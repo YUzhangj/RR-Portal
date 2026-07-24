@@ -41,6 +41,19 @@ function sewLaborToAdd(g) {
   return laborInItems > 0 ? 0 : num(g && g.labor_amount);
 }
 
+function isSewLaborRow(row) {
+  return /人工/.test((row && (row.fabric || row.part || row.name)) || '');
+}
+function sewMaterialOnlyAmount(group) {
+  return sum((group && group.items) || [], row => isSewLaborRow(row)
+    ? 0
+    : num(row.usage) * num(row.mat_price) * (num(row.markup) || 1));
+}
+function sewWeightedMaterialRmb(sewing) {
+  const groups = (sewing && sewing.sewing_groups) || [];
+  return sum(groups, group => sewMaterialOnlyAmount(group) * sewGroupQty(group)) / sewTotalQty(sewing);
+}
+
 function sewGroupQty(group) {
   const value = group && group.product_qty;
   if (value == null || value === '') return 1;
@@ -341,6 +354,9 @@ async function buildWorkbook({ quote, sections }) {
   // ---------- 纸箱 / 运费（在九、合计前） ----------
   row = renderCartonAndFreight(ws, row, eng, sales, subRefs);
 
+  // ---------- 印尼运费明细（按各部门点数自动计算） ----------
+  row = renderIndonesiaFreightBlock(ws, row, { eng, mold, pnt, electronic, slush, sewing }, fxRH, subRefs);
+
   // ---------- 九、合计（含搪胶/车缝/纸箱/附加税） ----------
   ws.mergeCells(row, 1, row, 14); styleSection(ws.getCell(row, 1));
   ws.getCell(row, 1).value = '十、合计';
@@ -353,8 +369,9 @@ async function buildWorkbook({ quote, sections }) {
 
   const pricing = sales.pricing || {};
   const header = sales.header || {};
-  // 运输费 = 减税明细 印尼运费 (HKD)；× fxRH 当 RMB（后面 /fxRH 还原 HKD）
-  const shipping = num(sales.pricing_summary?.indo_freight) * fxRH;
+  // 印尼运费直接引用上方明细的活公式，避免依赖页面保存的旧快照。
+  const indoFreightHkd = subRefs.indoFreightHkd ?? num(sales.pricing_summary?.indo_freight);
+  const shipping = indoFreightHkd * fxRH;
   // 注塑是 HKD，换算成 RMB
   const injSubtotalRmb = injSubtotal * fxRH;
   // 模具分摊：从工程"模具费用"表取 套产品分摊
@@ -423,8 +440,10 @@ async function buildWorkbook({ quote, sections }) {
     subRefs.asmLabor ? { formula: `${subRefs.asmLabor}`, result: asmSubtotal } : asmSubtotal,
     // G 包装人工 (本身 HKD，不换算)
     subRefs.pkgLabor ? { formula: `${subRefs.pkgLabor}`, result: pklSubtotal } : pklSubtotal,
-    // H 运输费 (RMB → HKD)
-    shipping / fxRH,
+    // I 印尼运费：引用上方逐部门明细合计
+    subRefs.indoFreight
+      ? { formula: subRefs.indoFreight, result: indoFreightHkd }
+      : indoFreightHkd,
     // I 搪胶 (本身就是 HKD)
     subRefs.slush ? { formula: subRefs.slush, result: slushTotalRmb / fxRH } : slushTotalRmb / fxRH,
     // J 车缝 (RMB → HKD)
@@ -1637,6 +1656,7 @@ function renderSewingBlock(ws, row, sewing, fxRH, refs) {
   const totalQty = sewTotalQty(sewing);
   const groupTerms = [];
   const hairTerms = [], clothTerms = [];
+  const materialTerms = [];
   // 预计算每组在"车缝明细" sheet 的 items 行区间（用于公式引用）
   let detailRow = 4; // 车缝明细 sheet 中第 1 个 group 的首行 items
   const ranges = groups.map(g => {
@@ -1672,6 +1692,10 @@ function renderSewingBlock(ws, row, sewing, fxRH, refs) {
     groupTerms.push(term);
     // 前端：车发 = category==='车发'；车衣 = 其余（默认）
     if ((g.category || '车衣') === '车发') hairTerms.push(term); else clothTerms.push(term);
+    const materialCells = (g.items || [])
+      .map((item, index) => isSewLaborRow(item) ? null : `'车缝明细'!J${rng.start + index}`)
+      .filter(Boolean);
+    if (materialCells.length) materialTerms.push(`(${materialCells.join('+')})*${qty}`);
     weightedNumerator += groupTotal * qty;
     row += 1;
   });
@@ -1688,7 +1712,116 @@ function renderSewingBlock(ws, row, sewing, fxRH, refs) {
   if (refs) {
     refs.sewHairRmb = hairTerms.length ? `(${hairTerms.join('+')})/${totalQty}` : null;
     refs.sewClothRmb = clothTerms.length ? `(${clothTerms.join('+')})/${totalQty}` : null;
+    refs.sewingMaterialHkd = materialTerms.length
+      ? `((${materialTerms.join('+')})/${totalQty})/${num(fxRH) || 0.85}`
+      : null;
   }
+  return row;
+}
+
+function renderIndonesiaFreightBlock(ws, row, payloads, fxRH, refs) {
+  const { eng, mold, pnt, electronic, slush, sewing } = payloads;
+  const fx = num(fxRH) || 0.85;
+  const engineeringBase = freeSubtotal(eng.hardware || [], fx)
+    + freeSubtotal(eng.aux_materials || [], fx)
+    + freeSubtotal(eng.packaging_materials || [], fx);
+  const electronicRows = (electronic.electronics && electronic.electronics.length)
+    ? electronic.electronics
+    : (eng.electronics || []);
+  const electronicBase = freeSubtotal(electronicRows, fx);
+  const injectionBase = injectionSubtotal(mold) + sum(mold.blow_items || [], item => {
+    const material = num(item.weight_g) * num(item.material_price_lb) / 454;
+    return (material + num(item.blow_labor) + num(item.flash)) * (num(item.profit_x) || 1);
+  });
+  const slushBase = sum(slush.slush_items || [], item => num(item.unit_price_hkd) * num(item.qty));
+  const sewingBase = sewWeightedMaterialRmb(sewing) / fx;
+  const paintingBase = secondProcSubtotal(pnt) * 0.3;
+  const refSum = (...values) => values.filter(Boolean).join('+') || '0';
+  const rows = [
+    {
+      label: '工程：五金＋辅助＋包装',
+      base: engineeringBase,
+      rate: num(eng.indo_pct),
+      formula: refSum(refs.hardware, refs.aux, refs.packaging),
+      note: '三表金额合计',
+    },
+    {
+      label: '电子',
+      base: electronicBase,
+      rate: num(electronic.indo_pct),
+      formula: refs.electronic || '0',
+      note: '电子金额合计',
+    },
+    {
+      label: '注塑＋吹气',
+      base: injectionBase,
+      rate: num(mold.indo_pct),
+      formula: refSum(refs.injection, refs.blow),
+      note: '啤机部金额合计',
+    },
+    {
+      label: '搪胶',
+      base: slushBase,
+      rate: num(slush.indo_pct),
+      formula: refs.slush || '0',
+      note: '搪胶金额合计',
+    },
+    {
+      label: '车缝材料（不含人工）',
+      base: sewingBase,
+      rate: num(sewing.indo_pct),
+      formula: refs.sewingMaterialHkd || '0',
+      note: '材料加权合计 RMB ÷ RMB→HKD',
+    },
+    {
+      label: '二次加工（印喷）',
+      base: paintingBase,
+      rate: num(pnt.indo_pct),
+      formula: refs.secondProc ? `${refs.secondProc}*30%` : '0',
+      note: '喷油总价 × 30%为基数',
+    },
+  ];
+
+  ws.mergeCells(row, 1, row, 14);
+  styleSection(ws.getCell(row, 1));
+  ws.getCell(row, 1).value = '印尼运费明细（各部门基数 × 点数%）';
+  row += 1;
+  ['来源', '计算基数 HKD', '点数 %', '印尼运费 HKD', '口径说明'].forEach((value, index) => {
+    ws.getCell(row, index + 1).value = value;
+    styleHeader(ws.getCell(row, index + 1));
+  });
+  ws.mergeCells(row, 5, row, 14);
+  row += 1;
+  const start = row;
+  let total = 0;
+  rows.forEach(item => {
+    const amount = item.base * item.rate / 100;
+    total += amount;
+    ws.getCell(row, 1).value = item.label;
+    ws.getCell(row, 2).value = { formula: item.formula, result: item.base };
+    ws.getCell(row, 2).numFmt = HKD4;
+    ws.getCell(row, 3).value = item.rate;
+    ws.getCell(row, 3).numFmt = '0.00';
+    ws.getCell(row, 4).value = { formula: `B${row}*C${row}/100`, result: amount };
+    ws.getCell(row, 4).numFmt = HKD4;
+    ws.mergeCells(row, 5, row, 14);
+    ws.getCell(row, 5).value = item.note;
+    for (let column = 1; column <= 14; column++) styleData(ws.getCell(row, column));
+    row += 1;
+  });
+  ws.mergeCells(row, 1, row, 3);
+  ws.getCell(row, 1).value = '印尼运费合计 HKD';
+  ws.getCell(row, 1).alignment = { horizontal: 'right', vertical: 'middle' };
+  ws.getCell(row, 4).value = { formula: `SUM(D${start}:D${row - 1})`, result: total };
+  ws.getCell(row, 4).numFmt = HKD4;
+  for (let column = 1; column <= 14; column++) styleSubtotal(ws.getCell(row, column), 'hkd');
+  ws.getCell(row, 1).font = { bold: true, name: FONT };
+  ws.getCell(row, 4).font = { bold: true, name: FONT };
+  if (refs) {
+    refs.indoFreight = `D${row}`;
+    refs.indoFreightHkd = total;
+  }
+  row += 2;
   return row;
 }
 

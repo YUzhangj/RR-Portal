@@ -302,3 +302,68 @@ test('export includes UV in painting detail and total quotation formula', async 
   assert.equal(uvQuoteCell.result, 2.5);
   assert.match(uvQuoteCell.formula, /T\d+\*U\d+/);
 });
+
+test('internal export lists Indonesian freight by department and links its total into quotation summary', async () => {
+  const workbook = await buildWorkbook({
+    quote: { quote_no: 'INDO-DETAIL', product_name: '印尼运费明细', qty: 1000, factory_code: 'qingxi' },
+    sections: [
+      { dept: 'engineering', payload_json: JSON.stringify({
+        indo_pct: 10,
+        hardware: [{ name: '五金', qty: 1, unit_price: 10 }],
+        aux_materials: [{ name: '辅助', qty: 1, unit_price: 20 }],
+        packaging_materials: [{ name: '包装', qty: 1, unit_price: 30 }],
+      }) },
+      { dept: 'electronic', payload_json: JSON.stringify({
+        indo_pct: 5,
+        electronics: [{ name: '电子', qty: 1, unit_price: 40 }],
+      }) },
+      { dept: 'molding', payload_json: JSON.stringify({
+        indo_pct: 2,
+        injection: [{ name: '注塑', weight_g: 0, material_unit_price: 0, shot_price: 50 }],
+        blow_items: [{ name: '吹气', weight_g: 0, blow_labor: 20, flash: 0, profit_x: 1 }],
+      }) },
+      { dept: 'slush', payload_json: JSON.stringify({
+        indo_pct: 3,
+        slush_items: [{ name: '搪胶', qty: 1, unit_price_hkd: 10 }],
+      }) },
+      { dept: 'sewing', payload_json: JSON.stringify({
+        indo_pct: 4,
+        sewing_groups: [{
+          name: '角色',
+          product_qty: 1,
+          items: [
+            { fabric: '面料', usage: 1, mat_price: 8, markup: 1 },
+            { fabric: '车缝人工', usage: 1, mat_price: 100, markup: 1 },
+          ],
+        }],
+      }) },
+      { dept: 'painting', payload_json: JSON.stringify({
+        indo_pct: 6,
+        painting_items: [{ name: '喷油', clamp_qty: 1, clamp_unit: 100 }],
+      }) },
+      { dept: 'sales', payload_json: JSON.stringify({
+        header: { fx_rmb_hkd: 0.8, fx_hkd_usd: 7.8 },
+        shipping: { scenarios: [] },
+      }) },
+    ],
+  });
+
+  const worksheet = workbook.getWorksheet('报价明细');
+  let detailTitleRow = 0;
+  let summaryRow = 0;
+  worksheet.eachRow(row => {
+    if (row.getCell(1).value === '印尼运费明细（各部门基数 × 点数%）') detailTitleRow = row.number;
+    if (row.getCell(1).value === '十、合计') summaryRow = row.number + 2;
+  });
+  assert.ok(detailTitleRow);
+  const firstDataRow = detailTitleRow + 2;
+  const totalRow = firstDataRow + 6;
+  assert.equal(worksheet.getCell(firstDataRow, 1).value, '工程：五金＋辅助＋包装');
+  assert.match(worksheet.getCell(firstDataRow, 2).value.formula, /\+/);
+  assert.equal(worksheet.getCell(firstDataRow, 4).value.formula, `B${firstDataRow}*C${firstDataRow}/100`);
+  assert.equal(worksheet.getCell(firstDataRow + 4, 1).value, '车缝材料（不含人工）');
+  assert.equal(Number(worksheet.getCell(firstDataRow + 4, 2).value.result.toFixed(4)), 10);
+  assert.match(worksheet.getCell(firstDataRow + 5, 2).value.formula, /\*30%/);
+  assert.equal(Number(worksheet.getCell(totalRow, 4).value.result.toFixed(4)), 11.9);
+  assert.equal(worksheet.getCell(summaryRow, 9).value.formula, `D${totalRow}`);
+});
