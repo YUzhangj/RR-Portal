@@ -321,18 +321,22 @@ async function buildWorkbook({ quote, sections }) {
   // 电子 总表：优先用 电子部 section 的 payload；回退用 工程的（兼容旧数据）
   const elecRows = (electronic.electronics && electronic.electronics.length) ? electronic.electronics : (eng.electronics || []);
   const elecLoss = 0;  // 电子 不计算损耗
-  row = renderFreeTable(ws, row, '四、电子', elecRows, elecLoss, fxRH, subRefs, 'electronic', { isHkd: true, skipLoss: true, rmbPrice: true });
-  row = renderFreeTable(ws, row, '五、五金', eng.hardware   || [], 0, fxRH, subRefs, 'hardware', { skipLoss: true, isHkd: true, rmbPrice: true });  // 五金不计损耗、按港币
+  row = renderFreeTable(ws, row, '四、电子', elecRows, elecLoss, fxRH, subRefs, 'electronic',
+    { isHkd: true, skipLoss: true, rmbPrice: true, indoPct: electronic.indo_pct });
+  row = renderFreeTable(ws, row, '五、五金', eng.hardware   || [], 0, fxRH, subRefs, 'hardware',
+    { skipLoss: true, isHkd: true, rmbPrice: true, indoPct: eng.indo_pct });  // 五金不计损耗、按港币
   const elecOnlySubtotal = freeSubtotal(elecRows, fxRH);
   const hwSubtotal = freeSubtotal(eng.hardware || [], fxRH);
   const elecSubtotal = elecOnlySubtotal + hwSubtotal;
 
   // ---------- 五、辅助材料 ----------
-  row = renderFreeTable(ws, row, '六、辅助材料', eng.aux_materials || [], 0, fxRH, subRefs, 'aux', { skipLoss: true, isHkd: true, rmbPrice: true });  // 不计损耗、按港币
+  row = renderFreeTable(ws, row, '六、辅助材料', eng.aux_materials || [], 0, fxRH, subRefs, 'aux',
+    { skipLoss: true, isHkd: true, rmbPrice: true, indoPct: eng.indo_pct });  // 不计损耗、按港币
   const auxSubtotal = freeSubtotal(eng.aux_materials || [], fxRH);
 
   // ---------- 六、包装材料 ----------
-  row = renderFreeTable(ws, row, '七、包装材料', eng.packaging_materials || [], 0, fxRH, subRefs, 'packaging', { skipLoss: true, isHkd: true, rmbPrice: true });  // 不计损耗、按港币
+  row = renderFreeTable(ws, row, '七、包装材料', eng.packaging_materials || [], 0, fxRH, subRefs, 'packaging',
+    { skipLoss: true, isHkd: true, rmbPrice: true, indoPct: eng.indo_pct });  // 不计损耗、按港币
   const pkSubtotal = freeSubtotal(eng.packaging_materials || [], fxRH);
 
   // ---------- 八/九、组装+包装人工 — 排拉工序：明细拆到「装配明细」分表，主表只留汇总 ----------
@@ -1277,6 +1281,7 @@ function renderFreeTable(ws, row, title, rows, lossPct, fxRH, refs, refKey, opts
   const isHkd = !!(opts && opts.isHkd);
   const skipLoss = !!(opts && opts.skipLoss);
   const rmbPrice = !!(opts && opts.rmbPrice);
+  const indoPct = num(opts && opts.indoPct);
   const fx = num(fxRH) || 0.85;
   ws.mergeCells(row, 1, row, 13); styleSection(ws.getCell(row, 1));
   ws.getCell(row, 1).value = title;
@@ -1284,8 +1289,8 @@ function renderFreeTable(ws, row, title, rows, lossPct, fxRH, refs, refKey, opts
   const priceLabel = isHkd ? '单价 HKD' : '单价';
   const amtLabel   = isHkd ? '金额 HKD' : '成品金额';
   const h = rmbPrice
-    ? ['序号', '零件名称', '规格要求', '', '', '', '用量', '单价 RMB', '单价 HKD', amtLabel, '税点 %', '备注']
-    : ['序号', '零件名称', '规格要求', '', '', '', '', '用量', priceLabel, amtLabel, '税点 %', '备注'];
+    ? ['序号', '零件名称', '规格要求', '', '', '', '用量', '单价 RMB', '单价 HKD', amtLabel, `印尼运费 ${indoPct}%`, '备注']
+    : ['序号', '零件名称', '规格要求', '', '', '', '', '用量', priceLabel, amtLabel, `印尼运费 ${indoPct}%`, '备注'];
   h.forEach((v, i) => { ws.getCell(row, i + 1).value = v; styleHeader(ws.getCell(row, i + 1)); });
   ws.mergeCells(row, 3, row, rmbPrice ? 6 : 7);
   row += 1;
@@ -1320,7 +1325,12 @@ function renderFreeTable(ws, row, title, rows, lossPct, fxRH, refs, refKey, opts
       }
     }
     ws.getCell(row, 10).numFmt = fmt;
-    ws.getCell(row, 11).value = r.tax_pct == null || r.tax_pct === '' ? '' : num(r.tax_pct);
+    const amountHkd = freeAmountHkd(r, fx);
+    ws.getCell(row, 11).value = {
+      formula: `J${row}*${indoPct}/100`,
+      result: amountHkd * indoPct / 100,
+    };
+    ws.getCell(row, 11).numFmt = HKD4;
     ws.getCell(row, 12).value = r.note || '';
     for (let c = 1; c <= 12; c++) styleData(ws.getCell(row, c));
     if (r.is_subtotal) ws.getRow(row).font = { bold: true };

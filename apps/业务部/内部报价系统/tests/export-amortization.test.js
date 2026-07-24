@@ -351,9 +351,11 @@ test('internal export lists Indonesian freight by department and links its total
   const worksheet = workbook.getWorksheet('报价明细');
   let detailTitleRow = 0;
   let summaryRow = 0;
+  const indoHeaderRows = [];
   worksheet.eachRow(row => {
     if (row.getCell(1).value === '印尼运费明细（各部门基数 × 点数%）') detailTitleRow = row.number;
     if (row.getCell(1).value === '十、合计') summaryRow = row.number + 2;
+    if (String(row.getCell(11).value || '').startsWith('印尼运费 ')) indoHeaderRows.push(row.number);
   });
   assert.ok(detailTitleRow);
   const firstDataRow = detailTitleRow + 2;
@@ -366,4 +368,13 @@ test('internal export lists Indonesian freight by department and links its total
   assert.match(worksheet.getCell(firstDataRow + 5, 2).value.formula, /\*30%/);
   assert.equal(Number(worksheet.getCell(totalRow, 4).value.result.toFixed(4)), 11.9);
   assert.equal(worksheet.getCell(summaryRow, 9).value.formula, `D${totalRow}`);
+  assert.deepEqual(
+    indoHeaderRows.map(row => worksheet.getCell(row, 11).value),
+    ['印尼运费 5%', '印尼运费 10%', '印尼运费 10%', '印尼运费 10%']
+  );
+  const electronicHeaderRow = indoHeaderRows[0];
+  assert.equal(
+    worksheet.getCell(electronicHeaderRow + 1, 11).value.formula,
+    `J${electronicHeaderRow + 1}*5/100`
+  );
 });
