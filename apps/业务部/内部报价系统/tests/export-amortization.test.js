@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
-const { buildWorkbook } = require('../backend/services/exportXlsx');
+const { buildWorkbook } = require('../backend/services/exportInternal');
 
 test('export keeps prototype and testing amortization when mold items are empty', async () => {
   const workbook = await buildWorkbook({
@@ -301,4 +301,165 @@ test('export includes UV in painting detail and total quotation formula', async 
   assert.equal(uvHeaderFound, true);
   assert.equal(uvQuoteCell.result, 2.5);
   assert.match(uvQuoteCell.formula, /T\d+\*U\d+/);
+});
+
+test('internal export lists Indonesian freight by department and links its total into quotation summary', async () => {
+  const workbook = await buildWorkbook({
+    quote: { quote_no: 'INDO-DETAIL', product_name: '印尼运费明细', qty: 1000, factory_code: 'qingxi' },
+    sections: [
+      { dept: 'engineering', payload_json: JSON.stringify({
+        indo_pct: 10,
+        hardware: [{ name: '五金', qty: 1, unit_price: 10 }],
+        aux_materials: [{ name: '辅助', qty: 1, unit_price: 20 }],
+        packaging_materials: [{ name: '包装', qty: 1, unit_price: 30 }],
+      }) },
+      { dept: 'electronic', payload_json: JSON.stringify({
+        indo_pct: 5,
+        electronics: [{ name: '电子', qty: 1, unit_price: 40 }],
+      }) },
+      { dept: 'molding', payload_json: JSON.stringify({
+        indo_pct: 2,
+        injection: [{ name: '注塑', weight_g: 0, material_unit_price: 0, shot_price: 50 }],
+        blow_items: [{ name: '吹气', weight_g: 0, blow_labor: 20, flash: 0, profit_x: 1 }],
+      }) },
+      { dept: 'slush', payload_json: JSON.stringify({
+        indo_pct: 3,
+        slush_items: [{ name: '搪胶', qty: 1, unit_price_hkd: 10 }],
+      }) },
+      { dept: 'sewing', payload_json: JSON.stringify({
+        indo_pct: 4,
+        sewing_groups: [{
+          name: '角色',
+          product_qty: 1,
+          items: [
+            { fabric: '面料', usage: 1, mat_price: 8, markup: 1 },
+            { fabric: '车缝人工', usage: 1, mat_price: 100, markup: 1 },
+          ],
+        }],
+      }) },
+      { dept: 'painting', payload_json: JSON.stringify({
+        indo_pct: 6,
+        painting_items: [{ name: '喷油', clamp_qty: 1, clamp_unit: 100 }],
+      }) },
+      { dept: 'sales', payload_json: JSON.stringify({
+        header: { fx_rmb_hkd: 0.8, fx_hkd_usd: 7.8 },
+        shipping: { scenarios: [] },
+      }) },
+    ],
+  });
+
+  const worksheet = workbook.getWorksheet('报价明细');
+  let detailTitleRow = 0;
+  let summaryRow = 0;
+  const indoHeaderRows = [];
+  worksheet.eachRow(row => {
+    if (row.getCell(1).value === '印尼运费明细（各部门基数 × 点数%）') detailTitleRow = row.number;
+    if (row.getCell(1).value === '十、合计') summaryRow = row.number + 2;
+    if (String(row.getCell(11).value || '').startsWith('印尼运费 ')) indoHeaderRows.push(row.number);
+  });
+  assert.ok(detailTitleRow);
+  const firstDataRow = detailTitleRow + 2;
+  const totalRow = firstDataRow + 6;
+  assert.equal(worksheet.getCell(firstDataRow, 1).value, '工程：五金＋辅助＋包装');
+  assert.match(worksheet.getCell(firstDataRow, 2).value.formula, /\+/);
+  assert.equal(worksheet.getCell(firstDataRow, 4).value.formula, `B${firstDataRow}*C${firstDataRow}/100`);
+  assert.equal(worksheet.getCell(firstDataRow + 4, 1).value, '车缝材料（不含人工）');
+  assert.equal(Number(worksheet.getCell(firstDataRow + 4, 2).value.result.toFixed(4)), 10);
+  assert.match(worksheet.getCell(firstDataRow + 5, 2).value.formula, /\*30%/);
+  assert.equal(Number(worksheet.getCell(totalRow, 4).value.result.toFixed(4)), 11.9);
+  assert.equal(worksheet.getCell(summaryRow, 9).value.formula, `D${totalRow}`);
+  assert.deepEqual(
+    indoHeaderRows.map(row => worksheet.getCell(row, 11).value),
+    ['印尼运费 5%', '印尼运费 10%', '印尼运费 10%', '印尼运费 10%']
+  );
+  const electronicHeaderRow = indoHeaderRows[0];
+  assert.equal(
+    worksheet.getCell(electronicHeaderRow + 1, 11).value.formula,
+    `J${electronicHeaderRow + 1}*5/100`
+  );
+});
+
+test('internal export mirrors UI formulas for slush and each departmental Indonesian freight', async () => {
+  const workbook = await buildWorkbook({
+    quote: { quote_no: 'UI-FORMULAS', product_name: '部门公式', qty: 1000, factory_code: 'qingxi' },
+    sections: [
+      { dept: 'molding', payload_json: JSON.stringify({
+        indo_pct: 2,
+        injection: [{ name: '注塑', weight_g: 10, material_unit_price: 0.01, shot_price: 0.5 }],
+        blow_items: [{ name: '吹气', weight_g: 454, material_price_lb: 1, blow_labor: 1, flash: 0.5, profit_x: 2 }],
+      }) },
+      { dept: 'slush', payload_json: JSON.stringify({
+        indo_pct: 3,
+        slush_items: [{
+          name: '搪胶',
+          qty: 2,
+          weight_g: 454,
+          material_price_lb: 2,
+          slush_labor_24h: 100,
+          batch_labor_12h: 50,
+          diesel_24h: 30,
+          electricity_24h: 20,
+          pigment_price: 25,
+          daily_output: 100,
+          batch_output_12h: 50,
+          shipping_bag: 0.5,
+          markup_x: 1.2,
+        }],
+      }) },
+      { dept: 'sewing', payload_json: JSON.stringify({
+        indo_pct: 4,
+        sewing_groups: [{
+          name: '角色',
+          product_qty: 1,
+          items: [
+            { fabric: '面料', usage: 2, mat_price: 4, markup: 1.5 },
+            { fabric: '车缝人工', usage: 1, mat_price: 100, markup: 1 },
+          ],
+        }],
+      }) },
+      { dept: 'painting', payload_json: JSON.stringify({
+        indo_pct: 6,
+        painting_items: [{ name: '喷油', clamp_qty: 2, clamp_unit: 5 }],
+      }) },
+      { dept: 'sales', payload_json: JSON.stringify({
+        header: { fx_rmb_hkd: 0.8, fx_hkd_usd: 7.8 },
+        shipping: { scenarios: [] },
+      }) },
+    ],
+  });
+
+  const worksheet = workbook.getWorksheet('报价明细');
+  const sectionRows = {};
+  worksheet.eachRow(row => {
+    const value = row.getCell(1).value;
+    if (typeof value === 'string') sectionRows[value] = row.number;
+  });
+
+  const injectionHeader = sectionRows['二、注塑部分'] + 1;
+  assert.equal(worksheet.getCell(injectionHeader, 17).value, '印尼运费 2%');
+  assert.equal(worksheet.getCell(injectionHeader + 1, 17).value.formula, `P${injectionHeader + 1}*2/100`);
+
+  const blowHeader = sectionRows['二·B、吹气部分 (HKD)'] + 1;
+  assert.equal(worksheet.getCell(blowHeader, 14).value, '印尼运费 2%');
+  assert.equal(worksheet.getCell(blowHeader + 1, 14).value.formula, `K${blowHeader + 1}*2/100`);
+
+  const slushHeader = sectionRows['二·C、搪胶部分'] + 1;
+  const slushRow = slushHeader + 1;
+  assert.equal(worksheet.getCell(slushHeader, 7).value, '料价 HK$/lb');
+  assert.equal(worksheet.getCell(slushHeader, 30).value, '印尼运费 3%');
+  assert.equal(worksheet.getCell(slushRow, 19).value.formula, `F${slushRow}*G${slushRow}/454`);
+  assert.equal(worksheet.getCell(slushRow, 26).value.formula, `SUM(S${slushRow}:X${slushRow})+R${slushRow}`);
+  assert.equal(worksheet.getCell(slushRow, 28).value.formula, `Z${slushRow}*Y${slushRow}`);
+  assert.equal(worksheet.getCell(slushRow, 29).value.formula, `AA${slushRow}*AB${slushRow}`);
+  assert.equal(worksheet.getCell(slushRow, 30).value.formula, `AC${slushRow}*3/100`);
+  assert.equal(Number(worksheet.getCell(slushRow, 29).value.result.toFixed(4)), 13.0896);
+
+  const paintingHeader = sectionRows['三、二次加工（印喷报价）'] + 1;
+  assert.equal(worksheet.getCell(paintingHeader, 23).value, '印尼运费 6%');
+  assert.equal(worksheet.getCell(paintingHeader + 2, 23).value.formula, `V${paintingHeader + 2}*30%*6/100`);
+
+  const sewingDetail = workbook.getWorksheet('车缝明细');
+  assert.equal(sewingDetail.getCell(3, 12).value, '印尼运费 4%');
+  assert.equal(sewingDetail.getCell(4, 12).value.formula, 'J4*4/100');
+  assert.equal(sewingDetail.getCell(5, 12).value, 0);
 });
