@@ -732,6 +732,7 @@ function sectionsToData({ quote, sections }) {
   const psum    = sales.pricing_summary || {};
   const t3      = psum.t3 || {};
   const fxRH    = num(header.fx_rmb_hkd) || 0.85;   // RMB→HKD
+  const fxHU    = num(header.fx_hkd_usd) || 7.8;    // HKD→USD
 
   const product = {
     item_no:   quote.quote_no || String(quote.id || ''),
@@ -756,7 +757,7 @@ function sectionsToData({ quote, sections }) {
     markup_packaging: vqMarkup,
     markup_labor:     vqMarkup,
     rmb_hkd:          fxRH,
-    hkd_usd:          num(header.fx_hkd_usd) || 7.8,
+    hkd_usd:          fxHU,
     hkd_rmb_quote:    fxRH ? 1 / fxRH : 0,
   };
 
@@ -849,7 +850,7 @@ function sectionsToData({ quote, sections }) {
     eng_name: '',
     quantity: num(r.qty) || 1,
     // 内部电子单价为 HKD，模板电子列为 USD → 按内部 HKD→USD 汇率换算
-    unit_price_usd: num(r.unit_price),
+    unit_price_usd: num(r.unit_price) / fxHU,
     markup: /P?ACB|PCB/i.test(String(r.name || '')) ? SEWING_DEFAULT_MARKUP : 1,
   }));
 
