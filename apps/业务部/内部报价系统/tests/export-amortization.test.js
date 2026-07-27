@@ -5,7 +5,74 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
-const { buildWorkbook } = require('../backend/services/exportInternal');
+const { buildWorkbook, adaptSurtaxForBase } = require('../backend/services/exportInternal');
+
+test('surtax is stored and exported as a direct HKD amount', async () => {
+  const args = {
+    quote: { quote_no: 'SURTAX-HKD', product_name: '附加税港币', qty: 1000 },
+    sections: [{
+      dept: 'sales',
+      payload_json: JSON.stringify({
+        header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.8 },
+        pricing_summary: { surtax: 0.1 },
+        shipping: { scenarios: [] },
+      }),
+    }],
+  };
+
+  const adapted = adaptSurtaxForBase(args);
+  const adaptedSales = JSON.parse(adapted.sections[0].payload_json);
+  assert.equal(adaptedSales.pricing_summary.surtax, 0.085);
+  assert.equal(JSON.parse(args.sections[0].payload_json).pricing_summary.surtax, 0.1);
+
+  const workbook = await buildWorkbook(args);
+  const worksheet = workbook.getWorksheet('报价明细');
+  let summaryRow = 0;
+  worksheet.eachRow(row => {
+    if (row.getCell(1).value === '十、合计') summaryRow = row.number + 2;
+  });
+  assert.ok(summaryRow);
+  assert.equal(worksheet.getCell(summaryRow, 13).value, 0.1);
+  assert.match(worksheet.getCell(summaryRow, 14).value.formula, new RegExp(`\\+M${summaryRow}$`));
+});
+
+test('manually adjusted carton price is preserved by the shared paper-rate formula', async () => {
+  const desiredPrice = 25;
+  const carton = { name: '纸箱1', cl: 48, cw: 20, ch: 43, qty: 110, flat_cards: [] };
+  const priceBase = (carton.cl + carton.cw + 2) * (carton.cw + carton.ch + 1) * 2 / 1000;
+  const paperRate = desiredPrice / priceBase;
+  const workbook = await buildWorkbook({
+    quote: { quote_no: 'CARTON-MANUAL', product_name: '手调箱价', qty: 1000 },
+    sections: [
+      {
+        dept: 'engineering',
+        payload_json: JSON.stringify({
+          carton_calc: { paper_rate: paperRate, cartons: [carton] },
+        }),
+      },
+      {
+        dept: 'sales',
+        payload_json: JSON.stringify({
+          header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.8 },
+          shipping: { scenarios: [] },
+        }),
+      },
+    ],
+  });
+
+  const worksheet = workbook.getWorksheet('报价明细');
+  let cartonPrice;
+  worksheet.eachRow(row => {
+    if (row.getCell(1).value === '纸箱1') cartonPrice = row.getCell(6).value;
+  });
+  assert.ok(cartonPrice);
+  assert.equal(Number(cartonPrice.result.toFixed(4)), desiredPrice);
+  assert.match(cartonPrice.formula, new RegExp(`\\*${paperRate}`));
+
+  const source = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'vq-extension.js'), 'utf8');
+  assert.match(source, /data-carton-price/);
+  assert.match(source, /config\.paper_rate\s*=\s*desiredPrice\s*\/\s*currentBase/);
+});
 
 test('export keeps prototype and testing amortization when mold items are empty', async () => {
   const workbook = await buildWorkbook({
