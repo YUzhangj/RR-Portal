@@ -380,7 +380,7 @@ async function buildWorkbook({ quote, sections }) {
   row = renderSewingBlock(ws, row, sewing, fxRH, subRefs);
 
   // ---------- 纸箱 / 运费（在九、合计前） ----------
-  row = renderCartonAndFreight(ws, row, eng, sales, subRefs);
+  row = renderCartonAndFreight(ws, row, eng, sales, subRefs, quote);
 
   // ---------- 印尼运费明细（按各部门点数自动计算） ----------
   row = renderIndonesiaFreightBlock(ws, row, { eng, mold, pnt, electronic, slush, sewing }, fxRH, subRefs);
@@ -2051,7 +2051,7 @@ function _renderSewingBlockDetailed(ws, row, sewing, fxRH, refs) {
   return row;
 }
 
-function renderCartonAndFreight(ws, row, eng, sales, refs) {
+function renderCartonAndFreight(ws, row, eng, sales, refs, quote) {
   const c = eng.carton_calc || {};
   // 每个纸箱跟踪: { boxCell, flatCells: [...], qtyCell } 用于构造 九、合计 K 列公式
   const cartonRefs = [];
@@ -2167,9 +2167,134 @@ function renderCartonAndFreight(ws, row, eng, sales, refs) {
       ws.getCell(row, 5).numFmt = HKD;
       for (let cc = 1; cc <= 5; cc++) styleData(ws.getCell(row, cc));
       // 记录每个运费场景的「运+吊柜 HK$/PCS」单元格(E列)，供减税明细 运费/吊柜费 公式引用
-      if (refs) { refs.freightCells = refs.freightCells || {}; refs.freightCells[name] = `E${row}`; }
+      if (refs) {
+        refs.freightCells = refs.freightCells || {};
+        refs.freightCells[name] = `E${row}`;
+        refs.freightInputCells = refs.freightInputCells || {};
+        refs.freightInputCells[name] = { capacity: `B${row}`, fee: `C${row}` };
+      }
       row += 1;
     });
+    row += 1;
+  }
+
+  // ---- SPIN 报客运输明细（保留完整 Excel 公式）----
+  if (String(quote?.customer || '').trim().toUpperCase() === 'SPIN') {
+    const spin = sales.spin_transport || {};
+    const fx = num(spin.fx_hkd_usd) || 7.75;
+    const divisor = num(spin.lcl_divisor) || 0.98;
+    const lclDefaults = [
+      { label: '盐田散货 3吨', capacity: 450, unitHkd: 16.8 },
+      { label: '盐田散货 5吨', capacity: 850, unitHkd: 11.24 },
+      { label: '盐田散货 8吨', capacity: 1000, unitHkd: 9.67 },
+    ];
+    const savedLcl = Array.isArray(spin.china_lcl) ? spin.china_lcl : [];
+    const mainCarton = cartons[0] || c;
+    const cartonCuft = num(mainCarton.cuft)
+      || num(mainCarton.cl) * num(mainCarton.cw) * num(mainCarton.ch) / 1728;
+    const pcsPerCarton = num(mainCarton.qty) || 1;
+    const rows = [
+      { label: '盐田 40HQ', capacity: num(f.cap_40), amount: num(f.yt40), kind: 'fcl', sourceName: 'YT 40柜' },
+      { label: '盐田 20HQ', capacity: num(f.cap_20), amount: num(f.yt20), kind: 'fcl', sourceName: 'YT 20柜' },
+      { label: 'HK 40HQ', capacity: num(f.cap_40), amount: num(f.hk40), kind: 'fcl', sourceName: 'HK 40柜' },
+      { label: 'HK 20HQ', capacity: num(f.cap_20), amount: num(f.hk20), kind: 'fcl', sourceName: 'HK 20柜' },
+      ...lclDefaults.map((defaults, index) => {
+        const saved = savedLcl[index] || {};
+        return {
+          label: saved.label || defaults.label,
+          capacity: num(saved.capacity_cuft) || defaults.capacity,
+          amount: num(saved.unit_hkd) || defaults.unitHkd,
+          kind: 'lcl',
+        };
+      }),
+    ];
+
+    ws.mergeCells(row, 1, row, 13);
+    styleSection(ws.getCell(row, 1));
+    ws.getCell(row, 1).value = 'SPIN 报客表运费计算（公式）';
+    row += 1;
+    const headers = [
+      '运输方式', '容量 CUFT', '运费/单价 HKD', 'HKD→USD', '散货找数',
+      '每箱 CUFT', '每箱 PCS', '整箱数', '实际报客数量', '产品运费 USD/PCS',
+    ];
+    headers.forEach((value, index) => {
+      ws.getCell(row, index + 1).value = value;
+      styleHeader(ws.getCell(row, index + 1));
+    });
+    ['SPIN散货参数', '容量 CUFT', '单价 HKD'].forEach((value, index) => {
+      ws.getCell(row, index + 11).value = value;
+      styleHeader(ws.getCell(row, index + 11));
+    });
+    const spinHeaderRow = row;
+    row += 1;
+
+    rows.forEach(item => {
+      const boxes = cartonCuft > 0 ? Math.floor(item.capacity / cartonCuft) : 0;
+      const actualQty = boxes * pcsPerCarton;
+      const usdPerPcs = item.kind === 'fcl'
+        ? (fx > 0 && actualQty > 0 ? item.amount / fx / actualQty : 0)
+        : (cartonCuft > 0 && pcsPerCarton > 0 && divisor > 0 && fx > 0
+          ? item.amount * cartonCuft / pcsPerCarton / divisor / fx
+          : 0);
+
+      ws.getCell(row, 1).value = item.label;
+      if (item.kind === 'fcl') {
+        const source = refs?.freightInputCells?.[item.sourceName];
+        ws.getCell(row, 2).value = source
+          ? { formula: source.capacity, result: item.capacity }
+          : { formula: String(item.capacity), result: item.capacity };
+        ws.getCell(row, 3).value = source
+          ? { formula: source.fee, result: item.amount }
+          : { formula: String(item.amount), result: item.amount };
+      } else {
+        ws.getCell(row, 11).value = item.label;
+        ws.getCell(row, 12).value = item.capacity;
+        ws.getCell(row, 13).value = item.amount;
+        ws.getCell(row, 13).numFmt = HKD;
+        for (let column = 11; column <= 13; column++) styleData(ws.getCell(row, column));
+        ws.getCell(row, 2).value = { formula: `L${row}`, result: item.capacity };
+        ws.getCell(row, 3).value = { formula: `M${row}`, result: item.amount };
+      }
+      ws.getCell(row, 3).numFmt = HKD;
+      ws.getCell(row, 4).value = fx;
+      ws.getCell(row, 4).numFmt = '0.0000';
+      ws.getCell(row, 5).value = item.kind === 'lcl' ? divisor : null;
+      ws.getCell(row, 5).numFmt = '0.0000';
+      ws.getCell(row, 6).value = cuftRow
+        ? { formula: `E${cuftRow}`, result: cartonCuft }
+        : cartonCuft;
+      ws.getCell(row, 6).numFmt = '0.0000';
+      ws.getCell(row, 7).value = qtyRow
+        ? { formula: `G${qtyRow}`, result: pcsPerCarton }
+        : pcsPerCarton;
+      ws.getCell(row, 7).numFmt = '0';
+      ws.getCell(row, 8).value = {
+        formula: `IFERROR(INT(B${row}/F${row}),0)`,
+        result: boxes,
+      };
+      ws.getCell(row, 8).numFmt = '0';
+      ws.getCell(row, 9).value = {
+        formula: `H${row}*G${row}`,
+        result: actualQty,
+      };
+      ws.getCell(row, 9).numFmt = '0';
+      ws.getCell(row, 10).value = {
+        formula: item.kind === 'fcl'
+          ? `IFERROR(C${row}/D${row}/I${row},0)`
+          : `IFERROR(C${row}*F${row}/G${row}/E${row}/D${row},0)`,
+        result: usdPerPcs,
+      };
+      ws.getCell(row, 10).numFmt = '0.0000';
+      for (let column = 1; column <= 10; column++) styleData(ws.getCell(row, column));
+      row += 1;
+    });
+    for (let column = 1; column <= 13; column++) {
+      ws.getCell(spinHeaderRow, column).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFFFE699' },
+      };
+    }
     row += 1;
   }
   return row;

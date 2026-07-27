@@ -1,0 +1,262 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const test = require('node:test');
+const ExcelJS = require('exceljs');
+
+const {
+  buildSpinTransportRows,
+  exportSpin,
+} = require('../backend/services/exportSpin');
+const { buildWorkbook } = require('../backend/services/exportXlsx');
+
+const carton = { cuft: 0.62, qty: 12 };
+const freight = {
+  cap_40: 1980,
+  cap_20: 883,
+  hk40: 8000,
+  hk20: 7100,
+  yt40: 7200,
+  yt20: 6000,
+};
+const spinConfig = {
+  fx_hkd_usd: 7.75,
+  lcl_divisor: 0.98,
+  china_lcl: [
+    { label: '盐田散货 3吨', capacity_cuft: 450, unit_hkd: 16.8 },
+    { label: '盐田散货 5吨', capacity_cuft: 850, unit_hkd: 11.24 },
+    { label: '盐田散货 8吨', capacity_cuft: 1000, unit_hkd: 9.67 },
+  ],
+};
+
+test('SPIN transport follows actual-carton-quantity formulas', () => {
+  const rows = buildSpinTransportRows({
+    cartonCuft: carton.cuft,
+    pcsPerCarton: carton.qty,
+    freightCalc: freight,
+    spinConfig,
+  });
+  const chinaFcl = rows.find(row => row.code === 'CHINA FCL');
+  const chinaLcl1 = rows.find(row => row.code === 'CHINA LCL1');
+
+  assert.equal(chinaFcl.qty_20, Math.floor(883 / 0.62) * 12);
+  assert.equal(chinaFcl.qty_40, Math.floor(1980 / 0.62) * 12);
+  assert.equal(chinaFcl.usd_per_toy, 7200 / 7.75 / chinaFcl.qty_40);
+  assert.equal(chinaLcl1.qty_40, Math.floor(450 / 0.62) * 12);
+  assert.equal(chinaLcl1.usd_per_toy, 16.8 * 0.62 / 12 / 0.98 / 7.75);
+});
+
+test('SPIN VQ exports transportation as Excel formulas with cached results', async () => {
+  const buffer = await exportSpin({
+    quote: {
+      id: 1,
+      quote_no: 'SPIN-FORMULA',
+      product_name: 'Formula Plush',
+      customer: 'SPIN',
+      version: 'V1',
+    },
+    sections: [
+      {
+        dept: 'engineering',
+        payload_json: JSON.stringify({ carton_calc: carton }),
+      },
+      {
+        dept: 'sales',
+        payload_json: JSON.stringify({
+          freight_calc: freight,
+          spin_transport: spinConfig,
+        }),
+      },
+    ],
+  });
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const worksheet = workbook.worksheets.find(sheet => sheet.name !== 'Summary');
+  let chinaFclRow = 0;
+  for (let row = 150; row <= worksheet.rowCount; row++) {
+    if (String(worksheet.getCell(row, 2).value || '').includes('CHINA FCL')) {
+      chinaFclRow = row;
+      break;
+    }
+  }
+  assert.ok(chinaFclRow, 'CHINA FCL row should exist');
+  assert.equal(workbook.getWorksheet('Summary').getCell(52, 2).value, carton.cuft);
+  assert.match(worksheet.getCell(chinaFclRow, 3).value.formula, /INT\(883\/'Summary'!B52\)\*'Summary'!E45/);
+  assert.match(worksheet.getCell(chinaFclRow, 9).value.formula, /INT\(1980\/'Summary'!B52\)\*'Summary'!E45/);
+  assert.match(worksheet.getCell(chinaFclRow, 12).value.formula, /7200\/7\.75\/I/);
+
+  const lclRow = chinaFclRow + 4;
+  assert.match(worksheet.getCell(lclRow, 9).value.formula, /INT\(450\/'Summary'!B52\)\*'Summary'!E45/);
+  assert.match(worksheet.getCell(lclRow, 12).value.formula, /16\.8\*'Summary'!B52\/'Summary'!E45\/0\.98\/7\.75/);
+  assert.ok(worksheet.getCell(lclRow, 12).value.result > 0);
+});
+
+test('SPIN VQ clears electronic amount formulas from unused template rows', async () => {
+  const buffer = await exportSpin({
+    quote: {
+      id: 2,
+      quote_no: 'SPIN-ELECTRONIC',
+      product_name: 'Electronic Plush',
+      customer: 'SPIN',
+      version: 'V1',
+    },
+    sections: [
+      {
+        dept: 'electronic',
+        payload_json: JSON.stringify({
+          electronics: [
+            { name: 'IC', qty: 1, unit_price: 0.3671 },
+            { name: 'PACB电子', qty: 1, unit_price: 3.9498 },
+          ],
+        }),
+      },
+      {
+        dept: 'sales',
+        payload_json: JSON.stringify({
+          header: { fx_hkd_usd: 7.75 },
+          freight_calc: freight,
+          spin_transport: spinConfig,
+        }),
+      },
+    ],
+  });
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const worksheet = workbook.worksheets.find(sheet => sheet.name !== 'Summary');
+  let electronicHeaderRow = 0;
+  worksheet.eachRow(row => {
+    if (String(row.getCell(3).value || '').includes('Electronic Parts Cost')) {
+      electronicHeaderRow = row.number;
+    }
+  });
+  assert.ok(electronicHeaderRow, 'Electronic Parts Cost section should exist');
+
+  const firstDataRow = electronicHeaderRow + 1;
+  assert.equal(worksheet.getCell(firstDataRow, 3).value, 'IC');
+  assert.equal(worksheet.getCell(firstDataRow + 1, 3).value, 'PACB电子');
+  assert.ok(worksheet.getCell(firstDataRow, 12).value.formula);
+  assert.ok(worksheet.getCell(firstDataRow + 1, 12).value.formula);
+  for (let row = firstDataRow + 2; row < firstDataRow + 10; row++) {
+    assert.equal(worksheet.getCell(row, 12).value, null);
+  }
+});
+
+test('SPIN VQ exports labor amounts as Excel formulas', async () => {
+  const buffer = await exportSpin({
+    quote: {
+      id: 3,
+      quote_no: 'SPIN-LABOR',
+      product_name: 'Labor Plush',
+      customer: 'SPIN',
+      version: 'V1',
+    },
+    sections: [
+      {
+        dept: 'sewing',
+        payload_json: JSON.stringify({
+          sewing_groups: [{
+            name: 'Main',
+            items: [
+              { fabric: '车缝', usage: 1, mat_price: 20.15 },
+              { fabric: '裁床', usage: 1, mat_price: 4.04 },
+              { fabric: '手工', usage: 1, mat_price: 9.43 },
+            ],
+          }],
+        }),
+      },
+      {
+        dept: 'assembly',
+        payload_json: JSON.stringify({
+          assembly_base_rate: 275,
+          packaging_labor: [{ name: '包装人工', qty: 1, unit_price: 11.67 }],
+        }),
+      },
+      {
+        dept: 'sales',
+        payload_json: JSON.stringify({
+          header: { fx_rmb_hkd: 0.85 },
+          freight_calc: freight,
+          spin_transport: spinConfig,
+        }),
+      },
+    ],
+  });
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const worksheet = workbook.worksheets.find(sheet => sheet.name !== 'Summary');
+  const laborRows = new Map();
+  worksheet.eachRow(row => {
+    const label = String(row.getCell(3).value || '').trim();
+    if (['Sewing', 'Packing', 'Cutting', 'Stuffing and manual time'].includes(label)) {
+      laborRows.set(label, row.number);
+    }
+  });
+
+  for (const [label, row] of laborRows) {
+    const amount = worksheet.getCell(row, 12).value;
+    assert.equal(amount.formula, `J${row}*K${row}`, `${label} should use a formula`);
+    assert.equal(amount.result, Math.round(
+      Number(worksheet.getCell(row, 10).value) * Number(worksheet.getCell(row, 11).value) * 10000
+    ) / 10000);
+  }
+  assert.equal(laborRows.size, 4);
+
+  const subtotalRow = Math.max(...laborRows.values()) + 1;
+  assert.equal(worksheet.getCell(subtotalRow, 13).value.formula, `SUM(L${subtotalRow - 8}:L${subtotalRow - 1})`);
+  const expectedSubtotal = [...laborRows.values()].reduce(
+    (sum, row) => sum + worksheet.getCell(row, 12).value.result,
+    0
+  );
+  assert.equal(
+    worksheet.getCell(subtotalRow, 13).value.result,
+    Math.round(expectedSubtotal * 10000) / 10000
+  );
+});
+
+test('internal quotation export includes the SPIN transportation formula table', async () => {
+  const workbook = await buildWorkbook({
+    quote: {
+      id: 1,
+      quote_no: 'SPIN-INTERNAL',
+      product_name: 'Formula Plush',
+      customer: 'SPIN',
+    },
+    sections: [
+      {
+        dept: 'engineering',
+        payload_json: JSON.stringify({
+          carton_calc: {
+            cartons: [{ name: '主纸箱', cl: 22, cw: 16, ch: 3.059, cuft: carton.cuft, qty: carton.qty }],
+          },
+        }),
+      },
+      {
+        dept: 'sales',
+        payload_json: JSON.stringify({
+          freight_calc: freight,
+          spin_transport: spinConfig,
+        }),
+      },
+    ],
+  });
+  const worksheet = workbook.getWorksheet('报价明细');
+  let titleRow = 0;
+  worksheet.eachRow(row => {
+    if (row.getCell(1).value === 'SPIN 报客表运费计算（公式）') titleRow = row.number;
+  });
+  assert.ok(titleRow, 'SPIN transportation table should exist');
+
+  const firstDataRow = titleRow + 2;
+  assert.equal(worksheet.getCell(firstDataRow, 1).value, '盐田 40HQ');
+  assert.match(worksheet.getCell(firstDataRow, 2).value.formula, /B\d+/);
+  assert.match(worksheet.getCell(firstDataRow, 3).value.formula, /C\d+/);
+  assert.match(worksheet.getCell(firstDataRow, 8).value.formula, /IFERROR\(INT\(B\d+\/F\d+\),0\)/);
+  assert.match(worksheet.getCell(firstDataRow, 9).value.formula, /H\d+\*G\d+/);
+  assert.match(worksheet.getCell(firstDataRow, 10).value.formula, /C\d+\/D\d+\/I\d+/);
+
+  const firstLclRow = firstDataRow + 4;
+  assert.equal(worksheet.getCell(firstLclRow, 1).value, '盐田散货 3吨');
+  assert.equal(worksheet.getCell(firstLclRow, 2).value.formula, `L${firstLclRow}`);
+  assert.equal(worksheet.getCell(firstLclRow, 3).value.formula, `M${firstLclRow}`);
+  assert.match(worksheet.getCell(firstLclRow, 10).value.formula, /C\d+\*F\d+\/G\d+\/E\d+\/D\d+/);
+});

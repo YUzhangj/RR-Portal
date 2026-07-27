@@ -3983,6 +3983,126 @@ function renderFreightCalc(host, f, eCarton, canEdit, onChange) {
   }
 }
 
+const SPIN_LCL_DEFAULTS = [
+  { label: '盐田散货 3吨', capacity_cuft: 450, unit_hkd: 16.8 },
+  { label: '盐田散货 5吨', capacity_cuft: 850, unit_hkd: 11.24 },
+  { label: '盐田散货 8吨', capacity_cuft: 1000, unit_hkd: 9.67 },
+];
+
+function renderSpinTransport(host, config, freight, eCarton, canEdit, onChange) {
+  if (!host) return () => {};
+  config.fx_hkd_usd = num(config.fx_hkd_usd) || 7.75;
+  config.lcl_divisor = num(config.lcl_divisor) || 0.98;
+  config.china_lcl = Array.isArray(config.china_lcl) ? config.china_lcl : [];
+  SPIN_LCL_DEFAULTS.forEach((defaults, index) => {
+    config.china_lcl[index] = { ...defaults, ...(config.china_lcl[index] || {}) };
+  });
+
+  const ro = canEdit ? '' : 'disabled';
+  const lclRows = config.china_lcl.map((row, index) => `
+    <tr>
+      <td>${escapeHtml(row.label || SPIN_LCL_DEFAULTS[index].label)}</td>
+      <td><input data-spin-lcl="${index}" data-key="capacity_cuft" type="number" step="any" value="${num(row.capacity_cuft)}" ${ro}/></td>
+      <td><input data-spin-lcl="${index}" data-key="unit_hkd" type="number" step="any" value="${num(row.unit_hkd)}" ${ro}/></td>
+      <td id="spin-lcl-qty-${index}">0</td>
+      <td id="spin-lcl-rate-${index}">0.0000</td>
+    </tr>`).join('');
+
+  host.innerHTML = `
+    <div class="card" style="margin-top:16px;border:1px solid #f59e0b;background:#fffbeb">
+      <h3 style="margin-top:0;color:#92400e">SPIN 报客表运费设定</h3>
+      <div class="wb-grid2">
+        <label>SPIN HKD→USD 汇率
+          <input id="spin-fx" type="number" step="any" value="${config.fx_hkd_usd}" ${ro}/>
+        </label>
+        <label>盐田散货找数
+          <input id="spin-divisor" type="number" step="any" value="${config.lcl_divisor}" ${ro}/>
+        </label>
+      </div>
+      <p class="muted" style="font-size:13px">
+        柜货：运费 HKD ÷ 汇率 ÷ 实际报客数量；散货：单价 HKD × 每箱 CUFT ÷ 每箱 PCS ÷ 找数 ÷ 汇率。
+        导出 SPIN VQ 时会把相同计算写成 Excel 公式。
+      </p>
+      <table class="wb-table" style="font-size:13px;text-align:center">
+        <thead><tr><th>柜货</th><th>柜容量 CUFT</th><th>运费 HKD</th><th>实际报客数量</th><th>产品运费 USD/PCS</th></tr></thead>
+        <tbody>
+          <tr><td>盐田 40HQ</td><td id="spin-yt40-cap">0</td><td id="spin-yt40-fee">0</td><td id="spin-yt40-qty">0</td><td id="spin-yt40-rate">0.0000</td></tr>
+          <tr><td>盐田 20HQ</td><td id="spin-yt20-cap">0</td><td id="spin-yt20-fee">0</td><td id="spin-yt20-qty">0</td><td id="spin-yt20-rate">0.0000</td></tr>
+          <tr><td>HK 40HQ</td><td id="spin-hk40-cap">0</td><td id="spin-hk40-fee">0</td><td id="spin-hk40-qty">0</td><td id="spin-hk40-rate">0.0000</td></tr>
+          <tr><td>HK 20HQ</td><td id="spin-hk20-cap">0</td><td id="spin-hk20-fee">0</td><td id="spin-hk20-qty">0</td><td id="spin-hk20-rate">0.0000</td></tr>
+        </tbody>
+      </table>
+      <table class="wb-table" style="margin-top:12px;font-size:13px;text-align:center">
+        <thead><tr><th>盐田散货</th><th>可装容量 CUFT</th><th>单价 HKD</th><th>实际报客数量</th><th>产品运费 USD/PCS</th></tr></thead>
+        <tbody>${lclRows}</tbody>
+      </table>
+      <p id="spin-carton-warning" class="muted" style="font-size:13px;margin-bottom:0"></p>
+    </div>`;
+
+  const paint = () => {
+    const cartonRow = Array.isArray(eCarton.cartons) && eCarton.cartons.length
+      ? eCarton.cartons[0]
+      : eCarton;
+    const cuft = num(cartonRow.cuft) || num(cartonRow.cl) * num(cartonRow.cw) * num(cartonRow.ch) / 1728;
+    const pcs = num(cartonRow.qty);
+    const fx = num(config.fx_hkd_usd);
+    const divisor = num(config.lcl_divisor);
+    const actualQty = capacity => (cuft > 0 && pcs > 0) ? Math.floor(num(capacity) / cuft) * pcs : 0;
+    const setText = (id, value) => {
+      const el = host.querySelector('#' + id);
+      if (el) el.textContent = value;
+    };
+    [
+      ['yt40', freight.cap_40, freight.yt40],
+      ['yt20', freight.cap_20, freight.yt20],
+      ['hk40', freight.cap_40, freight.hk40],
+      ['hk20', freight.cap_20, freight.hk20],
+    ].forEach(([key, capacity, fee]) => {
+      const qty = actualQty(capacity);
+      const rate = fx > 0 && qty > 0 ? num(fee) / fx / qty : 0;
+      setText(`spin-${key}-cap`, num(capacity));
+      setText(`spin-${key}-fee`, num(fee));
+      setText(`spin-${key}-qty`, qty);
+      setText(`spin-${key}-rate`, rate.toFixed(4));
+    });
+    config.china_lcl.forEach((row, index) => {
+      const qty = actualQty(row.capacity_cuft);
+      const rate = cuft > 0 && pcs > 0 && fx > 0 && divisor > 0
+        ? num(row.unit_hkd) * cuft / pcs / divisor / fx
+        : 0;
+      setText(`spin-lcl-qty-${index}`, qty);
+      setText(`spin-lcl-rate-${index}`, rate.toFixed(4));
+    });
+    const warning = host.querySelector('#spin-carton-warning');
+    if (warning) warning.textContent = cuft > 0 && pcs > 0
+      ? `当前取值：每箱 ${cuft.toFixed(4)} CUFT，${pcs} PCS。`
+      : '请先在工程部填写纸箱 CUFT 与每箱装箱数，SPIN 运费才能计算。';
+  };
+
+  if (canEdit) {
+    host.querySelector('#spin-fx').oninput = event => {
+      config.fx_hkd_usd = num(event.target.value);
+      onChange();
+      paint();
+    };
+    host.querySelector('#spin-divisor').oninput = event => {
+      config.lcl_divisor = num(event.target.value);
+      onChange();
+      paint();
+    };
+    host.querySelectorAll('[data-spin-lcl]').forEach(input => {
+      input.oninput = event => {
+        const index = Number(event.target.dataset.spinLcl);
+        config.china_lcl[index][event.target.dataset.key] = num(event.target.value);
+        onChange();
+        paint();
+      };
+    });
+  }
+  paint();
+  return paint;
+}
+
 function matchFreightByName(name) {
   const n = (name || '').toString();
   const isIndo = /印尼|indo|indonesia/i.test(n);
@@ -4224,6 +4344,7 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
 function renderSales(host, payload, quote, canEditHeader, canEditPricing, allSections, onChange, onHeaderChange) {
   payload.header = payload.header || { currency: 'HKD', fx_hkd_usd: 7.8, fx_rmb_hkd: 0.85 };
   payload.pricing = payload.pricing || { mgmt_fee_pct: 0, profit_pct: 10, tax_pct: 13, shipping_per_pcs: 0, mold_amortization_qty: quote.qty || 10000 };
+  if (payload.pricing.vq_markup_pct == null) payload.pricing.vq_markup_pct = 18;
   payload.shipping = payload.shipping || {
     freight_pct: 48, lifting_pct: 52, markup_x: 1.20, divisor: 0.98,
     target_usd: 0,
@@ -4255,6 +4376,7 @@ function renderSales(host, payload, quote, canEditHeader, canEditPricing, allSec
       </label>
       <label>RMB→HKD 汇率 <input id="h-fxrh" type="number" step="any" value="${h.fx_rmb_hkd}" ${canEditPricing ? '' : 'disabled'} /></label>
       <label>报价 HKD→USD 汇率 <input id="h-fxhu" type="number" step="any" value="${h.fx_hkd_usd}" ${canEditPricing ? '' : 'disabled'} /></label>
+      <label>报客加价 % <input id="p-vqmk" type="number" step="any" value="${p.vq_markup_pct}" title="生成报客表(VQ)时统一套到成本行的加价率" ${canEditPricing ? '' : 'disabled'} /></label>
     </div>
 
     <div class="hidden">
@@ -4266,6 +4388,7 @@ function renderSales(host, payload, quote, canEditHeader, canEditPricing, allSec
     </div>
 
     <h3>九、运费计算 (HK$)</h3>
+    ${String(quote.customer || '').trim().toUpperCase() === 'SPIN' ? '<div id="wb-spin-transport"></div>' : ''}
     <div id="wb-freight"></div>
     <p class="muted" style="font-size:13px;margin-top:8px">📌 出货价算价 已移到 <b>📊 汇总</b> tab，可在那里查看与编辑。</p>
   `;
@@ -4279,7 +4402,26 @@ function renderSales(host, payload, quote, canEditHeader, canEditPricing, allSec
     hk40: 8000, hk20: 7100, yt40: 7200, yt20: 6000,
     hk10t: 14900, yt10t: 11500, hk5t: 12500, yt5t: 11000,
   };
-  renderFreightCalc(host.querySelector('#wb-freight'), payload.freight_calc, eCarton, true, onChange);
+  payload.spin_transport = payload.spin_transport || {
+    fx_hkd_usd: 7.75,
+    lcl_divisor: 0.98,
+    china_lcl: SPIN_LCL_DEFAULTS.map(row => ({ ...row })),
+  };
+  let refreshSpinTransport = () => {};
+  if (String(quote.customer || '').trim().toUpperCase() === 'SPIN') {
+    refreshSpinTransport = renderSpinTransport(
+      host.querySelector('#wb-spin-transport'),
+      payload.spin_transport,
+      payload.freight_calc,
+      eCarton,
+      canEditPricing,
+      onChange
+    );
+  }
+  renderFreightCalc(host.querySelector('#wb-freight'), payload.freight_calc, eCarton, true, () => {
+    onChange();
+    refreshSpinTransport();
+  });
 
   if (canEditHeader) {
     ['h-pn', 'h-ver', 'h-cu', 'h-qty'].forEach(id => $(id).oninput = () => onHeaderChange({
@@ -4290,7 +4432,7 @@ function renderSales(host, payload, quote, canEditHeader, canEditPricing, allSec
     $('h-cy').onchange = () => { h.currency = $('h-cy').value; onChange(); };
     $('h-fxrh').oninput = () => { h.fx_rmb_hkd = num($('h-fxrh').value); onChange(); };
     $('h-fxhu').oninput = () => { h.fx_hkd_usd = num($('h-fxhu').value); onChange(); };
-    [['p-ship', 'shipping_per_pcs'], ['p-mgmt', 'mgmt_fee_pct'], ['p-prof', 'profit_pct'], ['p-tax', 'tax_pct'], ['p-amt', 'mold_amortization_qty']]
+    [['p-ship', 'shipping_per_pcs'], ['p-mgmt', 'mgmt_fee_pct'], ['p-prof', 'profit_pct'], ['p-tax', 'tax_pct'], ['p-amt', 'mold_amortization_qty'], ['p-vqmk', 'vq_markup_pct']]
       .forEach(([id, k]) => $(id).oninput = () => { p[k] = num($(id).value); onChange(); });
   }
 }
@@ -4574,7 +4716,12 @@ async function renderQuotePage() {
   const exp = document.createElement('div'); exp.className = 'card';
   const approved = sections.filter(s => s.status === 'approved').length;
   const totalDepts = sections.length;
+  const customerCode = String(data.quote.customer || '').trim().toUpperCase();
+  const supportsVq = customerCode === 'SPIN' || customerCode === 'TOMY';
+  const vqClient = customerCode === 'SPIN' ? 'SPIN' : 'TOMY';
+  const vqTitle = approved < totalDepts ? '需全部部门审核通过后可生成' : `按 ${vqClient} VQ 模板生成客户报价单`;
   exp.innerHTML = `<button id="btn-export" ${approved < totalDepts ? 'disabled' : ''}>导出内部明细表 (${approved}/${totalDepts})</button>
+    ${supportsVq ? `<button id="btn-export-vq" style="margin-left:10px" title="${vqTitle}" ${approved < totalDepts ? 'disabled' : ''}>生成 ${vqClient} 报客表 (VQ)</button>` : ''}
     <pre id="export-result" style="margin-top:10px;max-height:300px;overflow:auto"></pre>`;
   host.appendChild(exp);
 
@@ -4583,6 +4730,21 @@ async function renderQuotePage() {
     try {
       await putSection(mySec, payload, submit);
       renderQuotePage();
+    } catch (e) { alert(e.message); }
+  };
+  if ($('btn-export-vq')) $('btn-export-vq').onclick = async () => {
+    try {
+      const r = await fetch('/api/quotes/' + id + '/export-vq', { credentials: 'include' });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({})); throw new Error(j.error || r.statusText);
+      }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `VQ_${data.quote.quote_no || id}_${new Date().toISOString().slice(0,10)}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
     } catch (e) { alert(e.message); }
   };
   $('btn-save') && ($('btn-save').onclick = () => saveSection(false));
@@ -4627,7 +4789,7 @@ async function renderQuotePage() {
 const ACTION_LABEL = {
   create: '创建报价单', login: '登录', fill: '保存草稿', submit: '提交审核',
   approve: '✅ 审核通过', reject: '❌ 驳回', reopen: '🔓 解除审核',
-  export: '📤 导出', edit_header: '✏️ 修改表头', change_pin: '修改 PIN',
+  export: '📤 导出', export_vq: '📤 生成报客表', edit_header: '✏️ 修改表头', change_pin: '修改 PIN',
   reset_staff_pin: '重置员工 PIN',
   view: '👁️ 浏览', clone: '📋 复制',
 };
