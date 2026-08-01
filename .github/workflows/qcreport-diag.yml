@@ -35,6 +35,11 @@ jobs:
           script: |
             set -euo pipefail
             docker ps -a --filter name=qc-report --format 'table {{.Names}}\t{{.Status}}'
+            docker ps -a --filter status=created --format '{{.Names}}' | xargs -r docker rm
+            docker exec rr-portal-nginx-1 nginx -t
+            docker exec rr-portal-nginx-1 nginx -s reload
+            sleep 3
+            curl -sf http://localhost/qc-report/health && echo && echo '[OK] /qc-report/health'
             echo "== 容器内 /health =="
             docker exec rr-portal-qc-report-1 python -c "import urllib.request,urllib.error;exec(\"try:\\n print(urllib.request.urlopen('http://127.0.0.1:3410/health',timeout=5).read().decode())\\nexcept urllib.error.HTTPError as e:\\n print('HTTP',e.code,e.read().decode())\")" 2>&1 || true
             echo "== 挂载权限 =="
