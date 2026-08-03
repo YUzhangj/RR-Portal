@@ -5,6 +5,7 @@
 // this small post-processor instead of growing exportXlsx.js further.
 const { buildWorkbook: buildBaseWorkbook } = require('./exportXlsx');
 const { toExcelFormulaInput, fractionNumberFormat } = require('../../frontend/formula-input');
+const { weightedInjectionSum, weightedColumnFormula } = require('./productMix');
 
 const FONT = 'Microsoft YaHei';
 const HKD4 = '"HK$"0.0000';
@@ -127,16 +128,8 @@ function shiftRowsDown(ws, startRow, shift) {
     }
   }
 
-  for (const model of merges) {
-    if (model.top < startRow) continue;
-    ws.mergeCells(
-      model.top + shift,
-      model.left,
-      model.bottom + shift,
-      model.right
-    );
-  }
-
+  // 必须在恢复合并单元格之前调整公式。ExcelJS 的合并占位格会共享
+  // 顶左单元格的 value；若先 merge 再 eachCell，同一公式会被重复平移多次。
   const formulaPattern = /([A-Z]+)(\d+)/g;
   ws.eachRow(row => {
     row.eachCell(cell => {
@@ -149,6 +142,16 @@ function shiftRowsDown(ws, startRow, shift) {
       if (formula !== value.formula) cell.value = { formula, result: value.result };
     });
   });
+
+  for (const model of merges) {
+    if (model.top < startRow) continue;
+    ws.mergeCells(
+      model.top + shift,
+      model.left,
+      model.bottom + shift,
+      model.right
+    );
+  }
 }
 
 function applyStyle(cell, style, numFmt) {
@@ -222,7 +225,7 @@ function slushUnitPrice(row) {
 
 function patchSimpleIndoColumns(ws, payloads) {
   const patches = [
-    { title: '二、注塑部分', dept: payloads.molding || {}, amountCol: 16, indoCol: 17 },
+    { title: '二、注塑部分', dept: payloads.molding || {}, amountCol: 16, indoCol: 17, weighted: true },
     { title: '二·B、吹气部分 (HKD)', dept: payloads.molding || {}, amountCol: 11, indoCol: 14 },
     { title: '三、二次加工（印喷报价）', dept: payloads.painting || {}, amountCol: 22, indoCol: 23, factor: 0.3 },
     { title: '四、电子', dept: payloads.electronic || {}, amountCol: 10, indoCol: 11 },
@@ -238,7 +241,7 @@ function patchSimpleIndoColumns(ws, payloads) {
     const headerRow = titleRow + 1;
     const totalRow = findRowMatching(
       ws,
-      value => /^(合计|小计)/.test(String(value || '')),
+      value => /^(加权合计|合计|小计)/.test(String(value || '')),
       headerRow + 1,
       Math.min(ws.rowCount, headerRow + 100)
     );
@@ -248,6 +251,7 @@ function patchSimpleIndoColumns(ws, payloads) {
     ws.getCell(headerRow, patch.indoCol).value = `印尼运费 ${pct}%`;
     applyStyle(ws.getCell(headerRow, patch.indoCol), headerStyle);
     let total = 0;
+    const rowResults = [];
     for (let row = headerRow + 1; row < totalRow; row += 1) {
       const amountCell = ws.getCell(row, patch.amountCol);
       const amount = num(amountCell.value && typeof amountCell.value === 'object'
@@ -263,9 +267,18 @@ function patchSimpleIndoColumns(ws, payloads) {
       ws.getCell(row, patch.indoCol).numFmt = HKD4;
       applyStyle(ws.getCell(row, patch.indoCol), ws.getCell(row, patch.amountCol).style, HKD4);
       total += result;
+      rowResults.push(result);
     }
+    if (patch.weighted) {
+      total = weightedInjectionSum(patch.dept, (_row, index) => rowResults[index]);
+    }
+    const hasDetailRows = totalRow > headerRow + 1;
     ws.getCell(totalRow, patch.indoCol).value = {
-      formula: `SUM(${colLetter(patch.indoCol)}${headerRow + 1}:${colLetter(patch.indoCol)}${totalRow - 1})`,
+      formula: !hasDetailRows
+        ? '0'
+        : patch.weighted
+          ? weightedColumnFormula(patch.dept, headerRow + 1, colLetter(patch.indoCol))
+          : `SUM(${colLetter(patch.indoCol)}${headerRow + 1}:${colLetter(patch.indoCol)}${totalRow - 1})`,
       result: total,
     };
     applyStyle(ws.getCell(totalRow, patch.indoCol), ws.getCell(totalRow, patch.amountCol).style, HKD4);
@@ -312,6 +325,73 @@ function patchFreeInputFormulas(ws, payloads) {
       }
     });
   }
+}
+
+function patchMoldProductGroups(ws, payloads) {
+  const molds = (payloads.engineering && payloads.engineering.molds) || [];
+  if (!molds.some(mold => mold.product_group_id)) return;
+  const titleRow = findRow(ws, '一、模具部分');
+  if (!titleRow) return;
+  ws.getCell(titleRow + 1, 1).value = '产品 / 序号';
+  const counters = {};
+  let previousGroup = '';
+  for (let index = 0; index < molds.length; index += 1) {
+    const mold = molds[index];
+    const row = titleRow + 2 + index;
+    const groupId = mold.product_group_id || '';
+    if (!groupId) continue;
+    counters[groupId] = (counters[groupId] || 0) + 1;
+    const groupNumber = Object.keys(counters).indexOf(groupId) + 1;
+    ws.getCell(row, 1).value = `${groupNumber}.${counters[groupId]}`;
+    if (groupId !== previousGroup) {
+      const groupName = mold.product_group_name || `产品${groupNumber}`;
+      ws.getCell(row, 1).value = `${groupName}\n${groupNumber}.${counters[groupId]}`;
+      ws.getCell(row, 1).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      ws.getCell(row, 1).font = { ...ws.getCell(row, 1).font, bold: true, name: FONT };
+      ws.getRow(row).height = Math.max(ws.getRow(row).height || 0, 34);
+      for (let column = 1; column <= 18; column += 1) {
+        ws.getCell(row, column).fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFE0F2FE' },
+        };
+      }
+    }
+    previousGroup = groupId;
+  }
+}
+
+function patchMoldingProductGroups(ws, payloads) {
+  const rows = (payloads.molding && payloads.molding.injection) || [];
+  if (!rows.some(item => item.product_group_id || item.product_group_name)) return;
+  const titleRow = findRow(ws, '二、注塑部分');
+  if (!titleRow) return;
+  ws.getCell(titleRow + 1, 1).value = '产品 / 序号';
+  const counters = {};
+  const groupNumbers = {};
+  let groupCount = 0;
+  let previousGroup = '';
+  rows.forEach((item, index) => {
+    const row = titleRow + 2 + index;
+    const groupId = item.product_group_id || item.product_group_name || '';
+    if (!groupId) return;
+    if (!groupNumbers[groupId]) groupNumbers[groupId] = ++groupCount;
+    counters[groupId] = (counters[groupId] || 0) + 1;
+    ws.getCell(row, 1).value = `${groupNumbers[groupId]}.${counters[groupId]}`;
+    if (groupId !== previousGroup) {
+      const groupName = item.product_group_name || `产品${groupNumbers[groupId]}`;
+      ws.getCell(row, 1).value = `${groupName}\n${groupNumbers[groupId]}.${counters[groupId]}`;
+      ws.getCell(row, 1).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      ws.getCell(row, 1).font = { ...ws.getCell(row, 1).font, bold: true, name: FONT };
+      ws.getRow(row).height = Math.max(ws.getRow(row).height || 0, 34);
+      for (let column = 1; column <= 17; column += 1) {
+        ws.getCell(row, column).fill = {
+          type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0F2FE' },
+        };
+      }
+    }
+    previousGroup = groupId;
+  });
 }
 
 function patchZeroCartonRate(ws, payloads) {
@@ -470,11 +550,10 @@ function freeSubtotal(rows, fx) {
 }
 
 function injectionSubtotal(molding) {
-  return sum((molding && molding.injection) || [], row => {
-    const material = num(row.material_unit_price)
-      || num(row.weight_g) * num(row.material_price_lb) / 454;
-    return material + num(row.shot_price);
-  });
+  const payload = molding || {};
+  const lossM = 1 + num(payload.injection_loss_pct ?? 3) / 100;
+  return weightedInjectionSum(payload, row =>
+    num(row.weight_g) * lossM * num(row.material_unit_price) + num(row.shot_price));
 }
 
 function blowSubtotal(molding) {
@@ -681,6 +760,11 @@ function appendSpinTransportBlock(ws, row, quote, sales, engineering, styles) {
     ws.getCell(row, 10).numFmt = '0.0000';
     row += 1;
   });
+  // 保留运费表与“十、合计”之间的空白行，但仍套用完整表格边框，
+  // 避免导出后 E:M 列看起来像缺失单元格。
+  for (let column = 1; column <= 13; column += 1) {
+    applyStyle(ws.getCell(row, column), styles.data);
+  }
   return row + 1;
 }
 
@@ -691,6 +775,8 @@ function enhanceWorkbook(workbook, { quote, sections }) {
   const sales = payloads.sales || {};
   const fx = num(sales.header && sales.header.fx_rmb_hkd) || 0.85;
 
+  patchMoldProductGroups(ws, payloads);
+  patchMoldingProductGroups(ws, payloads);
   patchFreeInputFormulas(ws, payloads);
   patchZeroCartonRate(ws, payloads);
   const refs = patchSimpleIndoColumns(ws, payloads);

@@ -300,6 +300,32 @@ function applyLoss(subtotal, pct) {
   return subtotal;  // 已全面取消损耗
 }
 
+function injectionProductGroups(payload) {
+  const rows = payload.injection || [];
+  if (!rows.some(row => row.product_group_id || row.product_group_name)) return [];
+  const groups = new Map();
+  rows.forEach((row, index) => {
+    const key = String(row.product_group_id || row.product_group_name || '__ungrouped__');
+    if (!groups.has(key)) groups.set(key, { key, name: row.product_group_name || '未分组产品', rows: [] });
+    groups.get(key).rows.push({ row, index });
+  });
+  return [...groups.values()];
+}
+function productMixRatio(payload, key) {
+  const ratios = payload.product_mix_ratios || {};
+  if (!Object.prototype.hasOwnProperty.call(ratios, key) || ratios[key] === '') return 1;
+  return Math.max(0, num(ratios[key]));
+}
+function weightedInjectionSum(payload, getter) {
+  const groups = injectionProductGroups(payload);
+  if (groups.length <= 1) return sum(payload.injection || [], getter);
+  const totalRatio = sum(groups, group => productMixRatio(payload, group.key));
+  if (totalRatio <= 0) return 0;
+  return sum(groups, group =>
+    sum(group.rows, item => getter(item.row, item.index)) * productMixRatio(payload, group.key)
+  ) / totalRatio;
+}
+
 // ==================== 工程：模具部分（表格布局，对齐 sheet1 / 导出格式） ====================
 function syncMoldFromParts(mold) {
   const parts = Array.isArray(mold.parts) ? mold.parts : [];
@@ -364,6 +390,39 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
   });
 
   molds.forEach((m, idx) => {
+    const groupId = m.product_group_id || '';
+    const previousGroupId = idx > 0 ? (molds[idx - 1].product_group_id || '') : '';
+    const nextGroupId = idx + 1 < molds.length ? (molds[idx + 1].product_group_id || '') : '';
+    if (groupId && groupId !== previousGroupId) {
+      const groupMolds = molds.filter(item => item.product_group_id === groupId);
+      const leader = groupMolds[0] || m;
+      const trGroup = document.createElement('tr');
+      trGroup.style.background = '#e0f2fe';
+      const tdGroup = document.createElement('td');
+      tdGroup.colSpan = canEdit ? 18 : 17;
+      tdGroup.style.cssText = 'padding:10px 14px;font-weight:700;color:#075985;border-top:2px solid #38bdf8';
+      const groupImage = leader.product_image || '';
+      const sourceRows = leader.product_group_rows || [];
+      tdGroup.innerHTML = `
+        <div style="display:flex;align-items:center;gap:12px">
+          ${groupImage ? `<img src="${escapeHtml(groupImage)}" style="width:72px;height:72px;object-fit:contain;border:1px solid #bae6fd;border-radius:8px;background:white"/>` : ''}
+          <span>产品组</span>
+          ${canEdit
+            ? `<input data-product-group-name="${escapeHtml(groupId)}" value="${escapeHtml(leader.product_group_name || '')}" style="width:140px;font-weight:700"/>`
+            : `<span>${escapeHtml(leader.product_group_name || '')}</span>`}
+          <span class="muted" style="font-weight:400">共 ${groupMolds.length} 副模具${sourceRows.length === 2 ? ` · 原表第 ${sourceRows[0]}–${sourceRows[1]} 行` : ''}</span>
+        </div>`;
+      trGroup.appendChild(tdGroup);
+      tbody.appendChild(trGroup);
+      if (canEdit) {
+        const groupNameInput = tdGroup.querySelector('[data-product-group-name]');
+        groupNameInput.oninput = () => {
+          groupMolds.forEach(item => { item.product_group_name = groupNameInput.value; });
+          onChange();
+        };
+      }
+    }
+
     const tr = document.createElement('tr');
     // 序号
     const tdNo = document.createElement('td'); tdNo.className = 'ro'; tdNo.textContent = idx + 1; tr.appendChild(tdNo);
@@ -482,6 +541,21 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
     }
     tbody.appendChild(tr);
 
+    if (groupId && groupId !== nextGroupId) {
+      const groupMolds = molds.filter(item => item.product_group_id === groupId);
+      const groupRmb = sum(groupMolds, item => num(item.price_rmb));
+      const groupUsd = sum(groupMolds, item => num(item.price_usd));
+      const groupHkd = groupRmb / fxv + groupUsd * usdv;
+      const trGroupSubtotal = document.createElement('tr');
+      trGroupSubtotal.style.background = '#f0f9ff';
+      trGroupSubtotal.innerHTML = `
+        <td colspan="13" style="text-align:right;font-weight:700;color:#075985">${escapeHtml(m.product_group_name || '')} 小计</td>
+        <td style="font-weight:700">${formatNum(groupRmb)}</td>
+        <td style="font-weight:700">${formatNum(groupUsd)}</td>
+        <td style="font-weight:700">${formatNum(groupHkd)}</td>
+        <td></td>${canEdit ? '<td></td>' : ''}`;
+      tbody.appendChild(trGroupSubtotal);
+    }
   });
 
   // 小计：RMB / HKD 同行，分别对齐 价格RMB / 价格HKD 列
@@ -1095,7 +1169,7 @@ function renderSummaryPane(host, sections, quote, me) {
   const auxRaw = sum(eng.aux_materials || [], r => freeAmountHkd(r, fxRH));  // 不计损耗
   const pkmatRaw = sum(eng.packaging_materials || [], r => freeAmountHkd(r, fxRH));  // 不计损耗
   const _injLossM = 1 + num(mold.injection_loss_pct ?? 3) / 100;  // 注塑料损耗（默认3%）
-  const injTotal = sum(mold.injection || [], r => num(r.weight_g) * _injLossM * num(r.material_unit_price) + num(r.shot_price));
+  const injTotal = weightedInjectionSum(mold, r => num(r.weight_g) * _injLossM * num(r.material_unit_price) + num(r.shot_price));
   const injRaw = injTotal / _injLossM; // 留作兼容（部分老逻辑可能引用）
   const blowTotal = sum(mold.blow_items || [], r => {
     const mat = num(r.weight_g)*num(r.material_price_lb)/454;
@@ -1310,12 +1384,13 @@ function renderSummaryPane(host, sections, quote, me) {
   const taxHost = host.querySelector('#tax-deduction-block');
   // 注塑料按材质分进/国内料：POM / PVC = 国内料；其他 = 进口料 — 全部 HKD
   const injLossM = 1 + num(mold.injection_loss_pct ?? 3) / 100;  // 注塑料损耗（默认3%）
-  let domesticMatHkd = 0, importMatHkd = 0;
-  (mold.injection || []).forEach(r => {
-    const rawUnitHkd = num(r.weight_g) * injLossM * num(r.material_unit_price);  // 原料单价 HK$
+  const domesticMatHkd = weightedInjectionSum(mold, r => {
     const mat = String(r.material || '').toUpperCase().trim();
-    if (/^(POM|PVC|C[- ]?PVC)/i.test(mat)) domesticMatHkd += rawUnitHkd;
-    else if (mat) importMatHkd += rawUnitHkd;
+    return /^(POM|PVC|C[- ]?PVC)/i.test(mat) ? num(r.weight_g) * injLossM * num(r.material_unit_price) : 0;
+  });
+  const importMatHkd = weightedInjectionSum(mold, r => {
+    const mat = String(r.material || '').toUpperCase().trim();
+    return mat && !/^(POM|PVC|C[- ]?PVC)/i.test(mat) ? num(r.weight_g) * injLossM * num(r.material_unit_price) : 0;
   });
 
   // 分类关键字（用于无显式类别时兜底）
@@ -1396,7 +1471,7 @@ function renderSummaryPane(host, sections, quote, me) {
     surtax_hkd: surtaxHkd,  // 供减税明细里印尼运费输入框重算 misc 用（避免丢附加税）
     hardware: (hwRaw - _sumByMatch(eng.hardware, isMotor)),  // 五金 HKD（剔除马达项；五金表已 HKD）
     electronic: (elecRaw - _sumByMatch(elecSrc, isMotor)),  // 电子 HKD（剔除马达项；电子表已 HKD）
-    injection_labor: sum(mold.injection || [], r => num(r.shot_price)),  // 啤工 = Σ啤价 HKD（只算机时人工，不含原料）
+    injection_labor: weightedInjectionSum(mold, r => num(r.shot_price)),  // 啤工按各产品配比加权
     painting_labor: ppTotal * 0.7,    // 喷油工 = 喷油总额 70%（喷油已 HKD，不除汇率）
     paint_material: ppTotal * 0.3,    // 油漆 = 喷油总额 30%（喷油已 HKD）
     assembly_labor: combinedAsmHkd,   // 装配工 = 旧组装+旧包装+新排拉(装配)+新排拉(包装)（已 HKD，不除汇率）
@@ -2283,11 +2358,11 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd)
         <div class="card" style="background:#f0fdf4;border:1px solid #86efac;">
           <p>从 <b>${escapeHtml(j.sheet_used || '')}</b> 解析到 <b>${j.molds.length}</b> 行明细：</p>
           <table class="wb-table"><thead><tr>
-            <th>模号</th><th>名称</th><th>类型</th><th>材质</th>
+            <th>产品</th><th>模号</th><th>名称</th><th>类型</th><th>材质</th>
             <th>出模数</th><th>套数</th><th>净重(g)</th><th>周期(秒)</th><th>机型</th><th>目标数</th><th>图片</th><th>模具尺寸</th><th>价格RMB</th><th>价格HKD</th><th>备注</th>
           </tr></thead><tbody>
           ${j.molds.map(m => `<tr>
-            <td>${escapeHtml(m.mold_no || '')}</td><td>${escapeHtml(m.name || '')}</td><td>${escapeHtml(m.mold_type || '')}</td>
+            <td>${escapeHtml(m.product_group_name || '')}</td><td>${escapeHtml(m.mold_no || '')}</td><td>${escapeHtml(m.name || '')}</td><td>${escapeHtml(m.mold_type || '')}</td>
             <td>${escapeHtml(m.material || '')}</td><td>${escapeHtml(m.cavity || '')}</td>
             <td>${escapeHtml(m.sets ?? '')}</td><td>${escapeHtml(m.weight_g ?? '')}</td><td>${escapeHtml(m.cycle_sec ?? '')}</td><td>${escapeHtml(m.machine_model || '')}</td><td>${escapeHtml(m.target ?? '')}</td><td>${escapeHtml((m.images || []).length)}</td><td>${escapeHtml((m.detail && m.detail.mold_size) || '')}</td><td>${escapeHtml(m.price_rmb ?? '')}</td><td>${escapeHtml(m.price_hkd ?? '')}</td><td>${escapeHtml(m.note || '')}</td>
           </tr>`).join('')}
@@ -2765,6 +2840,7 @@ function lookupMaterialPrice(material, grade, prices) {
 
 function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, userRole) {
   payload.injection = payload.injection || [];
+  payload.product_mix_ratios = payload.product_mix_ratios || {};
   payload.injection_loss_pct = payload.injection_loss_pct ?? 3;
   payload.blow_items = payload.blow_items || [];
   // 参考表：先用本报价单已存的；没有则用全局缓存；都没有用 hardcoded 默认
@@ -2820,6 +2896,12 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
   if (canEdit && payload.injection.length === 0 && refMolds && refMolds.length) {
     payload.injection = refMolds.map(m => ({
       mold_no: m.mold_no || '', name: m.name,
+      product_group_id: m.product_group_id || '',
+      product_group_name: m.product_group_name || '',
+      product_group_rows: m.product_group_rows || [],
+      product_image: m.product_image || '',
+      source_sheet_name: m.source_sheet_name || '',
+      source_sheet_index: m.source_sheet_index ?? null,
       material: m.material || '',
       material_grade: m.material_grade || '',
       color: m.color || '',
@@ -2910,11 +2992,21 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     const syncBtn = host.querySelector('#btn-sync-mold');
     if (syncBtn) syncBtn.onclick = () => {
       if (!confirm(`将根据工程已填的 ${refMolds.length} 副模具同步注塑表。已填行（按"模具名称"匹配）会保留其他字段，新增的会追加，工程已删除的会移除。继续？`)) return;
-      const byName = new Map(payload.injection.map(r => [r.name, r]));
+      const syncKey = row => [
+        row.product_group_id || row.product_group_name || '',
+        row.mold_no || '', row.name || '', row.mold_part_index ?? 0,
+      ].join('|');
+      const byName = new Map(payload.injection.map(r => [syncKey(r), r]));
       payload.injection = refMolds.map(m => {
-        const existing = byName.get(m.name) || {};
+        const existing = byName.get(syncKey(m)) || {};
         return {
           ...existing,
+          product_group_id: m.product_group_id || '',
+          product_group_name: m.product_group_name || '',
+          product_group_rows: m.product_group_rows || [],
+          product_image: m.product_image || '',
+          source_sheet_name: m.source_sheet_name || '',
+          source_sheet_index: m.source_sheet_index ?? null,
           mold_no: m.mold_no || existing.mold_no || '',
           name: m.name,
           material: m.material || existing.material || '',
@@ -3029,6 +3121,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
   });
 
   const cols = [
+    { key: 'product_group_name', label: '产品', readonly: true, width: '110px' },
     { key: 'name', label: '模具名称', type: 'textarea', width: '220px' },
     { key: 'mold_no', label: '模号', width: '70px' },
     { key: 'material', label: '材质', width: '110px', type: 'select', affectsOptions: true,
@@ -3077,17 +3170,41 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     const fxv = num(fxRmbHkd) || 0.85;
     const rows = payload.injection || [];
     const lossM = 1 + num(payload.injection_loss_pct ?? 3) / 100;  // 料损耗（默认3%）
-    const rawSum = sum(rows, r => num(r.weight_g) * lossM * num(r.material_unit_price));
-    const shotSum = sum(rows, r => num(r.shot_price));
+    const rawSum = weightedInjectionSum(payload, r => num(r.weight_g) * lossM * num(r.material_unit_price));
+    const shotSum = weightedInjectionSum(payload, r => num(r.shot_price));
     const finishedSum = rawSum + shotSum;
+    const groups = injectionProductGroups(payload);
+    const hasMultipleProducts = groups.length > 1;
+    const totalRatio = sum(groups, group => productMixRatio(payload, group.key));
+    const groupCards = groups.map(group => {
+      const groupRaw = sum(group.rows, item => num(item.row.weight_g) * lossM * num(item.row.material_unit_price));
+      const groupShot = sum(group.rows, item => num(item.row.shot_price));
+      const groupFinished = groupRaw + groupShot;
+      return `<div class="ls-row" style="background:#f0f9ff;color:#075985">
+        <span class="ls-label">${escapeHtml(group.name)} 小计（${group.rows.length} 行）</span>
+        <span class="ls-val">HK$ ${formatNum(groupFinished)} ${hasMultipleProducts ? `× 配比
+          <input class="product-mix-ratio" data-group="${escapeHtml(group.key)}" type="number" min="0" step="any"
+            value="${productMixRatio(payload, group.key)}" ${canEdit ? '' : 'disabled'} style="width:72px;margin:0 6px">` : ''}
+          <small class="muted">原料 ${formatNum(groupRaw)} + 啤价 ${formatNum(groupShot)}</small>
+        </span>
+      </div>`;
+    }).join('');
     injCard.className = 'loss-summary';
     injCard.innerHTML = `
       <div class="ls-title">二、注塑 成本汇总</div>
-      <div class="ls-row"><span class="ls-label">原料单价 总</span><span class="ls-val">${formatNum(rawSum)}</span></div>
-      <div class="ls-row"><span class="ls-label">啤价 总</span><span class="ls-val">${formatNum(shotSum)}</span></div>
-      <div class="ls-row hi"><span class="ls-label">成品金额 总 HK$</span><span class="ls-val">${formatNum(finishedSum)}</span></div>
+      ${groupCards}
+      <div class="ls-row"><span class="ls-label">原料单价 ${hasMultipleProducts ? '加权平均' : '总'}</span><span class="ls-val">${formatNum(rawSum)}</span></div>
+      <div class="ls-row"><span class="ls-label">啤价 ${hasMultipleProducts ? '加权平均' : '总'}</span><span class="ls-val">${formatNum(shotSum)}</span></div>
+      <div class="ls-row hi"><span class="ls-label">成品金额 ${hasMultipleProducts ? `加权平均（总配比 ${formatNum(totalRatio)}）` : '总'} HK$</span><span class="ls-val">${formatNum(finishedSum)}</span></div>
       <div class="ls-row hi"><span class="ls-label">合计 RMB</span><span class="ls-val">${formatNum(finishedSum / fxv)} <small class="muted">(汇率 ${fxv})</small></span></div>
     `;
+    injCard.querySelectorAll('.product-mix-ratio').forEach(input => {
+      input.onchange = () => {
+        payload.product_mix_ratios[input.dataset.group] = Math.max(0, num(input.value));
+        onChange();
+        paintInj();
+      };
+    });
   };
   paintInj();
   wrappedOnChange._fns.push(paintInj);
@@ -4325,7 +4442,7 @@ function computeTotals(sections, p) {
 
   // 电子/五金/辅助/包装/二次加工(喷油) 均为 HKD，换算回 RMB（×汇率）以与其余 RMB 项相加
   const _salesFx = num((get('sales') || {}).header?.fx_rmb_hkd) || 0.85;
-  const injection = applyLoss(sum(mold.injection || [], r => num(r.shot_price) / Math.max(num(r.sets), 1)), mold.injection_loss_pct ?? 3);
+  const injection = applyLoss(weightedInjectionSum(mold, r => num(r.shot_price) / Math.max(num(r.sets), 1)), mold.injection_loss_pct ?? 3);
   // 注：模板里"成品金额"列其实是 啤价/套数 之类，这里先按 shot_price/sets 估算，导出时严格按模板填回。
   const second_proc = applyLoss(sum(pnt.second_proc || [], r => num(r.price) * num(r.qty)), pnt.second_proc_loss_pct ?? 1) * _salesFx;
   const electronics = (freeTableSubtotal(elecSrc, _salesFx)  // 电子部优先，与导出一致

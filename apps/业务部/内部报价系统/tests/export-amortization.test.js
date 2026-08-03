@@ -7,6 +7,51 @@ const test = require('node:test');
 
 const { buildWorkbook, adaptSurtaxForBase } = require('../backend/services/exportInternal');
 
+test('internal export writes product-ratio weighted injection formulas', async () => {
+  const workbook = await buildWorkbook({
+    quote: { quote_no: 'PRODUCT-MIX', product_name: '产品配比', qty: 1000 },
+    sections: [
+      { dept: 'molding', payload_json: JSON.stringify({
+        injection_loss_pct: 0,
+        indo_pct: 2,
+        product_mix_ratios: { p1: 2, p2: 1 },
+        injection: [
+          { product_group_id: 'p1', product_group_name: '1#产品', name: 'A', weight_g: 0, material_unit_price: 0, shot_price: 10 },
+          { product_group_id: 'p1', product_group_name: '1#产品', name: 'B', weight_g: 0, material_unit_price: 0, shot_price: 20 },
+          { product_group_id: 'p2', product_group_name: '2#产品', name: 'C', weight_g: 0, material_unit_price: 0, shot_price: 40 },
+        ],
+      }) },
+      { dept: 'sales', payload_json: JSON.stringify({ header: { fx_rmb_hkd: 0.85 }, shipping: { scenarios: [] } }) },
+    ],
+  });
+  const worksheet = workbook.getWorksheet('报价明细');
+  let titleRow = 0;
+  worksheet.eachRow(row => { if (row.getCell(1).value === '二、注塑部分') titleRow = row.number; });
+  const dataStart = titleRow + 2;
+  const totalRow = dataStart + 3;
+  assert.equal(worksheet.getCell(totalRow, 1).value, '加权合计（总配比 3）');
+  assert.equal(worksheet.getCell(totalRow, 16).value.formula, `((P${dataStart}+P${dataStart + 1})*2+(P${dataStart + 2})*1)/3`);
+  assert.equal(Number(worksheet.getCell(totalRow, 16).value.result.toFixed(4)), 33.3333);
+  assert.equal(worksheet.getCell(totalRow, 17).value.formula, `((Q${dataStart}+Q${dataStart + 1})*2+(Q${dataStart + 2})*1)/3`);
+});
+
+test('empty department Indonesian freight totals do not create circular references', async () => {
+  const workbook = await buildWorkbook({
+    quote: { quote_no: 'EMPTY-DEPT', product_name: '空部门', qty: 1000 },
+    sections: [
+      { dept: 'engineering', payload_json: JSON.stringify({ hardware: [], aux_materials: [], packaging_materials: [] }) },
+      { dept: 'sales', payload_json: JSON.stringify({ header: { fx_rmb_hkd: 0.85 }, shipping: { scenarios: [] } }) },
+    ],
+  });
+  const worksheet = workbook.getWorksheet('报价明细');
+  for (const title of ['五、五金', '六、辅助材料', '七、包装材料']) {
+    let titleRow = 0;
+    worksheet.eachRow(row => { if (row.getCell(1).value === title) titleRow = row.number; });
+    const totalRow = titleRow + 2;
+    assert.equal(worksheet.getCell(totalRow, 11).value.formula, '0');
+  }
+});
+
 test('surtax is stored and exported as a direct HKD amount', async () => {
   const args = {
     quote: { quote_no: 'SURTAX-HKD', product_name: '附加税港币', qty: 1000 },
@@ -214,6 +259,82 @@ test('electronic quantity accepts formulas and preserves them in export', async 
   assert.match(source, /c\.qty\s*=\s*parseFormulaInput\(i\.value\)/);
 });
 
+test('internal export keeps mold rows separated by product group', async () => {
+  const workbook = await buildWorkbook({
+    quote: { quote_no: 'MOLD-PRODUCT-GROUPS', product_name: '多产品模具', qty: 1000 },
+    sections: [
+      {
+        dept: 'engineering',
+        payload_json: JSON.stringify({
+          molds: [
+            { mold_no: 'NO.01', name: '产品一外壳', product_group_id: 'product-1', product_group_name: '产品1' },
+            { mold_no: 'NO.02', name: '产品一配件', product_group_id: 'product-1', product_group_name: '产品1' },
+            { mold_no: 'NO.03', name: '产品二外壳', product_group_id: 'product-2', product_group_name: '产品2' },
+          ],
+        }),
+      },
+      {
+        dept: 'sales',
+        payload_json: JSON.stringify({
+          header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.8 },
+          shipping: { scenarios: [] },
+        }),
+      },
+    ],
+  });
+
+  const worksheet = workbook.getWorksheet('报价明细');
+  const rows = {};
+  worksheet.eachRow(row => {
+    const moldNo = row.getCell(3).value;
+    if (moldNo) rows[moldNo] = row;
+  });
+  assert.equal(rows['NO.01'].getCell(1).value, '产品1\n1.1');
+  assert.equal(rows['NO.02'].getCell(1).value, '1.2');
+  assert.equal(rows['NO.03'].getCell(1).value, '产品2\n2.1');
+  assert.equal(rows['NO.01'].getCell(2).value, '产品一外壳');
+  assert.equal(rows['NO.03'].getCell(2).value, '产品二外壳');
+  assert.equal(worksheet.getCell(rows['NO.01'].number - 1, 1).value, '产品 / 序号');
+});
+
+test('internal export keeps molding rows separated by engineering product group', async () => {
+  const workbook = await buildWorkbook({
+    quote: { quote_no: 'MOLDING-PRODUCT-GROUPS', product_name: '多产品注塑', qty: 1000 },
+    sections: [
+      {
+        dept: 'molding',
+        payload_json: JSON.stringify({
+          injection: [
+            { name: '产品一外壳', product_group_id: 'product-1', product_group_name: '1#产品', weight_g: 10 },
+            { name: '产品一配件', product_group_id: 'product-1', product_group_name: '1#产品', weight_g: 5 },
+            { name: '产品二外壳', product_group_id: 'product-2', product_group_name: '2#产品', weight_g: 12 },
+          ],
+        }),
+      },
+      {
+        dept: 'sales',
+        payload_json: JSON.stringify({
+          header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.8 },
+          shipping: { scenarios: [] },
+        }),
+      },
+    ],
+  });
+
+  const worksheet = workbook.getWorksheet('报价明细');
+  const rows = {};
+  worksheet.eachRow(row => {
+    const name = String(row.getCell(2).value || '');
+    if (name) rows[name] = row;
+  });
+  assert.equal(rows['产品一外壳'].getCell(1).value, '1#产品\n1.1');
+  assert.equal(rows['产品一配件'].getCell(1).value, '1.2');
+  assert.equal(rows['产品二外壳'].getCell(1).value, '2#产品\n2.1');
+  assert.equal(rows['产品一外壳'].getCell(2).value, '产品一外壳');
+  assert.equal(rows['产品二外壳'].getCell(2).value, '产品二外壳');
+  assert.equal(worksheet.getCell(rows['产品一外壳'].number - 1, 1).value, '产品 / 序号');
+});
+
 test('export keeps prototype and testing amortization when mold items are empty', async () => {
   const workbook = await buildWorkbook({
     quote: { quote_no: 'TEST-264', product_name: '分摊测试', qty: 10000 },
@@ -397,6 +518,48 @@ test('export tax-summary base price preserves a manual page override', async () 
   });
 
   assert.equal(worksheet.getCell(titleRow + 2, 1).value, 8.7836);
+});
+
+test('SPIN export keeps shifted tax-summary formulas linked to their real rows', async () => {
+  const workbook = await buildWorkbook({
+    quote: { quote_no: 'SPIN-TAX-SHIFT', customer: 'SPIN', product_name: '公式平移', qty: 1000 },
+    sections: [{ dept: 'sales', payload_json: JSON.stringify({
+      header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.8 },
+      shipping: { markup_x: 1.2, divisor: 0.98, scenarios: [] },
+      pricing_summary: {
+        t1: { base_price: 30 },
+        t2: { carton: 1 },
+        t3: {},
+        t4: { carton: { amt: 1, rate: 10 } },
+        overrides: { 't1.base_price': true, 't2.carton': true },
+      },
+    }) }],
+  });
+
+  const worksheet = workbook.getWorksheet('报价明细');
+  let deductionRow = 0;
+  let summaryRow = 0;
+  let afterCostRow = 0;
+  worksheet.eachRow(row => {
+    const deduction = row.getCell(11).value;
+    const summary = row.getCell(9).value;
+    if (deduction && typeof deduction === 'object' && /^SUM\(A\d+:J\d+\)$/.test(deduction.formula || '')) {
+      deductionRow = row.number;
+    }
+    if (row.getCell(1).value === '合计减税' && summary && typeof summary === 'object') summaryRow = row.number;
+    if (row.getCell(1).value === '减税后成本') afterCostRow = row.number;
+  });
+
+  assert.ok(deductionRow);
+  assert.ok(summaryRow);
+  assert.ok(afterCostRow);
+  assert.equal(worksheet.getCell(summaryRow, 9).value.formula, `K${deductionRow}`);
+  assert.match(worksheet.getCell(afterCostRow, 9).value.formula, new RegExp(`-K${deductionRow}$`));
+  for (const rowNumber of [summaryRow, afterCostRow]) {
+    const formula = worksheet.getCell(rowNumber, 9).value.formula;
+    const refs = [...formula.matchAll(/[A-Z]+(\d+)/g)].map(match => Number(match[1]));
+    assert.ok(refs.every(ref => ref <= worksheet.rowCount), `${formula} 引用了工作表范围外的行`);
+  }
 });
 
 test('export separates electronic and sewing pricing and keeps weighted sewing formulas', async () => {
