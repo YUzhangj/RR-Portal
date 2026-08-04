@@ -191,6 +191,26 @@ def test_banner_is_collapsible(client):
     assert 'class="bg-amber-50 border border-amber-300 rounded-lg p-3 mb-4 text-sm" open' not in banner
 
 
+def test_unlock_also_unlocks_records_in_range(client):
+    """手动解锁时间段时，范围内 locked=1 的记录同步解锁可编辑，范围外仍锁。"""
+    rid = _create_pending()
+    # 补两条范围内的记录
+    _insert('hd', 'hd', 'sy', '2026-05-10', jx_qty=1)
+    _insert('hd', 'hd', 'sy', '2026-05-20', jx_qty=1)
+    con = sqlite3.connect(app_module.DATABASE)
+    con.execute("UPDATE flow_records SET locked=1")
+    con.commit(); con.close()
+    _login(client, 'sy')
+    client.post(f'/reconcile/{rid}/approve')
+    lid = next(l['id'] for l in _locks() if l['party'] == 'hd')
+    _login(client, 'hd')
+    client.post(f'/locks/{lid}/delete', data={'unlock_from': '2026-05-01', 'unlock_to': '2026-05-15'})
+    con = sqlite3.connect(app_module.DATABASE)
+    r10 = con.execute("SELECT locked FROM flow_records WHERE date='2026-05-10'").fetchone()[0]
+    r20 = con.execute("SELECT locked FROM flow_records WHERE date='2026-05-20'").fetchone()[0]
+    con.close()
+    assert r10 == 0   # 范围内已解锁
+    assert r20 == 1   # 范围外仍锁
 def test_locks_grouped_by_counterparty(client):
     """锁定横幅按对方分组显示（邵阳是邵阳，兴信是兴信）。"""
     con = sqlite3.connect(app_module.DATABASE)
