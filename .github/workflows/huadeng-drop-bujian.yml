@@ -1,0 +1,67 @@
+name: Huadeng Drop Bujian Locks (one-off)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-cloud
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  drop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate SSH host fingerprint
+        shell: bash
+        env:
+          CLOUD_HOST_FINGERPRINT: ${{ secrets.CLOUD_HOST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CLOUD_HOST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}=?$ ]]; then
+            echo 'bad fingerprint' >&2; exit 1
+          fi
+
+      - name: Drop bujian locks via SSH
+        env:
+          CLOUD_HOST_FINGERPRINT: ${{ secrets.CLOUD_HOST_FINGERPRINT }}
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        with:
+          host: ${{ secrets.CLOUD_HOST }}
+          username: ${{ secrets.CLOUD_USER }}
+          key: ${{ secrets.CLOUD_SSH_KEY }}
+          fingerprint: ${{ env.CLOUD_HOST_FINGERPRINT }}
+          command_timeout: 8m
+          script: |
+            set -euo pipefail
+            DB="/opt/rr-portal/apps/PMC跟仓管/华登包材管理/data/huadeng.db"
+            BAK="$DB.bak-$(date +%Y%m%d%H%M%S)-drop-bujian"
+            cp -a "$DB" "$BAK"
+            echo "backup: $BAK"
+            python3 - "$DB" <<'PY'
+            import sqlite3, sys
+            con = sqlite3.connect(sys.argv[1], timeout=10)
+            cur = con.cursor()
+            bujian_rids = [r[0] for r in cur.execute(
+                "SELECT DISTINCT reconciliation_id FROM period_locks WHERE reason LIKE '%补建%'")]
+            print("补建核对批次数:", len(bujian_rids))
+            before_locks = cur.execute("SELECT count(*) FROM period_locks").fetchone()[0]
+            before_locked_recs = cur.execute("SELECT count(*) FROM flow_records WHERE locked=1").fetchone()[0]
+            print("before: locks", before_locks, "| locked records", before_locked_recs)
+            q_marks = ",".join("?" * len(bujian_rids))
+            cur.execute(f"DELETE FROM period_locks WHERE reconciliation_id IN ({q_marks})", bujian_rids)
+            nrec = cur.execute(f"UPDATE flow_records SET locked=0 WHERE locked=1 AND reconciliation_id IN ({q_marks})", bujian_rids).rowcount
+            con.commit()
+            print("deleted locks, unlocked records:", nrec)
+            print("== 剩余锁定（应全部不带补建）==")
+            for r in cur.execute("SELECT party, date_from, date_to, reason FROM period_locks ORDER BY party, date_from"):
+                print(r)
+            print("剩余含补建的锁:", cur.execute("SELECT count(*) FROM period_locks WHERE reason LIKE '%补建%'").fetchone()[0])
+            print("仍 locked=1 且挂在补建批次的记录:", cur.execute(
+                f"SELECT count(*) FROM flow_records WHERE locked=1 AND reconciliation_id IN ({q_marks})", bujian_rids).fetchone()[0])
+            con.close()
+            PY
