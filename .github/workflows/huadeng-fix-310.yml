@@ -1,0 +1,57 @@
+name: Huadeng Fix Lock 310 (one-off)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-cloud
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate SSH host fingerprint
+        shell: bash
+        env:
+          CLOUD_HOST_FINGERPRINT: ${{ secrets.CLOUD_HOST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CLOUD_HOST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}=?$ ]]; then
+            echo 'bad fingerprint' >&2; exit 1
+          fi
+
+      - name: Fix lock 310 date_to via SSH
+        env:
+          CLOUD_HOST_FINGERPRINT: ${{ secrets.CLOUD_HOST_FINGERPRINT }}
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        with:
+          host: ${{ secrets.CLOUD_HOST }}
+          username: ${{ secrets.CLOUD_USER }}
+          key: ${{ secrets.CLOUD_SSH_KEY }}
+          fingerprint: ${{ env.CLOUD_HOST_FINGERPRINT }}
+          command_timeout: 8m
+          script: |
+            set -euo pipefail
+            DB="/opt/rr-portal/apps/PMC跟仓管/华登包材管理/data/huadeng.db"
+            BAK="$DB.bak-$(date +%Y%m%d%H%M%S)-fix-310"
+            cp -a "$DB" "$BAK"
+            echo "backup: $BAK"
+            python3 - "$DB" <<'PY'
+            import sqlite3, sys
+            con = sqlite3.connect(sys.argv[1], timeout=10)
+            cur = con.cursor()
+            n1 = cur.execute("UPDATE period_locks SET date_to='2026-06-16' WHERE id IN (115,116) AND date_to='2026-6-16'").rowcount
+            n2 = cur.execute("UPDATE reconciliations SET date_to='2026-06-16' WHERE id=310 AND date_to='2026-6-16'").rowcount
+            con.commit()
+            print("locks fixed:", n1, "| recon fixed:", n2)
+            print("period_locks bad:", cur.execute("SELECT count(*) FROM period_locks WHERE date_from NOT GLOB '????-??-??' OR date_to NOT GLOB '????-??-??' OR date_from > date_to").fetchone()[0])
+            for r in cur.execute("SELECT id, party, date_from, date_to, reason FROM period_locks WHERE id IN (115,116)"):
+                print(r)
+            con.close()
+            PY
