@@ -1,0 +1,68 @@
+name: CPG CD36 Backfill (one-off)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-cloud
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate SSH host fingerprint
+        shell: bash
+        env:
+          CLOUD_HOST_FINGERPRINT: ${{ secrets.CLOUD_HOST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CLOUD_HOST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}=?$ ]]; then
+            echo 'bad fingerprint' >&2; exit 1
+          fi
+
+      - name: Backfill 36# record via SSH
+        env:
+          CLOUD_HOST_FINGERPRINT: ${{ secrets.CLOUD_HOST_FINGERPRINT }}
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        with:
+          host: ${{ secrets.CLOUD_HOST }}
+          username: ${{ secrets.CLOUD_USER }}
+          key: ${{ secrets.CLOUD_SSH_KEY }}
+          fingerprint: ${{ env.CLOUD_HOST_FINGERPRINT }}
+          command_timeout: 8m
+          script: |
+            set -euo pipefail
+            DB="/opt/rr-portal/apps/PMC跟仓管/加工管理/data/pcba.db"
+            BAK="$DB.bak-$(date +%Y%m%d%H%M%S)-cd36-backfill"
+            cp -a "$DB" "$BAK"
+            echo "backup: $BAK"
+            python3 - "$DB" <<'PY'
+            import sqlite3, sys
+            con = sqlite3.connect(sys.argv[1], timeout=10)
+            cur = con.cursor()
+            # 幂等：已存在则不再插
+            dup = cur.execute("""SELECT count(*) FROM records WHERE department='东莞车间'
+                AND doc_no='DS260617-01' AND sticker_type='36#NFC贴纸' AND qty=16944""").fetchone()[0]
+            if dup:
+                print("已存在，跳过")
+            else:
+                loc = cur.execute("SELECT id FROM locations WHERE name='东莞车间'").fetchone()[0]
+                uid = cur.execute("SELECT id FROM users WHERE username='admin'").fetchone()[0]
+                cur.execute("""INSERT INTO records
+                    (rec_type, location_id, rec_date, doc_no, material, sticker_type, qty, remark, department, created_by)
+                    VALUES ('issue', ?, '2026-07-09', 'DS260617-01', 'NFC贴纸', '36#NFC贴纸', 16944,
+                            '36#CD领料明细导入（补录）', '东莞车间', ?)""", (loc, uid))
+                con.commit()
+                print("已补录 36#NFC贴纸 16944 (2026-07-09, DS260617-01)")
+            print("36# 现有记录:")
+            for r in cur.execute("""SELECT rec_date, doc_no, qty, remark FROM records
+                WHERE department='东莞车间' AND sticker_type='36#NFC贴纸' ORDER BY rec_date"""):
+                print(r)
+            con.close()
+            PY
