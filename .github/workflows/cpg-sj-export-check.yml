@@ -1,0 +1,64 @@
+name: CPG SJ Export Check (one-off)
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: deploy-cloud
+  queue: max
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate SSH host fingerprint
+        shell: bash
+        env:
+          CLOUD_HOST_FINGERPRINT: ${{ secrets.CLOUD_HOST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CLOUD_HOST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}=?$ ]]; then
+            echo 'bad fingerprint' >&2; exit 1
+          fi
+      - name: Dump sj data via SSH
+        env:
+          CLOUD_HOST_FINGERPRINT: ${{ secrets.CLOUD_HOST_FINGERPRINT }}
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        with:
+          host: ${{ secrets.CLOUD_HOST }}
+          username: ${{ secrets.CLOUD_USER }}
+          key: ${{ secrets.CLOUD_SSH_KEY }}
+          fingerprint: ${{ env.CLOUD_HOST_FINGERPRINT }}
+          command_timeout: 5m
+          script: |
+            set -uo pipefail
+            DB="/opt/rr-portal/apps/PMC跟仓管/加工管理/data/pcba.db"
+            python3 - "$DB" <<'PY'
+            import sqlite3, sys
+            con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=5)
+            cur = con.cursor()
+            print("== 邵阳华登 finished 按型号 ==")
+            for r in cur.execute("""SELECT sticker_type, sum(qty), count(*), min(rec_date), max(rec_date)
+                FROM records WHERE department='邵阳华登' AND rec_type='finished'
+                GROUP BY sticker_type ORDER BY sum(qty) DESC LIMIT 10"""):
+                print(r)
+            print("邵阳华登 finished 总计:", cur.execute("SELECT sum(qty) FROM records WHERE department='邵阳华登' AND rec_type='finished'").fetchone())
+            print("== 碟片半成品 semi_outbound 按加工点 ==")
+            for r in cur.execute("""SELECT IFNULL(l.name,'(无)'), count(*), sum(r.qty)
+                FROM records r LEFT JOIN locations l ON r.location_id=l.id
+                WHERE r.department='碟片半成品' AND r.rec_type='semi_outbound' GROUP BY l.name"""):
+                print(r)
+            print("== 碟片半成品 入/出按型号汇总 ==")
+            for r in cur.execute("""SELECT r.sticker_type, r.rec_type, sum(r.qty)
+                FROM records r WHERE r.department='碟片半成品' AND r.sticker_type LIKE '%NFC%'
+                GROUP BY r.sticker_type, r.rec_type ORDER BY r.sticker_type, r.rec_type"""):
+                print("S|" + "|".join(str(x) for x in r))
+            print("== 碟片半成品 semi_outbound 按单号日期抽样 ==")
+            for r in cur.execute("""SELECT r.rec_date, r.doc_no, l.name, count(*)
+                FROM records r LEFT JOIN locations l ON r.location_id=l.id
+                WHERE r.department='碟片半成品' AND r.rec_type='semi_outbound'
+                GROUP BY r.rec_date, r.doc_no, l.name ORDER BY r.rec_date LIMIT 15"""):
+                print(r)
+            con.close()
+            PY
