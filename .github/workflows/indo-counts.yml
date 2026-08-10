@@ -39,13 +39,7 @@ jobs:
             DBC=$(docker ps --format '{{.Names}}' | grep -i -E '^rr-portal.*(db|postgres)' | head -1)
             echo "db container: $DBC"
             docker exec "$DBC" psql -U rrportal -d rrportal -c "
-              SELECT 'purchase_orders' t, count(*) FROM indo_shipping.purchase_orders
-              UNION ALL SELECT 'po_items', count(*) FROM indo_shipping.po_items
-              UNION ALL SELECT 'po_receipts', count(*) FROM indo_shipping.po_receipts
-              UNION ALL SELECT 'outbound', count(*) FROM indo_shipping.outbound
-              UNION ALL SELECT 'materials', count(*) FROM indo_shipping.materials
-              UNION ALL SELECT 'schedules', count(*) FROM indo_shipping.schedules
-              UNION ALL SELECT 'shipment_items', count(*) FROM indo_shipping.shipment_items
-              UNION ALL SELECT 'audit_logs', count(*) FROM indo_shipping.audit_logs ORDER BY 1;" 2>&1 | head -20
+              SELECT id, title, length(raw_rows) AS raw_bytes, pg_size_pretty(length(raw_rows)::bigint) FROM indo_shipping.schedules ORDER BY id;
+              EXPLAIN ANALYZE SELECT count(*) FROM indo_shipping.po_receipts;" 2>&1 | head -20
             echo "== 接口计时（容器内）=="
             docker exec "$C" sh -c 'time curl -s http://localhost:8080/api/health 2>/dev/null || time wget -qO- http://localhost:8080/api/health 2>/dev/null' || true
