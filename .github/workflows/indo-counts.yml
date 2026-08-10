@@ -21,7 +21,7 @@ jobs:
           if [[ ! "$CLOUD_HOST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}=?$ ]]; then
             echo 'bad fingerprint' >&2; exit 1
           fi
-      - name: Count indo tables via SSH
+      - name: Server load check via SSH
         env:
           CLOUD_HOST_FINGERPRINT: ${{ secrets.CLOUD_HOST_FINGERPRINT }}
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
@@ -33,13 +33,9 @@ jobs:
           command_timeout: 5m
           script: |
             set -uo pipefail
-            C=$(docker ps --filter name=indo --format '{{.Names}}' | grep -i -E 'api|shipping' | head -1)
-            echo "container: $C"
-            docker ps --format '{{.Names}}' | grep -i indo
-            DBC=$(docker ps --format '{{.Names}}' | grep -i -E '^rr-portal.*(db|postgres)' | head -1)
-            echo "db container: $DBC"
-            docker exec "$DBC" psql -U rrportal -d rrportal -c "
-              SELECT id, pg_column_size(raw_rows) AS raw_bytes FROM indo_shipping.schedules ORDER BY id;
-              EXPLAIN ANALYZE SELECT count(*) FROM indo_shipping.po_receipts;" 2>&1 | head -20
-            echo "== 接口计时（容器内）=="
-            docker exec "$C" sh -c 'time curl -s http://localhost:8080/api/health 2>/dev/null || time wget -qO- http://localhost:8080/api/health 2>/dev/null' || true
+            echo "== 负载 =="
+            uptime
+            echo "== 容器 CPU/内存 =="
+            docker stats --no-stream --format '{{.Names}} {{.CPUPerc}} {{.MemUsage}}' | head -25
+            echo "== indo api 近30分钟请求分布 =="
+            docker logs --since 30m rr-portal-indo-shipping-1 2>&1 | grep -oE '"(GET|POST|PUT|DELETE) [^ "]+' | sort | uniq -c | sort -rn | head -15
