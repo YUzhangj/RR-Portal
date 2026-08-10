@@ -33,9 +33,8 @@ jobs:
           command_timeout: 5m
           script: |
             set -uo pipefail
-            echo "== 负载 =="
             uptime
-            echo "== 容器 CPU/内存 =="
-            docker stats --no-stream --format '{{.Names}} {{.CPUPerc}} {{.MemUsage}}' | head -25
+            nproc
+            docker stats --no-stream | head -28
             echo "== indo api 近30分钟请求分布 =="
             docker logs --since 30m rr-portal-indo-shipping-1 2>&1 | grep -oE '"(GET|POST|PUT|DELETE) [^ "]+' | sort | uniq -c | sort -rn | head -15
