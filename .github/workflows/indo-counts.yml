@@ -1,0 +1,51 @@
+name: Indo DB Counts (one-off)
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: deploy-cloud
+  queue: max
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate SSH host fingerprint
+        shell: bash
+        env:
+          CLOUD_HOST_FINGERPRINT: ${{ secrets.CLOUD_HOST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CLOUD_HOST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}=?$ ]]; then
+            echo 'bad fingerprint' >&2; exit 1
+          fi
+      - name: Count indo tables via SSH
+        env:
+          CLOUD_HOST_FINGERPRINT: ${{ secrets.CLOUD_HOST_FINGERPRINT }}
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        with:
+          host: ${{ secrets.CLOUD_HOST }}
+          username: ${{ secrets.CLOUD_USER }}
+          key: ${{ secrets.CLOUD_SSH_KEY }}
+          fingerprint: ${{ env.CLOUD_HOST_FINGERPRINT }}
+          command_timeout: 5m
+          script: |
+            set -uo pipefail
+            C=$(docker ps --filter name=indo --format '{{.Names}}' | grep -i -E 'api|shipping' | head -1)
+            echo "container: $C"
+            docker ps --format '{{.Names}}' | grep -i indo
+            DBC=$(docker ps --format '{{.Names}}' | grep -i -E '^rr-portal.*(db|postgres)' | head -1)
+            echo "db container: $DBC"
+            docker exec "$DBC" psql -U rrportal -d rrportal -c "
+              SELECT 'purchase_orders' t, count(*) FROM purchase_orders
+              UNION ALL SELECT 'po_items', count(*) FROM po_items
+              UNION ALL SELECT 'po_receipts', count(*) FROM po_receipts
+              UNION ALL SELECT 'outbound', count(*) FROM outbound
+              UNION ALL SELECT 'materials', count(*) FROM materials
+              UNION ALL SELECT 'schedules', count(*) FROM schedules
+              UNION ALL SELECT 'shipment_items', count(*) FROM shipment_items
+              UNION ALL SELECT 'audit_logs', count(*) FROM audit_logs ORDER BY 1;" 2>&1 | head -20
+            echo "== 接口计时（容器内）=="
+            docker exec "$C" sh -c 'time curl -s http://localhost:8080/api/health 2>/dev/null || time wget -qO- http://localhost:8080/api/health 2>/dev/null' || true
