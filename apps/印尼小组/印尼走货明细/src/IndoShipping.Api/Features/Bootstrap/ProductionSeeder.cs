@@ -54,12 +54,54 @@ public static class ProductionSeeder
         try
         {
             await ImportSeedSnapshotAsync(connection, configuration, logger);
+            await MigrateLegacyUsersAsync(connection, logger);
             await EnsureAdminUserAsync(db, configuration, passwordHasher, logger);
         }
         finally
         {
             await ReleaseAdvisoryLockAsync(connection);
         }
+    }
+
+    /// <summary>
+    /// 旧版 PostgreSQL 使用未加引号的小写 users 表，新版 EF 模型使用带引号的
+    /// "Users" 表。升级既有本地数据库时迁移账号的密码哈希和权限，避免业务数据
+    /// 仍在但原账号无法登录。已有新版账号只在它还是禁用占位账号时才会被覆盖。
+    /// </summary>
+    private static async Task MigrateLegacyUsersAsync(NpgsqlConnection connection, ILogger logger)
+    {
+        await using var existsCommand = new NpgsqlCommand("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_class AS c
+                JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+                WHERE n.nspname = current_schema()
+                  AND c.relname = 'users'
+                  AND c.relkind IN ('r', 'p')
+            )
+            """, connection);
+        if (await existsCommand.ExecuteScalarAsync() is not true)
+            return;
+
+        await using var migrateCommand = new NpgsqlCommand("""
+            INSERT INTO "Users"
+                ("Username", "PasswordHash", "DisplayName", "Userbqrpower", "Usereditpower", "IsActive", "CreatedAt")
+            SELECT
+                username, passwordhash, displayname, userbqrpower, usereditpower, isactive, createdat
+            FROM users
+            ON CONFLICT ("Username") DO UPDATE SET
+                "PasswordHash" = EXCLUDED."PasswordHash",
+                "DisplayName" = EXCLUDED."DisplayName",
+                "Userbqrpower" = EXCLUDED."Userbqrpower",
+                "Usereditpower" = EXCLUDED."Usereditpower",
+                "IsActive" = EXCLUDED."IsActive",
+                "CreatedAt" = EXCLUDED."CreatedAt"
+            WHERE "Users"."PasswordHash" = @disabledHash
+            """, connection);
+        migrateCommand.Parameters.AddWithValue("disabledHash", DisabledPasswordHash);
+        var affected = await migrateCommand.ExecuteNonQueryAsync();
+        if (affected > 0)
+            logger.LogInformation("Migrated {UserCount} legacy user account(s) into the current Users table.", affected);
     }
 
     private static async Task ImportSeedSnapshotAsync(
