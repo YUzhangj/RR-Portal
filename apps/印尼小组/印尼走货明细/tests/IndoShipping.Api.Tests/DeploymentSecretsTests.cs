@@ -43,6 +43,15 @@ public sealed class DeploymentSecretsTests
         Assert.Equal("admin-pw-12345", secrets.InitialAdminPassword);
     }
 
+    [Fact]
+    public void Custom_schema_supports_existing_local_database_layout()
+    {
+        var secrets = DeploymentSecrets.FromSecrets("pw", Encode("k"), "indo_shipping", "indo_shipping", null, "dbo");
+        var connection = new NpgsqlConnectionStringBuilder(secrets.ConnectionString);
+
+        Assert.Equal("dbo", connection.SearchPath);
+    }
+
     private static string Encode(string value) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
 }

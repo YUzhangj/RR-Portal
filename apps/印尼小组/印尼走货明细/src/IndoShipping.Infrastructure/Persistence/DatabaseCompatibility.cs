@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
+using System.Text.RegularExpressions;
 
 namespace IndoShipping.Infrastructure.Persistence;
 
@@ -24,8 +26,23 @@ public static class DatabaseCompatibility
         // 不能用 ExecuteSqlRawAsync：EF 会把 SQL 过 string.Format，
         // 脚本里 CHECK 正则的 '{9}' 会被当占位符直接 FormatException。
         // 走原生 ADO.NET 命令，无格式化、支持多语句批量执行。
+        var script = await File.ReadAllTextAsync(scriptPath);
+        var configuredSchema = new NpgsqlConnectionStringBuilder(connection.ConnectionString).SearchPath;
+        if (!string.IsNullOrWhiteSpace(configuredSchema))
+        {
+            // DeploymentSecrets accepts a single schema name. Make the bootstrap script
+            // follow that selection instead of silently switching every connection back
+            // to indo_shipping (local installations historically use dbo).
+            if (!Regex.IsMatch(configuredSchema, "^[A-Za-z_][A-Za-z0-9_]*$"))
+                throw new InvalidOperationException($"Invalid PostgreSQL schema name: {configuredSchema}");
+            var quotedSchema = $"\"{configuredSchema}\"";
+            script = script
+                .Replace("CREATE SCHEMA IF NOT EXISTS indo_shipping;", $"CREATE SCHEMA IF NOT EXISTS {quotedSchema};")
+                .Replace("SET search_path TO indo_shipping;", $"SET search_path TO {quotedSchema};");
+        }
+
         await using var command = connection.CreateCommand();
-        command.CommandText = await File.ReadAllTextAsync(scriptPath);
+        command.CommandText = script;
         command.CommandTimeout = 120;
         await command.ExecuteNonQueryAsync();
     }
