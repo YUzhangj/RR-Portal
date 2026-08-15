@@ -15,6 +15,9 @@ public static class DataMigrations
     private const string ReplaceHsDictionaryKey =
         "data_migration:2026-08-13-replace-hs-dictionary-v1";
 
+    private const string BackfillTranslationsKey =
+        "data_migration:2026-08-15-backfill-translations-v1";
+
     public static async Task ApplyAsync(AppDbContext db, ILogger logger)
     {
         var connection = db.Database.GetDbConnection();
@@ -38,16 +41,34 @@ public static class DataMigrations
                 );
                 CREATE INDEX IF NOT EXISTS "IX_dict_translation_active"
                     ON dict_translation(active, priority);
-
-                INSERT INTO dict_translation(keyword, english_name, source, priority)
-                SELECT trim(name_zh), min(trim(name_en)), 'existing-material', 100
-                FROM materials
-                WHERE trim(COALESCE(name_zh, '')) <> '' AND trim(COALESCE(name_en, '')) <> ''
-                GROUP BY trim(name_zh)
-                HAVING COUNT(DISTINCT lower(trim(name_en))) = 1
-                ON CONFLICT (keyword) DO NOTHING;
                 """;
             await ensureTranslations.ExecuteNonQueryAsync();
+        }
+
+        // 历史物料回填只执行一次（settings 一次性标记）：否则用户在字典页删除的条目
+        // 会在每次重启后复活，与字典「删除」能力矛盾
+        await using (var backfillClaim = connection.CreateCommand())
+        {
+            backfillClaim.CommandText = $"""
+                INSERT INTO settings ("key", value, updated_at)
+                VALUES ('{BackfillTranslationsKey}', 'applied', now())
+                ON CONFLICT ("key") DO NOTHING
+                RETURNING 1;
+                """;
+            if (await backfillClaim.ExecuteScalarAsync() is not null)
+            {
+                await using var backfill = connection.CreateCommand();
+                backfill.CommandText = """
+                    INSERT INTO dict_translation(keyword, english_name, source, priority)
+                    SELECT trim(name_zh), min(trim(name_en)), 'existing-material', 100
+                    FROM materials
+                    WHERE trim(COALESCE(name_zh, '')) <> '' AND trim(COALESCE(name_en, '')) <> ''
+                    GROUP BY trim(name_zh)
+                    HAVING COUNT(DISTINCT lower(trim(name_en))) = 1
+                    ON CONFLICT (keyword) DO NOTHING;
+                    """;
+                await backfill.ExecuteNonQueryAsync();
+            }
         }
 
         await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.Serializable);
