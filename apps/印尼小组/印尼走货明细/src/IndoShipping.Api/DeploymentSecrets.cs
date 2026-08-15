@@ -19,7 +19,8 @@ public sealed record DeploymentSecrets(string ConnectionString, string JwtKey, s
             Required(jwtKeyBase64, "INDO_SHIPPING_JWT_KEY_B64"),
             Environment.GetEnvironmentVariable("DB_NAME"),
             Environment.GetEnvironmentVariable("DB_USER"),
-            Environment.GetEnvironmentVariable("INDO_SHIPPING_ADMIN_PASSWORD_B64"));
+            Environment.GetEnvironmentVariable("INDO_SHIPPING_ADMIN_PASSWORD_B64"),
+            Environment.GetEnvironmentVariable("DB_SCHEMA"));
         configuration["ConnectionStrings:Default"] = secrets.ConnectionString;
         configuration["Jwt:Key"] = secrets.JwtKey;
         if (secrets.InitialAdminPassword is not null)
@@ -32,7 +33,8 @@ public sealed record DeploymentSecrets(string ConnectionString, string JwtKey, s
         string jwtKeyBase64,
         string? dbName,
         string? dbUser,
-        string? adminPasswordBase64)
+        string? adminPasswordBase64,
+        string? dbSchema = null)
     {
         var jwtKey = Decode(jwtKeyBase64, "INDO_SHIPPING_JWT_KEY_B64");
         var adminPassword = adminPasswordBase64 is { Length: > 0 }
@@ -45,7 +47,7 @@ public sealed record DeploymentSecrets(string ConnectionString, string JwtKey, s
             Database = string.IsNullOrWhiteSpace(dbName) ? "rrportal" : dbName,
             Username = string.IsNullOrWhiteSpace(dbUser) ? "rrportal" : dbUser,
             Password = dbPassword,
-            SearchPath = "indo_shipping",
+            SearchPath = string.IsNullOrWhiteSpace(dbSchema) ? "indo_shipping" : dbSchema,
             PersistSecurityInfo = false
         };
         return new DeploymentSecrets(connection.ConnectionString, jwtKey, adminPassword);
