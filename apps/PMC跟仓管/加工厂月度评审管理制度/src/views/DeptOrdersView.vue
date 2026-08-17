@@ -9,7 +9,7 @@ import { CRAFT_LABELS, REGION_LABELS, regionOf, type Craft, type Region } from '
 import { canEditOrders, allowedRegions } from '../utils/permissions'
 import { buildDeliveryReport, deliveryHeaders, exportDeliveryExcel, parseDeliveryImport, splitSewingContractItemNo, type DeliveryPricingMode, type ReportRow, type DetailRow } from '../utils/deliveryStats'
 import { readDeliveryPdfAsAoa } from '../utils/pdfDeliveryImport'
-import { parseDeliveryExcelFiles } from '../utils/deliveryExcelImport'
+import { parseDeliveryExcelFiles, UNMATCHED_IMPORT_FACTORY_PREFIX } from '../utils/deliveryExcelImport'
 import { cnyTaxToHkdUntaxed, cnyTaxToUntaxedRmb, DEFAULT_CNY_TO_HKD_RATE } from '../utils/orderPricing'
 import { matchesOrderDate, type OrderDateFilter } from '../utils/orderDateFilter'
 import { deliveryImportFactoryMap } from '../utils/deliveryImportScope'
@@ -23,6 +23,7 @@ const factories = useFactoriesStore()
 const auth = useAuthStore()
 const fileInput = ref<HTMLInputElement | null>(null)
 const importingExcel = ref(false)
+const confirmingImport = ref(false)
 const pdfInput = ref<HTMLInputElement | null>(null)
 const savingRowId = ref<string | null>(null)
 const savingAll = ref(false)
@@ -53,6 +54,60 @@ const selectedMonth = ref(new Date().toISOString().slice(0, 7))
 const rangeStart = ref('')
 const rangeEnd = ref('')
 const canEdit = computed(() => (auth.role ? canEditOrders(auth.role) : false))
+
+type ImportDraftRow = {
+  key: string
+  source: string
+  payload: Record<string, any>
+}
+type ImportDraftSummary = {
+  fileCount: number
+  failedRows: number
+  unrecognizedFiles: string[]
+  readFailedFiles: string[]
+}
+const importDraftRows = ref<ImportDraftRow[]>([])
+const importDraftSummary = ref<ImportDraftSummary | null>(null)
+const importDraftError = ref('')
+const showImportDraft = computed(() => importDraftSummary.value !== null)
+const importFactoryOptions = computed(() => factories.items
+  .filter((factory) => factory.craft === craft.value && (!region.value || regionOf(factory) === region.value))
+  .filter((factory) => !myRegions.value || myRegions.value.includes(regionOf(factory)))
+  .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')))
+
+function importFactoryIsValid(value: unknown) {
+  return factories.items.some((factory) => factory.id === value)
+}
+
+function importRowIssues(row: ImportDraftRow) {
+  const p = row.payload
+  const issues: string[] = []
+  if (!importFactoryIsValid(p.factory)) issues.push('请选择加工厂')
+  if (!String(p.product ?? '').trim()) issues.push('缺少物料名称')
+  if (!String(p.order_date ?? '').trim()) issues.push('缺少下单时间')
+  if (!String(p.delivery_date ?? '').trim()) issues.push('缺少下单交货时间')
+  const quantity = p.quantity
+  if (quantity !== '' && quantity != null && !Number.isFinite(Number(quantity))) issues.push('数量格式错误')
+  return issues
+}
+
+function unmatchedImportFactoryName(value: unknown) {
+  const text = String(value ?? '')
+  return text.startsWith(UNMATCHED_IMPORT_FACTORY_PREFIX) ? text.slice(UNMATCHED_IMPORT_FACTORY_PREFIX.length) : ''
+}
+
+const invalidImportRowCount = computed(() => importDraftRows.value.filter((row) => importRowIssues(row).length).length)
+
+function closeImportDraft() {
+  if (confirmingImport.value) return
+  importDraftRows.value = []
+  importDraftSummary.value = null
+  importDraftError.value = ''
+}
+
+function removeImportDraftRow(key: string) {
+  importDraftRows.value = importDraftRows.value.filter((row) => row.key !== key)
+}
 
 const dateFilter = computed<OrderDateFilter>(() => {
   if (dateMode.value === 'month') return { mode: 'month', month: selectedMonth.value }
@@ -340,29 +395,66 @@ async function importExcel(ev: Event) {
   importingExcel.value = true
   try {
     const parsed = await parseDeliveryExcelFiles(files, fByName, { preferCnyTaxPrice: true })
-    let ok = 0, fail = parsed.failedRows
-    const saveErrors: string[] = []
-    for (const p of parsed.payloads) {
-      try {
-        await orders.create(normalizeDeptPricing({ ...p, created_by: auth.userId ?? undefined }) as any)
-        ok++
-      } catch (err: any) {
-        fail++
-        const message = err?.response?.message || err?.message || '记录保存失败'
-        if (!saveErrors.includes(message)) saveErrors.push(message)
-      }
+    importDraftRows.value = parsed.payloads.map((payload, index) => ({
+      key: `${Date.now()}-${index}`,
+      source: parsed.sources[index] ?? files[0]?.name ?? '',
+      payload: { ...payload },
+    }))
+    importDraftSummary.value = {
+      fileCount: parsed.fileCount,
+      failedRows: parsed.failedRows,
+      unrecognizedFiles: parsed.unrecognizedFiles,
+      readFailedFiles: parsed.readFailedFiles,
     }
-    await orders.fetchAll()
-    const issues = [
-      parsed.unrecognizedFiles.length ? `未识别 ${parsed.unrecognizedFiles.length} 个文件` : '',
-      parsed.readFailedFiles.length ? `读取失败 ${parsed.readFailedFiles.length} 个文件` : '',
-      saveErrors.length ? `保存失败：${saveErrors.slice(0, 3).join('；')}` : '',
-    ].filter(Boolean).join('，')
-    alert(`批量导入完成：共 ${parsed.fileCount} 个文件，成功 ${ok} 条，失败 ${fail} 条${issues ? `\n${issues}` : ''}`)
+    importDraftError.value = ''
   } finally {
     importingExcel.value = false
     if (fileInput.value) fileInput.value.value = ''
   }
+}
+
+async function confirmExcelImport() {
+  if (confirmingImport.value || !importDraftSummary.value) return
+  const blockingRows = importDraftRows.value.filter((row) => {
+    const p = row.payload
+    return !importFactoryIsValid(p.factory) || !String(p.product ?? '').trim()
+      || (p.quantity !== '' && p.quantity != null && !Number.isFinite(Number(p.quantity)))
+  })
+  if (blockingRows.length) {
+    importDraftError.value = `还有 ${blockingRows.length} 条必填内容不正确，请先修改红色提示的记录。`
+    return
+  }
+  if (!importDraftRows.value.length) {
+    importDraftError.value = '草稿中没有可导入的记录。'
+    return
+  }
+  confirmingImport.value = true
+  importDraftError.value = ''
+  let ok = 0
+  const failedMessages: string[] = []
+  const failedRows: ImportDraftRow[] = []
+  for (const row of importDraftRows.value) {
+    const p = { ...row.payload }
+    if (p.quantity !== '' && p.quantity != null) p.quantity = Number(p.quantity)
+    try {
+      await orders.create(normalizeDeptPricing({ ...p, created_by: auth.userId ?? undefined }) as any)
+      ok++
+    } catch (err: any) {
+      failedRows.push(row)
+      const message = err?.response?.message || err?.message || '记录保存失败'
+      if (!failedMessages.includes(message)) failedMessages.push(message)
+    }
+  }
+  confirmingImport.value = false
+  if (ok === importDraftRows.value.length) {
+    closeImportDraft()
+    await orders.fetchAll()
+    showSaveToast('success', `已正式导入 ${ok} 条记录`)
+    return
+  }
+  importDraftRows.value = failedRows
+  importDraftError.value = `已导入 ${ok} 条，下方保留 ${failedRows.length} 条保存失败的草稿：${failedMessages.slice(0, 3).join('；')}`
+  await orders.fetchAll()
 }
 
 async function importPdf(ev: Event) {
@@ -656,6 +748,72 @@ async function removeRow(row: DetailRow) {
           {{ saveToast.message }}
         </div>
       </Transition>
+      <div v-if="showImportDraft" class="import-draft-backdrop" @click.self="closeImportDraft">
+        <section class="import-draft-modal" role="dialog" aria-modal="true" aria-labelledby="import-draft-title">
+          <header class="import-draft-header">
+            <div>
+              <h3 id="import-draft-title">导入草稿预览</h3>
+              <p>
+                共 {{ importDraftSummary?.fileCount }} 个文件，识别 {{ importDraftRows.length }} 条
+                <span v-if="invalidImportRowCount" class="draft-warning">· {{ invalidImportRowCount }} 条需核对</span>
+              </p>
+            </div>
+            <button class="ghost draft-close" :disabled="confirmingImport" aria-label="关闭导入草稿" @click="closeImportDraft">×</button>
+          </header>
+          <div v-if="importDraftSummary?.failedRows || importDraftSummary?.unrecognizedFiles.length || importDraftSummary?.readFailedFiles.length" class="draft-notice">
+            <span v-if="importDraftSummary?.failedRows">有 {{ importDraftSummary.failedRows }} 行未生成草稿。</span>
+            <span v-if="importDraftSummary?.unrecognizedFiles.length">未识别文件：{{ importDraftSummary.unrecognizedFiles.join('、') }}</span>
+            <span v-if="importDraftSummary?.readFailedFiles.length">读取失败：{{ importDraftSummary.readFailedFiles.join('、') }}</span>
+          </div>
+          <div class="import-draft-scroll">
+            <table class="import-draft-table">
+              <thead><tr>
+                <th>#</th><th>来源</th><th>加工厂 *</th><th>下单PMC</th><th>货号</th><th>订单号</th>
+                <th>加工类别</th><th>物料名称 *</th><th>数量</th><th>下单时间</th><th>下单交货时间</th><th>含税工价</th><th>备注</th><th>核对结果</th><th>操作</th>
+              </tr></thead>
+              <tbody>
+                <tr v-for="(row, index) in importDraftRows" :key="row.key" :class="{ 'draft-row-warning': importRowIssues(row).length }">
+                  <td>{{ index + 1 }}</td>
+                  <td class="draft-source" :title="row.source">{{ row.source }}</td>
+                  <td><select v-model="row.payload.factory" :class="{ invalid: !importFactoryIsValid(row.payload.factory) }">
+                    <option value="">请选择</option>
+                    <option v-if="unmatchedImportFactoryName(row.payload.factory)" :value="row.payload.factory" disabled>
+                      未匹配：{{ unmatchedImportFactoryName(row.payload.factory) }}
+                    </option>
+                    <option v-for="factory in importFactoryOptions" :key="factory.id" :value="factory.id">{{ factory.name }}</option>
+                  </select></td>
+                  <td><input v-model="row.payload.pmc" /></td>
+                  <td><input v-model="row.payload.item_no" /></td>
+                  <td><input v-model="row.payload.order_no" /></td>
+                  <td><input v-model="row.payload.process_category" /></td>
+                  <td><input v-model="row.payload.product" :class="{ invalid: !String(row.payload.product ?? '').trim() }" /></td>
+                  <td><input v-model="row.payload.quantity" type="number" min="0" /></td>
+                  <td><input v-model="row.payload.order_date" type="date" /></td>
+                  <td><input v-model="row.payload.delivery_date" type="date" /></td>
+                  <td><input v-model="row.payload.unit_price_cny_tax" type="number" min="0" step="0.0001" /></td>
+                  <td><input v-model="row.payload.notes" /></td>
+                  <td class="draft-issues">
+                    <span v-if="!importRowIssues(row).length" class="draft-ok">✓ 正常</span>
+                    <span v-for="issue in importRowIssues(row)" v-else :key="issue">{{ issue }}</span>
+                  </td>
+                  <td><button class="ghost mini danger" :disabled="confirmingImport" @click="removeImportDraftRow(row.key)">移除</button></td>
+                </tr>
+                <tr v-if="!importDraftRows.length"><td colspan="15" class="hint">没有可预览的记录</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <footer class="import-draft-footer">
+            <p class="draft-help">表格内容可直接修改。只有点击“确认导入”后才会写入系统；取消不会保存任何草稿数据。</p>
+            <p v-if="importDraftError" class="draft-error">{{ importDraftError }}</p>
+            <div class="draft-actions">
+              <button class="ghost" :disabled="confirmingImport" @click="closeImportDraft">取消导入</button>
+              <button :disabled="confirmingImport || !importDraftRows.length" @click="confirmExcelImport">
+                {{ confirmingImport ? '正式导入中…' : `确认导入 ${importDraftRows.length} 条` }}
+              </button>
+            </div>
+          </footer>
+        </section>
+      </div>
       <div class="toolbar">
         <RouterLink to="/orders" class="back">← 部门</RouterLink>
         <h2 style="margin:0">{{ deptName }} · 货期管理</h2>
@@ -1023,4 +1181,59 @@ async function removeRow(row: DetailRow) {
 .save-toast.error .save-toast-icon { background: #dc2626; }
 .save-toast-enter-active, .save-toast-leave-active { transition: opacity .2s ease, transform .2s ease; }
 .save-toast-enter-from, .save-toast-leave-to { opacity: 0; transform: translate(-50%, -10px); }
+.import-draft-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(17, 24, 39, .48);
+}
+.import-draft-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(1760px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(17, 24, 39, .3);
+}
+.import-draft-header, .import-draft-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.import-draft-header h3 { margin: 0 0 4px; }
+.import-draft-header p, .draft-help { margin: 0; color: var(--text-soft); font-size: .88rem; }
+.draft-close { width: 38px; height: 38px; padding: 0; font-size: 1.35rem; }
+.draft-warning, .draft-error { color: #b91c1c; font-weight: 600; }
+.draft-notice { display: flex; flex-wrap: wrap; gap: 14px; padding: 10px 20px; color: #92400e; background: #fffbeb; border-bottom: 1px solid #fde68a; font-size: .86rem; }
+.import-draft-scroll { flex: 1 1 auto; min-height: 240px; overflow: auto; }
+.import-draft-table { min-width: 1900px; margin: 0; border: 0; border-radius: 0; }
+.import-draft-table th { position: sticky; top: 0; z-index: 2; background: #f8fafc; }
+.import-draft-table th, .import-draft-table td { padding: 8px; text-align: center; white-space: nowrap; font-size: .8rem; }
+.import-draft-table input, .import-draft-table select { box-sizing: border-box; width: 126px; min-height: 34px; padding: 5px 7px; border: 1px solid var(--border); border-radius: 6px; font: inherit; background: #fff; }
+.import-draft-table select { width: 180px; }
+.import-draft-table input[type="date"] { width: 138px; }
+.import-draft-table .invalid { border-color: #ef4444; background: #fef2f2; }
+.draft-row-warning { background: #fffdf5; }
+.draft-source { max-width: 190px; overflow: hidden; text-overflow: ellipsis; text-align: left !important; }
+.draft-issues { min-width: 150px; white-space: normal !important; text-align: left !important; }
+.draft-issues span { display: block; color: #b91c1c; line-height: 1.45; }
+.draft-issues .draft-ok { color: #15803d; }
+.import-draft-footer { align-items: flex-end; border-top: 1px solid var(--border); border-bottom: 0; }
+.draft-help { max-width: 720px; }
+.draft-error { margin: 0; flex: 1; font-size: .86rem; }
+.draft-actions { display: flex; gap: 10px; flex: 0 0 auto; }
+@media (max-width: 700px) {
+  .import-draft-backdrop { padding: 8px; }
+  .import-draft-modal { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
+  .import-draft-footer { align-items: stretch; flex-direction: column; }
+  .draft-actions { justify-content: flex-end; }
+}
 </style>

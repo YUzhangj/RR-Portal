@@ -402,9 +402,10 @@ function formatImportDate(value: any): string {
     return `${y}-${m}-${d}`
   }
   const text = cleanText(value)
-  const m = text.match(/(\d{4})[\/\-年.](\d{1,2})[\/\-月.](\d{1,2})/)
+  const m = text.match(/(\d{2}|\d{4})[\/\-年.](\d{1,2})[\/\-月.](\d{1,2})/)
   if (!m) return text
-  return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`
+  const year = m[1].length === 2 ? `20${m[1]}` : m[1]
+  return `${year}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`
 }
 
 function lastDateInText(value: any): string {
@@ -1088,7 +1089,9 @@ export function parseDeliveryImport(
   if (header.includes('款号') && header.includes('加工内容') && header.includes('单价')) {
     return parsePurchaseOrderImport(aoa, headerIdx, header, factoryIdByName)
   }
-  if (header.includes('货号') && header.includes('货品名称') && header.includes('商品名称') && header.some((value) => value.includes('单价'))) {
+  if (header.includes('货号') && header.includes('货品名称') && header.includes('数量')
+    && header.some((value) => value.includes('单价'))
+    && (header.includes('商品名称') || header.includes('工序'))) {
     return parseAssemblyContractImport(aoa, headerIdx, header, factoryIdByName)
   }
   const C = {
