@@ -17,6 +17,39 @@ function multiSheetExcelFile(name: string, sheets: { name: string; aoa: any[][] 
 }
 
 describe('parseDeliveryExcelFiles', () => {
+  it('skips hidden historical sheets and imports the visible purchase order sheet', async () => {
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+      ['供应商：', '大罗', '', '', '订单编号：', '', '', 'OLD-ORDER'],
+      ['货号', '货 品 名 称', '数量', '单位', '商品名称', '订单PO', '交货日期', '单价'],
+      ['OLD-ITEM', '隐藏旧数据', 1, 'PCS', '成品包装', '', '2025/4/8', 0.1],
+      ['', '合计', 1],
+      ['下单日期：2025年4月8日'],
+    ]), '隐藏历史表')
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+      ['供应商：', '大罗', '', '', '订单编号：', '', '', 'DL20260701-1'],
+      ['货号', '货 品 名 称', '数量', '单位', '商品名称', '订单PO', '交货日期', '单价'],
+      ['77782GQ1-S001-INT', '冰箱迷你球(客版）', 400, '个', '成品包装', '4500203233-60', '2026/7/20', 0.391],
+      ['', '合计', 400],
+      ['下单日期：2026年7月1日'],
+    ]), '当前采购单')
+    wb.Workbook = {
+      ...(wb.Workbook ?? {}),
+      Sheets: [{ name: '隐藏历史表', Hidden: 1 }, { name: '当前采购单', Hidden: 0 }],
+    }
+    const data = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer
+    const file: DeliveryExcelFile = { name: '大罗采购单 1.xlsx', arrayBuffer: async () => data }
+
+    const result = await parseDeliveryExcelFiles([file], { 大罗: 'factory-daluo' })
+
+    expect(result.failedRows).toBe(0)
+    expect(result.payloads).toHaveLength(1)
+    expect(result.payloads[0]).toMatchObject({
+      order_no: 'DL20260701-1', item_no: '77782GQ1-S001-INT',
+      order_date: '2026-07-01', delivery_date: '2026-07-20',
+    })
+  })
+
   it('imports the assembly processing purchase-order template', async () => {
     const file = excelFile('工作簿1.xlsx', [
       ['装配加工采购单'],

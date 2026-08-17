@@ -293,6 +293,110 @@ describe('parseDeliveryImport', () => {
     })
   })
 
+  it('imports Hunan painting purchase orders using 货品名称 and 外发单价 headers', () => {
+    const aoa = [
+      ['邵阳市华登塑胶制品有限公司'],
+      ['', '', '', '采购单'],
+      [],
+      ['供应商：', '邵阳县盛钜塑胶制品有限公司', '', '', '', '订单编号：', 'AP26088-PQ012'],
+      ['联络人：', '吴小锋', '', '', '', '联络人：', '韦文帅'],
+      [], [],
+      ['货 号', '货 品 名 称', '加工类别', '数量', '单位', '外发单价', '金额', '备 注'],
+      [77555, '圆台灯面罩', '印喷', 40200, 'PCS', 0.032, 1286.4, ''],
+      [77555, 'A咖啡机上包装盒', '印喷', 25400, 'PCS', 0.119, 3022.6, ''],
+      [77555, 'A咖啡机研磨柄', '印喷', 25400, 'PCS', 0.044, 1117.6, ''],
+      [77555, 'A咖啡机座', '印喷', 25400, 'PCS', 0.142, 3606.8, ''],
+      [77555, 'A咖啡机上盖', '印喷', 25400, 'PCS', 0.151, 3835.4, ''],
+      [77555, 'A咖啡机身', '印喷', 25400, 'PCS', 0.135, 3429, ''],
+      [77555, '烫衣架面板', '印喷', 40200, 'PCS', 0.02, 804, ''],
+      [77555, '台灯罩', '印喷', 40200, 'PCS', 0.047, 1889.4, ''],
+      ['', '', '', '附送1%备品', '', '合计', 18991.2, ''],
+      ['1. 2026年 8 月 5 日前交货、 8 月 24 日前交完，货送 21 栋 处，收货人： 李力'],
+      [],
+      ['供应商确认：', '吴小锋', '采购签核： 陈玉叶', '', '主管：韦文帅', '', '经理：王浩帅'],
+      ['时间： 2026 年 7 月 13 日', '', '', '', '时间： 2026 年 7 月 13 日'],
+    ]
+
+    const result = parseDeliveryImport(aoa, { 盛钜: 'factory-shengju' })
+
+    expect(result.failed).toBe(0)
+    expect(result.payloads).toHaveLength(8)
+    expect(result.payloads[0]).toMatchObject({
+      factory: 'factory-shengju', pmc: '陈玉叶', item_no: '77555', order_no: 'AP26088-PQ012',
+      product: '圆台灯面罩', process_category: '印喷', quantity: 40200,
+      unit_price_cny_tax: 0.032, amount: 1286.4,
+      order_date: '2026-07-13', delivery_date: '2026-08-05',
+    })
+    expect(result.payloads[7]).toMatchObject({
+      product: '台灯罩', quantity: 40200, unit_price_cny_tax: 0.047, amount: 1889.4,
+    })
+  })
+
+  it('imports row delivery times and the following order time from Hunan assembly purchase orders', () => {
+    const aoa = [
+      ['邵阳市华登塑胶制品有限公司'],
+      ['', '', '采购单'],
+      [],
+      ['供应商：', '华宏', '', '', '订单编号：', '', '', 'HH20260701-1'],
+      ['联络人：', '伍贤用', '', '', '联络人：', '', '', '余小兵'],
+      [], [],
+      ['货号', '货 品 名 称', '数量', '单位', '商品名称', '订单PO', '交货时间', '单价', '备注'],
+      ['9565GQ1-S001', '松鼠', 968, 'pcs', '成品', '4500203225-140', new Date('2026-07-06T00:00:00Z'), 1.02, ''],
+      ['9565GQ5-SLB-S002', '松鼠', 2720, 'pcs', '成品', '4500209323-40', '2026/7/6周一', 1.02, ''],
+      ['', '合计', 3688],
+      ['供应商确认：', '', '采购签核：', '伍计红', '主管：', '', '经理：'],
+      ['交货时间：', '', '', '', '', '', '下单时间：2026年7月1日'],
+      ['物料名称', '规格', '用量', '需求数', '领料数', '领料数', '领料数', '交货日期', '交货数'],
+      ['浅绿色松鼠半成品', '', 1, 8265],
+      ['邵阳市华登塑胶制品有限公司'],
+      ['供应商：', '华宏', '', '', '订单编号：', '', '', 'HH20260706-1'],
+      ['货号', '货 品 名 称', '数量', '单位', '商品名称', '订单PO', '交货时间', '单价', '备注'],
+      ['9565GQ1-S002', '松鼠', 2112, 'pcs', '成品', '4500210826-90', '2026/7/10', 1.02, ''],
+      ['', '合计', 2112],
+      ['下单时间：2026年7月6日'],
+    ]
+
+    const result = parseDeliveryImport(aoa, { 华宏: 'factory-huahong' })
+
+    expect(result.failed).toBe(0)
+    expect(result.payloads).toHaveLength(2)
+    expect(result.payloads[0]).toMatchObject({
+      factory: 'factory-huahong', pmc: '伍计红', order_no: 'HH20260701-1',
+      item_no: '9565GQ1-S001', product: '松鼠', process_category: '成品',
+      order_date: '2026-07-01', delivery_date: '2026-07-06',
+    })
+    expect(result.payloads[1]).toMatchObject({
+      item_no: '9565GQ5-SLB-S002', order_date: '2026-07-01', delivery_date: '2026-07-06',
+    })
+  })
+
+  it('uses the first matching order date for a visible sheet containing consecutive assembly orders', () => {
+    const aoa = [
+      ['邵阳市华登塑胶制品有限公司'],
+      ['供应商：', '大罗', '', '', '订单编号：', '', '', 'DL20260701-1'],
+      ['货号', '货 品 名 称', '数量', '单位', '商品名称', '订单PO', '交货日期', '单价', '备注'],
+      ['77782GQ1-S001-INT', '冰箱迷你球(客版）', 400, '个', '成品包装', '4500203233-60', new Date('2026-07-19T15:59:17Z'), 0.391, ''],
+      ['', '合计', 400],
+      ['供应商确认：', '', '采购签核：', '伍计红'],
+      ['交货时间：已实际交货日期为准', '', '', '', '', '', '下单日期：2026年7月1日'],
+      ['邵阳市华登塑胶制品有限公司'],
+      ['供应商：', '大罗', '', '', '订单编号：', '', '', 'DL20260727-1'],
+      ['货号', '货 品 名 称', '数量', '单位', '商品名称', '订单PO', '交货日期', '单价', '备注'],
+      ['77711GQ2-S001-NA', '冰箱迷你球', 5000, 'PCS', '成品包装', 'MPO11007-20', '2026/8/12', 0.391, ''],
+      ['', '合计', 5000],
+      ['下单日期：2026年7月27日'],
+    ]
+
+    const result = parseDeliveryImport(aoa, { 大罗: 'factory-daluo' })
+
+    expect(result.failed).toBe(0)
+    expect(result.payloads).toHaveLength(1)
+    expect(result.payloads[0]).toMatchObject({
+      factory: 'factory-daluo', order_no: 'DL20260701-1', order_date: '2026-07-01',
+      delivery_date: '2026-07-20', item_no: '77782GQ1-S001-INT',
+    })
+  })
+
   it('imports molding contract templates', () => {
     const aoa = [
       ['东莞兴信塑胶制品有限公司', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''],
