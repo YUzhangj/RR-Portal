@@ -261,6 +261,26 @@ router.post('/painting-sheet', requireAuth, memUpload.single('file'), async (req
   }
 });
 
+// POST /api/uploads/blow-sheet  吹气报价竖表 xls/xlsx → 返回 { items, count, sheets_used }
+const { parseWorkbook: parseBlowWorkbook } = require('../services/parseBlowSheet');
+router.post('/blow-sheet', requireAuth, memUpload.single('file'), async (req, res) => {
+  if (!['molding', 'sales', 'engineering'].includes(req.user.dept) && req.user.role !== 'admin') {
+    return res.status(403).json({ error: '仅 啤机部/业务/工程/超级管理员 可上传' });
+  }
+  if (!req.file) return res.status(400).json({ error: '缺少文件' });
+  if (!/\.(xls|xlsx)$/i.test(req.file.originalname)) return res.status(400).json({ error: '只支持 .xls/.xlsx' });
+  try {
+    const result = await parseBlowWorkbook(req.file.buffer);
+    if (result.error) return res.status(422).json(result);
+    if (/\.xls$/i.test(req.file.originalname)) {
+      result.images_hint = '旧版 .xls 内嵌图片暂时无法自动抽取；吹气价格字段不受影响，已正常导入。';
+    }
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: '解析失败: ' + error.message });
+  }
+});
+
 // POST /api/uploads/slush-sheet  搪胶报价模板 xlsx → 返回 { items, count, sheets_used }
 const { parseWorkbook: parseSlushWorkbook } = require('../services/parseSlushSheet');
 router.post('/slush-sheet', requireAuth, memUpload.single('file'), async (req, res) => {

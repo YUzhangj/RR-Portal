@@ -264,11 +264,11 @@ function patchPaintingProductMix(ws, painting) {
   // 喷油表使用两层表头（工序名 + 数量/单价），数据从标题下第 3 行开始。
   const dataStart = headerRow + 2;
   const originalTotalRow = dataStart + items.length;
-  const ratioColumn = 21;
-  const amountColumn = 22;
+  const amountKeys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv'];
+  const amountColumn = 4 + amountKeys.length * 2;
+  const ratioColumn = amountColumn - 1;
   const ratioLetter = colLetter(ratioColumn);
   const amountLetter = colLetter(amountColumn);
-  const amountKeys = ['clamp', 'pad', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv'];
   const amountOf = item => sum(amountKeys, key => num(item[`${key}_qty`]) * num(item[`${key}_unit`]));
   const weightedTotal = weightedRowsSum(payload, items, amountOf);
 
@@ -313,7 +313,7 @@ function patchSimpleIndoColumns(ws, payloads) {
   const patches = [
     { title: '二、注塑部分', dept: payloads.molding || {}, amountCol: 16, indoCol: 17, weighted: true },
     { title: '二·B、吹气部分 (HKD)', dept: payloads.molding || {}, amountCol: 12, indoCol: 15 },
-    { title: '三、二次加工（印喷报价）', dept: payloads.painting || {}, amountCol: 22, indoCol: 23, factor: 0.3, totalFromAmount: true },
+    { title: '三、二次加工（印喷报价）', dept: payloads.painting || {}, amountCol: 24, indoCol: 25, factor: 0.3, totalFromAmount: true },
     {
       title: '四、电子',
       dept: electronic,
@@ -403,7 +403,6 @@ function patchFreeInputFormulas(ws, payloads) {
     {
       title: '四、电子',
       rows: (payloads.electronic && payloads.electronic.electronics) || [],
-      quantityOnly: true,
     },
     { title: '五、五金', rows: engineering.hardware || [] },
     { title: '六、辅助材料', rows: engineering.aux_materials || [] },
@@ -672,7 +671,11 @@ function injectionSubtotal(molding) {
 
 function blowSubtotal(molding) {
   return sum((molding && molding.blow_items) || [], row => {
-    const material = num(row.weight_g) * num(row.material_price_lb) / 454;
+    const hasImportedMaterial = row.material_cost_hkd !== undefined
+      && row.material_cost_hkd !== null && row.material_cost_hkd !== '';
+    const material = hasImportedMaterial
+      ? num(row.material_cost_hkd)
+      : num(row.weight_g) * num(row.material_price_lb) / 454;
     const usage = row.usage_qty !== undefined && row.usage_qty !== null && row.usage_qty !== ''
       ? num(row.usage_qty)
       : 1;
@@ -681,7 +684,7 @@ function blowSubtotal(molding) {
 }
 
 function secondProcSubtotal(painting) {
-  const keys = ['clamp', 'pad', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv'];
+  const keys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv'];
   const payload = painting || {};
   const items = payload.painting_items || [];
   ensureExplicitProductGroups(items);

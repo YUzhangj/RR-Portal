@@ -22,8 +22,13 @@ const sum = (arr, fn) => arr.reduce((a, r) => a + (fn(r) || 0), 0);
 const blowUsage = row => row && row.usage_qty !== undefined && row.usage_qty !== null && row.usage_qty !== ''
   ? num(row.usage_qty)
   : 1;
+const hasBlowMaterialCost = row => row && row.material_cost_hkd !== undefined
+  && row.material_cost_hkd !== null && row.material_cost_hkd !== '';
+const blowMaterialCost = row => hasBlowMaterialCost(row)
+  ? num(row.material_cost_hkd)
+  : num(row && row.weight_g) * num(row && row.material_price_lb) / 454;
 const blowRowTotal = row => {
-  const material = num(row && row.weight_g) * num(row && row.material_price_lb) / 454;
+  const material = blowMaterialCost(row);
   return (material + num(row && row.blow_labor) + num(row && row.flash))
     * (num(row && row.profit_x) || 1)
     * blowUsage(row);
@@ -1214,13 +1219,13 @@ function injectionSubtotal(p) {
 }
 
 function renderSecondProc(ws, row, payload, fxRH, refs) {
-  // 二次加工 = 喷油部 painting_items（夹模/移印/散枪/边模/油色/浸油/抹油/擦PP水/UV 九工序）
+  // 二次加工 = 喷油部 painting_items（夹模/移印/炒货/散枪/边模/油色/浸油/抹油/擦PP水/UV 十工序）
   const items = payload.painting_items || payload.second_proc || [];
   const colLetter = (n) => { let s=''; while(n>0){const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=Math.floor((n-1)/26);} return s; };
   // 工序列布局：A 序号 | B 名称 | C 位置 | 各工序(数量+单价 两列) | 报价
-  const procs = ['夹模', '移印', '散枪', '边模', '油色', '浸油', '抹油', '擦PP水', 'UV'];
-  const procKeys = ['clamp', 'pad', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv'];
-  const priceCol = 4 + procs.length * 2;      // 报价列号（九工序 = 22）
+  const procs = ['夹模', '移印', '炒货', '散枪', '边模', '油色', '浸油', '抹油', '擦PP水', 'UV'];
+  const procKeys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv'];
+  const priceCol = 4 + procs.length * 2;      // 报价列号（十工序 = 24）
   const PRICE = colLetter(priceCol);
   ws.getColumn(priceCol).width = 16;
   ws.mergeCells(row, 1, row, priceCol); styleSection(ws.getCell(row, 1));
@@ -1291,7 +1296,7 @@ function renderSecondProc(ws, row, payload, fxRH, refs) {
   return row;
 }
 function secondProcSubtotal(p) {
-  const procKeys = ['clamp', 'pad', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv'];
+  const procKeys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv'];
   const items = p.painting_items || p.second_proc || [];
   const s = sum(items, r => {
     if (r.price !== undefined) return num(r.price) * num(r.qty); // 旧结构兼容
@@ -1627,7 +1632,7 @@ function renderBlowBlock(ws, row, mold, refs) {
   h.forEach((v, i) => { ws.getCell(row, i + 1).value = v; styleHeader(ws.getCell(row, i + 1)); });
   row += 1;
   items.forEach(r => {
-    const mat = num(r.weight_g) * num(r.material_price_lb) / 454;
+    const mat = blowMaterialCost(r);
     const sub = mat + num(r.blow_labor) + num(r.flash);
     const usage = blowUsage(r);
     const tot = sub * (num(r.profit_x) || 1) * usage;
@@ -1637,7 +1642,9 @@ function renderBlowBlock(ws, row, mold, refs) {
     ws.getCell(row, 3).value = r.material || '';
     ws.getCell(row, 4).value = num(r.weight_g);
     ws.getCell(row, 5).value = num(r.material_price_lb);
-    ws.getCell(row, 6).value = { formula: `D${row}*E${row}/454`, result: mat };  // 产品料价 = 重×料价/454
+    ws.getCell(row, 6).value = hasBlowMaterialCost(r)
+      ? mat
+      : { formula: `D${row}*E${row}/454`, result: mat };  // 导入价优先，否则重×料价/454
     ws.getCell(row, 7).value = num(r.blow_labor);
     ws.getCell(row, 8).value = num(r.flash);
     ws.getCell(row, 9).value = { formula: `F${row}+G${row}+H${row}`, result: sub };  // 小计 = 产品料价+吹工+披锋
