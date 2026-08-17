@@ -56,9 +56,30 @@ def detect_cols(ws):
                 found["date"] = c.column
     return found if ("po" in found and "inv" in found) else None
 
+def _load_workbook_resilient(path):
+    """WPS 等非标 XML（如行范围 sortState ref="1:303"）会导致 openpyxl 拒读，剥离问题标签后重试"""
+    try:
+        return openpyxl.load_workbook(path)
+    except ValueError:
+        import zipfile, tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        tmp.close()
+        zin = zipfile.ZipFile(path)
+        zout = zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED)
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename.startswith("xl/worksheets/") and item.filename.endswith(".xml"):
+                t = data.decode("utf-8", errors="replace")
+                t = re.sub(r'<sortState[^>]*/>', "", t)
+                t = re.sub(r'<sortState[^>]*>.*?</sortState>', "", t, flags=re.S)
+                data = t.encode("utf-8")
+            zout.writestr(item, data)
+        zin.close(); zout.close()
+        return openpyxl.load_workbook(tmp.name)
+
 def process(schedule_path, out_dir, matcher: UnifiedMatcher, log=print):
     """返回 (结果文件路径, 分类清单路径, stats)"""
-    wb = openpyxl.load_workbook(schedule_path)  # 保留公式与格式
+    wb = _load_workbook_resilient(schedule_path)  # 保留公式与格式；WPS非标XML自动修复
     is_total = "总排期" in wb.sheetnames
     sheets = [wb["总排期"]] if is_total else list(wb.worksheets)
     log(f"{'总排期模式' if is_total else '分排期模式'}: {len(sheets)} 个sheet")
