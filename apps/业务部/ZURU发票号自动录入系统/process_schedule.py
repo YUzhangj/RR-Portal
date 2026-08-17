@@ -31,7 +31,7 @@ def detect_cols(ws):
                 found["inv"] = c.column
             elif "cust" not in found and re.search(r'客户.*PO|客PO|consignee', t, re.I):
                 found["cust"] = c.column
-            elif "po" not in found and re.fullmatch(r'PO号?|PO#|PONO|合同', t, re.I):
+            elif "po" not in found and re.fullmatch(r'(ZURU)?PO(NO#?|号|#)?|合同', t, re.I):
                 found["po"] = c.column
             elif "poline" not in found and re.fullmatch(r'SKU(No\.)?', t, re.I):
                 found["poline"] = c.column
@@ -48,7 +48,7 @@ def detect_cols(ws):
         for c in row:
             t = ht(c)
             if not t: continue
-            if "po" not in found and re.search(r'\bPO\b|合同', t, re.I) and "客户" not in t:
+            if "po" not in found and (re.search(r'\bPO\b|合同', t, re.I) or re.search(r'PONO', t, re.I)) and "客户" not in t:
                 found["po"] = c.column
             elif "hh" not in found and re.search(r'ITEM', t, re.I):
                 found["hh"] = c.column
@@ -246,6 +246,10 @@ def process(schedule_path, out_dir, matcher: UnifiedMatcher, log=print):
         if flipped:
             log(f"  sheet[{ws.title}] 供给护栏翻转 {flipped} 行为复核")
             stats["供给护栏转复核"] = stats.get("供给护栏转复核", 0) + flipped
+
+    if not results and not stats.get("已有发票号(跳过)"):
+        log("⚠ 未识别到任何排期sheet（找不到PO号/发票号列），请检查文件格式")
+        stats["未识别到排期sheet"] = 1
 
     base = os.path.splitext(os.path.basename(schedule_path))[0]
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
