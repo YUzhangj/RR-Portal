@@ -15,7 +15,7 @@ function loadElectronicAllocation() {
     num: value => Number(value) || 0,
     sum: (rows, fn) => rows.reduce((total, row) => total + (fn(row) || 0), 0),
   };
-  vm.runInNewContext(`${source.slice(start, end)}\nthis.elecSplitRows = elecSplitRows; this.upgradeLegacyElecSplit = upgradeLegacyElecSplit;`, context);
+  vm.runInNewContext(`${source.slice(start, end)}\nthis.elecSplitRows = elecSplitRows; this.buildElectronicSummaryRows = buildElectronicSummaryRows; this.upgradeLegacyElecSplit = upgradeLegacyElecSplit;`, context);
   return context;
 }
 
@@ -49,7 +49,7 @@ test('USD electronic import keeps source amounts and normalizes calculation valu
   assert.equal(result.source_extras.mold_fees[0].amount, 354);
 });
 
-test('IC only receives its direct cost, profit and proportional tax', () => {
+test('IC keeps its direct source price and all other charges remain in PACB', () => {
   const { elecSplitRows: split } = loadElectronicAllocation();
   const parts = [
     { name: 'IC', qty: 1, unit_price: 0.8 },
@@ -67,14 +67,38 @@ test('IC only receives its direct cost, profit and proportional tax', () => {
 
   const rows = split(parts, extras, 0.85);
 
-  assert.equal(rows.ic.unit_price_rmb, 0.927294);
-  assert.equal(rows.pacb.unit_price_rmb, 2.153761);
-  assert.equal(rows.ic._unit_price_pretax, 0.88);
-  assert.equal(rows.pacb._unit_price_pretax, 2.043915);
+  assert.equal(rows.ic.unit_price_rmb, 0.8);
+  assert.equal(rows.pacb.unit_price_rmb, 2.281055);
+  assert.equal(rows.ic._unit_price_pretax, 0.8);
+  assert.equal(rows.pacb._unit_price_pretax, 2.123915);
   assert.equal(
     +(rows.ic.unit_price_rmb + rows.pacb.unit_price_rmb).toFixed(6),
     3.081055,
   );
+});
+
+test('every IC is kept as a separate priced row and PACB receives the balance', () => {
+  const { elecSplitRows: split, buildElectronicSummaryRows: buildRows } = loadElectronicAllocation();
+  const rows = split([
+    { name: '语音IC', spec: 'SOP-8', qty: 1, unit_price: 1.2 },
+    { name: '控制芯片', spec: 'QFN-16', qty: 2, unit_price: 0.35 },
+    { name: 'PCB及其他电子', qty: 1, unit_price: 1.1 },
+  ], { labor_cost: 0.5, profit_pct: 10 }, 0.85);
+
+  assert.equal(rows.icRows.length, 2);
+  assert.equal(rows.icRows[0].qty, 1);
+  assert.equal(rows.icRows[0].unit_price_rmb, 1.2);
+  assert.equal(rows.icRows[1].qty, 2);
+  assert.equal(rows.icRows[1].unit_price_rmb, 0.35);
+  assert.equal(rows.pacb.unit_price_rmb, 1.95);
+  assert.equal(
+    +(rows.icRows.reduce((total, row) => total + row.qty * row.unit_price_rmb, 0)
+      + rows.pacb.unit_price_rmb).toFixed(6),
+    3.85,
+  );
+  const summary = buildRows(rows, '含税');
+  assert.deepEqual(Array.from(summary, row => row.name), ['语音IC', '控制芯片', 'PACB电子']);
+  assert.deepEqual(Array.from(summary, row => row.qty), [1, 2, 1]);
 });
 
 test('all processing costs remain in PACB when no IC exists', () => {
@@ -106,8 +130,8 @@ test('legacy automatic split upgrades but manual prices are preserved', () => {
   };
 
   assert.equal(upgradeLegacyElecSplit(payload, 0.85), true);
-  assert.equal(payload.electronics[0].unit_price_rmb, 0.927294);
-  assert.equal(payload.electronics[1].unit_price_rmb, 2.153761);
+  assert.equal(payload.electronics[0].unit_price_rmb, 0.8);
+  assert.equal(payload.electronics[1].unit_price_rmb, 2.281055);
 
   payload.electronics[0].unit_price_rmb = 1;
   assert.equal(upgradeLegacyElecSplit(payload, 0.85), false);

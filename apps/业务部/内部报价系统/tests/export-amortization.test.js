@@ -142,17 +142,17 @@ test('internal export keeps editable spray-product ratios and a weighted-average
   const totalRow = secondSummary + 1;
   assert.ok(firstSummary && secondSummary);
   assert.equal(worksheet.getCell(totalRow, 1).value, '合计 HKD');
-  assert.equal(worksheet.getCell(firstSummary, 21).value, 2);
-  assert.equal(worksheet.getCell(secondSummary, 21).value, 1);
-  assert.equal(worksheet.getCell(firstSummary, 22).value.result, 30);
-  assert.equal(worksheet.getCell(secondSummary, 22).value.result, 60);
+  assert.equal(worksheet.getCell(firstSummary, 23).value, 2);
+  assert.equal(worksheet.getCell(secondSummary, 23).value, 1);
+  assert.equal(worksheet.getCell(firstSummary, 24).value.result, 30);
+  assert.equal(worksheet.getCell(secondSummary, 24).value.result, 60);
   assert.equal(
-    worksheet.getCell(totalRow, 22).value.formula,
-    `(IFERROR(SUMPRODUCT(U${firstSummary}:U${secondSummary},V${firstSummary}:V${secondSummary})/SUM(U${firstSummary}:U${secondSummary}),0))`,
+    worksheet.getCell(totalRow, 24).value.formula,
+    `(IFERROR(SUMPRODUCT(W${firstSummary}:W${secondSummary},X${firstSummary}:X${secondSummary})/SUM(W${firstSummary}:W${secondSummary}),0))`,
   );
-  assert.equal(worksheet.getCell(totalRow, 22).value.result, 40);
-  assert.equal(worksheet.getCell(totalRow, 23).value.formula, `V${totalRow}*30%*5/100`);
-  assert.equal(worksheet.getCell(totalRow, 23).value.result, 0.6);
+  assert.equal(worksheet.getCell(totalRow, 24).value.result, 40);
+  assert.equal(worksheet.getCell(totalRow, 25).value.formula, `X${totalRow}*30%*5/100`);
+  assert.equal(worksheet.getCell(totalRow, 25).value.result, 0.6);
 });
 
 test('empty department Indonesian freight totals do not create circular references', async () => {
@@ -336,7 +336,7 @@ test('explicit formula inputs remain formulas in the internal quotation export',
   assert.equal(worksheet.getCell(fractionRow, 10).value.formula, `G${fractionRow}*I${fractionRow}`);
 });
 
-test('electronic quantity accepts formulas and preserves them in export', async () => {
+test('electronic quantity and unit price accept formulas and preserve them in export', async () => {
   const workbook = await buildWorkbook({
     quote: { quote_no: 'ELECTRONIC-QTY-FORMULA', product_name: '电子用量公式', qty: 1000 },
     sections: [
@@ -348,6 +348,7 @@ test('electronic quantity accepts formulas and preserves them in export', async 
             qty: 0.5,
             qty_raw: '=1/2',
             unit_price_rmb: 0.31,
+            unit_price_rmb_raw: '=(0.2+0.11)',
             unit_price: 0.364706,
           }],
         }),
@@ -369,6 +370,7 @@ test('electronic quantity accepts formulas and preserves them in export', async 
   });
   assert.ok(itemRow);
   assert.deepEqual(worksheet.getCell(itemRow, 7).value, { formula: '1/2', result: 0.5 });
+  assert.deepEqual(worksheet.getCell(itemRow, 8).value, { formula: '(0.2+0.11)', result: 0.31 });
   assert.equal(worksheet.getCell(itemRow, 10).value.formula, `G${itemRow}*I${itemRow}`);
 
   const source = fs.readFileSync(
@@ -377,6 +379,8 @@ test('electronic quantity accepts formulas and preserves them in export', async 
   );
   assert.match(source, /row\.qty\s*=\s*parseFormulaInput\(inpQ\.value\)/);
   assert.match(source, /c\.qty\s*=\s*parseFormulaInput\(i\.value\)/);
+  assert.match(source, /row\.unit_price_rmb\s*=\s*sourceValue == null/);
+  assert.match(source, /c\.unit_price_rmb\s*=\s*sourceValue == null/);
 });
 
 test('internal export keeps mold rows separated by product group', async () => {
@@ -785,12 +789,12 @@ test('export includes UV in painting detail and total quotation formula', async 
   let uvQuoteCell;
   worksheet.eachRow(row => row.eachCell(cell => {
     if (cell.value === 'UV') uvHeaderFound = true;
-    if (cell.value === 'UV测试件') uvQuoteCell = worksheet.getCell(row.number, 22).value;
+    if (cell.value === 'UV测试件') uvQuoteCell = worksheet.getCell(row.number, 24).value;
   }));
 
   assert.equal(uvHeaderFound, true);
   assert.equal(uvQuoteCell.result, 2.5);
-  assert.match(uvQuoteCell.formula, /T\d+\*U\d+/);
+  assert.match(uvQuoteCell.formula, /V\d+\*W\d+/);
 });
 
 test('internal export lists Indonesian freight by department and links its total into quotation summary', async () => {
@@ -995,8 +999,8 @@ test('internal export mirrors UI formulas for slush and each departmental Indone
   assert.equal(Number(worksheet.getCell(slushRow, 29).value.result.toFixed(4)), 13.0896);
 
   const paintingHeader = sectionRows['三、二次加工（印喷报价）'] + 1;
-  assert.equal(worksheet.getCell(paintingHeader, 23).value, '印尼运费 6%');
-  assert.equal(worksheet.getCell(paintingHeader + 2, 23).value.formula, `V${paintingHeader + 2}*30%*6/100`);
+  assert.equal(worksheet.getCell(paintingHeader, 25).value, '印尼运费 6%');
+  assert.equal(worksheet.getCell(paintingHeader + 2, 25).value.formula, `X${paintingHeader + 2}*30%*6/100`);
 
   const sewingDetail = workbook.getWorksheet('车缝明细');
   assert.equal(sewingDetail.getCell(3, 12).value, '印尼运费 4%');

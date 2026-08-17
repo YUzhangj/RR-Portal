@@ -73,9 +73,10 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const PORT = process.env.PORT || 3211;
+const HOST = process.env.HOST || '0.0.0.0';
 async function start() {
   await db.ready;
-  app.listen(PORT, () => console.log(`内部报价系统 listening on http://localhost:${PORT}`));
+  app.listen(PORT, HOST, () => console.log(`内部报价系统 listening on http://${HOST}:${PORT}`));
 }
 start().catch((error) => {
   console.error('[fatal] 数据库初始化失败，服务未启动', error);

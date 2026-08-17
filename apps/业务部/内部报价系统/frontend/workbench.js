@@ -69,6 +69,7 @@ function sewWeightedMaterialRmb(sewing) {
 }
 
 const parseFormulaInput = window.FormulaInput.parseFormulaInput;
+const toExcelFormulaInput = window.FormulaInput.toExcelFormulaInput;
 
 function renderTable(container, columns, rows, opts = {}) {
   const {
@@ -725,6 +726,17 @@ function electronicHkdToSource(value, currency, fxRmbHkd, fxHkdUsd) {
   if (currency === 'RMB') return amount * (num(fxRmbHkd) || 0.85);
   return amount;
 }
+function electronicSourcePriceRawToRmb(rawValue, currency, fxRmbHkd, fxHkdUsd) {
+  const raw = String(rawValue ?? '').trim();
+  if (!raw) return '';
+  if (currency === 'RMB') return raw;
+  const formula = toExcelFormulaInput(raw);
+  if (!formula) return '';
+  const fxRH = num(fxRmbHkd) || 0.85;
+  if (currency === 'USD') return `=(${formula})*${num(fxHkdUsd) || 7.8}*${fxRH}`;
+  if (currency === 'HKD') return `=(${formula})*${fxRH}`;
+  return raw;
+}
 function normalizeElectronicImport(source, fxRmbHkd, fxHkdUsd) {
   const doc = JSON.parse(JSON.stringify(source || {}));
   const currency = doc.source_currency || 'RMB';
@@ -775,32 +787,56 @@ function elecTaxedCore(parts, ex) {
   return { cost, profitPrice, taxed };
 }
 
-// 由细表汇总成 IC + PACB电子 两行：
-// - IC 只承担自身采购成本、利润，以及按直接成本占比分配的税费；
-// - 其余零件与邦定/贴片/人工/测试/包装等加工费用全部归 PACB；
-// - 两行合计始终等于整套电子的含税核价。
+function isElectronicIcPart(part) {
+  return /(?:^|\b)IC(?:\b|$)|芯片/i.test(`${part && part.name || ''} ${part && part.spec || ''}`);
+}
+
+function electronicIcParts(parts) {
+  const result = [];
+  const visit = part => {
+    if (isElectronicIcPart(part)) result.push(part);
+    (part.children || []).forEach(visit);
+  };
+  (parts || []).forEach(visit);
+  return result;
+}
+
+// 由细表汇总成「逐项 IC + PACB电子」：
+// - 每条 IC 保留源表的用量和单价，不再分摊利润、税费或加工费；
+// - 其余零件及邦定/贴片/人工/测试/包装/利润/税费全部归 PACB；
+// - 全部 IC 金额 + PACB 金额始终等于整套电子的含税核价。
 function elecSplitRows(parts, ex, fx) {
   fx = num(fx) || 0.85;
   ex = ex || {};
   const { cost, profitPrice, taxed } = elecTaxedCore(parts, ex);
-  const icPart = (parts || []).find(p => /IC/i.test(p.name || ''));
-  const icDirectCost = icPart ? Math.max(0, num(icPart.qty) * num(icPart.unit_price)) : 0;
-  const safeCost = Math.max(0, cost);
-  const boundedIcCost = Math.min(icDirectCost, safeCost);
-  const icCostRatio = safeCost > 0 ? boundedIcCost / safeCost : 0;
-  const profitFactor = 1 + num(ex.profit_pct) / 100;
-  const icPretax = boundedIcCost * profitFactor;
-  const pacbPretax = profitPrice - icPretax;
-  const sharedTax = taxed - profitPrice;
-  const icTaxed = icPretax + sharedTax * icCostRatio;
-  const pacbTaxed = taxed - icTaxed;
+  const icParts = electronicIcParts(parts);
+  const icDirectTotal = sum(icParts, part => Math.max(0, num(part.qty) * num(part.unit_price)));
+  const pacbPretax = profitPrice - icDirectTotal;
+  const pacbTaxed = taxed - icDirectTotal;
   const mk = (taxedRMB, pretaxRMB) => ({
     unit_price_rmb: +taxedRMB.toFixed(6),
     unit_price: +(taxedRMB / fx).toFixed(6),
     _unit_price_taxed: +taxedRMB.toFixed(6),
     _unit_price_pretax: +pretaxRMB.toFixed(6),
   });
-  return { icPart, ic: mk(icTaxed, icPretax), pacb: mk(pacbTaxed, pacbPretax) };
+  const icRows = icParts.map(part => ({
+    part,
+    qty: num(part.qty),
+    ...mk(Math.max(0, num(part.unit_price)), Math.max(0, num(part.unit_price))),
+  }));
+  return {
+    icParts,
+    icPart: icParts[0] || null,
+    icRows,
+    ic: icRows[0] ? {
+      unit_price_rmb: icRows[0].unit_price_rmb,
+      unit_price: icRows[0].unit_price,
+      _unit_price_taxed: icRows[0]._unit_price_taxed,
+      _unit_price_pretax: icRows[0]._unit_price_pretax,
+    } : mk(0, 0),
+    pacb: mk(pacbTaxed, pacbPretax),
+    cost,
+  };
 }
 
 function elecImportedSummaryRows(doc, ex, fx) {
@@ -809,19 +845,60 @@ function elecImportedSummaryRows(doc, ex, fx) {
   }
   fx = num(fx) || 0.85;
   const sourceExtras = doc.extras || ex || {};
-  const otp = Math.max(0, num(sourceExtras.otp_price_rmb));
   const total = Math.max(0, num(sourceExtras.total_price_rmb || sourceExtras.taxed_price));
-  const pacb = sourceExtras.quoted_price_rmb != null
-    ? Math.max(0, num(sourceExtras.quoted_price_rmb) - otp)
-    : Math.max(0, total - otp);
-  const icPart = (doc.parts || []).find(p => /IC|芯片/i.test(`${p.name || ''} ${p.spec || ''}`));
   const mk = rmb => ({
     unit_price_rmb: +rmb.toFixed(6),
     unit_price: +(rmb / fx).toFixed(6),
     _unit_price_taxed: +rmb.toFixed(6),
     _unit_price_pretax: +rmb.toFixed(6),
   });
-  return { icPart, ic: mk(otp), pacb: mk(pacb) };
+  const icParts = electronicIcParts(doc.parts || []);
+  const icRows = icParts.map(part => ({
+    part,
+    qty: num(part.qty),
+    ...mk(Math.max(0, num(part.unit_price))),
+  }));
+  const icTotal = sum(icRows, row => num(row.qty) * num(row.unit_price_rmb));
+  const quotedTotal = sourceExtras.quoted_price_rmb != null
+    ? Math.max(0, num(sourceExtras.quoted_price_rmb)) : total;
+  return {
+    icParts,
+    icPart: icParts[0] || null,
+    icRows,
+    ic: icRows[0] || mk(0),
+    pacb: mk(quotedTotal - icTotal),
+  };
+}
+
+function buildElectronicSummaryRows(split, taxLabel) {
+  const icRows = (split.icRows || []).map((item, index) => ({
+    name: item.part && item.part.name ? item.part.name : `IC${index + 1}`,
+    spec: item.part && item.part.spec ? item.part.spec : '',
+    qty: item.qty,
+    unit_price_rmb: item.unit_price_rmb,
+    unit_price: item.unit_price,
+    _unit_price_taxed: item._unit_price_taxed,
+    _unit_price_pretax: item._unit_price_pretax,
+    tax_label: taxLabel,
+    note: item.part && item.part.note ? item.part.note : '',
+    _electronic_summary_role: 'ic',
+  }));
+  icRows.push({
+    name: 'PACB电子',
+    spec: '含 PCB+电阻+电容+人工 等除IC外其余费用汇总',
+    qty: 1,
+    ...split.pacb,
+    tax_label: taxLabel,
+    note: '',
+    _electronic_summary_role: 'pacb',
+  });
+  return icRows;
+}
+
+function isDerivedElectronicSummary(rows) {
+  return Array.isArray(rows) && rows.length >= 1
+    && /PACB/i.test(rows[rows.length - 1].name || '')
+    && rows.slice(0, -1).every(row => row._electronic_summary_role === 'ic' || isElectronicIcPart(row));
 }
 
 // 旧报价曾按“IC占零件明细比例”分摊全部加工费用。仅当当前两行仍精确匹配旧自动结果时，
@@ -846,8 +923,7 @@ function upgradeLegacyElecSplit(payload, fx) {
   if (Math.abs(currentRmb(rows[0]) - oldIc) > 0.00001
     || Math.abs(currentRmb(rows[1]) - oldPacb) > 0.00001) return false;
   const split = elecSplitRows(doc.parts, ex, fx);
-  Object.assign(rows[0], split.ic);
-  Object.assign(rows[1], split.pacb);
+  payload.electronics = buildElectronicSummaryRows(split, rows[0].tax_label || '含税');
   return true;
 }
 
@@ -939,12 +1015,21 @@ function renderHierElectronics(container, rows, onChange, canEdit, fxRmbHkd, pct
         onChange();
       };
       tdQty.appendChild(inpQ);
-      const inpP = document.createElement('input'); inpP.type = 'number'; inpP.step = 'any';
-      inpP.value = row.unit_price_rmb == null ? '' : electronicHkdToSource(freeUnitHkd(row, fx), sourceCurrency, fx, fxHU);
+      const inpP = document.createElement('input'); inpP.type = 'text';
+      inpP.value = row.unit_price_source_raw != null && row.unit_price_source_raw !== ''
+        ? row.unit_price_source_raw
+        : (sourceCurrency === 'RMB' && row.unit_price_rmb_raw != null && row.unit_price_rmb_raw !== ''
+          ? row.unit_price_rmb_raw
+        : (row.unit_price_rmb == null ? '' : electronicHkdToSource(freeUnitHkd(row, fx), sourceCurrency, fx, fxHU)));
+      inpP.placeholder = '如 =0.2+0.11';
+      inpP.title = '可输入以 = 开头的算式；也可直接输入数字或分数';
       inpP.oninput = () => {
-        const sourceValue = inpP.value === '' ? null : Number(inpP.value);
+        row.unit_price_source_raw = inpP.value;
+        const sourceValue = parseFormulaInput(inpP.value);
+        row.unit_price_rmb_raw = electronicSourcePriceRawToRmb(inpP.value, sourceCurrency, fx, fxHU);
         row.unit_price = sourceValue == null ? null : +electronicSourceToHkd(sourceValue, sourceCurrency, fx, fxHU).toFixed(6);
         row.unit_price_rmb = sourceValue == null ? null : +electronicSourceToRmb(sourceValue, sourceCurrency, fx, fxHU).toFixed(6);
+        inpP.style.color = inpP.value.trim() !== '' && sourceValue == null ? '#b91c1c' : '';
         refreshAmt();
         onChange();
       };
@@ -1090,12 +1175,21 @@ function renderHierChildren(children, onParentChange, canEdit, fxRmbHkd, sourceC
     else { tdQ.className='ro'; tdQ.textContent = formatNum(c.qty ?? ''); }
     const tdP = document.createElement('td');
     if (canEdit) {
-      const i = document.createElement('input'); i.type='number'; i.step='any';
-      i.value = c.unit_price_rmb == null ? '' : electronicHkdToSource(freeUnitHkd(c, fx), sourceCurrency, fx, fxHU);
+      const i = document.createElement('input'); i.type='text';
+      i.value = c.unit_price_source_raw != null && c.unit_price_source_raw !== ''
+        ? c.unit_price_source_raw
+        : (sourceCurrency === 'RMB' && c.unit_price_rmb_raw != null && c.unit_price_rmb_raw !== ''
+          ? c.unit_price_rmb_raw
+        : (c.unit_price_rmb == null ? '' : electronicHkdToSource(freeUnitHkd(c, fx), sourceCurrency, fx, fxHU)));
+      i.placeholder = '如 =0.2+0.11';
+      i.title = '可输入以 = 开头的算式；也可直接输入数字或分数';
       i.oninput = () => {
-        const sourceValue = i.value === '' ? null : Number(i.value);
+        c.unit_price_source_raw = i.value;
+        const sourceValue = parseFormulaInput(i.value);
+        c.unit_price_rmb_raw = electronicSourcePriceRawToRmb(i.value, sourceCurrency, fx, fxHU);
         c.unit_price = sourceValue == null ? null : +electronicSourceToHkd(sourceValue, sourceCurrency, fx, fxHU).toFixed(6);
         c.unit_price_rmb = sourceValue == null ? null : +electronicSourceToRmb(sourceValue, sourceCurrency, fx, fxHU).toFixed(6);
+        i.style.color = i.value.trim() !== '' && sourceValue == null ? '#b91c1c' : '';
         refresh();
         onParentChange();
       };
@@ -1370,7 +1464,7 @@ function renderSummaryPane(host, sections, quote, me) {
   const blowTotal = sum(mold.blow_items || [], r => {
     return blowRowTotal(r);
   });
-  const ppTotal = weightedPaintingSum(pnt);  // 多产品按配比加权；单产品直接合计（含九工序）
+  const ppTotal = weightedPaintingSum(pnt);  // 多产品按配比加权；单产品直接合计（含十工序）
   const slushTotal = sum(slush.slush_items || [], r => num(r.unit_price_hkd)*num(r.qty));
   const asmLaborTotal = sum(asm.assembly_labor || [], r => num(r.unit_price)*num(r.qty));
   const pkLaborTotal = sum(asm.packaging_labor || [], r => num(r.unit_price)*num(r.qty));
@@ -2727,7 +2821,7 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
   host.innerHTML = `
     <h3>电子部分
     ${canEdit ? '<button class="mini" id="el-import" type="button" style="margin-left:10px">📄 导入登信报价单</button><input id="el-file" type="file" accept=".xls,.xlsx" style="display:none"/><button class="mini" id="el-import-lianxiang" type="button" style="margin-left:6px">📄 导入联翔报价单</button><input id="el-file-lianxiang" type="file" accept=".xls,.xlsx" style="display:none"/>' : ''}
-    ${canEdit && payload.electronics_doc ? '<button class="mini" id="el-summarize" type="button" style="margin-left:6px">🔄 由明细汇总成 IC + PACB</button>' : ''}
+    ${canEdit && payload.electronics_doc ? '<button class="mini" id="el-summarize" type="button" style="margin-left:6px">🔄 由明细汇总成 逐项IC + PACB</button>' : ''}
     ${payload.electronics_doc ? `<small style="margin-left:8px;color:#16a34a">✓ 已导入 ${payload.electronics_doc.parts_count} 行 · 原币 ${payload.electronics_doc.source_currency || 'RMB'} (${payload.electronics_doc.imported_at || ''})</small>` : ''}
     </h3>
     <div id="el-import-preview"></div>
@@ -2828,15 +2922,19 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
       });
     });
     if (canEdit) {
-      // 总表仍是「IC + PACB电子」两行（由明细汇总出来的）时，细表改动自动联动
-      const isDerivedSummary = () => Array.isArray(payload.electronics) && payload.electronics.length === 2
-        && /^IC$/i.test(payload.electronics[0].name || '') && /PACB/i.test(payload.electronics[1].name || '');
+      // 总表仍是「逐项 IC + PACB电子」（由明细汇总出来的）时，细表改动自动联动。
+      const isDerivedSummary = () => isDerivedElectronicSummary(payload.electronics);
       const autoResummarize = () => {
         if (!isDerivedSummary()) return;
         const fxH = num((payload._fx_rmb_hkd) || fxRmbHkd) || 0.85;
         const sp = elecImportedSummaryRows(doc, payload.electronics_extra || doc.extras || {}, fxH);
-        Object.assign(payload.electronics[0], sp.ic);
-        Object.assign(payload.electronics[1], sp.pacb);
+        const taxLabel = payload.electronics[0]?.tax_label || (doc.meta && doc.meta.tax_label) || '含税';
+        const freshRows = buildElectronicSummaryRows(sp, taxLabel);
+        if (freshRows.length === payload.electronics.length) {
+          freshRows.forEach((row, index) => Object.assign(payload.electronics[index], row));
+        } else {
+          payload.electronics = freshRows;
+        }
         paintSummarySubtotal();
       };
       tbody.querySelectorAll('input').forEach(inp => {
@@ -2918,20 +3016,17 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
   }
   renderElecExtra(host.querySelector('#wb-elec-extra'), payload, wrappedOnChange, canEdit, fxRmbHkd, fxHkdUsd);
   if (canEdit) {
-    // 由明细一键汇总成 IC + PACB电子 两行
+    // 由明细一键汇总成逐项 IC + PACB电子。
     const sumBtn = host.querySelector('#el-summarize');
     if (sumBtn) sumBtn.onclick = () => {
       const doc = payload.electronics_doc;
       if (!doc || !doc.parts) { alert('没有导入的明细数据'); return; }
-      if (payload.electronics && payload.electronics.length > 2 && !confirm('当前总表有 ' + payload.electronics.length + ' 行，确认重置为 IC + PACB电子 两行（手填数据会丢失）？')) return;
-      // 总表行按细表占比分摊含税核价：合计=两行之和=含税核价，每行带各自那份加工/利润/税
+      if (payload.electronics && payload.electronics.length > 1 && !isDerivedElectronicSummary(payload.electronics)
+        && !confirm('当前总表有 ' + payload.electronics.length + ' 行，确认重置为逐项 IC + PACB电子（手填数据会丢失）？')) return;
       const fxHere = num((payload._fx_rmb_hkd) || fxRmbHkd) || 0.85;
       const sp = elecImportedSummaryRows(doc, payload.electronics_extra || doc.extras || {}, fxHere);
       const taxLabel = (doc.meta && doc.meta.tax_label) || '含税';
-      payload.electronics = [
-        { name: 'IC', spec: sp.icPart ? sp.icPart.spec : '', qty: 1, ...sp.ic, tax_label: taxLabel, note: '' },
-        { name: 'PACB电子', spec: '含 PCB+电阻+电容+人工 等其余明细汇总', qty: 1, ...sp.pacb, tax_label: taxLabel, note: '' },
-      ];
+      payload.electronics = buildElectronicSummaryRows(sp, taxLabel);
       onChange();
       renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd);
     };
@@ -2981,18 +3076,14 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
               </div>
             </div>`;
           impPreview.querySelector('#el-imp-apply').onclick = () => {
-            // 导入应用后总表重置为 IC + PACB电子 两行（值从明细汇总，导入后可手改）
+            // 导入应用后总表重置为逐项 IC + PACB电子（IC 对应源价，其余费用归 PACB）。
             // 明细是 RMB，总表单价是 HKD：单价 HKD = RMB ÷ 汇率（与税点下拉/由明细汇总按钮口径一致）
             const fx = num(fxRmbHkd) || 0.85;
             j.source_currency = impPreview.querySelector('#el-source-currency').value;
             const normalized = normalizeElectronicImport(j, fx, fxHkdUsd);
-            // 总表行按细表占比分摊含税核价：合计=两行之和=含税核价，每行带各自那份加工/利润/税
             const sp = elecImportedSummaryRows(normalized, normalized.extras || {}, fx);
             const taxLabel = (normalized.meta && normalized.meta.tax_label) || '含税';
-            payload.electronics = [
-              { name: 'IC', spec: sp.icPart ? sp.icPart.spec : '', qty: 1, ...sp.ic, tax_label: taxLabel, note: '' },
-              { name: 'PACB电子', spec: '含 PCB+电阻+电容+人工 等其余明细汇总', qty: 1, ...sp.pacb, tax_label: taxLabel, note: '' },
-            ];
+            payload.electronics = buildElectronicSummaryRows(sp, taxLabel);
             if (normalized.extras) {
               payload.electronics_extra = payload.electronics_extra || {};
               ['test_repair', 'packing_shipping', 'profit_pct', 'tax_diff', 'tax_payable', 'bonding_cost', 'smt_cost', 'labor_cost'].forEach(k => {
@@ -3664,7 +3755,7 @@ function renderPainting(host, payload, canEdit, onChange, fxRmbHkd) {
             <p>从 <b>${escapeHtml(j.sheet_used || '')}</b> 解析到 <b>${j.count}</b> 行喷油工序${imgInfo}${j.meta && j.meta.title ? ' · ' + escapeHtml(j.meta.title) : ''}</p>
             ${j.multi_product ? `<p><b>已识别 ${j.product_groups.length} 个明确产品编号</b>，应用后按产品配比加权平均。</p>` : '<p class="muted">未识别到两个以上明确产品编号，将按单产品直接合计。</p>'}
             ${j.images_hint ? `<p class="muted">⚠️ ${escapeHtml(j.images_hint)}</p>` : ''}
-            <p class="muted">应用后会替换当前喷油明细（夹模/移印/散枪/边模/油色/浸油/抹油/擦PP水/UV 九道工序）。</p>
+            <p class="muted">应用后会替换当前喷油明细（夹模/移印/炒货/散枪/边模/油色/浸油/抹油/擦PP水/UV 十道工序）。</p>
             <div style="margin-top:10px;display:flex;gap:8px">
               <button id="pp-imp-apply">应用</button>
               <button id="pp-imp-cancel" class="mini danger">取消</button>
@@ -3689,6 +3780,7 @@ function renderPainting(host, payload, canEdit, onChange, fxRmbHkd) {
 const PAINTING_PROCS = [
   { key: 'clamp',  label: '夹模' },
   { key: 'pad',    label: '移印' },
+  { key: 'roast',  label: '炒货' },
   { key: 'spray',  label: '散枪' },
   { key: 'edge',   label: '边模' },
   { key: 'color',  label: '油色' },
