@@ -87,7 +87,7 @@ function renderTable(container, columns, rows, opts = {}) {
   const tr = document.createElement('tr');
   const headerRefreshers = [];
   tr.innerHTML = '<th style="width:36px">#</th>' +
-    columns.map(c => `<th${c.width ? ` style="width:${c.width}"` : ''}>${c.headerInput
+    columns.map(c => `<th${c.className ? ` class="${c.className}"` : ''}${c.width ? ` style="width:${c.width}"` : ''}>${c.headerInput
       ? `${c.label} <input type="number" step="any" class="th-hinput" data-k="${c.key}" value="${c.headerInput.get() ?? ''}" style="width:56px"${readonly ? ' disabled' : ''}>${c.headerInput.suffix ?? ''}`
       : c.label}</th>`).join('') +
     (readonly ? '' : '<th style="width:36px"></th>');
@@ -125,6 +125,7 @@ function renderTable(container, columns, rows, opts = {}) {
       headerRefreshers.push(refreshCalcs);
       columns.forEach(c => {
         const td = document.createElement('td');
+        if (c.className) td.classList.add(c.className);
         if (c.renderCell) {
           c.renderCell(td, row, { readonly, onChange, rebuild });
           tr.appendChild(td);
@@ -138,7 +139,7 @@ function renderTable(container, columns, rows, opts = {}) {
         if (c.calc) val = c.calc(row);
         if (val === undefined || val === null) val = '';
         if (ro) {
-          td.className = 'ro';
+          td.classList.add('ro');
           td.textContent = c.type === 'fraction' && typeof val === 'string' ? val : formatNum(val);
           if (c.calc) calcCells.push({ td, fn: c.calc });
         } else if (c.type === 'textarea') {
@@ -158,7 +159,7 @@ function renderTable(container, columns, rows, opts = {}) {
               row[c.key] = fixedValue;
               setTimeout(onChange, 0);
             }
-            td.className = 'ro';
+            td.classList.add('ro');
             const fixed = document.createElement('input'); fixed.type = 'text'; fixed.value = fixedValue; fixed.readOnly = true;
             fixed.style.background = '#f8fafc'; fixed.style.cursor = 'default';
             td.appendChild(fixed);
@@ -3254,6 +3255,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       product_image: m.product_image || '',
       source_sheet_name: m.source_sheet_name || '',
       source_sheet_index: m.source_sheet_index ?? null,
+      mold_size: m.mold_size || '',
       material: m.material || '',
       material_grade: m.material_grade || '',
       color: m.color || '',
@@ -3365,6 +3367,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
           source_sheet_index: m.source_sheet_index ?? null,
           mold_no: m.mold_no || existing.mold_no || '',
           name: m.name,
+          mold_size: m.mold_size || existing.mold_size || '',
           material: m.material || existing.material || '',
           material_grade: m.material_grade || existing.material_grade || '',
           color: m.color || existing.color || '',
@@ -3503,12 +3506,13 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     { key: 'material_unit_price', label: '料价 HK$/g', type: 'number', width: '110px' },
     { key: 'raw_unit', label: '原料单价 HK$', readonly: true, width: '100px',
       calc: r => num(r.weight_g) * (1 + num(payload.injection_loss_pct ?? 3)/100) * num(r.material_unit_price) },
-    { key: 'machine', label: '机台', width: '90px' },
+    { key: 'machine', label: '机台', width: '90px', className: 'molding-machine-key' },
     { key: 'shot_price', label: '啤价(HK$/啤)', type: 'number', width: '100px' },
     { key: 'cavity', label: '出模数', width: '80px' },
     { key: 'sets', label: '套数', type: 'number', width: '70px' },
-    { key: 'machine_model', label: '机型', width: '90px' },
-    { key: 'target', label: '目标数', type: 'number', width: '100px' },
+    { key: 'machine_model', label: '机型', width: '90px', className: 'molding-machine-key' },
+    { key: 'target', label: '目标数', type: 'number', width: '100px', className: 'molding-machine-key' },
+    { key: 'mold_size', label: '模具尺寸', width: '130px' },
     { key: 'cycle_sec', label: '周期(秒)', type: 'number', width: '80px' },
     { key: 'finished_amt', label: '成品金额 HK$', readonly: true, width: '100px',
       calc: r => num(r.weight_g) * (1 + num(payload.injection_loss_pct ?? 3)/100) * num(r.material_unit_price) + num(r.shot_price) },

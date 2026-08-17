@@ -79,9 +79,15 @@ test('legacy painting rows recover product groups from explicit numbered names',
 
 test('molding UI visually separates multiple product groups', () => {
   const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '../frontend/styles.css'), 'utf8');
   assert.match(source, /className: 'injection-product-group'/);
   assert.match(source, /产品 \$\{group\.index \+ 1\}\/\$\{injectionGroupsForTable\.length\}/);
   assert.match(source, /rowStyle: showInjectionGroups/);
+  assert.match(source, /key: 'mold_size', label: '模具尺寸'/);
+  assert.match(source, /mold_size: m\.mold_size \|\| existing\.mold_size \|\| ''/);
+  assert.equal((source.match(/className: 'molding-machine-key'/g) || []).length, 3);
+  assert.match(styles, /thead th\.molding-machine-key/);
+  assert.match(styles, /tbody td\.molding-machine-key input/);
 });
 
 test('electronic IC rows are excluded only from Indonesian freight', () => {
