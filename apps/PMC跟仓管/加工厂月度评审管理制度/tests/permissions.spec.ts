@@ -9,8 +9,15 @@ import {
   setPermissionOverrides,
   visibleCraft,
 } from '../src/utils/permissions'
+import { BUYER_CRAFT, isBuyer, ROLE_LABELS } from '../src/constants/roles'
 
 describe('permissions', () => {
+  it('supports the electronics buyer role and maps it to the electronics department', () => {
+    expect(ROLE_LABELS.buyer_electronics).toBe('电子部采购')
+    expect(BUYER_CRAFT.buyer_electronics).toBe('electronics')
+    expect(isBuyer('buyer_electronics')).toBe(true)
+    expect(canEditOrders('buyer_electronics')).toBe(true)
+  })
   it('only finance_cost can edit output', () => {
     expect(canEditOutput('finance_cost')).toBe(true)
     expect(canEditOutput('buyer_injection')).toBe(false)
