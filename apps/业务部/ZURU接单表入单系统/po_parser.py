@@ -5,6 +5,8 @@
 import os
 import re
 import logging
+import zipfile
+import hashlib
 from datetime import datetime, timedelta
 
 import openpyxl
@@ -59,6 +61,47 @@ _REV_RE = re.compile(r'(?:Rev\d*\.?|(?:^|\W)R\d\b|\.rev\.)', re.I)
 def is_revision(filename):
     """判断文件名是否为修改单"""
     return bool(_REV_RE.search(filename))
+
+
+# === 取消单识别 ===
+# 取消单特征：PO 上盖有"订单取消"大字覆盖层（内嵌透明 PNG 章图）
+_CANCEL_NAME_RE = re.compile(r'取消|cancel', re.I)
+
+# 已知取消章图片的 SHA-1（对内嵌图片字节级匹配；发现新章样可追加）
+_CANCEL_STAMP_SHA1 = {
+    '70d73f3af75d74cc5df55a1aaa024b3787fa2f91',  # 订单取消.png 1432x346 透明横幅（2026-08-11 PO-4500218205）
+}
+
+
+def _png_banner_hint(data):
+    """PNG 透明横幅启发式：带 alpha 通道、宽≥1000、宽高比≥3 → 疑似大字覆盖章"""
+    if len(data) < 26 or data[:8] != b'\x89PNG\r\n\x1a\n' or data[12:16] != b'IHDR':
+        return False
+    w = int.from_bytes(data[16:20], 'big')
+    h = int.from_bytes(data[20:24], 'big')
+    color_type = data[25]  # 6 = RGBA（带透明通道）
+    return color_type == 6 and w >= 1000 and h > 0 and w / h >= 3
+
+
+def is_cancelled(filepath, filename=None):
+    """判断是否为取消单：文件名含"取消/cancel"，或内嵌"订单取消"覆盖章图片"""
+    name = filename or os.path.basename(filepath)
+    if _CANCEL_NAME_RE.search(name):
+        return True
+    try:
+        with zipfile.ZipFile(filepath) as z:
+            for n in z.namelist():
+                if not n.startswith('xl/media/'):
+                    continue
+                data = z.read(n)
+                if hashlib.sha1(data).hexdigest() in _CANCEL_STAMP_SHA1:
+                    return True
+                if _png_banner_hint(data):
+                    return True
+    except Exception:
+        # 旧版 .xls 非 zip 结构或读取异常时，按非取消单处理
+        pass
+    return False
 
 
 def _clean(v):
