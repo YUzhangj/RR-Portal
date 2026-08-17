@@ -559,7 +559,7 @@ function parseAssemblyContractImport(
     out: colContaining('单价'),
     amount: colContaining('金额'),
     category: colContaining('商品名称'),
-    delivery_date: colContaining('交货期', '交货日期'),
+    delivery_date: colContaining('交货期', '交货日期', '交货时间'),
     notes: colContaining('备注'),
   }
   const beforeHeader = aoa.slice(0, headerIdx)
@@ -570,8 +570,11 @@ function parseAssemblyContractImport(
   const standaloneOrderDate = beforeHeader.flat()
     .map(formatImportDate)
     .find((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)) ?? ''
-  const orderDate = labeledDates(aoa, '下单日期').at(-1)
-    || labeledDates(aoa, '时间').at(-1)
+  // 连续采购单的“下单时间/下单日期”位于各自明细表之后；当前段取表头后
+  // 遇到的第一个值，避免误用工作表最后一张采购单的日期。
+  const orderDate = labeledDates(aoa.slice(headerIdx + 1), '下单时间').at(0)
+    || labeledDates(aoa.slice(headerIdx + 1), '下单日期').at(0)
+    || labeledDates(aoa.slice(headerIdx + 1), '时间').at(0)
     || standaloneOrderDate
   const pmc = labeledValue(aoa.flat(), '采购签核', ['主管', '生产经理', '经理'])
     || labeledValues(aoa, '采购签核').at(-1)
@@ -759,7 +762,7 @@ function parsePaintingPurchaseOrderImport(
 ): { payloads: Record<string, any>[]; failed: number } {
   const isHeader = (row: any[]) => {
     const cells = row.map(compactText)
-    return cells.includes('货号') && cells.includes('货物名称') && cells.includes('加工类别')
+    return cells.includes('货号') && (cells.includes('货物名称') || cells.includes('货品名称')) && cells.includes('加工类别')
       && cells.includes('数量') && cells.some((cell) => cell.includes('单价'))
   }
   const headerIndexes = aoa.reduce<number[]>((indexes, row, index) => {
@@ -779,7 +782,7 @@ function parsePaintingPurchaseOrderImport(
     const colContaining = (...aliases: string[]) => header.findIndex((cell) =>
       aliases.some((alias) => cell.includes(compactText(alias))))
     const C = {
-      item_no: colContaining('货号'), product: colContaining('货物名称'), category: colContaining('加工类别'),
+      item_no: colContaining('货号'), product: colContaining('货物名称', '货品名称'), category: colContaining('加工类别'),
       qty: colContaining('数量'), out: colContaining('单价'), amount: colContaining('金额'), notes: colContaining('备注'),
     }
     const factoryName = labeledValues(metadata, '供应商').at(-1) ?? ''
@@ -1070,7 +1073,7 @@ export function parseDeliveryImport(
   if (header.includes('货号') && header.includes('模号') && header.includes('名称') && header.includes('加工类别') && header.some((cell) => cell.includes('外发单价'))) {
     return parseHunanInjectionPurchaseOrderImport(aoa, factoryIdByName)
   }
-  if (header.includes('货号') && header.includes('货物名称') && header.includes('加工类别') && header.includes('数量')) {
+  if (header.includes('货号') && (header.includes('货物名称') || header.includes('货品名称')) && header.includes('加工类别') && header.includes('数量')) {
     return parsePaintingPurchaseOrderImport(aoa, factoryIdByName)
   }
   if (header.includes('货号') && header.includes('货品名称') && header.some((cell) => cell.includes('加工项目'))) {

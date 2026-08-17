@@ -36,7 +36,14 @@ export async function parseDeliveryExcelFiles(
     try {
       const wb = XLSX.read(await file.arrayBuffer(), { cellDates: true })
       let recognized = false
-      for (const sheetName of wb.SheetNames) {
+      const visibleSheetNames = wb.SheetNames.filter((sheetName) => {
+        const metadata = wb.Workbook?.Sheets?.find((entry) => entry.name === sheetName)
+        return !metadata?.Hidden
+      })
+      // 采购单常会保留隐藏的旧版工作表；导入应以用户当前可见的表为准。
+      // 如果异常文件没有任何可见表，仍回退尝试全部表，保持兼容。
+      const sheetNames = visibleSheetNames.length ? visibleSheetNames : wb.SheetNames
+      for (const sheetName of sheetNames) {
         const sheet = wb.Sheets[sheetName]
         if (!sheet) continue
         const aoa = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1, defval: '' })
