@@ -292,8 +292,16 @@ function blowUsage(row) {
     ? num(row.usage_qty)
     : 1;
 }
+function hasBlowMaterialCost(row) {
+  return row && row.material_cost_hkd !== undefined && row.material_cost_hkd !== null && row.material_cost_hkd !== '';
+}
+function blowMaterialCost(row) {
+  return hasBlowMaterialCost(row)
+    ? num(row.material_cost_hkd)
+    : num(row && row.weight_g) * num(row && row.material_price_lb) / 454;
+}
 function blowRowTotal(row) {
-  const material = num(row && row.weight_g) * num(row && row.material_price_lb) / 454;
+  const material = blowMaterialCost(row);
   return (material + num(row && row.blow_labor) + num(row && row.flash))
     * (num(row && row.profit_x) || 1)
     * blowUsage(row);
@@ -3276,7 +3284,11 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     <div id="wb-inj"></div>
     <div id="wb-inj-summary"></div>
 
-    <h3>二·B、吹气部分 <small class="muted">(单价含港币)</small></h3>
+    <h3>二·B、吹气部分 <small class="muted">(单价含港币)</small>
+      ${canEdit ? `<button class="mini" id="blow-import" type="button" style="margin-left:10px">📄 导入吹气报价</button>
+      <input id="blow-file" type="file" accept=".xls,.xlsx" style="display:none"/>` : ''}
+    </h3>
+    <div id="blow-import-preview"></div>
     <div id="wb-blow"></div>
 
     <details class="ref-tables" style="margin-top:18px">
@@ -3599,6 +3611,68 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
 
   // 吹气部分
   renderBlowItems(host.querySelector('#wb-blow'), payload.blow_items, wrappedOnChange, canEdit, payload);
+  if (canEdit) {
+    const importButton = host.querySelector('#blow-import');
+    const fileInput = host.querySelector('#blow-file');
+    const preview = host.querySelector('#blow-import-preview');
+    importButton.onclick = () => fileInput.click();
+    fileInput.onchange = async event => {
+      const file = event.target.files[0];
+      if (!file) return;
+      preview.innerHTML = '<i class="muted" style="padding:8px;display:block">正在解析吹气报价…</i>';
+      try {
+        const form = new FormData();
+        form.append('file', file);
+        const response = await fetch('/api/uploads/blow-sheet', {
+          method: 'POST', credentials: 'include', body: form,
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || '解析失败');
+        const rows = result.items || [];
+        preview.innerHTML = `
+          <div class="card" style="background:#f0fdf4;border:1px solid #86efac;margin-top:10px">
+            <p>从 <b>${escapeHtml((result.sheets_used || []).join('、'))}</b> 解析到 <b>${rows.length}</b> 条吹气报价。</p>
+            <p class="muted">${rows.map(row => `${escapeHtml(row.name || '未命名')}：${formatNum(row.weight_g)}g · 料价 ${formatNum(row.material_price_lb)} HK$/lb · 吹工 ${formatNum(row.blow_labor)} · 披锋 ${formatNum(row.flash)} · 利润 ×${formatNum(row.profit_x)}`).join('<br>')}</p>
+            ${result.images_hint ? `<p class="muted">⚠️ ${escapeHtml(result.images_hint)}</p>` : ''}
+            <p class="muted">应用后将替换当前吹气明细；产品料价、小计和合计由系统公式重新计算。</p>
+            <div style="margin-top:10px;display:flex;gap:8px">
+              <button id="blow-import-apply">应用</button>
+              <button id="blow-import-cancel" class="mini danger">取消</button>
+            </div>
+          </div>`;
+        preview.querySelector('#blow-import-apply').onclick = () => {
+          const hasExisting = (payload.blow_items || []).some(row => row && (
+            row.name || num(row.weight_g) || num(row.material_price_lb) || num(row.blow_labor) || num(row.flash)
+          ));
+          if (hasExisting && !confirm(`将替换现有 ${payload.blow_items.length} 条吹气明细，确认？`)) return;
+          payload.blow_items = rows.map(row => ({
+            name: row.name || '',
+            capacity: row.capacity ?? '',
+            material: row.material || '',
+            weight_g: num(row.weight_g),
+            material_price_lb: num(row.material_price_lb),
+            material_cost_hkd: row.material_cost_hkd,
+            blow_labor: num(row.blow_labor),
+            flash: num(row.flash),
+            profit_x: num(row.profit_x) || 1,
+            usage_qty: num(row.usage_qty) || 1,
+            cavity_note: row.cavity_note || '',
+            mold_price_note: row.mold_price_note || '',
+          }));
+          preview.innerHTML = '';
+          fileInput.value = '';
+          wrappedOnChange();
+          renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, userRole);
+        };
+        preview.querySelector('#blow-import-cancel').onclick = () => {
+          preview.innerHTML = '';
+          fileInput.value = '';
+        };
+      } catch (error) {
+        preview.innerHTML = `<div class="card" style="background:#fef2f2;border:1px solid #fecaca;margin-top:10px">解析失败：${escapeHtml(error.message)}</div>`;
+      }
+    };
+  }
 }
 
 // 吹气产品报价表（每行 = 一个 货名）
@@ -3626,7 +3700,7 @@ function renderBlowItems(container, rows, onChange, canEdit, pctHost) {
   const tbody = table.querySelector('tbody');
 
   const calc = (r) => {
-    const matCost = num(r.weight_g) * num(r.material_price_lb) / 454;
+    const matCost = blowMaterialCost(r);
     const sub = matCost + num(r.blow_labor) + num(r.flash);
     const total = sub * (num(r.profit_x) || 1) * blowUsage(r);
     return { matCost, sub, total };
@@ -3651,7 +3725,11 @@ function renderBlowItems(container, rows, onChange, canEdit, pctHost) {
         inp.type = type === 'number' ? 'number' : 'text';
         if (type === 'number') inp.step = 'any';
         inp.value = r[k] ?? '';
-        inp.oninput = () => { r[k] = type === 'number' ? (inp.value === '' ? null : Number(inp.value)) : inp.value; updateCalc(); onChange(); };
+        inp.oninput = () => {
+          r[k] = type === 'number' ? (inp.value === '' ? null : Number(inp.value)) : inp.value;
+          if (k === 'weight_g' || k === 'material_price_lb') r.material_cost_hkd = null;
+          updateCalc(); onChange();
+        };
         td.appendChild(inp);
       }
       return td;

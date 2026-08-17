@@ -671,7 +671,11 @@ function injectionSubtotal(molding) {
 
 function blowSubtotal(molding) {
   return sum((molding && molding.blow_items) || [], row => {
-    const material = num(row.weight_g) * num(row.material_price_lb) / 454;
+    const hasImportedMaterial = row.material_cost_hkd !== undefined
+      && row.material_cost_hkd !== null && row.material_cost_hkd !== '';
+    const material = hasImportedMaterial
+      ? num(row.material_cost_hkd)
+      : num(row.weight_g) * num(row.material_price_lb) / 454;
     const usage = row.usage_qty !== undefined && row.usage_qty !== null && row.usage_qty !== ''
       ? num(row.usage_qty)
       : 1;
