@@ -506,7 +506,7 @@ def test_xingxin_nfc_export_uses_legacy_matrix_workbook(client):
     assert wb["出库明细"].cell(3, 3).value == 20
 
 
-def test_xingxin_nfc_record_export_fills_legacy_opening_date(client):
+def test_xingxin_nfc_record_export_keeps_opening_out_of_detail_sheet(client):
     login(client, "兴信B来料仓", "123456", DEFAULT_DEPARTMENT)
     dongguan = loc_id(client, "东莞车间")
     client.post("/api/records", json={
@@ -523,10 +523,13 @@ def test_xingxin_nfc_record_export_fills_legacy_opening_date(client):
     wb = openpyxl.load_workbook(io.BytesIO(r.content), data_only=True)
 
     assert r.status_code == 200
-    assert wb["出库明细"].cell(1, 3).value == "2026-06-27"
+    # 期初只进总表（东莞列），出库明细不再出现期初列
+    assert wb["总表"].cell(3, 13).value == 60
+    assert wb["出库明细"].cell(1, 3).value is None
+    assert wb["出库明细"].cell(2, 3).value is None
 
 
-def test_xingxin_nfc_export_groups_opening_stock_by_document_column(client):
+def test_xingxin_nfc_export_keeps_opening_stock_in_total_sheet_only(client):
     login(client, "兴信B来料仓", "123456", DEFAULT_DEPARTMENT)
     client.post("/api/records", json={
         "rec_type": "inbound_raw",
@@ -552,12 +555,11 @@ def test_xingxin_nfc_export_groups_opening_stock_by_document_column(client):
     ws = wb["入库明细"]
 
     assert r.status_code == 200
-    assert ws.cell(1, 3).value == "2026-06-27"
-    assert ws.cell(2, 3).value == "期初入仓"
-    assert ws.cell(3, 3).value == 846669
-    assert ws.cell(4, 3).value == 865000
-    assert ws.cell(1, 4).value is None
-    assert ws.cell(2, 4).value is None
+    # 期初入仓只体现在总表“截止6月27号”列，明细页只列实际单据
+    assert wb["总表"].cell(3, 3).value == 846669
+    assert wb["总表"].cell(4, 3).value == 865000
+    assert ws.cell(1, 3).value is None
+    assert ws.cell(2, 3).value is None
 
 
 def test_xingxin_nfc_export_does_not_include_regular_june_rows_in_opening_total(client):
@@ -607,7 +609,9 @@ def test_xingxin_nfc_import_does_not_treat_quantity_as_workbook_year(client):
     exported_wb = openpyxl.load_workbook(
         io.BytesIO(exported.content), data_only=True
     )
-    assert exported_wb["入库明细"].cell(1, 3).value == "2026-06-27"
+    # 期初不再进明细页，首列是实际单据 RK-1；期初数仍在总表
+    assert exported_wb["总表"].cell(3, 3).value == 49855
+    assert exported_wb["入库明细"].cell(1, 3).value == "2026-07-01"
 
 
 def test_xingxin_nfc_export_sorts_columns_by_date_and_document(client):
@@ -641,7 +645,7 @@ def test_xingxin_nfc_export_sorts_columns_by_date_and_document(client):
     ]
 
 
-def test_xingxin_nfc_export_repairs_legacy_future_opening_date(client):
+def test_xingxin_nfc_export_excludes_future_dated_opening_from_detail(client):
     login(client, "兴信B来料仓", "123456", DEFAULT_DEPARTMENT)
     response = client.post("/api/records", json={
         "rec_type": "inbound_raw",
@@ -656,7 +660,9 @@ def test_xingxin_nfc_export_repairs_legacy_future_opening_date(client):
 
     exported = client.get("/api/records/export?material=NFC贴纸")
     wb = openpyxl.load_workbook(io.BytesIO(exported.content), data_only=True)
-    assert wb["入库明细"].cell(1, 3).value == "2026-06-27"
+    # 期初只进总表，明细页不再有期初列
+    assert wb["总表"].cell(3, 3).value == 100
+    assert wb["入库明细"].cell(1, 3).value is None
 
 
 def test_semi_finished_export_uses_legacy_matrix_workbook(client):

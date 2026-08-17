@@ -3626,9 +3626,12 @@ def _supplier_nfc_detail_groups(records):
 
 def _supplier_nfc_detail_sheet(wb, title, records, sticker_names, total_header):
     ws = wb.create_sheet(title)
+    # 期初数据只在总表展示（截止6月27号/东莞/邵阳领料列），明细页只列实际
+    # 出入库单据，与纸质台账版式一致，避免明细页合计多出期初列（2026-08-17）。
     records = [
         row for row in records
         if _export_month(_record_export_date(row)) in (6, *EXPORT_MONTHS)
+        and not _supplier_nfc_opening_kind(row)
     ]
     groups = sorted(
         _supplier_nfc_detail_groups(records),
