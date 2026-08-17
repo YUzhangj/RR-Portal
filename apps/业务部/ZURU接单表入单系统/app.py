@@ -86,6 +86,10 @@ def _load_json(name):
 
 
 COUNTRY_MAP = _load_json('country_map.json')
+# 美国目的国仅显示"美国"，不带洲后缀（仅美国如此，覆盖映射表中的 -北美洲 值）
+COUNTRY_MAP.update({k: '美国' for k in
+                    ('USA', 'United States', 'US', 'U.S.', 'U.S.A.',
+                     'United States of America', 'America')})
 ITEM_MAP = _load_json('item_map.json')
 # 黑名单货号（河源等独立排期，不入总排期接单表）
 _ignore_data = _load_json('ignore_items.json')
@@ -530,6 +534,14 @@ def classify():
     results = []
     for fname, path in saved:
         try:
+            # 取消单直接标记，不参与新单/修改单分类
+            if po_parser.is_cancelled(path, filename=fname):
+                results.append({
+                    'filename': fname, 'po': '',
+                    'is_revision': False, 'cancelled': True,
+                    'missing_items': []
+                })
+                continue
             data = po_parser.parse(path)
             po = data['po_number']
             is_rev = po in existing_pos
@@ -541,12 +553,14 @@ def classify():
                     missing.append(f'{sn}({sku})')
             results.append({
                 'filename': fname, 'po': po,
-                'is_revision': is_rev, 'missing_items': missing
+                'is_revision': is_rev, 'cancelled': False,
+                'missing_items': missing
             })
         except Exception:
             results.append({
                 'filename': fname, 'po': '',
                 'is_revision': po_parser.is_revision(fname),
+                'cancelled': False,
                 'missing_items': []
             })
     po_files = {}
@@ -595,6 +609,7 @@ def process():
 
     new_orders = []
     rev_orders = []
+    cancelled_orders = []
     parse_errors = []
 
     for i, (fname, path) in enumerate(saved):
@@ -603,6 +618,10 @@ def process():
             task['msg'] = f'解析 {fname}...'
 
         try:
+            # 取消单（文件名含"取消"或内嵌"订单取消"覆盖章）直接跳过，不入单
+            if po_parser.is_cancelled(path, filename=fname):
+                cancelled_orders.append(fname)
+                continue
             data = po_parser.parse(path)
             data['filename'] = fname
             po = data['po_number']
@@ -625,6 +644,7 @@ def process():
 
     result = {'ok': True, 'written': 0, 'warnings': [], 'details': [],
               'filename': '', 'revisions': rev_orders, 'parse_errors': parse_errors,
+              'cancelled': cancelled_orders,
               'task_id': task['id']}
 
     custom_date_str = request.form.get('order_date', '')
@@ -642,6 +662,12 @@ def process():
         result['warnings'] = gen['warnings']
         result['details'] = gen['details']
         result['filename'] = gen.get('filename', '')
+
+    # 取消单提示排在警告最前，确保用户能看到
+    if cancelled_orders:
+        cancel_warns = [f'{n}: 检测到"订单取消"覆盖标记，已按取消单跳过，未入单'
+                        for n in cancelled_orders]
+        result['warnings'] = cancel_warns + result['warnings']
 
     with _tasks_lock:
         task['done'] = True
