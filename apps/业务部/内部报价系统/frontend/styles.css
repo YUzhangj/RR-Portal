@@ -236,6 +236,24 @@ button.ghost:hover { background: var(--primary-soft); }
   color: #374151;
   padding-left: 0;
 }
+
+/* 啤机部：机台、机型、目标数是自动套啤价的关键字段，作为一组强调。 */
+.wb-table thead th.molding-machine-key {
+  background: #fef3c7;
+  color: #92400e;
+  border-bottom-color: #f59e0b;
+}
+.wb-table tbody td.molding-machine-key {
+  background: #fffbeb;
+}
+.wb-table tbody td.molding-machine-key input {
+  background: #fffdf4;
+  border-color: #fcd34d;
+}
+.wb-table tbody td.molding-machine-key input:focus {
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, .16);
+}
 .wb-footer { margin: 6px 0; font-size: 13px; color: #374151; text-align: right; }
 
 /* ========== 两列网格表单（业务工作台） ========== */

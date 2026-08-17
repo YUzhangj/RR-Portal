@@ -1,13 +1,19 @@
 // 解析"车缝报价单"型 xlsx
 // 期望结构：每个产品分组顶部有一个标题行（一般是合并单元格 + 浅色填充），
-// 紧接着是表头行（物料名称 / 裁片部位 / 供应商 / ... / 用量 / 单价 / 成本 / 码点 / 价钱 / 备注），
+// 紧接着是表头行（物料名称/布料名称 / 裁片部位/部位 / ... / 用量 / 单价 / 码点 / 价钱 / 备注），
 // 然后是若干物料行 + 人工行（裁床人工 / 车缝人工 / 手工人工），
 // 末行 "合计 ¥xx.xx"
 // 多个产品在同一工作表里堆叠。
 const ExcelJS = require('exceljs');
 
-// 表头必含项（放宽「单价」：有的表用「物料价」而非「单价」，故不强求）
-const HEADER_KEYS = ['物料名称', '裁片部位', '用量', '价钱'];
+// 新旧车缝报价表的同义表头。新格式使用「布料名称 / 部位 / 物料价（RMB） /
+// 价钱（RMB） / 总价钱（RMB）」，旧格式使用「物料名称 / 裁片部位 / 单价 / 价钱」。
+const HEADER_ALIASES = {
+  material: ['物料名称', '布料名称'],
+  part: ['裁片部位', '部位'],
+  qty: ['用量'],
+  price: ['价钱'],
+};
 
 function toStr(v) {
   if (v == null) return '';
@@ -21,14 +27,18 @@ function toStr(v) {
 
 function toNum(v) {
   if (v == null || v === '') return null;
-  if (typeof v === 'object' && 'result' in v) return Number(v.result) || null;
+  if (typeof v === 'object' && 'result' in v) {
+    const result = Number(v.result);
+    return Number.isNaN(result) ? null : result;
+  }
   const n = Number(String(v).replace(/[^\d.\-]/g, ''));
   return isNaN(n) ? null : n;
 }
 
 function isHeaderRow(values) {
-  const joined = values.map(toStr).join('|');
-  return HEADER_KEYS.every(k => joined.includes(k));
+  const cells = values.map(toStr).filter(Boolean);
+  return Object.values(HEADER_ALIASES).every(aliases =>
+    aliases.some(alias => cells.some(cell => cell.includes(alias))));
 }
 
 // 给一行的 header 单元格，建 colIndex 索引（1-based）
@@ -39,13 +49,14 @@ function buildHeaderIndex(headerCells) {
     const s = toStr(v);
     if (!s) return;
     // 只取第一次匹配，避免右侧"显示客人单价/用量/总价"等额外列覆盖
-    if (s.includes('物料名称')) setOnce('material', i);
-    else if (s.includes('裁片部位')) setOnce('part', i);
+    if (s.includes('物料名称') || s.includes('布料名称')) setOnce('material', i);
+    else if (s.includes('裁片部位') || s === '部位') setOnce('part', i);
     else if (s.includes('供应商')) setOnce('supplier', i);
     else if (s.includes('用量')) setOnce('qty', i);
     else if (s.includes('单价') || s.includes('物料价')) setOnce('unit_price', i);
     else if (s.includes('成本')) setOnce('cost', i);
     else if (s.includes('码点')) setOnce('markup', i);
+    else if (s.includes('总价钱')) setOnce('total_price', i);
     else if (s.includes('价钱')) setOnce('price', i);
     else if (s.includes('备注')) setOnce('note', i);
     // 区别于“物料名称”：部分表格用“名称”列标记角色1/角色2等产品分组。
@@ -75,7 +86,7 @@ async function parseWorkbook(buffer) {
       break;
     }
   }
-  if (!ws) return { error: '没有找到车缝明细表头（物料名称/裁片部位/用量/价钱）' };
+  if (!ws) return { error: '没有找到车缝明细表头（物料名称或布料名称 / 裁片部位或部位 / 用量 / 价钱）' };
 
   const mergedTitleRows = new Set((ws.model.merges || []).flatMap((range) => {
     const match = /^[A-Z]+(\d+):[A-Z]+(\d+)$/i.exec(range);
@@ -87,6 +98,7 @@ async function parseWorkbook(buffer) {
   let headerIdx = null;
   let pendingTitle = null;
   let afterTotal = false;
+  let lastMaterial = '';
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i] || [];
@@ -103,6 +115,7 @@ async function parseWorkbook(buffer) {
       }
       pendingTitle = null;
       afterTotal = false;
+      lastMaterial = '';
       continue;
     }
 
@@ -132,6 +145,7 @@ async function parseWorkbook(buffer) {
           groups.push(cur);
         }
         afterTotal = false;
+        lastMaterial = '';
         continue;
       }
     }
@@ -142,10 +156,13 @@ async function parseWorkbook(buffer) {
       if (cur && cur.items.length === 0) cur.name = matName;
       else { cur = { name: matName, items: [], labor_amount: 0, sub_parts: [] }; groups.push(cur); }
       afterTotal = false;
+      lastMaterial = '';
       continue;
     }
 
-    const price = toNum(r[headerIdx.price]);
+    const basePrice = toNum(r[headerIdx.price]);
+    const totalPrice = toNum(r[headerIdx.total_price]);
+    const price = totalPrice != null ? totalPrice : basePrice;
     const qty = toNum(r[headerIdx.qty]);
     const unitPrice = toNum(r[headerIdx.unit_price]);
 
@@ -153,6 +170,7 @@ async function parseWorkbook(buffer) {
     if (matName.includes('合计') || (part === '' && matName === '' && price != null && qty == null)) {
       // 保留表头索引；部分报价单整张明细表只在第一行提供一次表头。
       afterTotal = true;
+      lastMaterial = '';
       continue;
     }
 
@@ -161,14 +179,20 @@ async function parseWorkbook(buffer) {
 
     afterTotal = false;
 
+    // 新格式会将相同布料的名称只写在首行，后续部位行留空；导入时按 Excel
+    // 的视觉语义向下继承，避免系统里出现只有部位、没有布料名称的明细。
+    const effectiveMaterial = matName || ((part && qty != null) ? lastMaterial : '');
+    if (matName) lastMaterial = matName;
+
     // 人工类
-    if (/裁床人工|车缝人工|手工人工|人工/.test(matName)) {
+    if (/裁床人工|车缝人工|手工人工|人工/.test(effectiveMaterial)) {
       cur.labor_amount = (cur.labor_amount || 0) + (price || 0);
       cur.items.push({
-        material: matName, part: part || '',
+        material: effectiveMaterial, part: part || '',
         qty: qty || 1, unit_price: unitPrice || price || 0,
         markup: toNum(r[headerIdx.markup]) || 1,
         price: price || 0,
+        base_price: basePrice || 0,
         note: toStr(r[headerIdx.note]),
         is_labor: true,
       });
@@ -176,7 +200,7 @@ async function parseWorkbook(buffer) {
     }
 
     cur.items.push({
-      material: matName,
+      material: effectiveMaterial,
       part: part || '',
       supplier: toStr(r[headerIdx.supplier]),
       qty: qty || 0,
@@ -184,13 +208,14 @@ async function parseWorkbook(buffer) {
       cost: toNum(r[headerIdx.cost]) || 0,
       markup: toNum(r[headerIdx.markup]) || 1,
       price: price || 0,
+      base_price: basePrice || 0,
       note: toStr(r[headerIdx.note]),
     });
   }
 
   // 去掉没有任何物料行的空组（如仅由 DATE/表头噪音生成的组）
   const nonEmpty = groups.filter(g => (g.items || []).length > 0);
-  if (!nonEmpty.length) return { error: '没有解析到任何产品分组（请确认表头含 物料名称/裁片部位/用量/价钱）' };
+  if (!nonEmpty.length) return { error: '没有解析到任何产品分组（请确认表头含 物料名称或布料名称 / 裁片部位或部位 / 用量 / 价钱）' };
 
   return { groups: nonEmpty, count: nonEmpty.length, sheet_used: ws.name };
 }

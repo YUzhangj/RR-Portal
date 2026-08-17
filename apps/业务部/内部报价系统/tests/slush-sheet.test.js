@@ -89,6 +89,34 @@ test('slush import recognizes an explicit mold fee currency', async () => {
   assert.equal(result.items[0].mold_fee_currency, 'USD');
 });
 
+test('slush import supports 皇冠猪 template product name and calculated mold fee', async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sheet1');
+  sheet.getCell('A2').value = '产品名称';
+  sheet.getCell('B2').value = '皇冠猪';
+  sheet.getCell('A3').value = '料价：';
+  sheet.getCell('B3').value = 6.2;
+  sheet.getCell('A4').value = '24小时搪工：';
+  sheet.getCell('B4').value = 900;
+  sheet.getCell('A5').value = '12批工/烤工：';
+  sheet.getCell('B5').value = 280;
+  sheet.getCell('D6').value = '24小时生产数:';
+  sheet.getCell('E6').value = 6000;
+  sheet.getCell('D7').value = '12小时批产量:';
+  sheet.getCell('E7').value = 5000;
+  sheet.getCell('D9').value = '模费:49*320';
+  sheet.getCell('E9').value = '15680元';
+  sheet.getCell('D10').value = '料重：';
+  sheet.getCell('E10').value = 25;
+
+  const result = await parseWorkbook(await workbook.xlsx.writeBuffer());
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.items[0].name, '皇冠猪');
+  assert.equal(result.items[0].mold_fee, 15680);
+  assert.equal(result.items[0].mold_fee_currency, 'RMB');
+});
+
 test('slush frontend wires template import, formula calculation, and image display', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'workbench.js'), 'utf8');
   assert.match(source, /fetch\('\/api\/uploads\/slush-sheet'/);

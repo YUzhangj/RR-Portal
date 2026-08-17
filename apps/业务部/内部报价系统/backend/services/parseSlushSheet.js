@@ -36,13 +36,19 @@ function findMoneyPair(rows, wanted, defaultCurrency = 'RMB') {
     for (let columnIndex = 0; columnIndex < row.length; columnIndex++) {
       const raw = toStr(row[columnIndex]);
       if (!raw) continue;
-      const inline = /^(.+?)[：:]\s*([-+]?\d[\d,，]*(?:\.\d+)?)\s*$/.exec(raw);
+      // 兼容「模费:1000」和「模费:49*320」两种写法。后者通常会在右侧
+      // 单元格保存算好的金额，优先读取该结果，避免把表达式误读成 49320。
+      const inline = /^(.+?)[：:]\s*(.*?)\s*$/.exec(raw);
       const label = inline ? inline[1] : raw;
       const plainLabel = normalizedLabel(label)
         .replace(/[（(]?(?:RMB|CNY|USD|HKD|人民币|港币|港元|美元|美金)[）)]?/gi, '');
       if (plainLabel !== wanted) continue;
+      const adjacentAmount = toNum(row[columnIndex + 1]);
+      const inlineAmount = inline && /^[-+]?\d[\d,，]*(?:\.\d+)?$/.test(inline[2])
+        ? toNum(inline[2])
+        : null;
       return {
-        amount: toNum(inline ? inline[2] : row[columnIndex + 1]),
+        amount: adjacentAmount != null ? adjacentAmount : inlineAmount,
         currency: detectCurrency(label) || defaultCurrency,
       };
     }
@@ -124,7 +130,7 @@ function parseSheet(sheet) {
   const moldFee = findMoneyPair(rows, '模费');
   const item = {
     item_code: '',
-    name: '',
+    name: toStr(findPair(rows, '产品名称')),
     material: '搪胶料',
     qty: 1,
     images: [],

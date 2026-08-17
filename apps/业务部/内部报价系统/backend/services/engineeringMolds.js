@@ -21,6 +21,7 @@ function expandEngineeringMolds(molds) {
       product_image: mold.product_image || '',
       source_sheet_name: mold._sheet_name || '',
       source_sheet_index: mold._sheet_index ?? null,
+      mold_size: mold.mold_size || (mold.detail && mold.detail.mold_size) || '',
     };
 
     if (Array.isArray(mold.parts) && mold.parts.length) {
