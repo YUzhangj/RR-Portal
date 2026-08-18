@@ -4401,8 +4401,8 @@ def export_records(
             totals_sql += " AND material=?"
             totals_params.append(material)
         monthly_totals = conn.execute(totals_sql, totals_params).fetchall()
-        # 东莞车间 PCBA 台账的「36#唱片CD」就是 36#NFC贴纸（车间沿用旧称），
-        # 导出时把贴纸领料记录一并带出，用于 36#唱片CD 行/明细页展示
+        # 东莞车间 PCBA 台账的「36#CD领料明细」是 CD 贴纸的独立小台账，
+        # 只取该页导入的记录（备注前缀区分），不要把 NFC 贴纸整仓领料混进来
         cd_issue_records = []
         if user["department"] == ASSEMBLY_DEPARTMENT and material == PCBA_MATERIAL:
             cd_issue_records = [dict(r) for r in conn.execute(
@@ -4412,7 +4412,8 @@ def export_records(
                 "r.qty, r.remark, r.summary_month "
                 "FROM records r LEFT JOIN locations l ON r.location_id = l.id "
                 "WHERE r.department=? AND r.material=? AND r.sticker_type=? "
-                "AND r.rec_type='issue' ORDER BY r.id",
+                "AND r.rec_type='issue' AND COALESCE(r.remark, '') LIKE '36#CD领料明细%' "
+                "ORDER BY r.id",
                 (user["department"], NFC_MATERIAL, "36#NFC贴纸"),
             ).fetchall()]
     finally:
