@@ -476,4 +476,39 @@ describe('parseDeliveryImport', () => {
       product: 'IC', process: '邦定', process_category: '邦定', quantity: 2040, unit_price_cny_tax: 0.5, amount: 1020,
     })
   })
+
+  it('imports electronics contracts without a product category and expands two-digit signing years', () => {
+    const aoa = [
+      ['东莞市登信电子有限公司'],
+      ['', '', '', '委外加工合同'],
+      [],
+      ['供应商：', '邵阳市华登塑胶制品有限公司', '', '', '', '', '订单编号：', 'Dz 20260000022'],
+      [], [], [], [],
+      ['货 号', '货 品 名 称', '工序', '数量', '单位', '单 价', '金 额', '单重（G)', '重量（KG)', '货期', '备注'],
+      ['7149绿', '焊线', '后焊', '10000', 'PCS', 0.098, 980, '', '', '', 'BBA2502462-01'],
+      ['', '', '', '', '', '合计', 980],
+      [],
+      ['供应商确认：', '', '', '采购签核：胡爱莲'],
+      ['时间： 26 年7月10日', '', '', '', '时间：      年    月     日'],
+    ]
+
+    const result = parseDeliveryImport(aoa, { '邵阳市华登塑胶制品有限公司': 'factory-electronics' })
+
+    expect(result.failed).toBe(0)
+    expect(result.payloads).toHaveLength(1)
+    expect(result.payloads[0]).toMatchObject({
+      factory: 'factory-electronics',
+      pmc: '胡爱莲',
+      item_no: '7149绿',
+      order_no: 'Dz 20260000022',
+      product: '焊线',
+      process: '后焊',
+      process_category: '后焊',
+      quantity: 10000,
+      unit_price_cny_tax: 0.098,
+      amount: 980,
+      order_date: '2026-07-10',
+      notes: 'BBA2502462-01',
+    })
+  })
 })
