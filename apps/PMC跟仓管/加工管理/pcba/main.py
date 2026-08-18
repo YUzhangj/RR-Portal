@@ -1201,6 +1201,14 @@ def _parse_legacy_assembly_pcba_workbook(conn, wb, department):
         headers = _legacy_header_map(ws)
         for row_no in range(2, ws.max_row + 1):
             if is_cd_sheet:
+                # 跳过「7月小计：」类汇总行，避免与明细重复计数
+                cd_label = _cell_text(
+                    _legacy_header_value(ws, headers, row_no, "物料名称")
+                ) + _cell_text(
+                    _legacy_header_value(ws, headers, row_no, "领料编号")
+                )
+                if "小计" in cd_label or "合计" in cd_label:
+                    continue
                 qty = _legacy_int(
                     _legacy_header_value(ws, headers, row_no, "领料数"),
                     row_no,
@@ -1277,6 +1285,9 @@ def _parse_legacy_assembly_pcba_workbook(conn, wb, department):
         product_name = _cell_text(
             _legacy_header_value(ws, headers, row_no, "品名/规格")
         )
+        # 跳过「8月小计：」类汇总行，避免与明细重复计数
+        if "小计" in product_name or "合计" in product_name:
+            continue
         body = RecordIn(
             rec_type="finished",
             location_id=location_id,

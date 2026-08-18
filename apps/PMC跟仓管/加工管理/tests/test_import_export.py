@@ -1626,6 +1626,58 @@ def test_assembly_pcba_legacy_workbook_imports_issue_and_finished_rows(client):
     assert by_type_doc[("finished", "2510160")]["location_name"] == "东莞车间"
 
 
+def test_assembly_pcba_legacy_workbook_skips_subtotal_rows(client):
+    # 东莞车间 PCBA 台账的明细页底部有「X月小计：」汇总行，导入时必须跳过，
+    # 否则汇总值会作为一条无日期记录重复计数（成品总数/36#CD 领料翻倍）。
+    login(client, "东莞车间", "123456", "东莞车间")
+    wb = openpyxl.Workbook()
+    total_ws = wb.active
+    total_ws.title = "总表"
+    total_ws.append(["物料名称", "领料总数", "截6月月结", "8月"])
+    total_ws.append(["PCBA主板", 93339, None, 93339])
+
+    cd_ws = wb.create_sheet("36#CD领料明细")
+    cd_ws.append(["日期", "领料编号", "物料名称", "领料数", "备注"])
+    cd_ws.append(["2026-07-09", "DS260617-01", "36#唱片CD", 16944, None])
+    cd_ws.append([None, None, "7月小计：", 16944, None])
+
+    issue_ws = wb.create_sheet("PCB主板领料明细")
+    issue_ws.append(["日期", "领料编号", "物料名称", "领料数", "备注"])
+    issue_ws.append(["2026-07-06", 2202830, "PCBA主板", 20800, None])
+    issue_ws.append([None, None, "8月小计：", 93339, None])
+
+    finished_ws = wb.create_sheet("成品入仓明细")
+    finished_ws.append(
+        ["日期", "送货单号", "合同号", "货号", "品名/规格", "数量（pcs）", "备注"]
+    )
+    finished_ws.append(
+        ["2026-07-07", 2510160, 4500204119, "MSLD182-77794", None, 11328, None]
+    )
+    finished_ws.append([None, None, None, None, "8月小计：", 168080, None])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    r = upload_bytes(
+        client,
+        "/api/records/import",
+        buf.getvalue(),
+        "东莞车间77794#PCB主板出入明细.xlsx",
+    )
+    records = client.get("/api/records").json()
+
+    assert r.status_code == 200
+    assert r.json()["created"] == 3
+    assert sum(row["qty"] for row in records if row["rec_type"] == "finished") == 11328
+    assert sum(
+        row["qty"] for row in records
+        if row["rec_type"] == "issue" and row["sticker_type"] == "36#NFC贴纸"
+    ) == 16944
+    assert sum(
+        row["qty"] for row in records
+        if row["rec_type"] == "issue" and row["material"] == "77794-PCBA板"
+    ) == 20800
+
+
 def test_assembly_pcba_export_matches_import_workbook_format(client):
     login(client, "东莞车间", "123456", "东莞车间")
     imported = upload_bytes(
