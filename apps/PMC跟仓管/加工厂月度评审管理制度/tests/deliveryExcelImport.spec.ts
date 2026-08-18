@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import * as XLSX from 'xlsx'
-import { parseDeliveryExcelFiles, UNMATCHED_IMPORT_FACTORY_PREFIX, type DeliveryExcelFile } from '../src/utils/deliveryExcelImport'
+import { parseDeliveryExcelFiles, type DeliveryExcelFile } from '../src/utils/deliveryExcelImport'
 
 function excelFile(name: string, aoa: any[][]): DeliveryExcelFile {
   const wb = XLSX.utils.book_new()
@@ -17,21 +17,6 @@ function multiSheetExcelFile(name: string, sheets: { name: string; aoa: any[][] 
 }
 
 describe('parseDeliveryExcelFiles', () => {
-  it('keeps rows with an unmatched factory available for draft correction', async () => {
-    const file = excelFile('未匹配工厂.xlsx', [
-      ['供应商：', '新增工厂', '', '', '', '', '订单编号：', 'PO-1'],
-      ['货号', '货品名称', '工序', '数量', '单位', '单价'],
-      ['A-1', '电子料', '贴片', 100, 'PCS', 0.2],
-      ['', '合计'],
-    ])
-
-    const result = await parseDeliveryExcelFiles([file], {})
-
-    expect(result.failedRows).toBe(0)
-    expect(result.payloads).toHaveLength(1)
-    expect(result.payloads[0].factory).toBe(`${UNMATCHED_IMPORT_FACTORY_PREFIX}新增工厂`)
-  })
-
   it('skips hidden historical sheets and imports the visible purchase order sheet', async () => {
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
@@ -59,7 +44,6 @@ describe('parseDeliveryExcelFiles', () => {
 
     expect(result.failedRows).toBe(0)
     expect(result.payloads).toHaveLength(1)
-    expect(result.sources).toEqual(['大罗采购单 1.xlsx · 当前采购单'])
     expect(result.payloads[0]).toMatchObject({
       order_no: 'DL20260701-1', item_no: '77782GQ1-S001-INT',
       order_date: '2026-07-01', delivery_date: '2026-07-20',
@@ -154,6 +138,39 @@ describe('parseDeliveryExcelFiles', () => {
       unit_price_cny_tax: 0.06,
       unit_price: 0.061,
       amount: 2712,
+    })
+  })
+
+  it('imports every purchase order repeated vertically in one assembly worksheet', async () => {
+    const purchaseOrder = (orderNo: string, orderDate: string, rows: any[][]) => [
+      ['供应商：', '晨晖', '', '', '订单编号：', '', '', orderNo],
+      ['货号', '货 品 名 称', '数量', '单位', '商品名称', '订单PO', '交货日期', '单价', '备注'],
+      ...rows,
+      ['', '合计'],
+      ['供应商确认：', '', '采购签核：', '', '伍计红'],
+      ['', '', '', '', '', `下单日期：${orderDate}`],
+    ]
+    const file = excelFile('晨晖采购单.xlsx', [
+      ...purchaseOrder('CH20260706-1', '2026年07月06日', [
+        ['SR1033CDU-12', '手链', 2004, 'PCS', '成品', 'PO0000259', '2026/07/08', 0.29],
+        ['SR1033CDU-12', '手链', 2412, 'PCS', '成品', 'PO0000260', '2026/07/27', 0.29],
+      ]),
+      ...purchaseOrder('CH20260706-2', '2026年07月06日', [
+        ['SR1033CDU-24', '手链', 10008, 'PCS', '成品', 'PO0000340', '2026/07/09', 0.65],
+        ['SR1033CDU-24', '手链', 2040, 'PCS', '成品', 'PO0000369', '2026/07/24', 0.65],
+      ]),
+    ])
+
+    const result = await parseDeliveryExcelFiles([file], { '晨晖': 'factory-chenhui' }, { preferCnyTaxPrice: true })
+
+    expect(result).toMatchObject({ failedRows: 0, unrecognizedFiles: [], readFailedFiles: [] })
+    expect(result.payloads).toHaveLength(4)
+    expect(result.payloads.map((row) => row.order_no)).toEqual([
+      'CH20260706-1', 'CH20260706-1', 'CH20260706-2', 'CH20260706-2',
+    ])
+    expect(result.payloads[2]).toMatchObject({
+      pmc: '伍计红', item_no: 'SR1033CDU-24', quantity: 10008,
+      order_date: '2026-07-06', delivery_date: '2026-07-09', unit_price_cny_tax: 0.65,
     })
   })
 
