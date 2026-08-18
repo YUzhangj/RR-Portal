@@ -5,6 +5,7 @@ import { api } from '../api/client'
 // Legacy quote shape (from old HTML — settings.quotes blob)
 interface Quote {
   supplier?: string
+  productCode?: string
   matName?: string
   spec?: string
   minQty?: number
@@ -21,6 +22,10 @@ const CURR = [
   { value: 'Rp',  label: 'Rp 印尼盾' },
 ]
 
+function legacyProductCode(notes?: string): string {
+  return notes?.match(/(?:^|\/)\s*货号\s*[:：]\s*([^/]+?)\s*$/)?.[1]?.trim() ?? ''
+}
+
 export default function QuotesPage() {
   const { message } = App.useApp()
   const [rows, setRows] = useState<Quote[]>([])
@@ -36,7 +41,12 @@ export default function QuotesPage() {
     try {
       const resp = await api.get<Quote[]>('/quotes/blob')
       blobVersion.current = resp.headers['x-blob-version'] ?? ''
-      setRows(Array.isArray(resp.data) ? resp.data : [])
+      setRows(Array.isArray(resp.data)
+        ? resp.data.map((quote) => ({
+            ...quote,
+            productCode: quote.productCode || legacyProductCode(quote.notes),
+          }))
+        : [])
       setDirty(false)
     } finally { setLoading(false) }
   }
@@ -64,7 +74,7 @@ export default function QuotesPage() {
     setDirty(true)
   }
   function add() {
-    setRows((r) => [{ supplier: '', matName: '', spec: '', minQty: 0, unitPrice: 0, currency: '¥' }, ...r])
+    setRows((r) => [{ supplier: '', productCode: '', matName: '', spec: '', minQty: 0, unitPrice: 0, currency: '¥' }, ...r])
     setDirty(true)
   }
   function del(i: number) {
@@ -78,12 +88,6 @@ export default function QuotesPage() {
     setSelKeys([])
     setDirty(true)
   }
-  function clearAll() {
-    if (!rows.length) return
-    setRows([]); setSelKeys([]); setDirty(true)
-    message.success('已清空（记得点 💾 保存全部 才会写入后端）')
-  }
-
   // 币种归一：把任意写法映射到下拉选项 ¥/HK$/US$/Rp（顺序重要：HK$ 含 $，先判）
   function inferCurrency(text: any): string {
     const t = String(text ?? '')
@@ -206,10 +210,11 @@ export default function QuotesPage() {
           const noteBase = cNotes >= 0 ? String(row[cNotes] ?? '').trim() : ''
           const common = {
             supplier: sup,
+            productCode: code,
             matName,
             spec: cSpec >= 0 ? String(row[cSpec] ?? '').trim() : '',
             quoteDate: (cDate >= 0 ? String(row[cDate] ?? '').trim() : '') || today,
-            notes: code ? (noteBase ? noteBase + ' / 货号:' + code : '货号:' + code) : noteBase,
+            notes: noteBase,
           }
           if (hasHorizontalTiers) {
             for (const tier of tierCols) {
@@ -255,6 +260,7 @@ export default function QuotesPage() {
     const XLSX = await import('xlsx')
     const data = rows.map((q) => ({
       供应商: q.supplier ?? '',
+      货号: q.productCode ?? '',
       物料名: q.matName ?? '',
       规格: q.spec ?? '',
       起订量: q.minQty ?? 0,
@@ -274,13 +280,13 @@ export default function QuotesPage() {
     .filter(({ q }) => {
       if (!filter) return true
       const s = filter.toLowerCase()
-      return ((q.supplier || '') + (q.matName || '') + (q.spec || '') + (q.notes || '')).toLowerCase().includes(s)
+      return ((q.supplier || '') + (q.productCode || '') + (q.matName || '') + (q.spec || '') + (q.notes || '')).toLowerCase().includes(s)
     }), [rows, filter])
 
   // Tiered-pricing group count
   const tierGroups = useMemo(() => {
     const set = new Set<string>()
-    for (const q of rows) set.add(`${q.supplier ?? ''}|${q.matName ?? ''}|${q.spec ?? ''}`)
+    for (const q of rows) set.add(`${q.supplier ?? ''}|${q.productCode ?? ''}|${q.matName ?? ''}|${q.spec ?? ''}`)
     return set.size
   }, [rows])
 
@@ -295,15 +301,12 @@ export default function QuotesPage() {
         }
         extra={
           <Space wrap>
-            <Input.Search allowClear placeholder="搜索 供应商/物料/规格/备注" style={{ width: 260 }}
+            <Input.Search allowClear placeholder="搜索 供应商/货号/物料/规格/备注" style={{ width: 280 }}
               onSearch={setFilter} onChange={(e) => !e.target.value && setFilter('')} />
             <Button onClick={load} disabled={loading}>🔄 重新加载</Button>
             <Button onClick={add}>➕ 新增</Button>
             <Popconfirm title={`删除选中的 ${selKeys.length} 条?`} onConfirm={delSelected} disabled={!selKeys.length}>
               <Button danger disabled={!selKeys.length}>🗑 批量删除 ({selKeys.length})</Button>
-            </Popconfirm>
-            <Popconfirm title={`清空全部 ${rows.length} 条报价？此操作不可撤销`} okText="清空" okButtonProps={{ danger: true }} onConfirm={clearAll} disabled={!rows.length}>
-              <Button danger disabled={!rows.length}>🗑 清空全部</Button>
             </Popconfirm>
             <Button onClick={() => fileRef.current?.click()}>📥 导入 Excel</Button>
             <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: 'none' }}
@@ -320,10 +323,11 @@ export default function QuotesPage() {
           dataSource={filtered}
           rowSelection={{ selectedRowKeys: selKeys, onChange: (k) => setSelKeys(k) }}
           pagination={{ defaultPageSize: 50, showSizeChanger: true }}
-          scroll={{ x: 1200 }}
+          scroll={{ x: 1360 }}
           columns={[
             { title: '#', width: 50, align: 'center', render: (_v, _r, i) => i + 1 },
             { title: '供应商', width: 200, render: (_v, r) => <Input size="small" value={r.q.supplier} onChange={(e) => patch(r._i, 'supplier', e.target.value)} /> },
+            { title: '货号', width: 140, render: (_v, r) => <Input size="small" value={r.q.productCode} placeholder="具体货号/共用" onChange={(e) => patch(r._i, 'productCode', e.target.value)} /> },
             { title: '物料名', width: 200, render: (_v, r) => <Input size="small" value={r.q.matName} onChange={(e) => patch(r._i, 'matName', e.target.value)} /> },
             { title: '规格', width: 160, render: (_v, r) => <Input size="small" value={r.q.spec} onChange={(e) => patch(r._i, 'spec', e.target.value)} /> },
             { title: '起订量', width: 100, render: (_v, r) => <InputNumber size="small" min={0} value={r.q.minQty} onChange={(v) => patch(r._i, 'minQty', v ?? 0)} style={{ width: '100%' }} /> },
