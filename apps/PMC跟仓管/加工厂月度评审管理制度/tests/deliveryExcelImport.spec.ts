@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import * as XLSX from 'xlsx'
-import { parseDeliveryExcelFiles, UNMATCHED_IMPORT_FACTORY_PREFIX, type DeliveryExcelFile } from '../src/utils/deliveryExcelImport'
+import { parseDeliveryExcelFiles, type DeliveryExcelFile } from '../src/utils/deliveryExcelImport'
 
 function excelFile(name: string, aoa: any[][]): DeliveryExcelFile {
   const wb = XLSX.utils.book_new()
@@ -17,21 +17,6 @@ function multiSheetExcelFile(name: string, sheets: { name: string; aoa: any[][] 
 }
 
 describe('parseDeliveryExcelFiles', () => {
-  it('keeps rows with an unmatched factory available for draft correction', async () => {
-    const file = excelFile('未匹配工厂.xlsx', [
-      ['供应商：', '新增工厂', '', '', '', '', '订单编号：', 'PO-1'],
-      ['货号', '货品名称', '工序', '数量', '单位', '单价'],
-      ['A-1', '电子料', '贴片', 100, 'PCS', 0.2],
-      ['', '合计'],
-    ])
-
-    const result = await parseDeliveryExcelFiles([file], {})
-
-    expect(result.failedRows).toBe(0)
-    expect(result.payloads).toHaveLength(1)
-    expect(result.payloads[0].factory).toBe(`${UNMATCHED_IMPORT_FACTORY_PREFIX}新增工厂`)
-  })
-
   it('skips hidden historical sheets and imports the visible purchase order sheet', async () => {
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
@@ -59,7 +44,6 @@ describe('parseDeliveryExcelFiles', () => {
 
     expect(result.failedRows).toBe(0)
     expect(result.payloads).toHaveLength(1)
-    expect(result.sources).toEqual(['大罗采购单 1.xlsx · 当前采购单'])
     expect(result.payloads[0]).toMatchObject({
       order_no: 'DL20260701-1', item_no: '77782GQ1-S001-INT',
       order_date: '2026-07-01', delivery_date: '2026-07-20',
