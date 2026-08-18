@@ -157,6 +157,39 @@ describe('parseDeliveryExcelFiles', () => {
     })
   })
 
+  it('imports every purchase order repeated vertically in one assembly worksheet', async () => {
+    const purchaseOrder = (orderNo: string, orderDate: string, rows: any[][]) => [
+      ['供应商：', '晨晖', '', '', '订单编号：', '', '', orderNo],
+      ['货号', '货 品 名 称', '数量', '单位', '商品名称', '订单PO', '交货日期', '单价', '备注'],
+      ...rows,
+      ['', '合计'],
+      ['供应商确认：', '', '采购签核：', '', '伍计红'],
+      ['', '', '', '', '', `下单日期：${orderDate}`],
+    ]
+    const file = excelFile('晨晖采购单.xlsx', [
+      ...purchaseOrder('CH20260706-1', '2026年07月06日', [
+        ['SR1033CDU-12', '手链', 2004, 'PCS', '成品', 'PO0000259', '2026/07/08', 0.29],
+        ['SR1033CDU-12', '手链', 2412, 'PCS', '成品', 'PO0000260', '2026/07/27', 0.29],
+      ]),
+      ...purchaseOrder('CH20260706-2', '2026年07月06日', [
+        ['SR1033CDU-24', '手链', 10008, 'PCS', '成品', 'PO0000340', '2026/07/09', 0.65],
+        ['SR1033CDU-24', '手链', 2040, 'PCS', '成品', 'PO0000369', '2026/07/24', 0.65],
+      ]),
+    ])
+
+    const result = await parseDeliveryExcelFiles([file], { '晨晖': 'factory-chenhui' }, { preferCnyTaxPrice: true })
+
+    expect(result).toMatchObject({ failedRows: 0, unrecognizedFiles: [], readFailedFiles: [] })
+    expect(result.payloads).toHaveLength(4)
+    expect(result.payloads.map((row) => row.order_no)).toEqual([
+      'CH20260706-1', 'CH20260706-1', 'CH20260706-2', 'CH20260706-2',
+    ])
+    expect(result.payloads[2]).toMatchObject({
+      pmc: '伍计红', item_no: 'SR1033CDU-24', quantity: 10008,
+      order_date: '2026-07-06', delivery_date: '2026-07-09', unit_price_cny_tax: 0.65,
+    })
+  })
+
   it('imports Runzhan assembly contracts with split approval and inherited delivery date', async () => {
     const file = excelFile('润展RZ20260015.xlsx', [
       ['东莞华登塑胶制品有限公司'],
