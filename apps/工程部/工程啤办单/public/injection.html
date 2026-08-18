@@ -465,6 +465,7 @@ function renderOrders(orders) {
 }
 
 let _currentMachineOrderId = null;
+let _viewLockedCompleted = false; // 当前详情是否为“已完成且锁定”的订单（实际用料改单需经理 PIN）
 let _injMatPrices = {};  // normalized material → unit_price (from buildPriceMap)
 
 function viewOrder(id) {
@@ -583,25 +584,30 @@ function viewOrder(id) {
         </div>`);
       }
 
-      // 已完成订单：锁定除啤办费用外的所有输入（发至模厂订单除外，可继续编辑）
-      // 例外：actual_weight_kg 为空的行仍允许编辑（补录漏填）—— 填了值保存后自动计算料金额并锁定
-      if (order.status === '已完成' && order.send_to !== '发至模厂' && order.workshop !== '模厂') {
+      // 已完成订单：锁定除啤办费用、实际用料外的所有输入（发至模厂订单除外，可继续编辑）
+      // 实际用料保持可编辑：空值行是补录；已填值修改属于经理改单，保存时需经理 PIN
+      const _lockedCompleted = order.status === '已完成' && order.send_to !== '发至模厂' && order.workshop !== '模厂';
+      _viewLockedCompleted = _lockedCompleted;
+      if (_lockedCompleted) {
         document.querySelectorAll('#machineItemsBody tr[data-item-id]').forEach(tr => {
           const wInp = tr.querySelector('[name="actual_weight_kg"]');
-          const amtInp = tr.querySelector('[name="actual_amount_hkd"]');
           const wEmpty = !wInp || !wInp.value || +wInp.value <= 0;
           tr.querySelectorAll('input').forEach(inp => {
             if (inp.name === 'injection_cost') return; // 永远可编辑
-            if (wEmpty && (inp.name === 'actual_weight_kg' || inp.name === 'actual_amount_hkd')) return; // 空值补录
+            if (inp.name === 'actual_weight_kg') return; // 可编辑：补录或经理修改（保存时经理 PIN 校验）
+            if (wEmpty && inp.name === 'actual_amount_hkd') return; // 空值补录联动
             inp.disabled = true;
             inp.style.background = '#f0f0f0';
           });
-          if (wEmpty && wInp) {
-            wInp.style.background = '#fff3cd'; // 高亮待补录
-            wInp.title = '该行实际用料未填写，保存后将自动计算料金额并锁定';
+          if (wInp) {
+            wInp.dataset.original = wInp.value;
+            wInp.style.background = '#fff3cd';
+            wInp.title = wEmpty
+              ? '该行实际用料未填写，保存后将自动计算料金额并锁定'
+              : '已完成订单：修改实际用料，保存时需输入经理 PIN';
           }
         });
-        document.getElementById('saveMachineBtn').textContent = '保存啤办费用/补录';
+        document.getElementById('saveMachineBtn').textContent = '保存（改实际用料需经理PIN）';
       }
 
       new bootstrap.Modal(document.getElementById('detailModal')).show();
@@ -661,30 +667,73 @@ function recalcTotals() {
 
 function saveMachineData(orderId) {
   const gv = (tr, name) => { const el = tr.querySelector(`[name="${name}"]`); return el ? el.value : ''; };
-  const updates = Array.from(document.getElementById('machineItemsBody').querySelectorAll('tr[data-item-id]')).map(tr => ({
-    id:                   +tr.dataset.itemId,
-    receipt_no:           gv(tr, 'receipt_no'),
-    collected_weight_kg:  parseFloat(gv(tr, 'collected_weight_kg'))  || null,
-    actual_weight_kg:     parseFloat(gv(tr, 'actual_weight_kg'))     || null,
-    actual_amount_hkd:    parseFloat(gv(tr, 'actual_amount_hkd'))    || null,
-    injection_cost:       parseFloat(gv(tr, 'injection_cost'))       || null,
-  }));
-  apiFetch(`/api/injection/${orderId}/items`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', 'X-User': encodeURIComponent('啤机部') },
-    body: JSON.stringify({ updates })
-  }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); })
-  .then(() => {
-    const t = document.createElement('div');
-    t.className = 'position-fixed bottom-0 end-0 p-3'; t.style.zIndex = 9999;
-    t.innerHTML = `<div class="toast show text-white bg-success border-0"><div class="d-flex"><div class="toast-body"><i class="bi bi-check-circle me-1"></i>数据已保存</div><button class="btn-close btn-close-white me-2 m-auto" onclick="this.closest('.position-fixed').remove()"></button></div></div>`;
-    document.body.appendChild(t); setTimeout(() => t.remove(), 3000);
-  }).catch(() => {
-    const t = document.createElement('div');
-    t.className = 'position-fixed bottom-0 end-0 p-3'; t.style.zIndex = 9999;
-    t.innerHTML = `<div class="toast show text-white bg-danger border-0"><div class="d-flex"><div class="toast-body"><i class="bi bi-exclamation-circle me-1"></i>保存失败，请重试</div><button class="btn-close btn-close-white me-2 m-auto" onclick="this.closest('.position-fixed').remove()"></button></div></div>`;
-    document.body.appendChild(t); setTimeout(() => t.remove(), 4000);
+  const managerChanges = [];
+  const updates = Array.from(document.getElementById('machineItemsBody').querySelectorAll('tr[data-item-id]')).map(tr => {
+    const wInp = tr.querySelector('[name="actual_weight_kg"]');
+    const original = wInp && wInp.dataset.original !== undefined ? wInp.dataset.original : '';
+    const currentW = gv(tr, 'actual_weight_kg');
+    // 已完成订单上「已填值的实际用料」被修改 → 走经理端点（需 PIN），不走普通 PATCH
+    const isManagerEdit = _viewLockedCompleted && original !== '' && +original > 0 && currentW !== original;
+    if (isManagerEdit) {
+      managerChanges.push({ id: +tr.dataset.itemId, actual_weight_kg: parseFloat(currentW) || 0 });
+    }
+    return {
+      id:                   +tr.dataset.itemId,
+      receipt_no:           gv(tr, 'receipt_no'),
+      collected_weight_kg:  parseFloat(gv(tr, 'collected_weight_kg'))  || null,
+      ...(isManagerEdit ? {} : {
+        actual_weight_kg:     parseFloat(currentW)     || null,
+        actual_amount_hkd:    parseFloat(gv(tr, 'actual_amount_hkd'))    || null,
+      }),
+      injection_cost:       parseFloat(gv(tr, 'injection_cost'))       || null,
+    };
   });
+
+  const toast = (ok) => {
+    const t = document.createElement('div');
+    t.className = 'position-fixed bottom-0 end-0 p-3'; t.style.zIndex = 9999;
+    t.innerHTML = ok
+      ? `<div class="toast show text-white bg-success border-0"><div class="d-flex"><div class="toast-body"><i class="bi bi-check-circle me-1"></i>数据已保存</div><button class="btn-close btn-close-white me-2 m-auto" onclick="this.closest('.position-fixed').remove()"></button></div></div>`
+      : `<div class="toast show text-white bg-danger border-0"><div class="d-flex"><div class="toast-body"><i class="bi bi-exclamation-circle me-1"></i>保存失败，请重试</div><button class="btn-close btn-close-white me-2 m-auto" onclick="this.closest('.position-fixed').remove()"></button></div></div>`;
+    document.body.appendChild(t); setTimeout(() => t.remove(), ok ? 3000 : 4000);
+  };
+
+  const patchItems = () => {
+    apiFetch(`/api/injection/${orderId}/items`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'X-User': encodeURIComponent('啤机部') },
+      body: JSON.stringify({ updates })
+    }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); })
+    .then(() => toast(true))
+    .catch(() => toast(false));
+  };
+
+  if (!managerChanges.length) { patchItems(); return; }
+
+  const pin = window.prompt('修改已完成订单的实际用料需要经理 PIN，请输入：');
+  if (pin === null) return;
+  if (!pin.trim()) { alert('未输入 PIN，已取消保存'); return; }
+  apiFetch('/api/manager-update-actual-weight', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      manager_name: '易东存',
+      manager_pin: pin.trim(),
+      order_id: orderId,
+      updates: managerChanges,
+    })
+  })
+    .then(r => r.json().then(d => ({ ok: r.ok, d })))
+    .then(({ ok, d }) => {
+      if (!ok || !d.success) { alert(d.error || '经理 PIN 校验失败，实际用料未保存'); return; }
+      // 同步原始值，避免重复保存时再次触发经理 PIN 流程
+      managerChanges.forEach(mc => {
+        const inp = document.querySelector(`tr[data-item-id="${mc.id}"] [name="actual_weight_kg"]`);
+        if (inp) inp.dataset.original = String(mc.actual_weight_kg);
+      });
+      patchItems();
+    })
+    .catch(() => alert('网络错误，实际用料未保存'));
 }
 
 let currentProblemOrderId = null;
