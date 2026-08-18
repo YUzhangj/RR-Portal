@@ -377,7 +377,75 @@ function showDashboard() {
   document.getElementById('dashSection').style.display = '';
   document.getElementById('dashName').textContent = currentManager;
   loadOrders();
+  loadMaterialPrices();
   startNotifyPolling();
+}
+
+// ─── 经理修改已完成啤办单的实际用料 ─────────────────────────────────────────
+let _mgrMatPrices = {};  // normalized material → unit_price（用于修改时联动金额预览）
+
+function loadMaterialPrices() {
+  apiFetch('/api/material-prices')
+    .then(r => r.json())
+    .then(prices => { _mgrMatPrices = buildPriceMap(prices); })
+    .catch(() => {});
+}
+
+function mgrAutoCalcAmt(input) {
+  const kg = parseFloat(input.value);
+  const price = parseFloat(input.dataset.unitPrice) || 0;
+  const cell = input.closest('tr').querySelector('.mgr-aw-amount');
+  if (!cell) return;
+  cell.textContent = (Number.isFinite(kg) && kg > 0 && price > 0)
+    ? (Math.round(kg * 2.20462 * price * 100) / 100).toFixed(2)
+    : '-';
+}
+
+function refreshReviewDetails() {
+  return apiFetch(`/api/${reviewingTab}/${reviewingId}`)
+    .then(r => r.json())
+    .then(order => {
+      document.getElementById('reviewDetails').innerHTML =
+        reviewingTab === 'assembly' ? renderAssemblyDetails(order) : renderDetails(order);
+    });
+}
+
+async function saveManagerActualWeight() {
+  const errEl = document.getElementById('mgrAwError');
+  errEl.textContent = '';
+  const managerPin = (document.getElementById('mgrAwPin').value || '').trim();
+  if (!managerPin) { errEl.textContent = '请输入经理 PIN'; return; }
+  const updates = [];
+  document.querySelectorAll('.mgr-aw-input').forEach(input => {
+    const raw = (input.value || '').trim();
+    if (raw === (input.dataset.original || '')) return;
+    updates.push({ id: +input.dataset.itemId, actual_weight_kg: raw === '' ? 0 : +raw });
+  });
+  if (!updates.length) { errEl.textContent = '没有修改任何实际用料'; return; }
+  if (updates.some(u => !Number.isFinite(u.actual_weight_kg) || u.actual_weight_kg < 0)) {
+    errEl.textContent = '实际用料必须是不小于 0 的数字';
+    return;
+  }
+  try {
+    const r = await apiFetch('/api/manager-update-actual-weight', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        manager_name: MANAGER_NAME,
+        manager_pin: managerPin,
+        order_id: reviewingId,
+        updates
+      })
+    });
+    const d = await r.json();
+    if (!r.ok || !d.success) { errEl.textContent = d.error || '保存失败'; return; }
+    document.getElementById('mgrAwPin').value = '';
+    showToast(`已保存 ${d.changed} 条实际用料修改`);
+    await refreshReviewDetails();
+    loadOrders();
+  } catch (e) {
+    errEl.textContent = '网络错误';
+  }
 }
 
 // ─── 状态 ─────────────────────────────────────────────────────────────────────
@@ -519,12 +587,7 @@ function openReview(id, orderNum, isViewOnly = false) {
 
   new bootstrap.Modal(document.getElementById('reviewModal')).show();
 
-  apiFetch(`/api/${reviewingTab}/${id}`)
-    .then(r => r.json())
-    .then(order => {
-      document.getElementById('reviewDetails').innerHTML =
-        reviewingTab === 'assembly' ? renderAssemblyDetails(order) : renderDetails(order);
-    })
+  refreshReviewDetails()
     .catch(() => {
       document.getElementById('reviewDetails').innerHTML = '<div class="text-danger">加载失败</div>';
     });
@@ -546,15 +609,39 @@ function renderDetails(order) {
   const items = order.items || [];
   if (!items.length) return header + '<div class="text-muted small">（无明细行）</div>';
 
-  const thead = '<tr><th>工模编号</th><th>工模名称</th><th>机型</th><th>原料</th><th>颜色</th><th>色粉编号</th><th>件数/套数</th><th>数量(啤)</th><th>整啤毛重(g)</th><th>所需用料(KG)</th><th>模具回厂时间</th><th>啤办完成时间</th><th>备注</th></tr>';
-  const rows = items.map(it => `<tr>
+  // 已完成的啤办单：经理可修改实际用料，用料金额按 实际用料 × 2.20462 × 原料单价 联动
+  const canEditWeight = reviewingTab === 'injection' && order.status === '已完成';
+  const thead = '<tr><th>工模编号</th><th>工模名称</th><th>机型</th><th>原料</th><th>颜色</th><th>色粉编号</th><th>件数/套数</th><th>数量(啤)</th><th>整啤毛重(g)</th><th>所需用料(KG)</th><th>模具回厂时间</th><th>啤办完成时间</th><th>备注</th>'
+    + '<th class="table-info">实际用料(KG)</th><th class="table-info">用料金额(HKD)</th></tr>';
+  const rows = items.map(it => {
+    const unitPrice = canEditWeight ? resolvePrice(it.material, _mgrMatPrices) : 0;
+    const weightCell = canEditWeight
+      ? `<input type="number" step="any" min="0" class="form-control form-control-sm mgr-aw-input" style="width:100px"
+           data-item-id="${it.id}" data-unit-price="${unitPrice}" data-original="${it.actual_weight_kg ?? ''}"
+           value="${it.actual_weight_kg ?? ''}" oninput="mgrAutoCalcAmt(this)">`
+      : esc(it.actual_weight_kg ?? '-');
+    return `<tr>
     <td>${esc(it.mold_id||'-')}</td><td>${esc(it.mold_name||'-')}</td><td>${esc(it.machine_type||'-')}</td><td>${esc(it.material||'-')}</td>
     <td>${esc(it.color||'-')}</td><td>${esc(it.pigment_no||'-')}</td><td>${esc(it.quantity||'-')}</td>
     <td>${esc(it.shoot_qty||'-')}</td><td>${esc(it.gross_weight_g||'-')}</td><td>${esc(it.required_material_kg||'-')}</td>
     <td>${esc(it.mold_return_time||'-')}</td><td>${esc(it.completion_time||'-')}</td><td>${esc(it.notes||'-')}</td>
-  </tr>`).join('');
+    <td class="table-info">${weightCell}</td>
+    <td class="table-info mgr-aw-amount" data-item-id="${it.id}">${it.actual_amount_hkd ?? '-'}</td>
+  </tr>`;
+  }).join('');
 
-  return header + `<div class="table-responsive"><table class="table table-bordered table-sm"><thead class="table-light">${thead}</thead><tbody>${rows}</tbody></table></div>`;
+  let saveBar = '';
+  if (canEditWeight) {
+    saveBar = `
+    <div class="d-flex flex-wrap align-items-center gap-2 mt-2 p-2 rounded border border-info">
+      <span class="small text-muted">经理可修改实际用料（蓝色列），保存后用料金额自动重算并记录审计</span>
+      <input type="password" id="mgrAwPin" class="form-control form-control-sm" style="width:140px" placeholder="经理 PIN" autocomplete="off">
+      <button class="btn btn-sm btn-info text-white" onclick="saveManagerActualWeight()"><i class="bi bi-save me-1"></i>保存实际用料</button>
+      <span id="mgrAwError" class="small text-danger"></span>
+    </div>`;
+  }
+
+  return header + `<div class="table-responsive"><table class="table table-bordered table-sm"><thead class="table-light">${thead}</thead><tbody>${rows}</tbody></table></div>` + saveBar;
 }
 
 function renderAssemblyDetails(order) {

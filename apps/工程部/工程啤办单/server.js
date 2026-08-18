@@ -304,7 +304,7 @@ app.use('/api', (req, res, next) => {
   // PATCH /status 已有 PIN 验证
   if (req.method === 'PATCH' && req.path.match(/\/\d+\/status$/)) return next();
   // 认证端点本身不需要 X-User
-  if (req.path === '/verify-pin' || req.path === '/change-pin' || req.path === '/reset-supervisor-pin' || req.path === '/recalc-amounts' || req.path === '/manager-update-prices' || req.path === '/clients/add' || req.path === '/clients/delete') return next();
+  if (req.path === '/verify-pin' || req.path === '/change-pin' || req.path === '/reset-supervisor-pin' || req.path === '/recalc-amounts' || req.path === '/manager-update-prices' || req.path === '/manager-update-actual-weight' || req.path === '/clients/add' || req.path === '/clients/delete') return next();
   const user = req.headers['x-user'];
   if (!user || !decodeURIComponent(user).trim()) {
     return res.status(401).json({ error: '未授权：请登录后操作' });
@@ -1055,6 +1055,54 @@ app.post('/api/recalc-amounts', (req, res) => {
   }
   console.log(`[recalc] manager=${actor} backfilled=${backfilled} missing_price=${missingPrice}`);
   res.json({ success: true, backfilled, missing_price: missingPrice });
+});
+
+// 经理修改已完成啤办单的实际用料：按当前价格表重算用料金额，并写审计日志。
+// 背景：PATCH /:id/items 无 PIN 保护且信赖前端金额，不适合开放改已完成单；
+// 这里只允许经理本人、仅已完成状态、后端自行重算 actual_amount_hkd。
+app.post('/api/manager-update-actual-weight', (req, res) => {
+  const actor = authManager(req, res);
+  if (!actor) return;
+  const { order_id, updates } = req.body;
+  const orderId = +order_id;
+  if (!orderId || !Array.isArray(updates) || !updates.length) {
+    return res.status(400).json({ error: '参数不完整' });
+  }
+  const data = loadData();
+  const order = (data.injection_orders || []).find(o => o.id === orderId);
+  if (!order) return res.status(404).json({ error: '订单不存在' });
+  if (order.status !== '已完成') {
+    return res.status(400).json({ error: '仅已完成订单可由经理修改实际用料' });
+  }
+  const items = data.injection_items || [];
+  const priceMap = buildPriceMap(data.material_prices);
+  const changes = [];
+  for (const u of updates) {
+    const item = items.find(i => i.id === +u.id && i.order_id === orderId);
+    if (!item) return res.status(404).json({ error: `明细 #${u.id} 不存在` });
+    const weight = +u.actual_weight_kg;
+    if (!Number.isFinite(weight) || weight < 0) {
+      return res.status(400).json({ error: `明细 #${u.id} 实际用料必须是不小于 0 的数字` });
+    }
+    const before = +(item.actual_weight_kg || 0);
+    if (before === weight) continue;
+    item.actual_weight_kg = weight;
+    const price = resolvePrice(item.material, priceMap);
+    if (price > 0) {
+      item.actual_amount_hkd = Math.round(weight * 2.20462 * price * 100) / 100;
+    }
+    changes.push({ item_id: item.id, mold_id: item.mold_id || '', before, after: weight });
+  }
+  if (!changes.length) return res.json({ success: true, changed: 0 });
+  order.updated_at = new Date().toISOString();
+  appendAudit(data, req, 'manager-update-actual-weight', actor, {
+    order_id: orderId,
+    order_number: order.order_number || '',
+    changes
+  });
+  saveData(data);
+  console.log(`[actual-weight] manager=${actor} order=${orderId} changed=${changes.length}`);
+  res.json({ success: true, changed: changes.length });
 });
 
 app.post('/api/change-pin', (req, res) => {
