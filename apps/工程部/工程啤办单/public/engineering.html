@@ -80,7 +80,7 @@
       <button class="btn btn-outline-secondary" onclick="openSummary()">
         <i class="bi bi-table me-1"></i>总表
       </button>
-      <button class="btn btn-primary" onclick="openNewModal()">
+      <button class="btn btn-primary" id="newOrderBtn" onclick="openNewModal()">
         <i class="bi bi-plus-lg me-1"></i>新建单据
       </button>
     </div>
@@ -587,6 +587,17 @@ const lockedStatuses = ['待经理审核', '待生产', '生产中', '已完成'
 let _supervisors = [], _managers = [];
 apiFetch('/api/roles').then(r => r.json()).then(d => { _supervisors = d.supervisors || []; _managers = d.managers || []; }).catch(() => {});
 function isPrivileged() { return _supervisors.includes(currentUser) || _managers.includes(currentUser); }
+// 修改（新建/编辑/删除/复制）仅经理可操作；其他人（含未登录、普通姓名、主管）只读
+function isManager() { return _managers.includes(currentUser); }
+function requireManager() {
+  if (isManager()) return true;
+  showToast('需要经理登录才能修改', 'danger');
+  return false;
+}
+function applyNavPermissions() {
+  const btn = document.getElementById('newOrderBtn');
+  if (btn) btn.style.display = isManager() ? '' : 'none';
+}
 const isLocked = s => lockedStatuses.includes(s) && !isPrivileged();
 
 const statusBadge = s => ({
@@ -623,8 +634,8 @@ function renderOrderList(orders) {
         <td class="text-nowrap" onclick="event.stopPropagation()">
           <div class="btn-group btn-group-sm">
             ${(o.status === '待审核' || o.status === '待经理审核') ? `<button class="btn ${o.status === '待经理审核' ? 'btn-primary' : 'btn-warning'} fw-bold" onclick="reviewOrder(${o.id},'${(o.order_number||'').replace(/'/g,'')}')">审核</button>` : ''}
-            ${!isLocked(o.status) ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ''}
-            ${!isLocked(o.status) ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ''}
+            ${isManager() && !isLocked(o.status) ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ''}
+            ${isManager() && !isLocked(o.status) ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ''}
             <button class="btn btn-outline-secondary" onclick="printOrder(${o.id})" title="打印"><i class="bi bi-printer"></i></button>
           </div>
         </td>
@@ -640,8 +651,8 @@ function renderOrderList(orders) {
           <td><strong>${esc(o.order_number||'-')}</strong></td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
           <td>${statusBadge(o.status)}</td>
           <td class="text-nowrap" onclick="event.stopPropagation()"><div class="btn-group btn-group-sm">
-            <button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>
-            <button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>
+            ${isManager() ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ``}
+            ${isManager() ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ``}
             <button class="btn btn-outline-secondary" onclick="printOrder(${o.id})" title="打印"><i class="bi bi-printer"></i></button>
           </div></td></tr>`);
         return;
@@ -660,9 +671,9 @@ function renderOrderList(orders) {
           <td>${idx===0 ? statusBadge(o.status) : ''}</td>
           <td class="text-nowrap" onclick="event.stopPropagation()">${idx===0 ? `<div class="btn-group btn-group-sm">
             ${(o.status === '待审核' || o.status === '待经理审核') ? `<button class="btn ${o.status === '待经理审核' ? 'btn-primary' : 'btn-warning'} fw-bold" onclick="reviewOrder(${o.id},'${(o.order_number||'').replace(/'/g,'')}')">审核</button>` : ''}
-            ${!isLocked(o.status) ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ''}
-            ${!isLocked(o.status) ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ''}
-            <button class="btn btn-outline-success" onclick="editOrder(${o.id},true)" title="复制"><i class="bi bi-copy"></i></button>
+            ${isManager() && !isLocked(o.status) ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ''}
+            ${isManager() && !isLocked(o.status) ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ''}
+            ${isManager() ? `<button class="btn btn-outline-success" onclick="editOrder(${o.id},true)" title="复制"><i class="bi bi-copy"></i></button>` : ``}
             <button class="btn btn-outline-secondary" onclick="printOrder(${o.id})" title="打印"><i class="bi bi-printer"></i></button>
           </div>` : ''}</td>
         </tr>`);
@@ -701,9 +712,9 @@ function renderOrderList(orders) {
       <td class="text-nowrap" onclick="event.stopPropagation()">
         <div class="btn-group btn-group-sm">
           ${(o.status === '待审核' || o.status === '待经理审核') ? `<button class="btn ${o.status === '待经理审核' ? 'btn-primary' : 'btn-warning'} fw-bold" onclick="reviewOrder(${o.id},'${(o.order_number||'').replace(/'/g,'')}')">审核</button>` : ''}
-          ${!isLocked(o.status) ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ''}
-          ${!isLocked(o.status) ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ''}
-          <button class="btn btn-outline-success"   onclick="editOrder(${o.id},true)" title="复制"><i class="bi bi-copy"></i></button>
+          ${isManager() && !isLocked(o.status) ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ''}
+          ${isManager() && !isLocked(o.status) ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ''}
+          ${isManager() ? `<button class="btn btn-outline-success"   onclick="editOrder(${o.id},true)" title="复制"><i class="bi bi-copy"></i></button>` : ``}
           <button class="btn btn-outline-secondary"  onclick="printOrder(${o.id})" title="打印"><i class="bi bi-printer"></i></button>
           ${engProblemsMap[o.id] ? `<button class="btn btn-danger" onclick="viewEngProblems(${o.id},'${(o.order_number||'').replace(/'/g,'')}')" title="查看问题"><i class="bi bi-exclamation-triangle-fill"></i></button>` : ''}
         </div>
@@ -738,6 +749,7 @@ function fmtDateTime(s) {
 
 // ─── 新建/编辑 ────────────────────────────────────────────────────────────────
 function openNewModal() {
+  if (!requireManager()) return;
   // 夹具单独立处理
   if (currentTab === 'assembly') { openNewAsmModal(); return; }
 
@@ -788,6 +800,7 @@ function openNewModal() {
 }
 
 function editOrder(id, isDuplicate = false) {
+  if (!requireManager()) return;
   // 夹具单独立处理
   if (currentTab === 'assembly') { editAsmOrder(id); return; }
 
@@ -1180,6 +1193,7 @@ const slushFields = ['seq_no','product_id','mold_id','mold_name','material','col
 const sprayFields = ['client_name','product_name','part_name','process','sample_qty','provide_time','eng_complete_time','delivery_time','engineer','follower'];
 
 function saveOrder(type) {
+  if (!requireManager()) return;
   // 夹具单独立处理
   if (type === 'assembly') { saveAsmOrder(); return; }
 
@@ -1358,6 +1372,7 @@ function resolveProblem(problemId) {
 
 // ─── 删除/打印 ────────────────────────────────────────────────────────────────
 function deleteOrder(id) {
+  if (!requireManager()) return;
   if (!confirm(`确定删除这条单据吗？删除后无法恢复。`)) return;
   apiFetch(`/api/${currentTab}/${id}`, { method: 'DELETE', headers: { 'X-User': encodeURIComponent(currentUser) } })
     .then(r => r.json())
@@ -2250,6 +2265,7 @@ function finishLogin(name) {
   sessionStorage.setItem('eng_user', name);
   document.getElementById('navUserBadge').textContent = '👤 ' + name;
   bootstrap.Modal.getInstance(document.getElementById('engLoginModal'))?.hide();
+  applyNavPermissions();
   loadOrders(); // 重新渲染列表（根据权限显示按钮）
 }
 
@@ -2260,10 +2276,12 @@ function switchUser() {
   document.getElementById('engLoginPin').value = '';
   document.getElementById('engLoginPinWrap').style.display = 'none';
   document.getElementById('engLoginBtn').setAttribute('onclick', 'checkLoginRole()');
+  applyNavPermissions();
   showLoginModal();
 }
 
 // 初始化用户
+applyNavPermissions();
 if (currentUser) {
   document.getElementById('navUserBadge').textContent = '👤 ' + currentUser;
 } else {
@@ -2275,6 +2293,7 @@ if (currentUser) {
 let _asmRowSeq = 0;
 
 function openNewAsmModal() {
+  if (!requireManager()) return;
   document.getElementById('asmModalTitle').textContent = '新建夹具申请单';
   document.getElementById('asm-id').value = '';
   document.getElementById('asm-order_number').value = '';
