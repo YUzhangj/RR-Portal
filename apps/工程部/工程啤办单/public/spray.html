@@ -15,15 +15,22 @@
     @media print {
       nav.navbar, .modal, .toast, .no-print { display: none !important; }
       body { background: #fff !important; }
+      /* flex 容器（Bootstrap .card 是 flex）在 Chrome 打印中无法正常跨页拆分，
+         打印时退化为 block */
+      .card, .card-body, .container-fluid, #orderList { display: block !important; }
       .card { border: none !important; box-shadow: none !important; }
       .card-body { padding: 0 !important; }
+      /* overflow 容器打印时无法跨页拆分（整表被推到新页留大片空白），取消之 */
+      #orderList .table-responsive { overflow: visible !important; }
       #orderList { padding: 0; }
-      #orderList table { font-size: 9pt !important; }
+      #orderList .mb-4 { margin-bottom: 8px !important; }
+      #orderList table { font-size: 9pt !important; page-break-inside: auto !important; }
       #orderList table th, #orderList table td { border: 1px solid #333 !important; }
       #orderList h6 { border-radius: 0 !important; background: #e8e8e8 !important; color: #000 !important; }
       @page { size: A4 landscape; margin: 8mm; }
+      /* 表头跨页重复；注意不要再给 tr 加 page-break-inside:avoid——
+         Chrome 下它会让过高的表格无法开始跨页，前一页留下大片空白 */
       #orderList thead { display: table-header-group; }
-      #orderList tr { page-break-inside: avoid; }
     }
   </style>
 </head>
