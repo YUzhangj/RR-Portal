@@ -146,20 +146,15 @@ router.put('/:id/items/:itemId', (req, res) => {
     updates.push('accumulated = ?', 'shortage = ?');
     values.push(accumulated, shortage);
 
-    // 同步更新订单表，若欠数为0则标记完成
+    // 只同步订单表的进度；不再回写其他排机单的明细行，
+    // 让每天的累计数保持为当天录入的快照，便于核算每日产量。
     if (currentItem.order_id) {
       if (shortage <= 0) {
         db.prepare("UPDATE orders SET accumulated = ?, status = 'completed' WHERE id = ?")
           .run(accumulated, currentItem.order_id);
-        // 同步所有排单里相同订单的条目，欠数全部归零
-        db.prepare("UPDATE schedule_items SET accumulated = ?, shortage = 0 WHERE order_id = ? AND id != ?")
-          .run(accumulated, currentItem.order_id, itemId);
       } else {
         db.prepare('UPDATE orders SET accumulated = ? WHERE id = ?')
           .run(accumulated, currentItem.order_id);
-        // 同步其他排单里相同订单的条目的累计数
-        db.prepare("UPDATE schedule_items SET accumulated = ?, shortage = ? WHERE order_id = ? AND id != ?")
-          .run(accumulated, shortage, currentItem.order_id, itemId);
       }
     }
   }

@@ -87,6 +87,21 @@ export default function ScheduleResult({ workshop = 'B' }) {
     }
   };
 
+  // 查看明细 / 收起明细（再次点击同一行即收起）
+  const toggleDetail = (id) => {
+    if (selectedSchedule?.id === id) {
+      setSelectedSchedule(null);
+      setItems([]);
+    } else {
+      fetchDetail(id);
+    }
+  };
+
+  const collapseDetail = () => {
+    setSelectedSchedule(null);
+    setItems([]);
+  };
+
   const fetchMachines = async () => {
     try {
       const { data } = await axios.get('/api/machines', { params: { workshop } });
@@ -338,7 +353,9 @@ export default function ScheduleResult({ workshop = 'B' }) {
     { title: '操作', width: 420,
       render: (_, r) => (
         <Space>
-          <Button size="small" onClick={() => fetchDetail(r.id)}>查看明细</Button>
+          <Button size="small" type={selectedSchedule?.id === r.id ? 'primary' : 'default'} onClick={() => toggleDetail(r.id)}>
+            {selectedSchedule?.id === r.id ? '收起明细' : '查看明细'}
+          </Button>
           <Button size="small" icon={<DownloadOutlined />} onClick={() => handleExport(r.id, r.shift)}>排机单</Button>
           <Button size="small" icon={<DownloadOutlined />} onClick={() => handleExportDailyReport(r.schedule_date)}>日报表(夜+白)</Button>
           <Popconfirm title="确定删除此排机单?" onConfirm={() => handleDelete(r.id)} okText="确定" cancelText="取消">
@@ -578,17 +595,20 @@ export default function ScheduleResult({ workshop = 'B' }) {
           }
           size="small"
           extra={
-            !isConfirmed && (
-              <Popconfirm
-                title="按机台号升序重排当前排机单？"
-                description="A-6# → A-12# → A-26# → A-40# 这样升序排列，同机台多行保留现有顺序。"
-                onConfirm={handleSortByMachine}
-                okText="确定排序"
-                cancelText="取消"
-              >
-                <Button size="small" icon={<SortAscendingOutlined />}>按机台号排序</Button>
-              </Popconfirm>
-            )
+            <Space>
+              {!isConfirmed && (
+                <Popconfirm
+                  title="按机台号升序重排当前排机单？"
+                  description="A-6# → A-12# → A-26# → A-40# 这样升序排列，同机台多行保留现有顺序。"
+                  onConfirm={handleSortByMachine}
+                  okText="确定排序"
+                  cancelText="取消"
+                >
+                  <Button size="small" icon={<SortAscendingOutlined />}>按机台号排序</Button>
+                </Popconfirm>
+              )}
+              <Button size="small" onClick={collapseDetail}>收起</Button>
+            </Space>
           }
         >
           <DndContext sensors={dndSensors} onDragEnd={handleDragEnd}>
