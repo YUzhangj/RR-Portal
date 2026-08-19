@@ -11,6 +11,20 @@
     .proc-done { color:#0f5132; background:#d1e7dd; border-radius:4px; padding:1px 6px; font-size:.75rem; }
     .proc-pending { color:#664d03; background:#fff3cd; border-radius:4px; padding:1px 6px; font-size:.75rem; cursor:pointer; }
     .proc-pending:hover { background:#ffe69c; }
+    /* 打印总表：只保留标题和总表内容 */
+    @media print {
+      nav.navbar, .modal, .toast, .no-print { display: none !important; }
+      body { background: #fff !important; }
+      .card { border: none !important; box-shadow: none !important; }
+      .card-body { padding: 0 !important; }
+      #orderList { padding: 0; }
+      #orderList table { font-size: 9pt !important; }
+      #orderList table th, #orderList table td { border: 1px solid #333 !important; }
+      #orderList h6 { border-radius: 0 !important; background: #e8e8e8 !important; color: #000 !important; }
+      @page { size: A4 landscape; margin: 8mm; }
+      #orderList thead { display: table-header-group; }
+      #orderList tr { page-break-inside: avoid; }
+    }
   </style>
 </head>
 <body class="bg-light">
@@ -28,7 +42,7 @@
 </nav>
 
 <div class="container-fluid mt-3">
-  <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+  <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3 no-print">
     <div class="d-flex flex-wrap gap-2 align-items-center">
       <select id="workshopFilter" class="form-select form-select-sm" style="width:auto" onchange="applyFilters()">
         <option value="">全部车间</option>
@@ -47,6 +61,7 @@
         <button class="btn btn-outline-primary active" id="viewListBtn" onclick="switchView('list')"><i class="bi bi-list-ul me-1"></i>列表</button>
         <button class="btn btn-outline-primary" id="viewSummaryBtn" onclick="switchView('summary')"><i class="bi bi-table me-1"></i>总表</button>
       </div>
+      <button class="btn btn-sm btn-outline-secondary no-print" onclick="printSummary()"><i class="bi bi-printer me-1"></i>打印总表</button>
       <small class="text-muted"><i class="bi bi-arrow-clockwise me-1"></i>每30秒自动刷新</small>
     </div>
   </div>
@@ -148,6 +163,12 @@ function switchView(view) {
   document.getElementById('viewListBtn').classList.toggle('active', view === 'list');
   document.getElementById('viewSummaryBtn').classList.toggle('active', view === 'summary');
   applyFilters();
+}
+
+// 打印总表：先切到总表视图（沿用当前车间/状态筛选），渲染完成后调起打印
+function printSummary() {
+  if (currentView !== 'summary') switchView('summary');
+  setTimeout(() => window.print(), 50);
 }
 
 function applyFilters() {
