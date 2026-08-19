@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>发票号自动录入系统</title>
+<style>
+  :root {
+    --bg: #f9fbfc;
+    --surface: #ffffff;
+    --label-1: rgba(0,0,0,.9);
+    --label-2: rgba(0,0,0,.6);
+    --label-3: rgba(0,0,0,.45);
+    --label-4: rgba(0,0,0,.3);
+    --f1: rgba(0,0,0,.03);
+    --f2: rgba(0,0,0,.05);
+    --f3: rgba(0,0,0,.15);
+    --sep: rgba(0,0,0,.13);
+    --blue: #1783ff;
+    --green: #16c456;
+    --green-bg: rgba(22,196,86,.1);
+    --danger: #ff3849;
+    --danger-bg: rgba(255,77,77,.1);
+    --r-lg: 12px; --r-md: 10px; --r-sm: 8px; --r-xxs: 4px;
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { -webkit-font-smoothing: antialiased; }
+  body {
+    font-family: "PingFang SC", -apple-system, sans-serif;
+    background: var(--bg); color: var(--label-1);
+    font-size: 14px; line-height: 20px;
+  }
+  .page { max-width: 768px; margin: 0 auto; padding: 32px 16px 64px; }
+
+  /* ===== 头部 ===== */
+  .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+  .title { font-size: 20px; font-weight: 600; line-height: 30px; letter-spacing: 0; }
+  .subtitle { font-size: 12px; line-height: 18px; color: var(--label-3); margin-top: 2px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--green-bg); color: var(--green);
+    font-size: 12px; font-weight: 500; line-height: 18px;
+    padding: 3px 10px; border-radius: 100px; white-space: nowrap;
+  }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+
+  /* ===== 卡片 ===== */
+  .card { background: var(--surface); border-radius: var(--r-lg); padding: 24px; margin-bottom: 20px; }
+  .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
+  .card-head h2 { font-size: 16px; font-weight: 500; line-height: 24px; }
+  .step-no {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--f2); color: var(--label-2);
+    font-size: 12px; font-weight: 500;
+  }
+
+  /* ===== 状态徽章 ===== */
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--f1); border-radius: var(--r-sm);
+    font-size: 12px; line-height: 18px; color: var(--label-2);
+    padding: 4px 10px;
+  }
+  .chip b { color: var(--label-1); font-weight: 500; }
+  .meta { font-size: 12px; line-height: 18px; color: var(--label-3); }
+
+  /* ===== 上传区 ===== */
+  .upl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; }
+  .upl {
+    position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px;
+    background: var(--f1); border-radius: var(--r-md); padding: 20px 12px;
+    cursor: pointer; text-align: center;
+    transition: background 150ms var(--ease-out);
+  }
+  .upl:hover { background: var(--f2); }
+  .upl svg { width: 20px; height: 20px; color: var(--label-3); }
+  .upl .upl-title { font-size: 14px; font-weight: 500; color: var(--label-1); }
+  .upl .upl-desc { font-size: 12px; color: var(--label-3); line-height: 18px; }
+  .upl .upl-file { font-size: 12px; color: var(--blue); line-height: 18px; word-break: break-all; display: none; }
+  .upl input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .upl.full .upl-title { display: none; }
+  .upl.full .upl-desc { display: none; }
+  .upl.full .upl-file { display: block; }
+
+  /* ===== 按钮 ===== */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    height: 32px; padding: 6px 14px; border: 0; border-radius: var(--r-md);
+    font-family: inherit; font-size: 14px; font-weight: 500; line-height: 20px;
+    cursor: pointer; text-decoration: none;
+    transition: transform 120ms var(--ease-out), background 150ms var(--ease-out), opacity 150ms;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .btn svg { width: 18px; height: 18px; }
+  .btn-primary { background: var(--label-1); color: #fff; }
+  .btn-primary:hover { background: rgba(37,37,37,1); }
+  .btn-secondary { background: var(--f1); color: var(--label-1); }
+  .btn-secondary:hover { background: var(--f2); }
+  .btn:disabled { color: var(--label-4); background: var(--f1); cursor: not-allowed; }
+  .btn:disabled:active { transform: none; }
+  .btn-row { display: flex; align-items: center; gap: 12px; }
+
+  /* ===== 日志 ===== */
+  details.log { margin-top: 16px; }
+  details.log summary {
+    font-size: 12px; color: var(--label-3); cursor: pointer; user-select: none;
+    list-style: none; display: inline-flex; align-items: center; gap: 4px;
+  }
+  details.log summary::before { content: "▸"; transition: transform 150ms var(--ease-out); }
+  details.log[open] summary::before { transform: rotate(90deg); }
+  .log-body {
+    margin-top: 8px; background: var(--f1); border-radius: var(--r-sm);
+    padding: 10px 12px; font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 12px; line-height: 18px; color: var(--label-2);
+    max-height: 200px; overflow: auto; white-space: pre-wrap;
+  }
+
+  /* ===== 结果 ===== */
+  .result { margin-top: 16px; display: none; }
+  .result.show { display: block; }
+  .result-file {
+    background: var(--f1); border-radius: var(--r-md); padding: 16px; margin-bottom: 12px;
+  }
+  .result-file .fname { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .result-file .fname svg { width: 18px; height: 18px; color: var(--label-3); }
+  .stat-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .stat { font-size: 12px; line-height: 18px; padding: 3px 10px; border-radius: 100px; background: var(--f2); color: var(--label-2); }
+  .stat.good { background: var(--green-bg); color: var(--green); }
+  .stat.warn { background: rgba(255,210,48,.2); color: rgba(202,158,0,1); }
+  .dl-row { display: flex; gap: 8px; }
+
+  /* ===== 加载 ===== */
+  .spin {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid var(--f3); border-top-color: var(--label-1);
+    animation: rot .6s linear infinite; display: inline-block; vertical-align: -2px;
+  }
+  @keyframes rot { to { transform: rotate(360deg); } }
+
+  /* ===== Toast ===== */
+  .toast {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    background: #2b2b2b; color: #fff; font-size: 14px; line-height: 20px;
+    padding: 10px 16px; border-radius: var(--r-md); z-index: 1000;
+    opacity: 0; pointer-events: none;
+    transition: opacity 300ms var(--ease-out), transform 300ms var(--ease-out);
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(4px); }
+
+  .sep { height: 1px; background: var(--sep); margin: 16px -24px; opacity: .4; }
+
+  @media (max-width: 640px) {
+    .upl-grid { grid-template-columns: 1fr; }
+    .topbar { flex-direction: column; align-items: flex-start; gap: 8px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="topbar">
+    <div>
+      <div class="title">发票号自动录入系统</div>
+      <div class="subtitle">精确度优先 · 不覆盖已有发票号 · 输出新文件不改原件</div>
+    </div>
+    <span class="pill"><span class="dot"></span>服务运行中</span>
+  </div>
+
+  <!-- ① 发票库 -->
+  <div class="card">
+    <div class="card-head"><span class="step-no">1</span><h2>发票库</h2></div>
+    <div class="chips" id="dbstatus">
+      <span class="chip">2025 发票 <b>{{ status['2025发票'] }}</b> 张 · PO <b>{{ status['2025PO'] }}</b></span>
+      <span class="chip">ZB 汇总表 <b>{{ status['ZB汇总表'] }}</b> 条</span>
+      <span class="chip">ZB 实体发票 <b>{{ status['ZB实体sheet'] }}</b> 张</span>
+    </div>
+    <div class="meta">{% if meta %}最近建库 {{ meta.get('built_at','') }}{% else %}库已预置，拿到新发票文件时才需要重新建库{% endif %}</div>
+
+    <details class="log" style="margin-top:12px">
+      <summary>重新建库（上传新发票文件）</summary>
+      <form id="dbform">
+        <label class="upl" id="upldb" style="margin:16px 0">
+            <svg viewBox="0 0 24 24" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M11.3636 3.36358C11.7151 3.01211 12.2849 3.01211 12.6364 3.36358L17.0808 7.80802C17.4323 8.1595 17.4323 8.72934 17.0808 9.08082C16.7293 9.43229 16.1595 9.43229 15.808 9.08082L12.9 6.17277V14.6666C12.9 15.1637 12.497 15.5666 12 15.5666C11.5029 15.5666 11.1 15.1637 11.1 14.6666V6.17277L8.19193 9.08082C7.84046 9.43229 7.27061 9.43229 6.91914 9.08082C6.56766 8.72934 6.56766 8.1595 6.91914 7.80802L11.3636 3.36358ZM3.99998 13.7666C4.49703 13.7666 4.89998 14.1696 4.89998 14.6666V18.2222C4.89998 18.455 4.99246 18.6783 5.15707 18.8429C5.32169 19.0075 5.54495 19.1 5.77775 19.1H18.2222C18.455 19.1 18.6783 19.0075 18.8429 18.8429C19.0075 18.6783 19.1 18.455 19.1 18.2222V14.6666C19.1 14.1696 19.5029 13.7666 20 13.7666C20.497 13.7666 20.9 14.1696 20.9 14.6666V18.2222C20.9 18.9324 20.6179 19.6135 20.1157 20.1157C19.6135 20.6179 18.9324 20.9 18.2222 20.9H5.77775C5.06756 20.9 4.38646 20.6179 3.88428 20.1157C3.3821 19.6135 3.09998 18.9324 3.09998 18.2222V14.6666C3.09998 14.1696 3.50292 13.7666 3.99998 13.7666Z" fill="currentColor"/></svg>
+            <span class="upl-title">选择发票文件</span>
+            <span class="upl-desc">逐张发票格式 / 带汇总表的 ZB 格式都支持，<b>自动识别类型</b>，可多选；重复文件自动以最新版为准</span>
+            <span class="upl-file"></span>
+            <input type="file" name="files" multiple accept=".xlsx">
+        </label>
+        <div class="btn-row">
+          <button type="submit" class="btn btn-primary" id="dbbtn">上传并建库</button>
+          <span class="meta">大文件建库约需 2-4 分钟</span>
+        </div>
+        <details class="log" id="dblogwrap" style="display:none">
+          <summary>建库日志</summary>
+          <div class="log-body" id="dblog"></div>
+        </details>
+      </form>
+    </details>
+  </div>
+
+  <!-- ② 处理排期 -->
+  <div class="card">
+    <div class="card-head"><span class="step-no">2</span><h2>上传排期，自动入发票号</h2></div>
+    <form id="procform">
+      <label class="upl" id="uplsch" style="margin-bottom:16px">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M15.4795 15.4971C15.9765 15.4971 16.3799 15.9004 16.3799 16.3975C16.3799 16.8945 15.9765 17.2978 15.4795 17.2979H8.52051C8.02345 17.2979 7.62012 16.8945 7.62012 16.3975C7.62012 15.9004 8.02345 15.4971 8.52051 15.4971H15.4795Z" fill="currentColor"/><path d="M12.3359 11.0996C12.8329 11.0997 13.2354 11.503 13.2354 12C13.2354 12.497 12.8329 12.9003 12.3359 12.9004H8.52051C8.02345 12.9004 7.62012 12.4971 7.62012 12C7.62012 11.5029 8.02345 11.0996 8.52051 11.0996H12.3359Z" fill="currentColor"/><path fill-rule="evenodd" clip-rule="evenodd" d="M13.1719 2.09961C13.9408 2.09969 14.6789 2.40555 15.2227 2.94922L19.0508 6.77734C19.5946 7.32113 19.9003 8.05911 19.9004 8.82812V18C19.9004 20.1539 18.1539 21.9004 16 21.9004H8C5.84626 21.9002 4.09961 20.1538 4.09961 18V6C4.09961 3.84621 5.84626 2.09981 8 2.09961H13.1719ZM8 3.90039C6.84037 3.90059 5.90039 4.84032 5.90039 6V18C5.90039 19.1597 6.84037 20.0994 8 20.0996H16C17.1598 20.0996 18.0996 19.1598 18.0996 18V9.90039H15C13.3985 9.90019 12.0996 8.6015 12.0996 7V3.90039H8ZM13.9004 7C13.9004 7.60739 14.3927 8.09941 15 8.09961H17.8213C17.8068 8.08333 17.7928 8.06626 17.7773 8.05078L13.9492 4.22266C13.9335 4.20696 13.9169 4.19237 13.9004 4.17773V7Z" fill="currentColor"/></svg>
+        <span class="upl-title">选择排期 Excel</span>
+        <span class="upl-desc">总排期（固定列）或分排期（自动识别列），可多选</span>
+        <span class="upl-file"></span>
+        <input type="file" name="files" multiple accept=".xlsx">
+      </label>
+      <div class="btn-row">
+        <button type="submit" class="btn btn-primary" id="procbtn">开始处理</button>
+        <span class="meta" id="procstate"></span>
+      </div>
+    </form>
+
+    <details class="log" id="proclogwrap" style="display:none">
+      <summary>处理日志</summary>
+      <div class="log-body" id="proclog"></div>
+    </details>
+
+    <div class="result" id="procresult"></div>
+  </div>
+
+  <!-- 规则说明 -->
+  <div class="card">
+    <details class="log" style="margin-top:0">
+      <summary>匹配规则说明</summary>
+      <div class="log-body" style="font-family:inherit;white-space:normal;line-height:1.9">
+        2025 走货行：PO 精确匹配 → 货号候选(4-6位数字) → 数量/日期消歧；货号无法提取或不在发票中时不填、转人工，杜绝 PO 级误填。<br>
+        2026 走货行：美国订单按 PO 行号(后缀÷10对齐)匹配 ZB 汇总表/实体发票；对不上时按客 PO(Ultimate consignee PO#)+货号+数量匹配。<br>
+        同货号分批出货：多张发票数量合计与排期总量吻合时合并填入(票1/票2)。<br>
+        供给护栏：发票货号数量不够排期行分时，整组转人工，杜绝"入多"。<br>
+        已有发票号一律跳过不覆盖；确定的填入粉色；不确定的把候选发票号写进格子标绿色，人工定夺后直接改。
+      </div>
+    </details>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+function toast(msg, ms=3200) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), ms);
+}
+// 文件选择回显
+document.querySelectorAll('.upl input[type=file]').forEach(inp => {
+  inp.addEventListener('change', () => {
+    const box = inp.closest('.upl');
+    const names = [...inp.files].map(f => f.name);
+    box.classList.toggle('full', names.length > 0);
+    box.querySelector('.upl-file').textContent = names.length > 2 ? `${names[0]} 等 ${names.length} 个文件` : names.join('、');
+  });
+});
+async function poll(url, logEl, wrapEl, done) {
+  try {
+    const r = await fetch(url); const j = await r.json();
+    if (j.log && j.log.length) { wrapEl.style.display = 'block'; logEl.textContent = j.log.join('\n'); logEl.scrollTop = logEl.scrollHeight; }
+    if (done(j)) return;
+  } catch(e) {}
+  setTimeout(() => poll(url, logEl, wrapEl, done), 1500);
+}
+
+$('dbform').onsubmit = async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  if (!fd.getAll('files').some(f => f.size)) { toast('请先选择发票文件'); return; }
+  const btn = $('dbbtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>&nbsp;建库中';
+  const r = await fetch('/admin/rebuild', {method: 'POST', body: fd});
+  const j = await r.json();
+  if (!j.ok) { toast('失败: ' + j.msg); btn.disabled = false; btn.textContent = '上传并建库'; return; }
+  poll('/admin/db_status', $('dblog'), $('dblogwrap'), (s) => {
+    if (!s.building) {
+      btn.disabled = false; btn.textContent = '上传并建库';
+      const st = s.status;
+      $('dbstatus').innerHTML =
+        `<span class="chip">2025 发票 <b>${st['2025发票']}</b> 张 · PO <b>${st['2025PO']}</b></span>` +
+        `<span class="chip">ZB 汇总表 <b>${st['ZB汇总表']}</b> 条</span>` +
+        `<span class="chip">ZB 实体发票 <b>${st['ZB实体sheet']}</b> 张</span>`;
+      toast('建库完成');
+      return true;
+    }
+    return false;
+  });
+};
+
+$('procform').onsubmit = async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  if (!fd.getAll('files').some(f => f.size)) { toast('请先选择排期文件'); return; }
+  const btn = $('procbtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>&nbsp;处理中';
+  $('procresult').className = 'result'; $('procresult').innerHTML = '';
+  const r = await fetch('/process', {method: 'POST', body: fd});
+  const j = await r.json();
+  if (!j.ok) { toast('失败: ' + j.msg); btn.disabled = false; btn.textContent = '开始处理'; return; }
+  poll('/job/' + j.job, $('proclog'), $('proclogwrap'), (s) => {
+    if (s.status === 'done' || s.status === 'error') {
+      btn.disabled = false; btn.textContent = '开始处理';
+      if (s.status === 'done') {
+        const dlSvg = '<svg viewBox="0 0 24 24" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2.90002C12.4971 2.90002 12.9 3.30297 12.9 3.80002V12.2939L15.8081 9.38585C16.1595 9.03438 16.7294 9.03438 17.0808 9.38585C17.4323 9.73732 17.4323 10.3072 17.0808 10.6586L12.6364 15.1031C12.4676 15.2719 12.2387 15.3667 12 15.3667C11.7613 15.3667 11.5324 15.2719 11.3636 15.1031L6.91917 10.6586C6.5677 10.3072 6.5677 9.73732 6.91917 9.38585C7.27064 9.03438 7.84049 9.03438 8.19196 9.38585L11.1 12.2939V3.80002C11.1 3.30297 11.503 2.90002 12 2.90002ZM4.00001 13.5874C4.49706 13.5874 4.90001 13.9903 4.90001 14.4874V18.043C4.90001 18.2758 4.99249 18.499 5.1571 18.6636C5.32172 18.8282 5.54498 18.9207 5.77778 18.9207H18.2222C18.455 18.9207 18.6783 18.8283 18.8429 18.6636C19.0075 18.499 19.1 18.2758 19.1 18.043V14.4874C19.1 13.9903 19.5029 13.5874 20 13.5874C20.4971 13.5874 20.9 13.9903 20.9 14.4874V18.043C20.9 18.7531 20.6179 19.4342 20.1157 19.9364C19.6135 20.4386 18.9324 20.7207 18.2222 20.7207H5.77778C5.06759 20.7207 4.38649 20.4386 3.88431 19.9364C3.38213 19.4342 3.10001 18.7531 3.10001 18.043V14.4874C3.10001 13.9903 3.50295 13.5874 4.00001 13.5874Z" fill="currentColor"/></svg>';
+        const docSvg = '<svg viewBox="0 0 24 24" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M13.1719 2.09961C13.9408 2.09969 14.6789 2.40555 15.2227 2.94922L19.0508 6.77734C19.5946 7.32113 19.9003 8.05911 19.9004 8.82812V18C19.9004 20.1539 18.1539 21.9004 16 21.9004H8C5.84626 21.9002 4.09961 20.1538 4.09961 18V6C4.09961 3.84621 5.84626 2.09981 8 2.09961H13.1719ZM8 3.90039C6.84037 3.90059 5.90039 4.84032 5.90039 6V18C5.90039 19.1597 6.84037 20.0994 8 20.0996H16C17.1598 20.0996 18.0996 19.1598 18.0996 18V9.90039H15C13.3985 9.90019 12.0996 8.6015 12.0996 7V3.90039H8Z" fill="currentColor"/></svg>';
+        $('procresult').innerHTML = s.items.map(it => {
+          const chips = Object.entries(it.stats).map(([k, v]) => {
+            const cls = k.includes('新填入') || k.includes('补齐') ? 'good' : (k.includes('复核') ? 'warn' : '');
+            return `<span class="stat ${cls}">${k} ${v}</span>`;
+          }).join('');
+          return `<div class="result-file"><div class="fname">${docSvg}${it.input}</div>` +
+            `<div class="stat-chips">${chips}</div>` +
+            `<div class="dl-row"><a class="btn btn-secondary" href="${it.result}">${dlSvg}已入发票排期</a>` +
+            `<a class="btn btn-secondary" href="${it.report}">${dlSvg}分类清单</a></div></div>`;
+        }).join('');
+        $('procresult').className = 'result show';
+        toast('处理完成');
+      } else {
+        toast('处理失败，请查看日志');
+      }
+      return true;
+    }
+    return false;
+  });
+};
+</script>
+</body>
+</html>
