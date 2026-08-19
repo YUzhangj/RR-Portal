@@ -249,6 +249,8 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+// HTML 转义：上传文件名等用户可控内容进 innerHTML 前必须转义（防存储型 XSS）
+const escHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 function toast(msg, ms=3200) {
   const t = $('toast'); t.textContent = msg; t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), ms);
@@ -314,7 +316,7 @@ $('procform').onsubmit = async (e) => {
             const cls = k.includes('新填入') || k.includes('补齐') ? 'good' : (k.includes('复核') ? 'warn' : '');
             return `<span class="stat ${cls}">${k} ${v}</span>`;
           }).join('');
-          return `<div class="result-file"><div class="fname">${docSvg}${it.input}</div>` +
+          return `<div class="result-file"><div class="fname">${docSvg}${escHtml(it.input)}</div>` +
             `<div class="stat-chips">${chips}</div>` +
             `<div class="dl-row"><a class="btn btn-secondary" href="${it.result}">${dlSvg}已入发票排期</a>` +
             `<a class="btn btn-secondary" href="${it.report}">${dlSvg}分类清单</a></div></div>`;
