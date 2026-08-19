@@ -273,19 +273,27 @@ async function confirmImportPreview() {
   if (importDraftInvalidCount.value) { alert('草稿中仍有异常行，请取消后修正 Excel 再重新导入'); return }
   if (!importDraftRows.value.length || importConfirming.value) return
   importConfirming.value = true
+  const failedRows: Quality5sImportDraftRow[] = []
+  let ok = 0
   try {
-    const batch = pb.createBatch()
     for (const row of importDraftRows.value) {
-      batch.collection('quality_5s_checks').create(row.payload)
+      try {
+        await pb.collection('quality_5s_checks').create(row.payload)
+        ok++
+      } catch (error: any) {
+        console.error(error)
+        const message = error?.response?.message || error?.message || '写入失败'
+        failedRows.push({ ...row, error: `写入失败：${message}` })
+      }
     }
-    await batch.send()
-    const ok = importDraftRows.value.length
-    cancelImportPreview()
-    await load()
-    alert(`正式导入完成：成功 ${ok} 条`)
-  } catch (error) {
-    console.error(error)
-    alert('正式导入失败：整批数据均未写入，请检查草稿内容')
+    if (ok) await load()
+    if (!failedRows.length) {
+      cancelImportPreview()
+      alert(`正式导入完成：成功 ${ok} 条`)
+    } else {
+      importDraftRows.value = failedRows
+      alert(`正式导入完成：成功 ${ok} 条，失败 ${failedRows.length} 条；失败行已保留在草稿中`)
+    }
   } finally { importConfirming.value = false }
 }
 
