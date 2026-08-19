@@ -10,6 +10,7 @@ import { allowedCrafts, allowedRegions } from '../utils/permissions'
 import { REGION_LABELS, regionOf, CRAFT_LABELS, type Region, type Craft } from '../constants/roles'
 import type { Order } from '../types/order'
 import type { Factory } from '../types/factory'
+import { useTableColumnPreferences } from '../composables/useTableColumnPreferences'
 
 const orders = useOrdersStore()
 const factories = useFactoriesStore()
@@ -63,6 +64,45 @@ interface Row {
   // 综合合格率
   combinedRate: string
 }
+
+const tableColumns = [
+  { key: 'factory', label: '厂名', width: 300, hideable: false },
+  { key: 'contact', label: '联系人', width: 120 },
+  { key: 'phone', label: '联系电话', width: 150 },
+  { key: 'address', label: '工厂地址', width: 240 },
+  { key: 'cooperation', label: '合作年限', width: 120 },
+  { key: 'equipment', label: '设备台数/生产拉线', width: 180 },
+  { key: 'lines', label: '帮我们生产的机台/生产线', width: 230 },
+  { key: 'staff', label: '员工人数', width: 110 },
+  { key: 'capacity', label: '月产能', width: 120 },
+  { key: 'types', label: '加工类型', width: 180 },
+  { key: 'quoteSum', label: '价格-核价总工价', width: 150 },
+  { key: 'unitSum', label: '价格-外发总工价', width: 150 },
+  { key: 'priceRatio', label: '价格-占比', width: 110 },
+  { key: 'orderCount', label: '交期-订单总单数', width: 140 },
+  { key: 'delayedCount', label: '交期-延期单数', width: 130 },
+  { key: 'delayRatio', label: '交期-延期占比', width: 130 },
+  { key: 'delayAvg', label: '交期-延期平均天数', width: 160 },
+  { key: 'inspectCount', label: 'QC-验货总单数', width: 140 },
+  { key: 'passCount', label: 'QC-合格单数', width: 130 },
+  { key: 'passRate', label: 'QC-合格率', width: 120 },
+  { key: 'combinedRate', label: '现场综合合格率', width: 160 },
+  { key: 'grade', label: '工厂评级(A/B/C/D)', width: 170 },
+  { key: 'notes', label: '备注', width: 160 },
+]
+const { frozenThrough, columnPanelOpen, visibleColumns, isVisible, isFrozen, columnStyle, toggleColumn, showAllColumns } =
+  useTableColumnPreferences('summary-table-columns', tableColumns)
+const visibleColumnCount = computed(() => visibleColumns.value.length)
+const baseKeys = ['contact', 'phone', 'address', 'cooperation', 'equipment', 'lines', 'staff', 'capacity', 'types']
+const priceKeys = ['quoteSum', 'unitSum', 'priceRatio']
+const deliveryKeys = ['orderCount', 'delayedCount', 'delayRatio', 'delayAvg']
+const inspectionKeys = ['inspectCount', 'passCount', 'passRate']
+const visibleCount = (keys: string[]) => keys.filter(isVisible).length
+const groupStyle = (keys: string[]) => {
+  const first = keys.find(isVisible)
+  return first && keys.filter(isVisible).every(isFrozen) ? columnStyle(first) : undefined
+}
+const groupFrozen = (keys: string[]) => keys.some(isVisible) && keys.filter(isVisible).every(isFrozen)
 
 const rows = computed<Row[]>(() => {
   const byFactory: Record<string, Order[]> = {}
@@ -177,63 +217,100 @@ function exportExcel() {
           <option value="">全部部门</option>
           <option v-for="c in CRAFT_OPTIONS" :key="c" :value="c">{{ CRAFT_LABELS[c as Craft] }}</option>
         </select>
+        <label class="freeze-control">冻结至
+          <select v-model="frozenThrough" class="column-select">
+            <option value="">不冻结列</option>
+            <option v-for="column in visibleColumns" :key="column.key" :value="column.key">{{ column.label }}</option>
+          </select>
+        </label>
+        <div class="column-menu">
+          <button class="ghost" @click="columnPanelOpen = !columnPanelOpen">栏目显示</button>
+          <div v-if="columnPanelOpen" class="column-panel">
+            <div class="column-panel-head"><b>显示/隐藏栏目</b><button class="link-btn" @click="showAllColumns">全部显示</button></div>
+            <label v-for="column in tableColumns.filter(c => c.hideable !== false)" :key="column.key">
+              <input type="checkbox" :checked="isVisible(column.key)" @change="toggleColumn(column.key)" /> {{ column.label }}
+            </label>
+          </div>
+        </div>
         <span class="spacer"></span>
         <input class="search-box" v-model="search" placeholder="搜索 厂名/联系人/加工类型" />
         <button @click="exportExcel">导出 Excel</button>
       </div>
-      <div class="scroll">
+      <div class="scroll" tabindex="0" aria-label="汇总表滚动区域">
         <table class="summary">
           <thead>
             <tr class="grp">
-              <th rowspan="3" class="factory-name-col">厂名</th>
-              <th :colspan="9" rowspan="2">工厂基础信息</th>
-              <th :colspan="7">PMC/外发组</th>
-              <th :colspan="4">QC品质</th>
-              <th rowspan="2">综合评级</th>
-              <th rowspan="3">备注</th>
+              <th rowspan="3" :class="{ frozen: isFrozen('factory'), 'freeze-edge': frozenThrough === 'factory' }" :style="columnStyle('factory')">厂名</th>
+              <th v-if="visibleCount(baseKeys)" :colspan="visibleCount(baseKeys)" rowspan="2"
+                :class="{ frozen: groupFrozen(baseKeys) }" :style="groupStyle(baseKeys)">工厂基础信息</th>
+              <th v-if="visibleCount(priceKeys) + visibleCount(deliveryKeys)" :colspan="visibleCount(priceKeys) + visibleCount(deliveryKeys)">
+                PMC/外发组
+              </th>
+              <th v-if="visibleCount(inspectionKeys) + (isVisible('combinedRate') ? 1 : 0)"
+                :colspan="visibleCount(inspectionKeys) + (isVisible('combinedRate') ? 1 : 0)">QC品质</th>
+              <th v-if="isVisible('grade')" rowspan="2" :class="{ frozen: isFrozen('grade') }" :style="columnStyle('grade')">综合评级</th>
+              <th v-if="isVisible('notes')" rowspan="3" :class="{ frozen: isFrozen('notes'), 'freeze-edge': frozenThrough === 'notes' }" :style="columnStyle('notes')">备注</th>
             </tr>
             <tr class="grp">
-              <th :colspan="3">价格</th>
-              <th :colspan="4">交期</th>
-              <th :colspan="3">品质验货</th>
-              <th rowspan="2">现场综合合格率</th>
+              <th v-if="visibleCount(priceKeys)" :colspan="visibleCount(priceKeys)"
+                :class="{ frozen: groupFrozen(priceKeys) }" :style="groupStyle(priceKeys)">价格</th>
+              <th v-if="visibleCount(deliveryKeys)" :colspan="visibleCount(deliveryKeys)"
+                :class="{ frozen: groupFrozen(deliveryKeys) }" :style="groupStyle(deliveryKeys)">交期</th>
+              <th v-if="visibleCount(inspectionKeys)" :colspan="visibleCount(inspectionKeys)"
+                :class="{ frozen: groupFrozen(inspectionKeys) }" :style="groupStyle(inspectionKeys)">品质验货</th>
+              <th v-if="isVisible('combinedRate')" rowspan="2"
+                :class="{ frozen: isFrozen('combinedRate'), 'freeze-edge': frozenThrough === 'combinedRate' }" :style="columnStyle('combinedRate')">现场综合合格率</th>
             </tr>
             <tr>
-              <th>联系人</th><th>联系电话</th><th>工厂地址</th><th>合作年限</th>
-              <th>设备台数/生产拉线</th><th>帮我们生产的机台/生产线</th><th>员工人数</th><th>月产能</th><th>加工类型</th>
-              <th>核价总工价</th><th>外发总工价</th><th>占比</th>
-              <th>订单总单数</th><th>延期单数</th><th>占比</th><th>延期平均天数</th>
-              <th>验货总单数</th><th>合格单数</th><th>合格率</th>
-              <th>工厂评级(A/B/C/D)</th>
+              <th v-if="isVisible('contact')" :class="{ frozen: isFrozen('contact'), 'freeze-edge': frozenThrough === 'contact' }" :style="columnStyle('contact')">联系人</th>
+              <th v-if="isVisible('phone')" :class="{ frozen: isFrozen('phone'), 'freeze-edge': frozenThrough === 'phone' }" :style="columnStyle('phone')">联系电话</th>
+              <th v-if="isVisible('address')" :class="{ frozen: isFrozen('address'), 'freeze-edge': frozenThrough === 'address' }" :style="columnStyle('address')">工厂地址</th>
+              <th v-if="isVisible('cooperation')" :class="{ frozen: isFrozen('cooperation'), 'freeze-edge': frozenThrough === 'cooperation' }" :style="columnStyle('cooperation')">合作年限</th>
+              <th v-if="isVisible('equipment')" :class="{ frozen: isFrozen('equipment'), 'freeze-edge': frozenThrough === 'equipment' }" :style="columnStyle('equipment')">设备台数/生产拉线</th>
+              <th v-if="isVisible('lines')" :class="{ frozen: isFrozen('lines'), 'freeze-edge': frozenThrough === 'lines' }" :style="columnStyle('lines')">帮我们生产的机台/生产线</th>
+              <th v-if="isVisible('staff')" :class="{ frozen: isFrozen('staff'), 'freeze-edge': frozenThrough === 'staff' }" :style="columnStyle('staff')">员工人数</th>
+              <th v-if="isVisible('capacity')" :class="{ frozen: isFrozen('capacity'), 'freeze-edge': frozenThrough === 'capacity' }" :style="columnStyle('capacity')">月产能</th>
+              <th v-if="isVisible('types')" :class="{ frozen: isFrozen('types'), 'freeze-edge': frozenThrough === 'types' }" :style="columnStyle('types')">加工类型</th>
+              <th v-if="isVisible('quoteSum')" :class="{ frozen: isFrozen('quoteSum'), 'freeze-edge': frozenThrough === 'quoteSum' }" :style="columnStyle('quoteSum')">核价总工价</th>
+              <th v-if="isVisible('unitSum')" :class="{ frozen: isFrozen('unitSum'), 'freeze-edge': frozenThrough === 'unitSum' }" :style="columnStyle('unitSum')">外发总工价</th>
+              <th v-if="isVisible('priceRatio')" :class="{ frozen: isFrozen('priceRatio'), 'freeze-edge': frozenThrough === 'priceRatio' }" :style="columnStyle('priceRatio')">占比</th>
+              <th v-if="isVisible('orderCount')" :class="{ frozen: isFrozen('orderCount'), 'freeze-edge': frozenThrough === 'orderCount' }" :style="columnStyle('orderCount')">订单总单数</th>
+              <th v-if="isVisible('delayedCount')" :class="{ frozen: isFrozen('delayedCount'), 'freeze-edge': frozenThrough === 'delayedCount' }" :style="columnStyle('delayedCount')">延期单数</th>
+              <th v-if="isVisible('delayRatio')" :class="{ frozen: isFrozen('delayRatio'), 'freeze-edge': frozenThrough === 'delayRatio' }" :style="columnStyle('delayRatio')">占比</th>
+              <th v-if="isVisible('delayAvg')" :class="{ frozen: isFrozen('delayAvg'), 'freeze-edge': frozenThrough === 'delayAvg' }" :style="columnStyle('delayAvg')">延期平均天数</th>
+              <th v-if="isVisible('inspectCount')" :class="{ frozen: isFrozen('inspectCount'), 'freeze-edge': frozenThrough === 'inspectCount' }" :style="columnStyle('inspectCount')">验货总单数</th>
+              <th v-if="isVisible('passCount')" :class="{ frozen: isFrozen('passCount'), 'freeze-edge': frozenThrough === 'passCount' }" :style="columnStyle('passCount')">合格单数</th>
+              <th v-if="isVisible('passRate')" :class="{ frozen: isFrozen('passRate'), 'freeze-edge': frozenThrough === 'passRate' }" :style="columnStyle('passRate')">合格率</th>
+              <th v-if="isVisible('grade')" :class="{ frozen: isFrozen('grade'), 'freeze-edge': frozenThrough === 'grade' }" :style="columnStyle('grade')">工厂评级(A/B/C/D)</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="r in rows" :key="r.f.id">
-              <td class="factory-name-col">{{ r.f.name || '-' }}</td>
-              <td>{{ r.f.contact_person || '-' }}</td>
-              <td>{{ r.f.contact_phone || '-' }}</td>
-              <td>{{ r.f.address || '-' }}</td>
-              <td>{{ r.f.cooperation_period || '-' }}</td>
-              <td>{{ r.f.equipment_qty ?? '-' }}</td>
-              <td>{{ r.f.production_lines || '-' }}</td>
-              <td>{{ r.f.staff_count ?? '-' }}</td>
-              <td>{{ r.f.monthly_capacity ?? '-' }}</td>
-              <td>{{ r.f.processable_types || '-' }}</td>
-              <td>{{ r.quoteSum }}</td>
-              <td>{{ r.unitSum }}</td>
-              <td>{{ r.priceRatio }}</td>
-              <td>{{ r.orderCount }}</td>
-              <td>{{ r.delayedCount }}</td>
-              <td>{{ r.delayRatio }}</td>
-              <td>{{ r.delayDaysAvg }}</td>
-              <td>{{ r.intInspect }}</td>
-              <td>{{ r.intPass }}</td>
-              <td>{{ r.intRate }}</td>
-              <td class="strong">{{ r.combinedRate }}</td>
-              <td><span v-if="r.grade" class="badge" :class="'badge-' + r.grade">{{ r.grade }}</span><span v-else>-</span></td>
-              <td>-</td>
+              <td :class="{ frozen: isFrozen('factory'), 'freeze-edge': frozenThrough === 'factory' }" :style="columnStyle('factory')">{{ r.f.name || '-' }}</td>
+              <td v-if="isVisible('contact')" :class="{ frozen: isFrozen('contact'), 'freeze-edge': frozenThrough === 'contact' }" :style="columnStyle('contact')">{{ r.f.contact_person || '-' }}</td>
+              <td v-if="isVisible('phone')" :class="{ frozen: isFrozen('phone'), 'freeze-edge': frozenThrough === 'phone' }" :style="columnStyle('phone')">{{ r.f.contact_phone || '-' }}</td>
+              <td v-if="isVisible('address')" :class="{ frozen: isFrozen('address'), 'freeze-edge': frozenThrough === 'address' }" :style="columnStyle('address')">{{ r.f.address || '-' }}</td>
+              <td v-if="isVisible('cooperation')" :class="{ frozen: isFrozen('cooperation'), 'freeze-edge': frozenThrough === 'cooperation' }" :style="columnStyle('cooperation')">{{ r.f.cooperation_period || '-' }}</td>
+              <td v-if="isVisible('equipment')" :class="{ frozen: isFrozen('equipment'), 'freeze-edge': frozenThrough === 'equipment' }" :style="columnStyle('equipment')">{{ r.f.equipment_qty ?? '-' }}</td>
+              <td v-if="isVisible('lines')" :class="{ frozen: isFrozen('lines'), 'freeze-edge': frozenThrough === 'lines' }" :style="columnStyle('lines')">{{ r.f.production_lines || '-' }}</td>
+              <td v-if="isVisible('staff')" :class="{ frozen: isFrozen('staff'), 'freeze-edge': frozenThrough === 'staff' }" :style="columnStyle('staff')">{{ r.f.staff_count ?? '-' }}</td>
+              <td v-if="isVisible('capacity')" :class="{ frozen: isFrozen('capacity'), 'freeze-edge': frozenThrough === 'capacity' }" :style="columnStyle('capacity')">{{ r.f.monthly_capacity ?? '-' }}</td>
+              <td v-if="isVisible('types')" :class="{ frozen: isFrozen('types'), 'freeze-edge': frozenThrough === 'types' }" :style="columnStyle('types')">{{ r.f.processable_types || '-' }}</td>
+              <td v-if="isVisible('quoteSum')" :class="{ frozen: isFrozen('quoteSum'), 'freeze-edge': frozenThrough === 'quoteSum' }" :style="columnStyle('quoteSum')">{{ r.quoteSum }}</td>
+              <td v-if="isVisible('unitSum')" :class="{ frozen: isFrozen('unitSum'), 'freeze-edge': frozenThrough === 'unitSum' }" :style="columnStyle('unitSum')">{{ r.unitSum }}</td>
+              <td v-if="isVisible('priceRatio')" :class="{ frozen: isFrozen('priceRatio'), 'freeze-edge': frozenThrough === 'priceRatio' }" :style="columnStyle('priceRatio')">{{ r.priceRatio }}</td>
+              <td v-if="isVisible('orderCount')" :class="{ frozen: isFrozen('orderCount'), 'freeze-edge': frozenThrough === 'orderCount' }" :style="columnStyle('orderCount')">{{ r.orderCount }}</td>
+              <td v-if="isVisible('delayedCount')" :class="{ frozen: isFrozen('delayedCount'), 'freeze-edge': frozenThrough === 'delayedCount' }" :style="columnStyle('delayedCount')">{{ r.delayedCount }}</td>
+              <td v-if="isVisible('delayRatio')" :class="{ frozen: isFrozen('delayRatio'), 'freeze-edge': frozenThrough === 'delayRatio' }" :style="columnStyle('delayRatio')">{{ r.delayRatio }}</td>
+              <td v-if="isVisible('delayAvg')" :class="{ frozen: isFrozen('delayAvg'), 'freeze-edge': frozenThrough === 'delayAvg' }" :style="columnStyle('delayAvg')">{{ r.delayDaysAvg }}</td>
+              <td v-if="isVisible('inspectCount')" :class="{ frozen: isFrozen('inspectCount'), 'freeze-edge': frozenThrough === 'inspectCount' }" :style="columnStyle('inspectCount')">{{ r.intInspect }}</td>
+              <td v-if="isVisible('passCount')" :class="{ frozen: isFrozen('passCount'), 'freeze-edge': frozenThrough === 'passCount' }" :style="columnStyle('passCount')">{{ r.intPass }}</td>
+              <td v-if="isVisible('passRate')" :class="{ frozen: isFrozen('passRate'), 'freeze-edge': frozenThrough === 'passRate' }" :style="columnStyle('passRate')">{{ r.intRate }}</td>
+              <td v-if="isVisible('combinedRate')" class="strong" :class="{ frozen: isFrozen('combinedRate'), 'freeze-edge': frozenThrough === 'combinedRate' }" :style="columnStyle('combinedRate')">{{ r.combinedRate }}</td>
+              <td v-if="isVisible('grade')" :class="{ frozen: isFrozen('grade'), 'freeze-edge': frozenThrough === 'grade' }" :style="columnStyle('grade')"><span v-if="r.grade" class="badge" :class="'badge-' + r.grade">{{ r.grade }}</span><span v-else>-</span></td>
+              <td v-if="isVisible('notes')" :class="{ frozen: isFrozen('notes'), 'freeze-edge': frozenThrough === 'notes' }" :style="columnStyle('notes')">-</td>
             </tr>
-            <tr v-if="!rows.length"><td colspan="23" class="hint" style="text-align:center">暂无数据</td></tr>
+            <tr v-if="!rows.length"><td :colspan="visibleColumnCount" class="hint" style="text-align:center">暂无数据</td></tr>
           </tbody>
         </table>
       </div>
@@ -268,7 +345,9 @@ function exportExcel() {
   scrollbar-gutter: stable;
 }
 .summary {
-  min-width: 2600px;
+  width: max-content;
+  min-width: 100%;
+  table-layout: fixed;
   margin-top: 0;
   overflow: visible;
 }
@@ -282,24 +361,18 @@ function exportExcel() {
 .summary thead tr:first-child th { top: 0; }
 .summary thead tr:nth-child(2) th { top: 44px; }
 .summary thead tr:nth-child(3) th { top: 88px; }
-.summary .factory-name-col {
-  position: sticky;
-  left: 0;
-  width: 300px;
-  min-width: 300px;
-  max-width: 300px;
-  box-sizing: border-box;
-  background: var(--surface);
-  box-shadow: 5px 0 7px -7px rgba(31, 37, 51, .55);
-}
-.summary thead .factory-name-col {
-  top: 0;
-  z-index: 6;
-  background: #fafbfc;
-}
-.summary tbody .factory-name-col { z-index: 2; }
+.summary .frozen { position: sticky; z-index: 2; background: var(--surface); }
+.summary thead .frozen { z-index: 5; background: #fafbfc; }
+.summary .freeze-edge { box-shadow: 5px 0 7px -7px rgba(31, 37, 51, .55); }
 .grp th { background: #f0f2f8; border-left: 1px solid var(--border); }
 .search-box { width: 240px; padding: .4rem .7rem; font-size: .9rem; border: 1px solid var(--border); border-radius: var(--radius-sm); margin-right: .6rem; }
 .region-sel { height: 34px; padding: 0 .6rem; margin-left: .6rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); cursor: pointer; }
+.freeze-control { display: flex; align-items: center; gap: .35rem; color: var(--text-soft); font-size: .85rem; white-space: nowrap; }
+.column-select { height: 34px; max-width: 200px; padding: 0 .55rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); }
+.column-menu { position: relative; }
+.column-panel { position: absolute; top: calc(100% + .4rem); left: 0; z-index: 20; width: 330px; max-height: 430px; overflow: auto; padding: .75rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); box-shadow: var(--shadow); display: grid; gap: .45rem; }
+.column-panel label { display: flex; align-items: flex-start; gap: .45rem; font-size: .84rem; }
+.column-panel-head { display: flex; justify-content: space-between; align-items: center; padding-bottom: .35rem; border-bottom: 1px solid var(--border); }
+.link-btn { padding: 0; border: 0; background: transparent; color: var(--primary); font-size: .82rem; }
 .strong { font-weight: 600; }
 </style>

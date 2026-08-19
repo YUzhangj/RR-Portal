@@ -10,6 +10,7 @@ import { canEditQuality, allowedRegions, canViewCraft } from '../utils/permissio
 import { buildQualityInspectionImportColumns, formatImportedDate, normalizeExcelHeader, resolveQualityInspectionFactory } from '../utils/qualityInspectionImport'
 import { REGIONS, REGION_LABELS, regionOf, type Craft, type Region } from '../constants/roles'
 import type { QualityInspection } from '../types/qualityInspection'
+import { useTableColumnPreferences } from '../composables/useTableColumnPreferences'
 
 const factories = useFactoriesStore()
 const auth = useAuthStore()
@@ -53,6 +54,41 @@ const filteredRecords = computed(() =>
 const showForm = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const RESULTS = ['PASS', 'FAIL']
+interface InspectionImportDraftRow {
+  rowNo: number
+  factoryName: string
+  payload: Record<string, any>
+  error: string
+  // 写入失败可重试，不计入异常行（否则会禁用确认按钮导致永远无法重试）
+  saveError?: string
+}
+const importDraftRows = ref<InspectionImportDraftRow[]>([])
+const importPreviewOpen = ref(false)
+const importConfirming = ref(false)
+const importDraftInvalidCount = computed(() => importDraftRows.value.filter((row) => row.error).length)
+const tableColumns = [
+  { key: 'index', label: '序号', width: 64, hideable: false },
+  { key: 'date', label: '送货日期', width: 138 },
+  { key: 'factory', label: '加工厂名称', width: 260 },
+  { key: 'processType', label: '加工类型', width: 120 },
+  { key: 'customer', label: '客户', width: 120 },
+  { key: 'deliveryNo', label: '送货单号', width: 130 },
+  { key: 'itemNo', label: '货号', width: 120 },
+  { key: 'product', label: '产品名称', width: 160 },
+  { key: 'quantity', label: '数量', width: 90 },
+  { key: 'orderCount', label: '单数', width: 80 },
+  { key: 'internalResult', label: '内部-检验结果', width: 120 },
+  { key: 'internalDefect', label: '内部-不良描述', width: 140 },
+  { key: 'internalInspector', label: '内部-检验人员', width: 120 },
+  { key: 'custDate', label: '客户-检验日期', width: 130 },
+  { key: 'custResult', label: '客户-检验结果', width: 120 },
+  { key: 'custDefect', label: '客户-不良描述', width: 140 },
+  { key: 'notes', label: '备注', width: 160 },
+  { key: 'actions', label: '操作', width: 190 },
+]
+const { frozenThrough, columnPanelOpen, visibleColumns, isVisible, isFrozen, columnStyle, toggleColumn, showAllColumns } =
+  useTableColumnPreferences('quality-inspection-table-columns', tableColumns)
+const visibleColumnCount = computed(() => visibleColumns.value.filter((column) => column.key !== 'actions' || canOperate.value).length)
 
 async function load() {
   records.value = await pb.collection('quality_inspections').getFullList<QualityInspection>({
@@ -145,17 +181,16 @@ async function importExcel(ev: Event) {
   const cell = (row: any[], i: number) => (i >= 0 ? row[i] : '')
   const str = (row: any[], i: number) => { const v = cell(row, i); return v == null ? '' : String(v).trim() }
   const toNumber = (v: any) => Number(String(v ?? '').replace(/,/g, ''))
-  let ok = 0, fail = 0
-  for (const row of aoa.slice(headerIdx + 1)) {
+  const preview: InspectionImportDraftRow[] = []
+  for (const [offset, row] of aoa.slice(headerIdx + 1).entries()) {
     const fname = str(row, idx.factory)
     const prod = str(row, idx.product)
     if (prod.includes('小计') || prod.includes('合计')) continue
     if (!fname && !prod) continue
     const factoryMatch = resolveQualityInspectionFactory(factories.items, fname, str(row, idx.ptype), regionFilter.value)
-    if (!fname || factoryMatch.status !== 'matched') { if (prod) fail++; continue }
     const payload: Record<string, any> = {
       created_by: auth.userId ?? undefined,
-      factory: factoryMatch.id, process_type: str(row, idx.ptype), customer: str(row, idx.customer),
+      factory: factoryMatch.status === 'matched' ? factoryMatch.id : '', process_type: str(row, idx.ptype), customer: str(row, idx.customer),
       delivery_no: str(row, idx.delivery_no), item_no: str(row, idx.item_no), product: prod,
       internal_result: str(row, idx.ir), internal_defect: str(row, idx.idf), internal_inspector: str(row, idx.iins),
       cust_inspect_date: str(row, idx.cdate), cust_result: str(row, idx.cres), cust_defect: str(row, idx.cdef),
@@ -163,11 +198,49 @@ async function importExcel(ev: Event) {
     }
     const dv = cell(row, idx.date); if (dv) payload.inspect_date = formatImportedDate(dv)
     const qv = cell(row, idx.qty); if (qv !== '' && qv != null) payload.quantity = toNumber(qv)
-    try { await pb.collection('quality_inspections').create(payload); ok++ } catch { fail++ }
+    const errors: string[] = []
+    if (!fname) errors.push('缺少加工厂名称')
+    else if (factoryMatch.status !== 'matched') errors.push(factoryMatch.status === 'ambiguous' ? '工厂简称匹配到多家工厂' : '工厂名未匹配')
+    if (!prod) errors.push('缺少产品名称')
+    preview.push({ rowNo: headerIdx + offset + 2, factoryName: fname, payload, error: errors.join('；') })
   }
   if (fileInput.value) fileInput.value.value = ''
-  await load()
-  alert(`导入完成：成功 ${ok} 条` + (fail ? `，失败 ${fail} 条(工厂名未匹配或简称不唯一)` : '') + '\n(加工厂名称可填系统全称或唯一简称，如「俊豪」)')
+  if (!preview.length) { alert('未识别到可预览的数据行'); return }
+  importDraftRows.value = preview
+  importPreviewOpen.value = true
+}
+
+function cancelImportPreview() {
+  importPreviewOpen.value = false
+  importDraftRows.value = []
+}
+
+async function confirmImportPreview() {
+  if (importDraftInvalidCount.value) { alert('草稿中仍有异常行，请取消后修正 Excel 再重新导入'); return }
+  if (!importDraftRows.value.length || importConfirming.value) return
+  importConfirming.value = true
+  const failedRows: InspectionImportDraftRow[] = []
+  let ok = 0
+  try {
+    for (const row of importDraftRows.value) {
+      try {
+        await pb.collection('quality_inspections').create(row.payload)
+        ok++
+      } catch (error: any) {
+        console.error(error)
+        const message = error?.response?.message || error?.message || '写入失败'
+        failedRows.push({ ...row, error: '', saveError: `写入失败：${message}` })
+      }
+    }
+    if (ok) await load()
+    if (!failedRows.length) {
+      cancelImportPreview()
+      alert(`正式导入完成：成功 ${ok} 条`)
+    } else {
+      importDraftRows.value = failedRows
+      alert(`正式导入完成：成功 ${ok} 条，失败 ${failedRows.length} 条；失败行已保留在草稿中`)
+    }
+  } finally { importConfirming.value = false }
 }
 
 function exportExcel() {
@@ -215,6 +288,21 @@ function exportExcel() {
           class="search-box"
           placeholder="搜索 送货日期/加工厂/客户/货号"
         />
+        <label class="freeze-control">冻结至
+          <select v-model="frozenThrough" class="region-sel">
+            <option value="">不冻结列</option>
+            <option v-for="column in visibleColumns" :key="column.key" :value="column.key" :disabled="column.key === 'actions'">{{ column.label }}</option>
+          </select>
+        </label>
+        <div class="column-menu">
+          <button class="ghost" @click="columnPanelOpen = !columnPanelOpen">栏目显示</button>
+          <div v-if="columnPanelOpen" class="column-panel">
+            <div class="column-panel-head"><b>显示/隐藏栏目</b><button class="link-btn" @click="showAllColumns">全部显示</button></div>
+            <label v-for="column in tableColumns.filter(c => c.hideable !== false && (c.key !== 'actions' || canOperate))" :key="column.key">
+              <input type="checkbox" :checked="isVisible(column.key)" @change="toggleColumn(column.key)" /> {{ column.label }}
+            </label>
+          </div>
+        </div>
         <span class="spacer"></span>
         <button v-if="canEdit" class="ghost" @click="fileInput?.click()">导入 Excel</button>
         <input ref="fileInput" type="file" accept=".xlsx,.xls,.csv" style="display:none" @change="importExcel" />
@@ -252,48 +340,70 @@ function exportExcel() {
         <div class="actions"><button :disabled="saving" @click="submit">{{ saving ? '保存中…' : '保存记录' }}</button></div>
       </section>
 
+      <div v-if="importPreviewOpen" class="import-overlay" @click.self="cancelImportPreview">
+        <section class="import-dialog" role="dialog" aria-modal="true" aria-label="品质检验 Excel 导入草稿预览">
+          <div class="import-dialog-head">
+            <div><h3>Excel 导入草稿预览</h3><span class="muted">共 {{ importDraftRows.length }} 条，异常 {{ importDraftInvalidCount }} 条</span></div>
+            <button class="ghost" @click="cancelImportPreview">关闭</button>
+          </div>
+          <p class="import-tip">此时尚未写入系统。请检查内容；如有异常行，请取消并修正 Excel 后重新导入。</p>
+          <div class="import-table-wrap">
+            <table class="import-preview-table">
+              <thead><tr><th>Excel行</th><th>送货日期</th><th>加工厂</th><th>加工类型</th><th>客户</th><th>货号</th><th>产品名称</th><th>数量</th><th>检查结果</th></tr></thead>
+              <tbody>
+                <tr v-for="row in importDraftRows" :key="row.rowNo" :class="{ 'import-row-error': row.error || row.saveError }">
+                  <td>{{ row.rowNo }}</td><td>{{ row.payload.inspect_date || '-' }}</td><td>{{ row.factoryName || '-' }}</td>
+                  <td>{{ row.payload.process_type || '-' }}</td><td>{{ row.payload.customer || '-' }}</td><td>{{ row.payload.item_no || '-' }}</td>
+                  <td>{{ row.payload.product || '-' }}</td><td>{{ row.payload.quantity ?? '-' }}</td><td>{{ row.error || row.saveError || '可导入' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="import-actions">
+            <button class="ghost" :disabled="importConfirming" @click="cancelImportPreview">取消导入</button>
+            <button :disabled="importConfirming || !!importDraftInvalidCount" @click="confirmImportPreview">
+              {{ importConfirming ? '导入中…' : `确认导入 ${importDraftRows.length} 条` }}
+            </button>
+          </div>
+        </section>
+      </div>
+
       <div class="scroll">
         <table class="qi">
           <thead>
             <tr>
-              <th rowspan="2">序号</th><th rowspan="2">送货日期</th><th rowspan="2">加工厂名称</th><th rowspan="2">加工类型</th>
-              <th rowspan="2">客户</th><th rowspan="2">送货单号</th><th rowspan="2">货号</th><th rowspan="2">产品名称</th><th rowspan="2">数量</th><th rowspan="2">单数</th>
-              <th colspan="3">内部验货状态</th>
-              <th colspan="3">客户验货状态（适用于装配与包装加工）</th>
-              <th rowspan="2">备注</th>
-              <th v-if="canOperate" rowspan="2">操作</th>
-            </tr>
-            <tr>
-              <th>检验结果</th><th>不良描述</th><th>检验人员</th>
-              <th>检验日期</th><th>检验结果</th><th>不良描述</th>
+              <th v-for="column in visibleColumns.filter(c => c.key !== 'actions' || canOperate)" :key="column.key"
+                :class="{ frozen: isFrozen(column.key), 'freeze-edge': frozenThrough === column.key }" :style="columnStyle(column.key)">
+                {{ column.label }}
+              </th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="(r, i) in filteredRecords" :key="r.id">
-              <td>{{ i + 1 }}</td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.inspect_date" class="table-input date-input" type="date" /><template v-else>{{ r.inspect_date ? r.inspect_date.slice(0, 10) : '-' }}</template></td>
-              <td>
+              <td :class="{ frozen: isFrozen('index'), 'freeze-edge': frozenThrough === 'index' }" :style="columnStyle('index')">{{ i + 1 }}</td>
+              <td v-if="isVisible('date')" :class="{ frozen: isFrozen('date'), 'freeze-edge': frozenThrough === 'date' }" :style="columnStyle('date')"><input v-if="editingId === r.id" v-model="rowDraft.inspect_date" class="table-input date-input" type="date" /><template v-else>{{ r.inspect_date ? r.inspect_date.slice(0, 10) : '-' }}</template></td>
+              <td v-if="isVisible('factory')" :class="{ frozen: isFrozen('factory'), 'freeze-edge': frozenThrough === 'factory' }" :style="columnStyle('factory')">
                 <select v-if="editingId === r.id" v-model="rowDraft.factory" class="table-input factory-input">
                   <option value="">选择工厂</option>
                   <option v-for="f in factories.items" :key="f.id" :value="f.id">{{ f.name }}</option>
                 </select>
                 <template v-else>{{ factoryName(r) }}</template>
               </td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.process_type" class="table-input" /><template v-else>{{ r.process_type || '-' }}</template></td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.customer" class="table-input" /><template v-else>{{ r.customer || '-' }}</template></td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.delivery_no" class="table-input" /><template v-else>{{ r.delivery_no || '-' }}</template></td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.item_no" class="table-input" /><template v-else>{{ r.item_no || '-' }}</template></td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.product" class="table-input product-input" /><template v-else>{{ r.product || '-' }}</template></td>
-              <td><input v-if="editingId === r.id" v-model.number="rowDraft.quantity" class="table-input quantity-input" type="number" min="0" /><template v-else>{{ r.quantity ?? '-' }}</template></td>
-              <td>1</td>
-              <td><select v-if="editingId === r.id" v-model="rowDraft.internal_result" class="table-input result-input"><option value="">-</option><option v-for="o in RESULTS" :key="o" :value="o">{{ o }}</option></select><template v-else>{{ r.internal_result || '-' }}</template></td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.internal_defect" class="table-input" /><template v-else>{{ r.internal_defect || '-' }}</template></td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.internal_inspector" class="table-input" /><template v-else>{{ r.internal_inspector || '-' }}</template></td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.cust_inspect_date" class="table-input" /><template v-else>{{ r.cust_inspect_date || '-' }}</template></td>
-              <td><select v-if="editingId === r.id" v-model="rowDraft.cust_result" class="table-input result-input"><option value="">-</option><option v-for="o in RESULTS" :key="o" :value="o">{{ o }}</option></select><template v-else>{{ r.cust_result || '-' }}</template></td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.cust_defect" class="table-input" /><template v-else>{{ r.cust_defect || '-' }}</template></td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.notes" class="table-input notes-input" /><template v-else>{{ r.notes || '-' }}</template></td>
-              <td v-if="canOperate">
+              <td v-if="isVisible('processType')" :class="{ frozen: isFrozen('processType'), 'freeze-edge': frozenThrough === 'processType' }" :style="columnStyle('processType')"><input v-if="editingId === r.id" v-model="rowDraft.process_type" class="table-input" /><template v-else>{{ r.process_type || '-' }}</template></td>
+              <td v-if="isVisible('customer')" :class="{ frozen: isFrozen('customer'), 'freeze-edge': frozenThrough === 'customer' }" :style="columnStyle('customer')"><input v-if="editingId === r.id" v-model="rowDraft.customer" class="table-input" /><template v-else>{{ r.customer || '-' }}</template></td>
+              <td v-if="isVisible('deliveryNo')" :class="{ frozen: isFrozen('deliveryNo'), 'freeze-edge': frozenThrough === 'deliveryNo' }" :style="columnStyle('deliveryNo')"><input v-if="editingId === r.id" v-model="rowDraft.delivery_no" class="table-input" /><template v-else>{{ r.delivery_no || '-' }}</template></td>
+              <td v-if="isVisible('itemNo')" :class="{ frozen: isFrozen('itemNo'), 'freeze-edge': frozenThrough === 'itemNo' }" :style="columnStyle('itemNo')"><input v-if="editingId === r.id" v-model="rowDraft.item_no" class="table-input" /><template v-else>{{ r.item_no || '-' }}</template></td>
+              <td v-if="isVisible('product')" :class="{ frozen: isFrozen('product'), 'freeze-edge': frozenThrough === 'product' }" :style="columnStyle('product')"><input v-if="editingId === r.id" v-model="rowDraft.product" class="table-input product-input" /><template v-else>{{ r.product || '-' }}</template></td>
+              <td v-if="isVisible('quantity')" :class="{ frozen: isFrozen('quantity'), 'freeze-edge': frozenThrough === 'quantity' }" :style="columnStyle('quantity')"><input v-if="editingId === r.id" v-model.number="rowDraft.quantity" class="table-input quantity-input" type="number" min="0" /><template v-else>{{ r.quantity ?? '-' }}</template></td>
+              <td v-if="isVisible('orderCount')" :class="{ frozen: isFrozen('orderCount'), 'freeze-edge': frozenThrough === 'orderCount' }" :style="columnStyle('orderCount')">1</td>
+              <td v-if="isVisible('internalResult')" :class="{ frozen: isFrozen('internalResult'), 'freeze-edge': frozenThrough === 'internalResult' }" :style="columnStyle('internalResult')"><select v-if="editingId === r.id" v-model="rowDraft.internal_result" class="table-input result-input"><option value="">-</option><option v-for="o in RESULTS" :key="o" :value="o">{{ o }}</option></select><template v-else>{{ r.internal_result || '-' }}</template></td>
+              <td v-if="isVisible('internalDefect')" :class="{ frozen: isFrozen('internalDefect'), 'freeze-edge': frozenThrough === 'internalDefect' }" :style="columnStyle('internalDefect')"><input v-if="editingId === r.id" v-model="rowDraft.internal_defect" class="table-input" /><template v-else>{{ r.internal_defect || '-' }}</template></td>
+              <td v-if="isVisible('internalInspector')" :class="{ frozen: isFrozen('internalInspector'), 'freeze-edge': frozenThrough === 'internalInspector' }" :style="columnStyle('internalInspector')"><input v-if="editingId === r.id" v-model="rowDraft.internal_inspector" class="table-input" /><template v-else>{{ r.internal_inspector || '-' }}</template></td>
+              <td v-if="isVisible('custDate')" :class="{ frozen: isFrozen('custDate'), 'freeze-edge': frozenThrough === 'custDate' }" :style="columnStyle('custDate')"><input v-if="editingId === r.id" v-model="rowDraft.cust_inspect_date" class="table-input" /><template v-else>{{ r.cust_inspect_date || '-' }}</template></td>
+              <td v-if="isVisible('custResult')" :class="{ frozen: isFrozen('custResult'), 'freeze-edge': frozenThrough === 'custResult' }" :style="columnStyle('custResult')"><select v-if="editingId === r.id" v-model="rowDraft.cust_result" class="table-input result-input"><option value="">-</option><option v-for="o in RESULTS" :key="o" :value="o">{{ o }}</option></select><template v-else>{{ r.cust_result || '-' }}</template></td>
+              <td v-if="isVisible('custDefect')" :class="{ frozen: isFrozen('custDefect'), 'freeze-edge': frozenThrough === 'custDefect' }" :style="columnStyle('custDefect')"><input v-if="editingId === r.id" v-model="rowDraft.cust_defect" class="table-input" /><template v-else>{{ r.cust_defect || '-' }}</template></td>
+              <td v-if="isVisible('notes')" :class="{ frozen: isFrozen('notes'), 'freeze-edge': frozenThrough === 'notes' }" :style="columnStyle('notes')"><input v-if="editingId === r.id" v-model="rowDraft.notes" class="table-input notes-input" /><template v-else>{{ r.notes || '-' }}</template></td>
+              <td v-if="canOperate && isVisible('actions')">
                 <div class="op-actions">
                   <button v-if="canEdit" class="ghost mini" @click="startEdit(r)">编辑</button>
                   <button v-if="canEdit" class="ghost mini" :disabled="editingId !== r.id || rowSavingId === r.id" @click="saveEdit(r)">{{ rowSavingId === r.id ? '保存中…' : '保存' }}</button>
@@ -301,7 +411,7 @@ function exportExcel() {
                 </div>
               </td>
             </tr>
-            <tr v-if="!filteredRecords.length"><td :colspan="canOperate ? 18 : 17" class="hint" style="text-align:center">暂无检验记录</td></tr>
+            <tr v-if="!filteredRecords.length"><td :colspan="visibleColumnCount" class="hint" style="text-align:center">暂无检验记录</td></tr>
           </tbody>
         </table>
       </div>
@@ -320,16 +430,28 @@ function exportExcel() {
 .scroll { position: relative; max-height: calc(100vh - 178px); overflow: auto; isolation: isolate; }
 .qi { min-width: 1900px; margin-top: 0; overflow: visible; }
 .qi th, .qi td { white-space: nowrap; text-align: center; font-size: .85rem; }
-.qi thead tr { height: 44px; }
-.qi thead th { position: sticky; z-index: 3; background: #fafbfc; }
-.qi thead tr:first-child th { top: 0; }
-.qi thead tr:nth-child(2) th { top: 44px; }
-.qi thead tr:first-child th:nth-child(1), .qi tbody td:nth-child(1) { left: 0; width: 64px; min-width: 64px; max-width: 64px; }
-.qi thead tr:first-child th:nth-child(2), .qi tbody td:nth-child(2) { left: 64px; width: 138px; min-width: 138px; max-width: 138px; }
-.qi thead tr:first-child th:nth-child(3), .qi tbody td:nth-child(3) { left: 202px; width: 260px; min-width: 260px; max-width: 260px; }
-.qi tbody td:nth-child(-n+3) { position: sticky; z-index: 2; background: var(--surface); }
-.qi thead tr:first-child th:nth-child(-n+3) { z-index: 5; }
-.qi thead tr:first-child th:nth-child(3), .qi tbody td:nth-child(3) { box-shadow: 5px 0 7px -7px rgba(31, 37, 51, .55); }
+.qi thead tr { height: 52px; }
+.qi thead th { position: sticky; top: 0; z-index: 3; background: #fafbfc; }
+.qi .frozen { position: sticky; z-index: 2; background: var(--surface); }
+.qi thead .frozen { z-index: 5; background: #fafbfc; }
+.qi .freeze-edge { box-shadow: 5px 0 7px -7px rgba(31, 37, 51, .55); }
+.freeze-control { display: flex; align-items: center; gap: .35rem; color: var(--text-soft); font-size: .85rem; white-space: nowrap; }
+.column-menu { position: relative; }
+.column-panel { position: absolute; top: calc(100% + .4rem); left: 0; z-index: 20; width: 300px; max-height: 430px; overflow: auto; padding: .75rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); box-shadow: var(--shadow); display: grid; gap: .45rem; }
+.column-panel label { display: flex; align-items: flex-start; gap: .45rem; font-size: .84rem; }
+.column-panel-head { display: flex; justify-content: space-between; align-items: center; padding-bottom: .35rem; border-bottom: 1px solid var(--border); }
+.link-btn { padding: 0; border: 0; background: transparent; color: var(--primary); font-size: .82rem; }
+.import-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 2rem; background: rgba(31,37,51,.42); }
+.import-dialog { width: min(1180px, 96vw); max-height: 88vh; display: flex; flex-direction: column; gap: .8rem; padding: 1rem; border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-lg); }
+.import-dialog-head, .import-actions { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.import-dialog-head h3 { margin: 0; }
+.import-tip { color: var(--text-soft); font-size: .88rem; }
+.import-table-wrap { min-height: 0; overflow: auto; }
+.import-preview-table { min-width: 1050px; margin: 0; overflow: visible; }
+.import-preview-table th { position: sticky; top: 0; z-index: 2; }
+.import-preview-table th, .import-preview-table td { text-align: left; white-space: nowrap; }
+.import-row-error td { background: #fff1f2; color: #b91c1c; }
+.import-actions { justify-content: flex-end; }
 .mini { padding: .25rem .6rem; font-size: .82rem; }
 .table-input { width: 112px; min-width: 0; height: 32px; padding: 0 .45rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); }
 .date-input { width: 138px; }
