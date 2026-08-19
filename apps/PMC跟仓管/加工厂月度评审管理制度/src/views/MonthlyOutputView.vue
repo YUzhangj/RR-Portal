@@ -22,14 +22,19 @@ const regionFilter = ref<Region | ''>('')
 // 按厂区/部门/工厂名搜索过滤（受授权厂区限制）
 const filteredFactories = computed(() => {
   const kw = search.value.trim().toLowerCase()
-  return factories.items.filter((f) => {
-    if (!myRegions.value.includes(regionOf(f))) return false
-    if (!allowedCrafts().includes(f.craft)) return false
-    if (regionFilter.value && regionOf(f) !== regionFilter.value) return false
-    if (deptFilter.value && f.craft !== deptFilter.value) return false
-    if (!kw) return true
-    return f.name.toLowerCase().includes(kw) || (CRAFT_LABELS[f.craft] ?? '').includes(kw)
-  })
+  return factories.items
+    .filter((f) => {
+      if (!myRegions.value.includes(regionOf(f))) return false
+      if (!allowedCrafts().includes(f.craft)) return false
+      if (regionFilter.value && regionOf(f) !== regionFilter.value) return false
+      if (deptFilter.value && f.craft !== deptFilter.value) return false
+      if (!kw) return true
+      return f.name.toLowerCase().includes(kw) || (CRAFT_LABELS[f.craft] ?? '').includes(kw)
+    })
+    .sort((a, b) => {
+      const amountDiff = (outputByFactory.value[b.id] ?? 0) - (outputByFactory.value[a.id] ?? 0)
+      return amountDiff || a.name.localeCompare(b.name, 'zh-CN')
+    })
 })
 
 function exportExcel() {

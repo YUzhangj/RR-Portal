@@ -25,6 +25,7 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const importingExcel = ref(false)
 const pdfInput = ref<HTMLInputElement | null>(null)
 const savingRowId = ref<string | null>(null)
+const savingAll = ref(false)
 const saveToast = ref<{ type: 'success' | 'error'; message: string } | null>(null)
 let saveToastTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -293,6 +294,8 @@ type RowDraft = {
   notes: string
 }
 const drafts = ref<Record<string, RowDraft>>({})
+const dirtyRowIds = ref<Set<string>>(new Set())
+const dirtyRowCount = computed(() => dirtyRowIds.value.size)
 
 function convertedOutPrice(cnyTaxPrice: number, exchangeRate: number, taxPoint: number | null): number | undefined {
   if (pricingMode.value === 'rmb-tax') return cnyTaxToUntaxedRmb(cnyTaxPrice, taxPoint ?? exchangeRate)
@@ -408,6 +411,8 @@ function syncDrafts() {
     next[row.id] = drafts.value[row.id] ?? draftFromRow(row)
   }
   drafts.value = next
+  const visibleIds = new Set(Object.keys(next))
+  dirtyRowIds.value = new Set([...dirtyRowIds.value].filter((id) => visibleIds.has(id)))
 }
 
 watch(rows, syncDrafts, { immediate: true })
@@ -420,6 +425,7 @@ function draftValue(row: DetailRow, field: keyof RowDraft) {
 function setDraftValue(row: DetailRow, field: keyof RowDraft, value: string) {
   if (!drafts.value[row.id]) drafts.value[row.id] = draftFromRow(row)
   drafts.value[row.id][field] = value
+  dirtyRowIds.value = new Set(dirtyRowIds.value).add(row.id)
   if (field === 'unit_price_cny_tax' || field === 'exchange_rate') {
     const cnyTaxPrice = Number(drafts.value[row.id].unit_price_cny_tax)
     const exchangeRate = Number(drafts.value[row.id].exchange_rate)
@@ -454,8 +460,7 @@ function exportExcel() {
   )
 }
 
-async function saveRow(row: DetailRow) {
-  if (savingRowId.value) return
+function buildRowUpdate(row: DetailRow): { data?: Partial<any>; error?: string } {
   const draft = drafts.value[row.id] ?? draftFromRow(row)
   const product = draft.product.trim()
   const quantity = parsePrice(draft.quantity)
@@ -469,18 +474,15 @@ async function saveRow(row: DetailRow) {
     ? convertedOutPrice(unitPriceCnyTax, exchangeRate, taxPoint)
     : enteredUnitPrice
   if (!product) {
-    showSaveToast('error', '保存失败：请输入物料名称')
-    return
+    return { error: '请输入物料名称' }
   }
   if (quantity === undefined) {
-    showSaveToast('error', '保存失败：数量请输入有效数字')
-    return
+    return { error: '数量请输入有效数字' }
   }
   if (quote === undefined || unitPrice === undefined || unitPriceCnyTax === undefined || exchangeRate === undefined || (exchangeRate != null && exchangeRate <= 0)) {
-    showSaveToast('error', usesFactoryTaxPoint.value && taxPoint == null
-      ? '保存失败：请先在工厂信息管理中维护该加工厂的税点'
-      : '保存失败：工价请输入有效数字')
-    return
+    return { error: usesFactoryTaxPoint.value && taxPoint == null
+      ? '请先在工厂信息管理中维护该加工厂的税点'
+      : '工价请输入有效数字' }
   }
 
   const data: Partial<any> = {
@@ -506,17 +508,67 @@ async function saveRow(row: DetailRow) {
     data.delay_days = 0
     data.is_delayed = false
   }
+  return { data }
+}
+
+async function saveRow(row: DetailRow) {
+  if (savingRowId.value || savingAll.value) return
+  const result = buildRowUpdate(row)
+  if (!result.data) {
+    showSaveToast('error', `保存失败：${result.error}`)
+    return
+  }
   savingRowId.value = row.id
   try {
-    await orders.update(row.id, data)
+    await orders.update(row.id, result.data)
     await orders.fetchAll()
-    drafts.value[row.id] = draft
+    dirtyRowIds.value = new Set([...dirtyRowIds.value].filter((id) => id !== row.id))
     showSaveToast('success', '保存成功')
   } catch (error: any) {
     const message = error?.response?.message || error?.message || '未知错误'
     showSaveToast('error', `保存失败：${message}`)
   } finally {
     savingRowId.value = null
+  }
+}
+
+async function saveAllRows() {
+  if (savingAll.value || savingRowId.value) return
+  const detailRows = rows.value.filter((row): row is DetailRow => row.kind === 'detail' && dirtyRowIds.value.has(row.id))
+  if (!detailRows.length) { showSaveToast('success', '没有需要保存的修改'); return }
+
+  const updates: Array<{ id: string; data: Partial<any> }> = []
+  for (const row of detailRows) {
+    const result = buildRowUpdate(row)
+    if (!result.data) {
+      showSaveToast('error', `全部保存失败：${row.item_no || row.order_no || row.id} - ${result.error}`)
+      return
+    }
+    updates.push({ id: row.id, data: result.data })
+  }
+
+  savingAll.value = true
+  const savedIds: string[] = []
+  const errors: string[] = []
+  try {
+    for (const update of updates) {
+      try {
+        await orders.update(update.id, update.data)
+        savedIds.push(update.id)
+      } catch (error: any) {
+        errors.push(error?.response?.message || error?.message || '未知错误')
+      }
+    }
+    await orders.fetchAll()
+    const savedSet = new Set(savedIds)
+    dirtyRowIds.value = new Set([...dirtyRowIds.value].filter((id) => !savedSet.has(id)))
+    if (errors.length) {
+      showSaveToast('error', `全部保存完成：成功 ${savedIds.length} 条，失败 ${errors.length} 条`)
+    } else {
+      showSaveToast('success', `全部保存成功：共 ${savedIds.length} 条`)
+    }
+  } finally {
+    savingAll.value = false
   }
 }
 
@@ -610,6 +662,9 @@ async function removeRow(row: DetailRow) {
         <h2 style="margin:0">{{ deptName }} · 货期管理</h2>
         <span class="muted">共 {{ orderCount }} 单</span>
         <RouterLink v-if="canEdit" :to="newLink"><button>+ 新增下单</button></RouterLink>
+        <button v-if="canEdit" class="save-all" type="button" :disabled="savingAll || !!savingRowId" @click="saveAllRows">
+          {{ savingAll ? '全部保存中…' : dirtyRowCount ? `全部保存（${dirtyRowCount}）` : '全部保存' }}
+        </button>
         <span class="spacer"></span>
         <div class="date-filter">
           <select v-model="dateMode" aria-label="下单日期筛选方式">
