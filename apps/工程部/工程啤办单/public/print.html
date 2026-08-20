@@ -395,7 +395,6 @@
       const engineer = v(o.eng_name);
       const stg = o.stage || '';
       const op = o.order_type || '';
-      function isCkP(s, t) { return stg === s && op === t; }
 
       let rows = items.map(it => `
         <tr>
@@ -428,9 +427,9 @@
           <span style="flex:2;text-align:right"><strong>日期：</strong>${v(o.date)}</span>
         </div>
         <div style="border:1px solid #333;border-bottom:none;padding:3px 8px;font-size:9pt;display:flex;align-items:center">
-          <div style="flex:1;border-right:1px solid #999;padding-right:6px"><strong>EP</strong>&ensp;${ck(isCkP('EP','喷油'))}试模&ensp;${ck(isCkP('EP','试色'))}试色&ensp;${ck(false)}啤板</div>
-          <div style="flex:1;border-right:1px solid #999;padding:0 6px"><strong>FEP</strong>&ensp;${ck(isCkP('FEP','喷油'))}试模&ensp;${ck(isCkP('FEP','试色'))}试色&ensp;${ck(false)}啤板</div>
-          <div style="flex:1;padding:0 6px"><strong>PP</strong>&ensp;${ck(isCkP('PP','喷油'))}试模&ensp;${ck(isCkP('PP','试色'))}试色&ensp;${ck(false)}啤板</div>
+          <div style="flex:1;border-right:1px solid #999;padding-right:6px">${ck(stg==='EP')}<strong>EP</strong></div>
+          <div style="flex:1;border-right:1px solid #999;padding:0 6px">${ck(stg==='FEP')}<strong>FEP</strong></div>
+          <div style="flex:1;padding:0 6px">${ck(stg==='PP')}<strong>PP</strong></div>
         </div>
         <div style="border:1px solid #333;border-bottom:none;padding:4px 8px;font-size:10pt"><strong>原因：</strong>${v(o.reason)}</div>
         <table class="print-table">
