@@ -49,4 +49,7 @@ jobs:
               if curl -sf http://127.0.0.1:5005/health; then echo " OK"; exit 0; fi
               sleep 5
             done
-            echo "健康检查超时"; exit 1
+            echo "=== 健康检查超时，容器日志 ==="
+            docker logs --tail 40 rr-portal-zuru-order-system-1 2>&1 || true
+            docker ps -a --filter name=zuru-order-system
+            exit 1
