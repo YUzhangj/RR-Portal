@@ -430,11 +430,7 @@
         <div style="border:1px solid #333;border-bottom:none;padding:3px 8px;font-size:9pt;display:flex;align-items:center">
           <div style="flex:1;border-right:1px solid #999;padding-right:6px"><strong>EP</strong>&ensp;${ck(isCkP('EP','喷油'))}试模&ensp;${ck(isCkP('EP','试色'))}试色&ensp;${ck(false)}啤板</div>
           <div style="flex:1;border-right:1px solid #999;padding:0 6px"><strong>FEP</strong>&ensp;${ck(isCkP('FEP','喷油'))}试模&ensp;${ck(isCkP('FEP','试色'))}试色&ensp;${ck(false)}啤板</div>
-          <div style="flex:1;border-right:1px solid #999;padding:0 6px"><strong>PP</strong>&ensp;${ck(isCkP('PP','喷油'))}试模&ensp;${ck(isCkP('PP','试色'))}试色&ensp;${ck(false)}啤板</div>
-          <div style="flex:1;padding-left:6px"><strong>其他</strong></div>
-        </div>
-        <div style="border:1px solid #333;border-bottom:none;padding:3px 8px;font-size:9pt">
-          ${ck(op==='喷油')}试模&emsp;&emsp;${ck(op==='试色')}试色&emsp;${ck(op==='返工')}返工
+          <div style="flex:1;padding:0 6px"><strong>PP</strong>&ensp;${ck(isCkP('PP','喷油'))}试模&ensp;${ck(isCkP('PP','试色'))}试色&ensp;${ck(false)}啤板</div>
         </div>
         <div style="border:1px solid #333;border-bottom:none;padding:4px 8px;font-size:10pt"><strong>原因：</strong>${v(o.reason)}</div>
         <table class="print-table">
