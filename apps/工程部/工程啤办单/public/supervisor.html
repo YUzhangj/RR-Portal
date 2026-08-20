@@ -390,7 +390,7 @@ function renderSupDetails(order, type) {
       <td>${esc(it.quantity||'-')}</td><td>${esc(it.required_date||'-')}</td><td>${esc(it.notes||'-')}</td><td>${esc(it.completion_time||'-')}</td>
     </tr>`).join('');
   } else {
-    thead = '<tr><th>客名</th><th>名称</th><th>样板数量</th><th>提供胶件时间</th><th>收到胶件时间</th><th>工程预计完成时间</th><th>喷油交货时间</th><th>工程师/PMC</th><th>备注</th></tr>';
+    thead = '<tr><th>客名</th><th>名称</th><th>样板数量</th><th>提供胶件时间</th><th>收到胶件时间</th><th>工程需求完成时间</th><th>喷油交货时间</th><th>工程师/PMC</th><th>备注</th></tr>';
     rows = items.map(it => `<tr>
       <td>${esc(it.client_name||'-')}</td><td>${esc(it.product_name||'-')}</td><td>${esc(it.sample_qty||'-')}</td>
       <td>${esc(it.provide_time||'-')}</td><td>${esc(it.receive_time||'-')}</td><td>${esc(it.eng_complete_time||'-')}</td>

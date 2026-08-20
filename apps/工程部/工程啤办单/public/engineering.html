@@ -268,7 +268,7 @@
               <option>T0</option><option>EP</option><option>FEP</option><option>PP</option>
             </select>
           </div>
-          <div class="col-md-3"><label class="form-label fw-bold">类型</label>
+          <div class="col-md-3" style="display:none"><label class="form-label fw-bold">类型</label>
             <select class="form-select" id="spray-order_type">
               <option>喷油</option><option>试色</option><option>返工</option>
             </select>
@@ -296,8 +296,8 @@
           <table class="table table-bordered table-sm items-table" id="sprayItemsTable">
             <thead>
               <tr>
-                <th>客名</th><th>产品名称 <span class="text-danger">*</span></th><th>零件名称</th><th>工序</th><th>样板数量</th><th>提供胶件时间</th>
-                <th>工程预计完成时间</th><th style="color:#dc3545">喷油复交货时间</th><th>工程师</th><th>跟进人</th><th></th>
+                <th>产品名称 <span class="text-danger">*</span></th><th>零件名称</th><th>工序</th><th>样板数量</th><th>提供胶件时间</th>
+                <th>工程需求完成时间</th><th style="color:#dc3545">喷油收到胶件时间</th><th>工程师</th><th></th>
               </tr>
             </thead>
             <tbody id="sprayItemsBody"></tbody>
@@ -726,7 +726,7 @@ function renderOrderList(orders) {
         <tr>
           ${isAsm ? `<th>货号</th><th>客名</th><th>夹具数</th><th>申请人</th><th>申请时间</th>` :
             isSpray ? `<th>编号</th><th>客名</th><th>名称</th><th>工序</th><th>样板数量</th>
-            <th>提供胶件时间</th><th>工程预计完成时间</th><th style="color:#fca5a5">喷油复交货时间</th><th>工程师</th>` :
+            <th>提供胶件时间</th><th>工程需求完成时间</th><th style="color:#fca5a5">喷油收到胶件时间</th><th>工程师</th>` :
             `<th>产品编号</th><th>产品名称</th><th>客名</th><th>日期</th><th>类型</th><th>车间</th><th>主管</th><th>工程师</th><th>原因</th>`}
           <th>状态</th><th>操作</th>
         </tr>
@@ -1150,7 +1150,6 @@ function clientSel(val) {
 function addSprayRow(it={}) {
   const tr = document.createElement('tr');
   tr.innerHTML = `
-    <td>${clientSel(it.client_name)}</td>
     <td>${inp('text','product_name',it.product_name)}</td>
     <td>${inp('text','part_name',it.part_name)}</td>
     <td><select name="process" class="form-select form-select-sm" style="min-width:90px">
@@ -1167,7 +1166,6 @@ function addSprayRow(it={}) {
     <td>${inp('date','eng_complete_time',it.eng_complete_time,'class="w-date"')}</td>
     <td>${inp('date','delivery_time',it.delivery_time,'class="w-date"')}</td>
     <td>${inp('text','engineer',it.engineer)}</td>
-    <td>${inp('text','follower',it.follower)}</td>
     <td>${delBtn()}</td>`;
   document.getElementById('sprayItemsBody').appendChild(tr);
 }
@@ -1217,6 +1215,15 @@ function saveOrder(type) {
          : type === 'slush'     ? collectRows('slushItemsBody', slushFields)
          :                        collectRows('sprayItemsBody', sprayFields),
   };
+
+  // 喷油单明细行自动带入表头数据：客名、跟进人（明细未单独填写时取表头值）
+  if (type === 'spray') {
+    body.items = (body.items || []).map(it => ({
+      ...it,
+      client_name: it.client_name || body.client_name || '',
+      follower: it.follower || body.eng_name || '',
+    }))
+  }
 
   // 产品名称必填：注塑/搪胶检查头部字段，喷油检查明细行
   if (type === 'spray') {
@@ -1515,7 +1522,7 @@ function renderReviewDetails(order, type) {
     thead = '<tr><th>序号</th><th>名称</th><th>数量</th><th>要求完成日期</th><th>价格</th><th>完成时间</th></tr>';
     rows = items.map((it, i) => `<tr><td>${i+1}</td><td>${esc(it.product_name||'-')}</td><td>${esc(it.quantity||'-')}</td><td>${esc(it.required_date||'-')}</td><td>${esc(it.price||'-')}</td><td>${esc(it.completion_time||'-')}</td></tr>`).join('');
   } else {
-    thead = '<tr><th>客名</th><th>名称</th><th>样板数量</th><th>提供胶件时间</th><th>收到胶件时间</th><th>工程预计完成时间</th><th>喷油交货时间</th><th>工程师/PMC</th><th>备注</th></tr>';
+    thead = '<tr><th>客名</th><th>名称</th><th>样板数量</th><th>提供胶件时间</th><th>收到胶件时间</th><th>工程需求完成时间</th><th>喷油交货时间</th><th>工程师/PMC</th><th>备注</th></tr>';
     rows = items.map(it => `<tr><td>${esc(it.client_name||'-')}</td><td>${esc(it.product_name||'-')}</td><td>${esc(it.sample_qty||'-')}</td><td>${esc(it.provide_time||'-')}</td><td>${esc(it.receive_time||'-')}</td><td>${esc(it.eng_complete_time||'-')}</td><td>${esc(it.delivery_time||'-')}</td><td>${esc(it.engineer||'-')}</td><td>${esc(it.notes||'-')}</td></tr>`).join('');
   }
 
