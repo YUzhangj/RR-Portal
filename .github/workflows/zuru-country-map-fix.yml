@@ -14,7 +14,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 上传 main 版本映射表到服务器
-        uses: appleboy/scp-action@edb2b67a723ca9a252b7b19eba4fadd58c1b8af3
+        uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.CLOUD_HOST }}
           username: ${{ secrets.CLOUD_USER }}
