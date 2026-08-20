@@ -135,6 +135,19 @@ function parseToISO(val) {
   return null;
 }
 
+// 生产进度固定 = 生产数/数量 百分比（2026-08-20 车间要求）。
+// 返回 { text: 显示文本, value: 存库的数值（百分数，如 9.79） }
+// 数量为空/为 0 → 空；生产数为空当 0（显示 "0"，和车间手填习惯一致）
+function computeProgress(quantity, productionCount) {
+  if (quantity == null || quantity === '') return { text: '', value: null };
+  const q = Number(quantity);
+  if (isNaN(q) || q === 0) return { text: '', value: null };
+  let c = Number(productionCount);
+  if (isNaN(c)) c = 0;
+  const pct = Math.round((c / q) * 10000) / 100;
+  return { text: pct + '%', value: pct };
+}
+
 function ordersToCelldata(orders, columns, newImportedIds) {
   const celldata = [];
   // 表头行
@@ -183,6 +196,13 @@ function ordersToCelldata(orders, columns, newImportedIds) {
         displayVal = normalizeDueText(val);
         valueToStore = displayVal;
         ct = { t: 's', fa: '@' };   // Excel 文本格式：@ 强制文本
+      } else if (col.data === 'production_progress') {
+        // 生产进度固定 = 生产数/数量 百分比（车间要求），显示层直接算，
+        // 不信 DB 里手填的旧值；用户改数量/生产数后钩子里会实时重算
+        const p = computeProgress(order.quantity, order.production_count);
+        displayVal = p.text;
+        valueToStore = p.value ?? '';
+        ct = { t: 's', fa: '@' };
       } else {
         displayVal = val == null ? '' : String(val);
         valueToStore = val ?? '';
@@ -478,13 +498,15 @@ function LuckysheetEditor({
         dbg('[钩子] (r,c)=(' + r + ',' + c + ') orderId=' + orderId + ' col=' + colData + ' v=', v, 'fmt=', fmt);
       }
 
-      // 用户改了 数量 或 每天目标 → 直接 JS 算天数写回（不靠 Luckysheet 的公式引擎，不稳）
-      if (colData === 'quantity' || colData === 'daily_target') {
+      // 用户改了 数量/每天目标/生产数 → 直接 JS 算天数、生产进度写回（不靠 Luckysheet 的公式引擎，不稳）
+      if (colData === 'quantity' || colData === 'daily_target' || colData === 'production_count') {
         setTimeout(() => {
           try {
             const daysColIdx = ORDER_COLUMNS.findIndex(col => col.data === 'days');
             const qtyColIdx = ORDER_COLUMNS.findIndex(col => col.data === 'quantity');
             const targetColIdx = ORDER_COLUMNS.findIndex(col => col.data === 'daily_target');
+            const progColIdx = ORDER_COLUMNS.findIndex(col => col.data === 'production_progress');
+            const prodCntColIdx = ORDER_COLUMNS.findIndex(col => col.data === 'production_count');
             const ls2 = getLuckysheet();
             if (!ls2?.setCellValue || daysColIdx < 0) return;
             const sheet2 = ls2.getAllSheets()[0];
@@ -499,9 +521,17 @@ function LuckysheetEditor({
             // 暂时 suppress 钩子，避免 days 被记成"用户改了" → 保存条数虚高
             suppressHookRef.current = true;
             ls2.setCellValue(r, daysColIdx, { v: days === '' ? '' : days, m: days === '' ? '' : String(days), ct: { t: 'n' } });
-            // 还得自己把 days 入 pending（不然 DB 不会更新这条）
+            // 生产进度：数量/生产数变化时实时重算成固定百分比
+            let progressValue;
+            if (progColIdx >= 0 && prodCntColIdx >= 0 && (colData === 'quantity' || colData === 'production_count')) {
+              const p = computeProgress(M, sheet2.data[r]?.[prodCntColIdx]?.v);
+              progressValue = p.value;
+              ls2.setCellValue(r, progColIdx, { v: p.value ?? '', m: p.text, ct: { t: 's', fa: '@' } });
+            }
+            // 还得自己把 days / 生产进度 入 pending（不然 DB 不会更新这条）
             if (!pendingChangesRef.current[orderId]) pendingChangesRef.current[orderId] = { fields: {}, fmt: {} };
             pendingChangesRef.current[orderId].fields.days = days === '' ? null : days;
+            if (progressValue !== undefined) pendingChangesRef.current[orderId].fields.production_progress = progressValue;
             // 100ms 后解锁，盖过 setCellValue 触发的 cellUpdated 异步触发
             setTimeout(() => { suppressHookRef.current = false; }, 100);
           } catch {}
