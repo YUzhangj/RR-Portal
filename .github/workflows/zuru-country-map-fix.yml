@@ -37,10 +37,16 @@ jobs:
             md5sum 'apps/业务部/ZURU接单表入单系统/data/country_map.json'
             echo "=== 键数 ==="
             python3 -c "import json;print(len(json.load(open('apps/业务部/ZURU接单表入单系统/data/country_map.json'))))"
+            echo "=== 清理 scp 嵌套目录 ==="
+            rm -rf 'apps/业务部/ZURU接单表入单系统/data/apps'
             echo "=== 重启 zuru-order-system 容器 ==="
             docker compose -f docker-compose.cloud.yml --env-file .env.cloud.production restart zuru-order-system
             sleep 8
             echo "=== 容器内文件 md5（应与上面一致）==="
             docker exec rr-portal-zuru-order-system-1 md5sum /app/data/country_map.json
-            echo "=== 健康检查 ==="
-            curl -sf http://127.0.0.1:5005/health && echo " OK"
+            echo "=== 健康检查（最多等 90s）==="
+            for i in $(seq 1 18); do
+              if curl -sf http://127.0.0.1:5005/health; then echo " OK"; exit 0; fi
+              sleep 5
+            done
+            echo "健康检查超时"; exit 1
