@@ -1,0 +1,46 @@
+name: Oneshot — 修复 ZURU 接单系统国家映射表（用后即删）
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  fix-country-map:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 上传 main 版本映射表到服务器
+        uses: appleboy/scp-action@edb2b67a723ca9a252b7b19eba4fadd58c1b8af3
+        with:
+          host: ${{ secrets.CLOUD_HOST }}
+          username: ${{ secrets.CLOUD_USER }}
+          key: ${{ secrets.CLOUD_SSH_KEY }}
+          source: "apps/业务部/ZURU接单表入单系统/data/country_map.json,apps/业务部/ZURU接单表入单系统/data/item_map.json"
+          target: "/opt/rr-portal/apps/业务部/ZURU接单表入单系统/data/"
+
+      - name: 校验并重启容器
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        with:
+          host: ${{ secrets.CLOUD_HOST }}
+          username: ${{ secrets.CLOUD_USER }}
+          key: ${{ secrets.CLOUD_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd /opt/rr-portal
+            echo "=== 替换前 git 状态 ==="
+            git status --short -- 'apps/业务部/ZURU接单表入单系统/data/' || true
+            echo "=== 服务器文件 md5 ==="
+            md5sum 'apps/业务部/ZURU接单表入单系统/data/country_map.json'
+            echo "=== 键数 ==="
+            python3 -c "import json;print(len(json.load(open('apps/业务部/ZURU接单表入单系统/data/country_map.json'))))"
+            echo "=== 重启 zuru-order-system 容器 ==="
+            docker compose -f docker-compose.cloud.yml --env-file .env.cloud.production restart zuru-order-system
+            sleep 8
+            echo "=== 容器内文件 md5（应与上面一致）==="
+            docker exec rr-portal-zuru-order-system-1 md5sum /app/data/country_map.json
+            echo "=== 健康检查 ==="
+            curl -sf http://127.0.0.1:5005/health && echo " OK"
