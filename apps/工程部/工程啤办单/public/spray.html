@@ -261,6 +261,7 @@ function renderOrders(orders) {
           <td><div class="btn-group btn-group-sm">
             <button class="btn btn-outline-danger" data-order-id="${o.id}" data-order-num="${esc(o.order_number||'')}" onclick="event.stopPropagation();openProblemModalFromBtn(this)" title="问题反馈"><i class="bi bi-exclamation-triangle"></i></button>
             <button class="btn btn-outline-secondary" onclick="event.stopPropagation();printOrder(${o.id})"><i class="bi bi-printer"></i></button>
+            <button class="btn btn-outline-danger" onclick="event.stopPropagation();deleteSprayOrder(${o.id},'${esc(o.order_number||'')}','${esc(o.status||'')}')" title="删除"><i class="bi bi-trash"></i></button>
           </div></td>
         </tr>`);
       return;
@@ -290,6 +291,7 @@ function renderOrders(orders) {
               ${problemsMap[o.id]?`<span class="badge bg-danger ms-1">${problemsMap[o.id]}问题</span>`:''}
               <button class="btn btn-outline-danger" data-order-id="${o.id}" data-order-num="${esc(o.order_number||'')}" onclick="event.stopPropagation();openProblemModalFromBtn(this)" title="问题反馈"><i class="bi bi-exclamation-triangle"></i></button>
               <button class="btn btn-outline-secondary" onclick="event.stopPropagation();printOrder(${o.id})"><i class="bi bi-printer"></i></button>
+              <button class="btn btn-outline-danger" onclick="event.stopPropagation();deleteSprayOrder(${o.id},'${esc(o.order_number||'')}','${esc(o.status||'')}')" title="删除"><i class="bi bi-trash"></i></button>
             </div>` : ''}
           </td>
         </tr>`);
@@ -303,8 +305,8 @@ function renderOrders(orders) {
         <tr>
           <th>车间</th><th>客名</th><th>产品名称</th><th>零件名称</th><th>工序</th><th>样板数量</th><th>提供胶件时间</th>
           <th style="color:#86efac">收到胶件时间</th>
-          <th style="color:#f9a8d4">工程预计完成时间</th>
-          <th style="color:#fca5a5">喷油复交货时间</th>
+          <th style="color:#f9a8d4">工程需求完成时间</th>
+          <th style="color:#fca5a5">喷油收到胶件时间</th>
           <th>工程师</th><th>跟进人</th><th style="color:#86efac">完成时间</th><th>进度</th><th>状态/操作</th>
         </tr>
       </thead>
@@ -354,8 +356,8 @@ function renderSummary(orders) {
             <th style="width:70px">样板数量</th>
             <th>提供胶件时间</th>
             <th>收到胶件时间</th>
-            <th>工程预计完成时间</th>
-            <th style="color:#dc3545">喷油复交货时间</th>
+            <th>工程需求完成时间</th>
+            <th style="color:#dc3545">喷油收到胶件时间</th>
             <th>工程师</th>
             <th>跟进人</th>
             <th style="width:180px">进度</th>
@@ -465,8 +467,8 @@ function viewOrder(id) {
             <thead class="table-dark" style="font-size:.8rem">
               <tr>
                 <th>客名</th><th>产品名称</th><th>零件名称</th><th>工序</th><th>样板数量</th><th>提供胶件时间</th>
-                <th>收到胶件时间</th><th>工程预计完成时间</th>
-                <th style="color:#fca5a5">喷油复交货时间</th><th>工程师</th><th>跟进人</th><th>进度</th>
+                <th>收到胶件时间</th><th>工程需求完成时间</th>
+                <th style="color:#fca5a5">喷油收到胶件时间</th><th>工程师</th><th>跟进人</th><th>进度</th>
               </tr>
             </thead>
             <tbody>${itemRows || '<tr><td colspan="11" class="text-muted text-center">无明细</td></tr>'}</tbody>
@@ -501,7 +503,7 @@ function saveSprayFields(id) {
   }).then(r => { if (r.ok) loadOrders(); });
 }
 
-// ─── 喷油复交货时间（per-item） ───────────────────────────────────────────────
+// ─── 喷油收到胶件时间（per-item） ───────────────────────────────────────────────
 function saveItemDelivery(el) {
   const orderId = el.dataset.orderId;
   const itemId = +el.dataset.itemId;
@@ -659,6 +661,33 @@ function submitProblem() {
 
 function printOrder(id) {
   window.open(`print.html?type=spray&id=${id}`, '_blank');
+}
+
+// 删除喷油单：锁定状态（待经理审核/待生产/生产中/已完成）需经理 PIN
+const SPRAY_LOCKED = ['待经理审核', '待生产', '生产中', '已完成'];
+async function deleteSprayOrder(id, orderNum, status) {
+  let body = null;
+  if (SPRAY_LOCKED.includes(status)) {
+    if (!confirm(`「${orderNum || '#' + id}」已是 ${status} 状态，删除需要经理 PIN。继续？`)) return;
+    const pin = window.prompt('请输入经理 PIN：');
+    if (pin === null) return;
+    if (!pin.trim()) { alert('未输入 PIN，已取消'); return; }
+    body = { manager_name: '易东存', pin: pin.trim() };
+  } else {
+    if (!confirm(`确定删除喷油单「${orderNum || '#' + id}」吗？删除后无法恢复。`)) return;
+  }
+  try {
+    const r = await apiFetch(`/api/spray/${id}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', 'X-User': encodeURIComponent('喷油部') },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) { alert(d.error || '删除失败'); return; }
+    loadOrders();
+  } catch (e) {
+    alert('网络错误，删除失败');
+  }
 }
 
 loadOrders();

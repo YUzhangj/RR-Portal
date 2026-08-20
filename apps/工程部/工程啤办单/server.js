@@ -353,6 +353,26 @@ app.use('/api', (req, res, next) => {
   app.delete(`/api/${type}/:id`, (req, res) => {
     const data = loadData();
     const order = data[`${type}_orders`].find(o => o.id === +req.params.id);
+    // 经理 PIN 可删除锁定状态单据（喷油部等页面无登录，删除已完成单靠此通道）
+    if (order && LOCKED_STATUSES.includes(order.status)) {
+      const pin = req.body?.pin || req.query.pin || '';
+      const name = req.body?.manager_name || req.query.manager_name || '';
+      const lockKey = pinKey(req, name);
+      const gate = checkPinLockout(lockKey);
+      if (!gate.allowed) {
+        return res.status(429).json({ error: `尝试过多，请 ${gate.remaining} 秒后重试` });
+      }
+      if (ALL_MANAGERS.includes(name) && pin && verifyPin(name, pin, 'manager')) {
+        clearPinFailures(lockKey);
+        appendAudit(data, req, 'manager-delete-order', name, {
+          order_type: type, order_id: order.id, order_number: order.order_number || '', status: order.status,
+        });
+        deleteOrder(type, req.params.id);
+        saveData(data);
+        return res.json({ success: true });
+      }
+      if (name) recordPinFailure(lockKey);
+    }
     if (checkLock(req, res, order, '删除')) return;
     deleteOrder(type, req.params.id);
     res.json({ success: true });
