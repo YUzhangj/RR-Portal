@@ -46,7 +46,7 @@ jobs:
             docker exec rr-portal-zuru-order-system-1 md5sum /app/data/country_map.json
             echo "=== 健康检查（最多等 90s）==="
             for i in $(seq 1 18); do
-              if curl -sf http://127.0.0.1:5005/health; then echo " OK"; exit 0; fi
+              if docker exec rr-portal-zuru-order-system-1 curl -sf http://localhost:5005/health; then echo ' OK'; exit 0; fi
               sleep 5
             done
             echo "=== 健康检查超时，容器日志 ==="
