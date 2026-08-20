@@ -82,6 +82,7 @@ const WORKSHOP_CONFIG = {
       { key: 'A3', name: '李腾', worker_count: 33 },
       { key: 'A5', name: '杨轮', worker_count: 47 },
       { key: '新拉', name: '新拉', worker_count: 20, note: '预计6月份开拉' },
+      { key: '待定', name: '待定', worker_count: 0, note: '新产品未定拉时临时挂，不进排拉记忆' },
     ]},
   B: { supervisor: '吴敏敏', factory_area: '兴信B', worker_count: 50,
     lines: [
@@ -90,6 +91,7 @@ const WORKSHOP_CONFIG = {
       { key: 'B3', name: '庞贵成', worker_count: 48 },
       { key: 'B5', name: '骆志凯', worker_count: 35 },
       { key: '新拉', name: '新拉', worker_count: 20, note: '预计6月份开拉' },
+      { key: '待定', name: '待定', worker_count: 0, note: '新产品未定拉时临时挂，不进排拉记忆' },
     ]},
   C: { supervisor: '刘荣华', factory_area: '华登', worker_count: 50,
     lines: [
@@ -99,6 +101,7 @@ const WORKSHOP_CONFIG = {
       { key: 'C08', name: '肖雄', worker_count: 49 },
       { key: 'C12', name: '梁泽文', worker_count: 62 },
       { key: '二楼蛋糕机器拉', name: '王飞飞', worker_count: 33 },
+      { key: '待定', name: '待定', worker_count: 0, note: '新产品未定拉时临时挂，不进排拉记忆' },
     ]},
 };
 const WORKSHOP_LINES = {
@@ -241,6 +244,8 @@ router.put('/item-line-map', (req, res) => {
   let n = 0;
   for (const e of entries) {
     if (!e || !e.item_no || !e.line) continue;
+    // 「待定」是临时挂单位置，不进记忆 —— 否则同货号下次导入会被预填成待定
+    if (String(e.line).trim() === '待定') continue;
     const key = getItemGroup(e.item_no) + '|' + String(e.work_type == null ? '' : e.work_type).trim();
     map[key] = String(e.line).trim();
     n++;
@@ -370,7 +375,8 @@ router.post('/auto-assign', async (req, res) => {
     const votes = {};
     for (const o of list) {
       const key = resolveLineKey(workshop, o.line_name);
-      if (key) votes[key] = (votes[key] || 0) + 1;
+      // 「待定」只是临时挂单位置，不参与学习 —— 学到了会把该货号永远钉在待定上
+      if (key && key !== '待定') votes[key] = (votes[key] || 0) + 1;
     }
     const best = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
     if (best) map[g] = best[0];   // 学到的覆盖旧的（最新手工排拉为准）
@@ -385,7 +391,8 @@ router.post('/auto-assign', async (req, res) => {
   let unmapped = 0;
   for (const [g, list] of Object.entries(groups)) {
     const line = map[g];
-    if (!line) { unmapped += list.length; continue; }
+    // 映射到「待定」（历史遗留）等于没映射 —— 待在待定不动，计未分配
+    if (!line || line === '待定') { unmapped += list.length; continue; }
     const lineCfg = cfg.lines.find(l => l.key === line);
     const wc = (lineCfg && lineCfg.worker_count) || cfg.worker_count;
     const sorted = [...list].sort((a, b) => (a.ship_date || '9999').localeCompare(b.ship_date || '9999'));

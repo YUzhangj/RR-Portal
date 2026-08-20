@@ -118,7 +118,7 @@ export default function App() {
                     onClick={e => e.stopPropagation()}
                     style={{ width: 60, fontSize: 13, border: '1px solid #fa8c16', borderRadius: 3, padding: '1px 4px', outline: 'none' }}
                   />
-                ) : `${l.key}(${l.name})`}
+                ) : (l.key === l.name ? l.key : `${l.key}(${l.name})`)}
               </div>
             ))}
           </div>

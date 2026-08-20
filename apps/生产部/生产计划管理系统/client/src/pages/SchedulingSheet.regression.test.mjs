@@ -76,3 +76,13 @@ test('sheet height follows the window instead of fixed 600px', () => {
   assert.match(source, /addEventListener\('resize', onResize\)/);
   assert.doesNotMatch(source, /height=\{600\}/);
 });
+
+// ===== 2026-08-20 「待定」拉（新产品未定拉临时挂） =====
+
+test('pending line 待定 is importable but never memorized in item-line map', () => {
+  // 选了「待定」的行正常进 orders，但不进 lineEntries（不写记忆映射）
+  assert.match(source, /mainLine && mainLine !== '待定'\) lineEntries\.push/);
+  assert.match(source, /pairLine && pairLine !== '待定'\) lineEntries\.push/);
+  // 拉的编号和拉长同名时（待定/新拉）标签不重复显示
+  assert.match(source, /l\.key === l\.name \? l\.key : `\$\{l\.key\}\(\$\{l\.name\}\)`/);
+});
