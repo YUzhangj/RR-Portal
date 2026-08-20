@@ -500,7 +500,12 @@ function viewOrder(id) {
         </div>
         ${order.completed_date ? '<div class="mt-2"><span class="badge bg-success">完成时间: '+esc(order.completed_date)+'</span></div>' : ''}`;
 
-      new bootstrap.Modal(document.getElementById('detailModal')).show();
+      // 已在打开状态（如工序保存后刷新内容）时不要重复 show，
+      // 否则叠加第二层背景导致整页变灰无法点击
+      const detailModalEl = document.getElementById('detailModal');
+      if (!detailModalEl.classList.contains('show')) {
+        new bootstrap.Modal(detailModalEl).show();
+      }
     });
 }
 
