@@ -171,6 +171,22 @@ const statusBadge = s => ({
   '已取消': '<span class="badge bg-secondary">已取消</span>'
 }[s] || `<span class="badge bg-secondary">${esc(s)}</span>`);
 
+// 待生产 → 生产中（开始生产）
+function setSprayStatus(id, status) {
+  apiFetch(`/api/spray/${id}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'X-User': encodeURIComponent('喷油部') },
+    body: JSON.stringify({ status })
+  }).then(async r => {
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      alert(d.error || `操作失败 (HTTP ${r.status})`);
+      return;
+    }
+    loadOrders();
+  });
+}
+
 function filterStatus(status, el) {
   currentFilter = status;
   document.querySelectorAll('.status-filter .btn').forEach(b => b.classList.remove('active'));
@@ -257,7 +273,7 @@ function renderOrders(orders) {
           <td>${esc(o.workshop||'-')}</td>
           <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
           <td>-</td><td>-</td>
-          <td>${statusBadge(o.status)} ${problemsMap[o.id]?`<span class="badge bg-danger ms-1">${problemsMap[o.id]}问题</span>`:''}</td>
+          <td>${statusBadge(o.status)} ${o.status === '待生产' ? `<button class="btn btn-warning btn-sm" onclick="event.stopPropagation();setSprayStatus(${o.id},'生产中')"><i class="bi bi-play-fill"></i>开始生产</button>` : ''} ${problemsMap[o.id]?`<span class="badge bg-danger ms-1">${problemsMap[o.id]}问题</span>`:''}</td>
           <td><div class="btn-group btn-group-sm">
             <button class="btn btn-outline-danger" data-order-id="${o.id}" data-order-num="${esc(o.order_number||'')}" onclick="event.stopPropagation();openProblemModalFromBtn(this)" title="问题反馈"><i class="bi bi-exclamation-triangle"></i></button>
             <button class="btn btn-outline-secondary" onclick="event.stopPropagation();printOrder(${o.id})"><i class="bi bi-printer"></i></button>
@@ -288,6 +304,7 @@ function renderOrders(orders) {
           <td>
             ${idx===0 ? `<div class="btn-group btn-group-sm">
               ${statusBadge(o.status)}
+              ${o.status === '待生产' ? `<button class="btn btn-warning" style="font-size:.75rem;padding:2px 7px;white-space:nowrap" onclick="event.stopPropagation();setSprayStatus(${o.id},'生产中')" title="开始生产"><i class="bi bi-play-fill me-1"></i>开始生产</button>` : ''}
               ${problemsMap[o.id]?`<span class="badge bg-danger ms-1">${problemsMap[o.id]}问题</span>`:''}
               <button class="btn btn-outline-danger" data-order-id="${o.id}" data-order-num="${esc(o.order_number||'')}" onclick="event.stopPropagation();openProblemModalFromBtn(this)" title="问题反馈"><i class="bi bi-exclamation-triangle"></i></button>
               <button class="btn btn-outline-secondary" onclick="event.stopPropagation();printOrder(${o.id})"><i class="bi bi-printer"></i></button>
