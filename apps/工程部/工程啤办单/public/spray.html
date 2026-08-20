@@ -443,7 +443,6 @@ function viewOrder(id) {
           <td>${esc(it.process||'-')}</td>
           <td>${esc(it.sample_qty||'-')}</td>
           <td>${esc(it.provide_time||'-')}</td>
-          <td>${esc(it.receive_time || order.actual_receive_time || '-')}</td>
           <td>${esc(it.eng_complete_time||'-')}</td>
           <td><input type="date" class="form-control form-control-sm spray-delivery" data-order-id="${order.id}" data-item-id="${it.id}" value="${esc(it.delivery_time||'')}" onchange="saveItemDelivery(this)" style="min-width:130px"></td>
           <td>${esc(it.engineer||'-')}</td>
@@ -467,21 +466,17 @@ function viewOrder(id) {
             <thead class="table-dark" style="font-size:.8rem">
               <tr>
                 <th>客名</th><th>产品名称</th><th>零件名称</th><th>工序</th><th>样板数量</th><th>提供胶件时间</th>
-                <th>收到胶件时间</th><th>工程需求完成时间</th>
+                <th>工程需求完成时间</th>
                 <th style="color:#fca5a5">喷油收到胶件时间</th><th>工程师</th><th>跟进人</th><th>进度</th>
               </tr>
             </thead>
-            <tbody>${itemRows || '<tr><td colspan="11" class="text-muted text-center">无明细</td></tr>'}</tbody>
+            <tbody>${itemRows || '<tr><td colspan="10" class="text-muted text-center">无明细</td></tr>'}</tbody>
           </table>
         </div>
 
         <h6 class="mt-3 mb-2 fw-bold">喷油部填写</h6>
         <div class="row g-3">
-          <div class="col-md-4">
-            <label class="form-label">实际收到胶件时间</label>
-            <input type="date" class="form-control" id="sf-actual-receive" value="${esc(order.actual_receive_time||'')}" onchange="saveSprayFields(${order.id})">
-          </div>
-          <div class="col-md-8">
+          <div class="col-12">
             <label class="form-label">备注</label>
             <input type="text" class="form-control" id="sf-notes" value="${esc(order.spray_notes||'')}" placeholder="喷油部备注" onchange="saveSprayFields(${order.id})">
           </div>
@@ -497,7 +492,6 @@ function saveSprayFields(id) {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', 'X-User': encodeURIComponent('喷油部') },
     body: JSON.stringify({
-      actual_receive_time: document.getElementById('sf-actual-receive').value,
       spray_notes: document.getElementById('sf-notes').value
     })
   }).then(r => { if (r.ok) loadOrders(); });
