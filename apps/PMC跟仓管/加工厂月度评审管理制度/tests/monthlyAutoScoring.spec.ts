@@ -9,9 +9,12 @@ const factory = {
 } as Factory
 
 describe('monthly automatic scoring', () => {
-  it('scores qualification from certificates and IP control', () => {
-    expect(calculateAutoScore('qualification', 10, factory, { orders: [], inspections: [], checks: [] })?.score).toBe(10)
-    expect(calculateAutoScore('qualification', 10, { ...factory, ip_control: '' }, { orders: [], inspections: [], checks: [] })?.score).toBe(5)
+  it('scores qualification and IP control as separate five-point items', () => {
+    const emptyData = { orders: [], inspections: [], checks: [] }
+    expect(calculateAutoScore('qualification', 5, factory, emptyData)?.score).toBe(5)
+    expect(calculateAutoScore('qualification', 5, { ...factory, cert_status: '' }, emptyData)?.score).toBe(0)
+    expect(calculateAutoScore('ip_control', 5, factory, emptyData)?.score).toBe(5)
+    expect(calculateAutoScore('ip_control', 5, { ...factory, ip_control: '' }, emptyData)?.score).toBe(0)
   })
 
   it('deduplicates order numbers for linear delivery scoring', () => {
@@ -43,11 +46,11 @@ describe('monthly automatic scoring', () => {
     expect(calculateAutoScore('5s', 20, factory, { orders: [], inspections: [], checks })?.score).toBe(20)
 
     const templates = [
-      { id: 'auto', module: 'qualification', max_score: 10 },
+      { id: 'auto', module: 'qualification', max_score: 5 },
       { id: 'manual', module: 'cooperation', max_score: 10 },
     ] as ScoreTemplate[]
     const merged = mergeAutomaticScores(templates, [{ template_id: 'manual', score: 8, notes: '人工评价' }], factory, { orders: [], inspections: [], checks })
-    expect(merged[0].score).toBe(10)
+    expect(merged[0].score).toBe(5)
     expect(merged[1]).toMatchObject({ score: 8, notes: '人工评价' })
   })
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { deliveryImportFactoryMap } from '../src/utils/deliveryImportScope'
+import { deliveryImportFactoryMap, deliveryScopeFactoryIds } from '../src/utils/deliveryImportScope'
 import type { Factory } from '../src/types/factory'
 
 function factory(id: string, name: string, craft: Factory['craft'], region?: Factory['region']): Factory {
@@ -25,5 +25,12 @@ describe('deliveryImportFactoryMap', () => {
     expect(deliveryImportFactoryMap(factories, 'sewing', 'hunan')).toEqual({
       同名车缝厂: 'hunan-sewing',
     })
+  })
+
+  it('builds a strict factory-id boundary for each region', () => {
+    expect([...deliveryScopeFactoryIds(factories, 'sewing', 'dongguan')]).toEqual([
+      'dongguan-sewing', 'legacy-dongguan',
+    ])
+    expect([...deliveryScopeFactoryIds(factories, 'sewing', 'hunan')]).toEqual(['hunan-sewing'])
   })
 })

@@ -5,7 +5,7 @@ import type { QualityInspection } from '../types/qualityInspection'
 import type { ScoreItem, ScoreModule, ScoreTemplate } from '../types/score'
 
 const AUTO_MODULES = new Set<ScoreModule>([
-  'qualification', 'delivery', 'defect_rate', 'process', '5s', 'craft_specific',
+  'qualification', 'ip_control', 'delivery', 'defect_rate', 'process', '5s', 'craft_specific',
 ])
 const S5_KEYS: (keyof Quality5sCheck)[] = [
   's_area', 's_material', 's_hygiene', 's_sharp',
@@ -59,11 +59,17 @@ function positiveStatus(value: unknown): boolean {
 
 function qualificationScore(factory: Factory, maxScore: number): AutoScoreResult {
   const certOk = positiveStatus(factory.cert_status)
-  const ipOk = positiveStatus(factory.ip_control)
-  const half = maxScore / 2
   return {
-    score: round2((certOk ? half : 0) + (ipOk ? half : 0)),
-    notes: `自动评分：环评/消防/安监资质 ${text(factory.cert_status) || '未填写'}（${certOk ? round2(half) : 0}分）；IP管控 ${text(factory.ip_control) || '未填写'}（${ipOk ? round2(half) : 0}分）`,
+    score: certOk ? maxScore : 0,
+    notes: `自动评分：环评/消防/安监资质 ${text(factory.cert_status) || '未填写'}（${certOk ? maxScore : 0}分）`,
+  }
+}
+
+function ipControlScore(factory: Factory, maxScore: number): AutoScoreResult {
+  const ipOk = positiveStatus(factory.ip_control)
+  return {
+    score: ipOk ? maxScore : 0,
+    notes: `自动评分：IP管控 ${text(factory.ip_control) || '未填写'}（${ipOk ? maxScore : 0}分）`,
   }
 }
 
@@ -149,6 +155,7 @@ export function calculateAutoScore(
   data: MonthlyScoringData,
 ): AutoScoreResult | null {
   if (module === 'qualification') return qualificationScore(factory, maxScore)
+  if (module === 'ip_control') return ipControlScore(factory, maxScore)
   if (module === 'delivery') return deliveryScore(data.orders, maxScore)
   if (module === 'defect_rate') return defectRateScore(data.inspections, maxScore)
   if (module === 'process') return processScore(data.inspections, maxScore)
