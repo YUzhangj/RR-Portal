@@ -346,43 +346,54 @@
       while (allItems.length < minRows) allItems.push({});
 
       const rows = allItems.map((it, i) => `
-        <tr style="height:18px">
+        <tr style="height:22px">
           <td style="text-align:center">${i < items.length ? i + 1 : ''}</td>
+          <td style="text-align:center">${i < items.length ? v(`${o.order_number || ''}-${String(i + 1).padStart(3, '0')}`) : ''}</td>
           <td>${v(it.product_name)}</td>
+          <td></td>
           <td style="text-align:center">${v(it.quantity)}</td>
-          <td>${v(it.required_date)}</td>
-          <td>${v(it.price)}</td>
-          <td>${v(it.completion_time)}</td>
+          <td style="text-align:center">${i < items.length && it.quantity ? 'SET' : ''}</td>
+          <td></td>
+          <td></td>
+          <td></td>
         </tr>`).join('');
 
       return `
-        <div class="print-header" style="margin-bottom:4px">
-          <div class="company-name">东莞兴信塑胶制品有限公司</div>
-          <div style="font-size:12pt;font-weight:bold;margin:4px 0">夹具申请单</div>
+        <div style="display:flex;align-items:flex-start;margin-bottom:4px">
+          <div style="flex:1"></div>
+          <div style="flex:2;text-align:center;font-size:16pt;font-weight:bold;font-family:'SimSun','宋体',serif">List JIG 治具清单</div>
+          <div style="flex:1;font-size:9pt;line-height:1.5">
+            <div>No. Dok. &ensp;: RRI/DE-ENG/005</div>
+            <div>Revisi ke- : 0</div>
+            <div>Tgl Efektif : ${v((o.created_at || o.date || '').slice(0, 10))}</div>
+            <div>Halaman &ensp;: 1/1</div>
+          </div>
         </div>
         <div style="border:1px solid #333;border-bottom:none;padding:4px 8px;font-size:10pt;display:flex;gap:0">
           <span style="flex:2"><strong>客户：</strong>${v(o.client_name)}</span>
           <span style="flex:3"><strong>产品编号：</strong>${v(o.order_number)}</span>
           <span style="flex:3"><strong>产品名称：</strong>${v(o.product_name)}</span>
-          <span style="flex:2;text-align:right"><strong>日期：</strong>${v((o.created_at||'').slice(0,10))}</span>
+          <span style="flex:2;text-align:right"><strong>日期：</strong>${v((o.date || o.created_at || '').slice(0, 10))}</span>
         </div>
-        ${o.reason ? `<div style="border:1px solid #333;border-top:none;border-bottom:none;padding:4px 8px;font-size:10pt"><strong>备注：</strong>${v(o.reason)}</div>` : ''}
         <table class="print-table">
           <thead>
             <tr>
-              <th style="width:40px">序号</th>
-              <th>名称</th>
-              <th>数量</th>
-              <th>要求完成日期</th>
-              <th>价格</th>
-              <th>完成时间</th>
+              <th style="width:40px">No.<br>序号</th>
+              <th style="width:130px">Nomor JIG<br>夹具编号</th>
+              <th>夹具名称<br><span style="font-weight:normal">Nama Mandarin JIG</span></th>
+              <th>夹具印尼文名称<br><span style="font-weight:normal">Nama Indonesia JIG</span></th>
+              <th style="width:56px">Jumlah<br>数量</th>
+              <th style="width:56px">Satuan<br>单位</th>
+              <th style="width:110px">Gambar JIG<br>夹具图片</th>
+              <th style="width:120px">装配签收人<br><span style="font-weight:normal">Pihak penerima</span></th>
+              <th style="width:90px">Catatan<br>备注</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
         </table>
         <div style="border:1px solid #333;border-top:none;padding:6px 8px;font-size:9pt;display:flex;align-items:center">
           <span style="flex:1"><strong>申请：</strong>${v(o.eng_name || o.created_by)}</span>
-          <span style="flex:1;text-align:center">${SUPERVISOR_STAMP[v(o.supervisor)] && ['待生产','生产中','已完成'].includes(o.status) ? `<span class="stamp">研发:${SUPERVISOR_STAMP[v(o.supervisor)]}</span>` : ''}</span>
+          <span style="flex:1;text-align:center">${SUPERVISOR_STAMP[v(o.supervisor)] && ['待生产', '生产中', '已完成'].includes(o.status) ? `<span class="stamp">研发:${SUPERVISOR_STAMP[v(o.supervisor)]}</span>` : ''}</span>
           <span style="flex:1;text-align:right"><strong>审核：</strong>${v(o.supervisor)}</span>
         </div>`;
     }
