@@ -94,7 +94,7 @@ const db = { prepare, exec, transaction, close: () => pool.end(), pool };
 const migrationTables = [
   'factories', 'departments', 'users', 'quotes', 'quote_sections', 'audit_log',
   'ref_tables', 'app_migrations', 'factory_ref_tables', 'user_factories',
-  'user_customers', 'user_perms',
+  'user_customers', 'user_perms', 'factory_material_price_control',
 ];
 
 async function migrateLegacySqlite() {
@@ -142,8 +142,9 @@ async function migrateLegacySqlite() {
 }
 
 const factories = [
-  { code: 'qingxi', name: '清溪', order: 1 },
-  { code: 'heyuan', name: '河源', order: 2 },
+  { code: 'qingxi', name: '清溪', order: 1, active: 1 },
+  // 保留河源 row 仅供历史报价外键和旧导出读取；前台与账号范围不再开放。
+  { code: 'heyuan', name: '河源', order: 2, active: 0 },
 ];
 const departments = [
   ['sales', '业务', 1], ['engineering', '工程/业务', 2], ['electronic', '电子部', 3],
@@ -158,6 +159,23 @@ const materialPrices = [
   ['LDPE', 'G812', 7.8], ['HDPE', 'HMA016', 8], ['TPR', '本白橡胶料', 15],
   ['C-TPR', '透明橡胶料', 17], ['K料', 'KR-03NW', 15], ['PC料', '2605', 12.5],
 ].map(([name, model, price]) => ({ name, model, price }));
+const qingxiMaterialPrices2026 = [
+  ['ABS', '750SW', 8.5], ['ABS', '抽粒料', 4.6], ['透明ABS', 'TR558/920', 12.5],
+  ['HIPS', 'HI425', 7.8], ['GP', 'MW-1', 7.8], ['1#PP', 'JM350/K8009', 6.8],
+  ['1#PP', '7032 E3', 6.8], ['透明PP', '5090T', 7.8], ['POM', 'F3003/M9044', 16.5],
+  ['POM', 'PM820/DM220', 21.5], ['PVC', '普通透明', 9], ['PVC', '普通本白', 8],
+  ['LDPE', 'G812', 7.8], ['HDPE', 'HMA016', 8], ['TPR', '本白橡胶料', 15],
+  ['TPR', '透明橡胶料', 17], ['K料', 'KR-03NW', 15], ['PC料', '2605', 12.5],
+].map(([name, model, price]) => ({ name, model, price }));
+function isLegacyStandardMaterialPriceTable(raw) {
+  let rows;
+  try { rows = JSON.parse(raw || '[]'); } catch { return false; }
+  if (!Array.isArray(rows) || rows.length !== materialPrices.length) return false;
+  return materialPrices.every((item) => rows.some((row) =>
+    String(row?.model || '').trim().toUpperCase() === String(item.model).trim().toUpperCase()
+    && Number(row?.price) === Number(item.price)
+  ));
+}
 const machinePrices = [
   ['4A-6A', '80T', 940], ['7A-9A', '60-80T', 1050], ['10A-12A', '120T', 1160],
   ['14A-16A', '150T', 1490], ['20A', '200T', 1920], ['24A', '260T', 1920],
@@ -170,9 +188,10 @@ async function initialize() {
   await pool.query(fs.readFileSync(path.join(__dirname, 'schema.postgres.sql'), 'utf8'));
   await migrateLegacySqlite();
   for (const factory of factories) {
-    await prepare(`INSERT INTO factories (code, name_cn, sort_order) VALUES (?, ?, ?)
-      ON CONFLICT (code) DO UPDATE SET name_cn = EXCLUDED.name_cn, sort_order = EXCLUDED.sort_order`)
-      .run(factory.code, factory.name, factory.order);
+    await prepare(`INSERT INTO factories (code, name_cn, sort_order, active) VALUES (?, ?, ?, ?)
+      ON CONFLICT (code) DO UPDATE SET
+        name_cn = EXCLUDED.name_cn, sort_order = EXCLUDED.sort_order, active = EXCLUDED.active`)
+      .run(factory.code, factory.name, factory.order, factory.active);
   }
   for (const [code, name, order] of departments) {
     const hash = bcrypt.hashSync(String(1000 + Math.floor(Math.random() * 9000)), 8);
@@ -189,13 +208,33 @@ async function initialize() {
     await prepare(`INSERT INTO ref_tables (key, data_json, updated_by) VALUES (?, ?, '[seed]')
       ON CONFLICT (key) DO NOTHING`).run(key, JSON.stringify(data));
     for (const factory of factories) {
-      const factoryData = key === 'machine_prices'
+      const factoryData = factory.code === 'qingxi' && key === 'material_prices'
+        ? qingxiMaterialPrices2026
+        : key === 'machine_prices'
         ? data.map((row) => row.model === '20A' ? { ...row, price: factory.code === 'heyuan' ? 1720 : 1920 } : row)
         : data;
       await prepare(`INSERT INTO factory_ref_tables (factory_code, key, data_json, updated_by)
         VALUES (?, ?, ?, '[factory-seed]') ON CONFLICT (factory_code, key) DO NOTHING`)
         .run(factory.code, key, JSON.stringify(factoryData));
     }
+  }
+
+  // 已有数据库只更新清溪厂区参考表；河源和历史报价单内保存的料价副本保持不变。
+  const qingxiMaterialPriceMigration = 'qingxi_material_prices_20260819';
+  if (!await prepare('SELECT 1 FROM app_migrations WHERE key = ?').get(qingxiMaterialPriceMigration)) {
+    const migrateQingxiMaterialPrices = transaction(async () => {
+      const current = await prepare(`SELECT data_json FROM factory_ref_tables
+        WHERE factory_code = 'qingxi' AND key = 'material_prices'`).get();
+      if (current && isLegacyStandardMaterialPriceTable(current.data_json)) {
+        await prepare(`UPDATE factory_ref_tables
+          SET data_json = ?, updated_at = CURRENT_TIMESTAMP, updated_by = ?
+          WHERE factory_code = 'qingxi' AND key = 'material_prices'`)
+          .run(JSON.stringify(qingxiMaterialPrices2026), '[清溪2026料价]');
+      }
+      await prepare('INSERT INTO app_migrations (key) VALUES (?)').run(qingxiMaterialPriceMigration);
+    });
+    await migrateQingxiMaterialPrices();
+    console.log('[migrate] 清溪料价已更新为 2026 最新报价（含 ABS 抽粒料）');
   }
 
   const userCount = Number((await prepare('SELECT COUNT(*) AS n FROM users').get()).n);
@@ -218,6 +257,20 @@ async function initialize() {
   }
   await prepare(`INSERT INTO user_factories (user_id, factory_code)
     SELECT id, factory_code FROM users ON CONFLICT DO NOTHING`).run();
+
+  const retireHeyuanFactoryMigration = 'retire_heyuan_factory_20260819';
+  if (!await prepare('SELECT 1 FROM app_migrations WHERE key = ?').get(retireHeyuanFactoryMigration)) {
+    const retireHeyuan = transaction(async () => {
+      await prepare("UPDATE users SET factory_code = 'qingxi' WHERE factory_code = 'heyuan'").run();
+      await prepare(`INSERT INTO user_factories (user_id, factory_code)
+        SELECT id, 'qingxi' FROM users ON CONFLICT DO NOTHING`).run();
+      await prepare("DELETE FROM user_factories WHERE factory_code = 'heyuan'").run();
+      await prepare("DELETE FROM factory_material_price_control WHERE factory_code = 'heyuan'").run();
+      await prepare('INSERT INTO app_migrations (key) VALUES (?)').run(retireHeyuanFactoryMigration);
+    });
+    await retireHeyuan();
+    console.log('[migrate] 河源厂区已下线；账号统一归入清溪，河源历史报价保留');
+  }
 }
 
 db.ready = initialize().catch((error) => {

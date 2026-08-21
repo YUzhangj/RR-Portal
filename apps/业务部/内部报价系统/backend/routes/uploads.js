@@ -136,7 +136,8 @@ router.post('/hardware-sheet', requireAuth, memUpload.single('file'), async (req
     return res.status(400).json({ error: '当前只支持 .xls/.xlsx' });
   }
   try {
-    const result = await parseHardwareWorkbook(req.file.buffer);
+    // 统一供应商报价模板固定采用 5K 档；旧版五金表不受此参数影响。
+    const result = await parseHardwareWorkbook(req.file.buffer, { targetQty: 5000 });
     if (result.error) return res.status(422).json(result);
     res.json(result);
   } catch (e) {

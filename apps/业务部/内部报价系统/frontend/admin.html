@@ -21,6 +21,24 @@
   </div>
 
   <div id="app">
+    <section class="card" style="margin-bottom:16px">
+      <div class="list-head">
+        <div>
+          <h2 style="margin:0">全局料价权限</h2>
+          <p class="muted" style="margin:6px 0 0">每个厂区只能指定一个账号发布全局料价；其他账号只能修改当前报价单内的料价。</p>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-top:14px">
+        <label style="min-width:300px">指定料价管理员
+          <select id="material-manager-user" style="width:100%"></select>
+        </label>
+        <button id="btn-save-material-manager" type="button">保存指定账号</button>
+        <button id="btn-add-material-manager-user" type="button" class="mini">＋ 新增账号</button>
+        <span id="material-manager-msg" class="msg"></span>
+      </div>
+      <p id="material-manager-meta" class="muted" style="margin:10px 0 0;font-size:13px"></p>
+    </section>
+
     <section class="card">
       <div class="list-head">
         <h2 style="margin:0">用户账号</h2>
@@ -51,12 +69,9 @@
               <option value="admin">管理员</option>
             </select>
           </label>
-          <label>可见厂区
-            <select id="nu-factory">
-              <option value="qingxi">清溪</option>
-              <option value="heyuan">河源</option>
-              <option value="all">清溪 + 河源</option>
-            </select>
+          <label>厂区
+            <input type="hidden" id="nu-factory" value="qingxi" />
+            <input type="text" value="清溪" disabled />
           </label>
         </div>
         <div style="margin-top:10px;display:flex;gap:8px">
@@ -156,6 +171,6 @@
       };
     })();
   </script>
-  <script src="./admin.js?v=20260717-admin-factory-configurable"></script>
+  <script src="./admin.js?v=20260819-material-manager-account-add"></script>
 </body>
 </html>

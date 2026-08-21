@@ -33,6 +33,8 @@ const factorySeeds = [
 ];
 const insertFactory = db.prepare('INSERT OR IGNORE INTO factories (code, name_cn, sort_order) VALUES (?, ?, ?)');
 for (const f of factorySeeds) insertFactory.run(f.code, f.name_cn, f.sort_order);
+// 河源厂区已下线：保留记录仅用于读取历史报价和维持外键，不再允许登录、建单或配置账号。
+db.prepare("UPDATE factories SET active = CASE WHEN code = 'qingxi' THEN 1 WHEN code = 'heyuan' THEN 0 ELSE active END").run();
 
 // 迁移：给已有库补版本和厂区字段（幂等）
 const _quoteCols = db.prepare('PRAGMA table_info(quotes)').all().map(c => c.name);
@@ -201,6 +203,39 @@ const refSeeds = {
     { model: '105A', normal: '800T', price: 4500 },
   ],
 };
+
+// 清溪 2026 年料价（HK$/Lb）：以清溪最新报价表为准，并保留 ABS 抽粒料。
+const qingxiMaterialPrices2026 = [
+  { name: 'ABS', model: '750SW', price: 8.50 },
+  { name: 'ABS', model: '抽粒料', price: 4.60 },
+  { name: '透明ABS', model: 'TR558/920', price: 12.50 },
+  { name: 'HIPS', model: 'HI425', price: 7.80 },
+  { name: 'GP', model: 'MW-1', price: 7.80 },
+  { name: '1#PP', model: 'JM350/K8009', price: 6.80 },
+  { name: '1#PP', model: '7032 E3', price: 6.80 },
+  { name: '透明PP', model: '5090T', price: 7.80 },
+  { name: 'POM', model: 'F3003/M9044', price: 16.50 },
+  { name: 'POM', model: 'PM820/DM220', price: 21.50 },
+  { name: 'PVC', model: '普通透明', price: 9.00 },
+  { name: 'PVC', model: '普通本白', price: 8.00 },
+  { name: 'LDPE', model: 'G812', price: 7.80 },
+  { name: 'HDPE', model: 'HMA016', price: 8.00 },
+  { name: 'TPR', model: '本白橡胶料', price: 15.00 },
+  { name: 'TPR', model: '透明橡胶料', price: 17.00 },
+  { name: 'K料', model: 'KR-03NW', price: 15.00 },
+  { name: 'PC料', model: '2605', price: 12.50 },
+];
+
+function isLegacyStandardMaterialPriceTable(raw) {
+  let rows;
+  try { rows = JSON.parse(raw || '[]'); } catch { return false; }
+  const expected = refSeeds.material_prices;
+  if (!Array.isArray(rows) || rows.length !== expected.length) return false;
+  return expected.every((item) => rows.some((row) =>
+    String(row?.model || '').trim().toUpperCase() === String(item.model).trim().toUpperCase()
+    && Number(row?.price) === Number(item.price)
+  ));
+}
 for (const [key, data] of Object.entries(refSeeds)) {
   const exists = db.prepare('SELECT 1 FROM ref_tables WHERE key = ?').get(key);
   if (!exists) {
@@ -237,6 +272,10 @@ const globalRefData = (key) => {
 
 const factoryRefSeedData = (factoryCode, key) => {
   const base = globalRefData(key);
+  if (factoryCode === 'qingxi' && key === 'material_prices'
+    && isLegacyStandardMaterialPriceTable(JSON.stringify(base))) {
+    return qingxiMaterialPrices2026;
+  }
   if (key !== 'machine_prices') return base;
   return base.map(row => row.model === '20A'
     ? { ...row, price: factoryCode === 'heyuan' ? 1720 : 1920 }
@@ -256,6 +295,31 @@ for (const f of factorySeeds) {
         .run(JSON.stringify(data), f.code, key);
     }
   }
+}
+
+// 已有数据库只更新清溪厂区参考表；河源和历史报价单内保存的料价副本保持不变。
+const qingxiMaterialPriceMigration = 'qingxi_material_prices_20260819';
+if (!db.prepare('SELECT 1 FROM app_migrations WHERE key = ?').get(qingxiMaterialPriceMigration)) {
+  db.exec('BEGIN');
+  try {
+    const current = db.prepare(`
+      SELECT data_json FROM factory_ref_tables
+      WHERE factory_code = 'qingxi' AND key = 'material_prices'
+    `).get();
+    if (current && isLegacyStandardMaterialPriceTable(current.data_json)) {
+      db.prepare(`
+        UPDATE factory_ref_tables
+        SET data_json = ?, updated_at = datetime('now'), updated_by = ?
+        WHERE factory_code = 'qingxi' AND key = 'material_prices'
+      `).run(JSON.stringify(qingxiMaterialPrices2026), '[清溪2026料价]');
+    }
+    db.prepare('INSERT INTO app_migrations (key) VALUES (?)').run(qingxiMaterialPriceMigration);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  console.log('[migrate] 清溪料价已更新为 2026 最新报价（含 ABS 抽粒料）');
 }
 
 // 旧报价保存了机型价副本；只迁移一次，按所属厂区统一本次发布的机型名称和 20A 价格。
@@ -387,6 +451,23 @@ db.prepare(`
   INSERT OR IGNORE INTO user_factories (user_id, factory_code)
   SELECT id, factory_code FROM users
 `).run();
+
+const retireHeyuanFactoryMigration = 'retire_heyuan_factory_20260819';
+if (!db.prepare('SELECT 1 FROM app_migrations WHERE key = ?').get(retireHeyuanFactoryMigration)) {
+  db.exec('BEGIN');
+  try {
+    db.prepare("UPDATE users SET factory_code = 'qingxi' WHERE factory_code = 'heyuan'").run();
+    db.prepare("INSERT OR IGNORE INTO user_factories (user_id, factory_code) SELECT id, 'qingxi' FROM users").run();
+    db.prepare("DELETE FROM user_factories WHERE factory_code = 'heyuan'").run();
+    db.prepare("DELETE FROM factory_material_price_control WHERE factory_code = 'heyuan'").run();
+    db.prepare('INSERT INTO app_migrations (key) VALUES (?)').run(retireHeyuanFactoryMigration);
+    db.exec('COMMIT');
+    console.log('[migrate] 河源厂区已下线；账号统一归入清溪，河源历史报价保留');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
 
 // 包装：transaction(fn) 在 BEGIN/COMMIT/ROLLBACK 中运行 fn
 db.transaction = function (fn) {

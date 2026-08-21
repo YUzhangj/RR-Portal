@@ -58,6 +58,58 @@ router.get('/users', async (req, res) => {
   res.json(out);
 });
 
+// 每个厂区仅指定一个全局料价管理员。
+router.get('/material-price-manager', async (req, res) => {
+  const users = await db.prepare(`
+    SELECT DISTINCT u.id, u.username, u.display_name, u.dept, d.name_cn AS dept_name
+    FROM users u
+    JOIN user_factories uf ON uf.user_id = u.id
+    LEFT JOIN departments d ON d.code = u.dept
+    WHERE uf.factory_code = ?
+    ORDER BY u.display_name, u.username
+  `).all(req.user.active_factory_code);
+  const control = await db.prepare(`
+    SELECT c.manager_user_id, c.last_effective_at, c.updated_at, c.updated_by,
+           u.username AS manager_username, u.display_name AS manager_name
+    FROM factory_material_price_control c
+    LEFT JOIN users u ON u.id = c.manager_user_id
+    WHERE c.factory_code = ?
+  `).get(req.user.active_factory_code);
+  res.json({
+    factory_code: req.user.active_factory_code,
+    manager_user_id: control?.manager_user_id || null,
+    manager_name: control?.manager_name || control?.manager_username || null,
+    last_effective_at: control?.last_effective_at || null,
+    users,
+  });
+});
+
+router.put('/material-price-manager', async (req, res) => {
+  const managerUserId = Number(req.body && req.body.manager_user_id);
+  if (!Number.isInteger(managerUserId) || managerUserId <= 0) {
+    return res.status(400).json({ error: '请选择一个料价管理员账号' });
+  }
+  const manager = await db.prepare(`
+    SELECT u.id, u.username, u.display_name
+    FROM users u JOIN user_factories uf ON uf.user_id = u.id
+    WHERE u.id = ? AND uf.factory_code = ?
+  `).get(managerUserId, req.user.active_factory_code);
+  if (!manager) return res.status(400).json({ error: '该账号无权访问当前厂区' });
+
+  await db.prepare(`
+    INSERT INTO factory_material_price_control (factory_code, manager_user_id, updated_at, updated_by)
+    VALUES (?, ?, datetime('now'), ?)
+    ON CONFLICT(factory_code) DO UPDATE SET
+      manager_user_id = excluded.manager_user_id,
+      updated_at = excluded.updated_at,
+      updated_by = excluded.updated_by
+  `).run(req.user.active_factory_code, managerUserId, req.user.username);
+  await db.prepare(`INSERT INTO audit_log (actor, action, detail)
+    VALUES (?, 'set_material_price_manager', ?)`)
+    .run(req.user.username, `${req.user.active_factory_code} -> ${manager.username}`);
+  res.json({ ok: true, manager_user_id: manager.id, manager_name: manager.display_name || manager.username });
+});
+
 // POST /api/admin/users  { username, password, display_name, dept, role, factory_code }
 router.post('/users', async (req, res) => {
   const { username, password, display_name, dept, role, factory_code } = req.body || {};
@@ -105,7 +157,7 @@ router.put('/users/:id/factory', async (req, res) => {
   const result = await changeUserFactories(db, id, factoryCodes);
   const changed = result.changed;
   const clearedCustomers = result.clearedCustomers;
-  const factoryName = factoryCodes.length > 1 ? '清溪 + 河源' : (factoryCodes[0] === 'heyuan' ? '河源' : '清溪');
+  const factoryName = '清溪';
   if (changed) {
     await db.prepare(`INSERT INTO audit_log (actor, action, detail) VALUES (?, 'change_user_factory', ?)`)
       .run(req.user.username, `${u.username} -> ${factoryName}; cleared customers=${clearedCustomers}`);

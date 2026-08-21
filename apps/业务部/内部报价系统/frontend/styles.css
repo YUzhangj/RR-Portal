@@ -163,6 +163,24 @@ button.ghost:hover { background: var(--primary-soft); }
   white-space: nowrap;
   letter-spacing: 0.02em;
 }
+.wb-table thead .quote-filter-row th {
+  padding: 6px 5px;
+  background: #f8fafc;
+  border-top: 1px solid var(--border);
+}
+.quote-filter-row input,
+.quote-filter-row select {
+  width: 100%;
+  min-width: 72px;
+  padding: 5px 7px;
+  border-color: #dbe2ea;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text);
+  background: #fff;
+}
+.quote-filter-row input::placeholder { color: var(--text-light); }
+.quote-filter-row .mini { width: 100%; white-space: nowrap; padding: 5px 7px; }
 .wb-table tbody td {
   padding: 8px 10px;
   border-bottom: 1px solid #f1f5f9;
@@ -491,10 +509,64 @@ h3 .upload-mold-sheet button:hover { background: #334155; }
   flex-wrap: wrap;
 }
 .new-quote-form {
+  margin-top: 18px;
+  padding: 16px 18px 18px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #f8fbff 0%, #f4f8ff 100%);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+.new-quote-form-head {
   display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
   align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.new-quote-form-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  box-shadow: 0 4px 10px rgba(37, 99, 235, .22);
+}
+.new-quote-form-head strong { display: block; color: #1e3a8a; font-size: 15px; }
+.new-quote-form-head small { display: block; margin-top: 1px; color: var(--text-dim); font-size: 12px; }
+.new-quote-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(130px, 1fr)) minmax(132px, auto);
+  gap: 12px;
+  align-items: end;
+}
+.new-quote-grid label { margin: 0; min-width: 0; }
+.new-quote-grid label > span {
+  display: block;
+  margin: 0 0 5px 2px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+}
+.new-quote-grid label > span b { color: var(--danger); }
+.new-quote-grid input,
+.new-quote-grid .combo { width: 100%; min-width: 0; }
+.new-quote-grid input { height: 40px; background: #fff; }
+.new-quote-submit {
+  height: 40px;
+  padding: 0 18px;
+  white-space: nowrap;
+  box-shadow: 0 4px 10px rgba(37, 99, 235, .18);
+}
+@media (max-width: 1180px) {
+  .new-quote-grid { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
+}
+@media (max-width: 720px) {
+  .new-quote-form { padding: 14px; }
+  .new-quote-grid { grid-template-columns: 1fr; }
+  .new-quote-submit { width: 100%; }
 }
 .new-quote-form input { padding: 7px 10px; font-size: 13px; min-width: 110px; }
 .new-quote-form input:nth-child(2) { min-width: 140px; }
@@ -539,12 +611,15 @@ h3 .upload-mold-sheet button:hover { background: #334155; }
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  position: sticky;
+  top: 0;
+  z-index: 40;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 6px;
   margin-bottom: 16px;
-  box-shadow: var(--shadow-sm);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, .10);
 }
 .dept-tab {
   padding: 8px 18px;
