@@ -12,7 +12,7 @@ import { readDeliveryPdfAsAoa } from '../utils/pdfDeliveryImport'
 import { parseDeliveryExcelFiles, UNMATCHED_IMPORT_FACTORY_PREFIX } from '../utils/deliveryExcelImport'
 import { cnyTaxToHkdUntaxed, cnyTaxToUntaxedRmb, DEFAULT_CNY_TO_HKD_RATE } from '../utils/orderPricing'
 import { matchesOrderDate, type OrderDateFilter } from '../utils/orderDateFilter'
-import { deliveryImportFactoryMap } from '../utils/deliveryImportScope'
+import { deliveryImportFactoryMap, deliveryScopeFactoryIds } from '../utils/deliveryImportScope'
 import { isPercentOver100 } from '../utils/percentage'
 import { taxPointFactor } from '../utils/taxPoint'
 import type { Order } from '../types/order'
@@ -122,10 +122,14 @@ function clearDateFilter() {
 }
 
 const myRegions = computed(() => (auth.role ? allowedRegions(auth.role) : null))
+const scopedFactoryIds = computed(() => region.value
+  ? deliveryScopeFactoryIds(factories.items, craft.value, region.value)
+  : new Set(factories.items.filter((factory) => factory.craft === craft.value).map((factory) => factory.id)))
 const deptOrders = computed(() => {
   const q = search.value.trim().toLowerCase()
   return orders.items
-    .filter((o) => o.expand?.factory?.craft === craft.value && (!region.value || regionOf(o.expand?.factory) === region.value))
+    // 以当前厂区+部门工厂 ID 白名单为唯一边界，不依赖订单 expand 的缓存字段。
+    .filter((o) => scopedFactoryIds.value.has(o.factory))
     .filter((o) => !myRegions.value || myRegions.value.includes(regionOf(o.expand?.factory)))
     .filter((o) => matchesOrderDate(o.order_date, dateFilter.value))
     .filter((o) => {

@@ -2,7 +2,7 @@ import type { Grade } from '../constants/grading'
 import type { Craft } from '../constants/roles'
 
 export type ScoreModule =
-  | 'qualification' | 'delivery' | 'cooperation'
+  | 'qualification' | 'ip_control' | 'delivery' | 'cooperation'
   | 'defect_rate' | 'process' | '5s' | 'craft_specific'
 
 export interface ScoreTemplate {
