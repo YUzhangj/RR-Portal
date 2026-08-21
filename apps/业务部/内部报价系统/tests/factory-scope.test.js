@@ -95,12 +95,16 @@ test('factory migration preserves refs, tolerates null payloads, and scopes quot
         'SELECT COUNT(*) AS n FROM quote_sections WHERE quote_id = ? AND dept = ? AND payload_json = ?'
       ).get(1, 'molding', 'null').n;
       const foreignKeyViolations = db.prepare('PRAGMA foreign_key_check').all().length;
+      const activeFactories = db.prepare('SELECT code FROM factories WHERE active = 1 ORDER BY sort_order').all().map(r => r.code);
+      const adminFactories = db.prepare("SELECT uf.factory_code FROM user_factories uf JOIN users u ON u.id = uf.user_id WHERE u.username = 'admin' ORDER BY uf.factory_code").all().map(r => r.factory_code);
       console.log('__FACTORY_RESULT__' + JSON.stringify({
         refs,
         quoteCount,
         preservedSectionCount,
         foreignKeyViolations,
         sameFactoryRejected,
+        activeFactories,
+        adminFactories,
       }));
       db.close();
     `], {
@@ -128,6 +132,8 @@ test('factory migration preserves refs, tolerates null payloads, and scopes quot
     assert.equal(result.preservedSectionCount, 1);
     assert.equal(result.foreignKeyViolations, 0);
     assert.equal(result.sameFactoryRejected, true);
+    assert.deepEqual(result.activeFactories, ['qingxi']);
+    assert.deepEqual(result.adminFactories, ['qingxi']);
     const backupPrefix = `${path.basename(dbPath)}.pre-factory-scope-`;
     const backups = fs.readdirSync(path.dirname(dbPath))
       .filter(file => file.startsWith(backupPrefix) && file.endsWith('.bak'));

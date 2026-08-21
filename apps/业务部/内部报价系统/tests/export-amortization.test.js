@@ -172,6 +172,36 @@ test('empty department Indonesian freight totals do not create circular referenc
   }
 });
 
+test('USD supplier material keeps USD as source price and converts directly to HKD', async () => {
+  const workbook = await buildWorkbook({
+    quote: { quote_no: 'USD-MATERIAL', product_name: '美金辅料', qty: 5000 },
+    sections: [
+      { dept: 'engineering', payload_json: JSON.stringify({
+        hardware: [],
+        aux_materials: [{
+          name: 'USD辅料', spec: 'PCS', qty: 2,
+          unit_price_rmb: null, unit_price_usd: 1.2, source_currency: 'USD',
+        }],
+        packaging_materials: [],
+      }) },
+      { dept: 'sales', payload_json: JSON.stringify({
+        header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.75 }, shipping: { scenarios: [] },
+      }) },
+    ],
+  });
+  const worksheet = workbook.getWorksheet('报价明细');
+  let titleRow = 0;
+  worksheet.eachRow(row => { if (row.getCell(1).value === '六、辅助材料') titleRow = row.number; });
+  const headerRow = titleRow + 1;
+  const dataRow = titleRow + 2;
+  assert.equal(worksheet.getCell(headerRow, 8).value, '单价（RMB / USD）');
+  assert.equal(worksheet.getCell(dataRow, 8).value, 1.2);
+  assert.match(worksheet.getCell(dataRow, 8).numFmt, /US\$/);
+  assert.equal(worksheet.getCell(dataRow, 9).value.formula, `H${dataRow}*7.75`);
+  assert.ok(Math.abs(worksheet.getCell(dataRow, 9).value.result - 9.3) < 1e-9);
+  assert.ok(Math.abs(worksheet.getCell(dataRow, 10).value.result - 18.6) < 1e-9);
+});
+
 test('surtax is stored and exported as a direct HKD amount', async () => {
   const args = {
     quote: { quote_no: 'SURTAX-HKD', product_name: '附加税港币', qty: 1000 },

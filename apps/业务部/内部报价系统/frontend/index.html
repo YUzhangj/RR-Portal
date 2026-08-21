@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>公司内部报价明细系统</title>
-  <link rel="stylesheet" href="./styles.css?v=20260717-topbar-factory" />
+  <link rel="stylesheet" href="./styles.css?v=20260818-quote-filters" />
 </head>
 <body>
   <div class="topbar">
@@ -48,37 +48,66 @@
       <div class="card">
         <div class="list-head">
           <h2 style="margin:0">报价单列表 · <span id="factory-list-name"></span></h2>
-          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-            <div class="search-box">
-              <input id="search-input" type="text" placeholder="🔍 搜索 货号 / 产品 / 客户…" />
-              <small id="search-count" class="muted"></small>
-            </div>
-            <div id="new-quote-form" class="hidden new-quote-form">
-              <input id="q-no" placeholder="货号" />
-              <input id="q-product" placeholder="产品名" />
-              <input id="q-version" placeholder="版本(可选)" />
+          <div class="search-box">
+            <input id="search-input" type="text" placeholder="🔍 搜索 货号 / 产品 / 客户…" />
+            <small id="search-count" class="muted"></small>
+          </div>
+        </div>
+        <div id="new-quote-form" class="hidden new-quote-form">
+          <div class="new-quote-form-head">
+            <div class="new-quote-form-icon">＋</div>
+            <div><strong>新建报价单</strong><small>填写基本资料后创建，各部门即可开始报价</small></div>
+          </div>
+          <div class="new-quote-grid">
+            <label><span>货号 <b>*</b></span><input id="q-no" placeholder="请输入货号" /></label>
+            <label><span>产品名称 <b>*</b></span><input id="q-product" placeholder="请输入产品名" /></label>
+            <label><span>版本</span><input id="q-version" placeholder="选填，如 V1" /></label>
+            <label><span>客户 <b>*</b></span>
               <div id="q-customer-combo" class="combo">
-                <input id="q-customer" placeholder="客户" autocomplete="off" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="q-customer-list" />
+                <input id="q-customer" placeholder="选择或输入客户" autocomplete="off" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="q-customer-list" required />
                 <button type="button" id="q-customer-toggle" class="combo-caret" tabindex="-1" aria-label="展开客户列表">▾</button>
                 <div id="q-customer-list" class="combo-list hidden" role="listbox"></div>
               </div>
-              <input id="q-qty" placeholder="数量" type="number" />
-              <button id="btn-create">＋ 新建报价单</button>
-            </div>
+            </label>
+            <label><span>报价数量</span><input id="q-qty" placeholder="请输入数量" type="number" min="0" /></label>
+            <button id="btn-create" class="new-quote-submit">＋ 创建报价单</button>
           </div>
         </div>
         <table id="quotes-table" class="wb-table" style="margin-top:14px">
-          <thead><tr>
-            <th style="width:50px">#</th>
-            <th style="width:140px">货号</th>
-            <th>产品</th>
-            <th style="width:120px">版本</th>
-            <th style="width:140px">客户</th>
-            <th style="width:90px">进度</th>
-            <th style="width:100px">状态</th>
-            <th style="width:140px">创建时间</th>
-            <th style="width:80px"></th>
-          </tr></thead>
+          <thead>
+            <tr>
+              <th style="width:50px">#</th>
+              <th style="width:140px">货号</th>
+              <th>产品</th>
+              <th style="width:120px">版本</th>
+              <th style="width:140px">客户</th>
+              <th style="width:110px">进度</th>
+              <th style="width:110px">状态</th>
+              <th style="width:140px">创建时间</th>
+              <th style="width:90px"></th>
+            </tr>
+            <tr class="quote-filter-row">
+              <th></th>
+              <th><input id="filter-quote-no" type="text" placeholder="筛选货号" aria-label="筛选货号" /></th>
+              <th><input id="filter-product" type="text" placeholder="筛选产品" aria-label="筛选产品" /></th>
+              <th><input id="filter-version" type="text" placeholder="筛选版本" aria-label="筛选版本" /></th>
+              <th><select id="filter-customer" aria-label="筛选客户"><option value="">全部客户</option></select></th>
+              <th><select id="filter-progress" aria-label="筛选进度">
+                <option value="">全部进度</option>
+                <option value="not_started">未开始</option>
+                <option value="in_progress">进行中</option>
+                <option value="complete">已完成</option>
+              </select></th>
+              <th><select id="filter-status" aria-label="筛选状态">
+                <option value="">全部状态</option>
+                <option value="drafting">草拟中</option>
+                <option value="fully_approved">全部已审</option>
+                <option value="exported">已导出</option>
+              </select></th>
+              <th></th>
+              <th><button id="btn-clear-filters" type="button" class="mini">清除</button></th>
+            </tr>
+          </thead>
           <tbody></tbody>
         </table>
       </div>
@@ -96,6 +125,6 @@
       };
     })();
   </script>
-  <script src="./main.js?v=20260717-topbar-factory"></script>
+  <script src="./main.js?v=20260818-quote-filters"></script>
 </body>
 </html>

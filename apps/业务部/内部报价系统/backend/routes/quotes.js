@@ -57,22 +57,27 @@ router.get('/customers', async (req, res) => {
 router.post('/', async (req, res) => {
   if (req.user.dept !== 'sales') return res.status(403).json({ error: '只有业务可以创建报价单' });
   const { quote_no, product_name, customer, qty, version } = req.body || {};
-  if (!quote_no || !product_name) return res.status(400).json({ error: '缺少 quote_no 或 product_name' });
+  const normalizedQuoteNo = String(quote_no || '').trim();
+  const normalizedProductName = String(product_name || '').trim();
+  const normalizedCustomer = String(customer || '').trim();
+  if (!normalizedQuoteNo || !normalizedProductName || !normalizedCustomer) {
+    return res.status(400).json({ error: '货号、产品名称和客户均为必填项' });
+  }
 
   const tx = db.transaction(async () => {
     const info = await db.prepare(`
       INSERT INTO quotes (quote_no, product_name, customer, qty, version, created_by_dept, created_by_name, factory_code)
       VALUES (?, ?, ?, ?, ?, 'sales', ?, ?)
-    `).run(quote_no, product_name, customer || null, qty || null, version || null, req.user.name, req.user.active_factory_code);
+    `).run(normalizedQuoteNo, normalizedProductName, normalizedCustomer, qty || null, version || null, req.user.name, req.user.active_factory_code);
     const id = info.lastInsertRowid;
     const ins = db.prepare(`INSERT INTO quote_sections (quote_id, dept) VALUES (?, ?)`);
     for (const d of DEPT_CODES) await ins.run(id, d);
     await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action) VALUES (?, 'sales', ?, 'create')`)
       .run(id, req.user.name);
     // 新客户建单后自动加入当前业务账号的可见范围，避免建完后自己看不到。
-    if (customer && req.user.role !== 'admin') {
+    if (req.user.role !== 'admin') {
       await db.prepare('INSERT INTO user_customers (user_id, customer) VALUES (?, ?) ON CONFLICT DO NOTHING')
-        .run(req.user.id, customer);
+        .run(req.user.id, normalizedCustomer);
     }
     return id;
   });
@@ -82,9 +87,9 @@ router.post('/', async (req, res) => {
     res.json({ id });
   } catch (e) {
     if (e.code === '23505' || String(e.message).includes('UNIQUE')) {
-      const _exist = await db.prepare('SELECT customer FROM quotes WHERE quote_no = ? AND factory_code = ?').get(quote_no, req.user.active_factory_code);
+      const _exist = await db.prepare('SELECT customer FROM quotes WHERE quote_no = ? AND factory_code = ?').get(normalizedQuoteNo, req.user.active_factory_code);
       const _cust = _exist && _exist.customer ? `客户「${_exist.customer}」` : '一张无客户的单';
-      return res.status(409).json({ error: `货号「${quote_no}」已被占用（在${_cust}名下），请换一个货号` });
+      return res.status(409).json({ error: `货号「${normalizedQuoteNo}」已被占用（在${_cust}名下），请换一个货号` });
     }
     throw e;
   }

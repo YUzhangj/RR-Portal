@@ -49,7 +49,45 @@ async function init() {
   };
   window.__me = me;
   await loadUsers();
+  await loadMaterialPriceManager();
 }
+
+async function loadMaterialPriceManager() {
+  try {
+    const result = await api('/admin/material-price-manager');
+    const select = $('material-manager-user');
+    select.innerHTML = '<option value="">请选择账号</option>' + (result.users || []).map(user =>
+      `<option value="${user.id}" ${Number(user.id) === Number(result.manager_user_id) ? 'selected' : ''}>${esc(user.display_name || user.username)} · ${esc(user.dept_name || user.dept)} · ${esc(user.username)}</option>`
+    ).join('');
+    const effective = result.last_effective_at
+      ? new Date(result.last_effective_at).toLocaleString()
+      : '尚未发布过全局料价';
+    $('material-manager-meta').textContent = result.manager_name
+      ? `当前指定：${result.manager_name}；上次生效时间：${effective}`
+      : `当前厂区尚未指定料价管理员；${effective}`;
+  } catch (error) {
+    $('material-manager-meta').textContent = `料价权限读取失败：${error.message}`;
+  }
+}
+
+$('btn-save-material-manager').onclick = async () => {
+  const managerUserId = Number($('material-manager-user').value);
+  if (!managerUserId) return alert('请选择一个账号');
+  if (!confirm('确认将该账号设为当前厂区唯一的全局料价管理员？原指定账号将立即失去全局发布权限。')) return;
+  const msg = $('material-manager-msg');
+  msg.textContent = '';
+  try {
+    const result = await api('/admin/material-price-manager', {
+      method: 'PUT', body: JSON.stringify({ manager_user_id: managerUserId }),
+    });
+    msg.style.color = 'green';
+    msg.textContent = `✓ 已指定 ${result.manager_name}`;
+    await loadMaterialPriceManager();
+  } catch (error) {
+    msg.style.color = '';
+    msg.textContent = error.message;
+  }
+};
 
 let __allUsers = [];
 async function loadUsers() {
@@ -77,13 +115,7 @@ function renderUsers() {
     const tr = document.createElement('tr');
     const isLocked = !!u.is_locked;
     const last = u.last_login ? new Date(u.last_login.includes('T') ? u.last_login : u.last_login.replace(' ', 'T') + 'Z').toLocaleString() : '—';
-    const factoryCodes = new Set(String(u.factory_codes || u.factory_code || '').split(',').filter(Boolean));
-    const factoryScope = factoryCodes.has('qingxi') && factoryCodes.has('heyuan') ? 'all' : (factoryCodes.has('heyuan') ? 'heyuan' : 'qingxi');
-    const factoryControl = `<div class="factory-control" role="group" aria-label="${esc(u.username)} 的可见厂区">
-          <button type="button" class="factory-option scope-qingxi ${factoryScope==='qingxi'?'active':''}" data-id="${u.id}" data-username="${esc(u.username)}" data-scope="qingxi" data-cur="${factoryScope}" aria-pressed="${factoryScope==='qingxi'}">清溪</button>
-          <button type="button" class="factory-option scope-heyuan ${factoryScope==='heyuan'?'active':''}" data-id="${u.id}" data-username="${esc(u.username)}" data-scope="heyuan" data-cur="${factoryScope}" aria-pressed="${factoryScope==='heyuan'}">河源</button>
-          <button type="button" class="factory-option scope-all ${factoryScope==='all'?'active':''}" data-id="${u.id}" data-username="${esc(u.username)}" data-scope="all" data-cur="${factoryScope}" aria-pressed="${factoryScope==='all'}">双厂区</button>
-        </div>`;
+    const factoryControl = '<span class="badge b-approved">清溪</span>';
     tr.innerHTML = `
       <td>${u.id}</td>
       <td><b>${esc(u.username)}</b></td>
@@ -116,21 +148,6 @@ function renderUsers() {
   document.querySelectorAll('.btn-unlock').forEach(b => b.onclick = () => unlockUser(b.dataset.id));
   document.querySelectorAll('.btn-del').forEach(b => b.onclick = () => delUser(b.dataset.id, b.dataset.username));
   document.querySelectorAll('.role-sel').forEach(s => s.onchange = () => changeRole(s.dataset.id, s.dataset.username, s.value, s.dataset.cur));
-  document.querySelectorAll('.factory-option:not(:disabled)').forEach(b => b.onclick = () => changeFactory(b.dataset.id, b.dataset.username, b.dataset.scope, b.dataset.cur));
-}
-
-async function changeFactory(id, username, factoryCode, cur) {
-  if (factoryCode === cur) return;
-  const name = factoryCode === 'all' ? '清溪 + 河源' : (factoryCode === 'heyuan' ? '河源' : '清溪');
-  const hint = factoryCode === 'all' ? '该账号登录后可以切换两个厂区。' : '该账号下次登录后只会进入此厂区。';
-  if (!confirm(`把「${username}」的可见厂区改为「${name}」？${hint}`)) {
-    loadUsers();
-    return;
-  }
-  try {
-    await api('/admin/users/' + id + '/factory', { method: 'PUT', body: JSON.stringify({ factory_code: factoryCode }) });
-    await loadUsers();
-  } catch (e) { alert(e.message); loadUsers(); }
 }
 
 async function changeRole(id, username, role, cur) {
@@ -260,9 +277,15 @@ async function delUser(id, username) {
   catch (e) { alert(e.message); }
 }
 
-$('btn-new-user').onclick = () => {
+function showNewUserForm() {
   $('new-user-form').classList.remove('hidden');
   $('nu-username').focus();
+}
+
+$('btn-new-user').onclick = showNewUserForm;
+$('btn-add-material-manager-user').onclick = () => {
+  showNewUserForm();
+  $('new-user-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
 };
 $('btn-cancel-user').onclick = () => $('new-user-form').classList.add('hidden');
 
@@ -286,6 +309,7 @@ $('btn-create-user').onclick = async () => {
     $('nu-msg').textContent = '✓ 创建成功';
     ['nu-username', 'nu-password', 'nu-display'].forEach(id => $(id).value = '');
     await loadUsers();
+    await loadMaterialPriceManager();
     setTimeout(() => { $('new-user-form').classList.add('hidden'); $('nu-msg').style.color = ''; $('nu-msg').textContent = ''; }, 1200);
   } catch (e) { $('nu-msg').style.color = ''; $('nu-msg').textContent = e.message; }
 };

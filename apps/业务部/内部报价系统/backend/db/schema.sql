@@ -130,3 +130,12 @@ CREATE TABLE IF NOT EXISTS user_perms (
   can_admin  INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (user_id, menu)
 );
+
+-- 每个厂区仅允许指定一个账号发布全局料价；普通账号仍可修改自己报价单内的料价副本。
+CREATE TABLE IF NOT EXISTS factory_material_price_control (
+  factory_code      TEXT PRIMARY KEY REFERENCES factories(code),
+  manager_user_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  last_effective_at TEXT,
+  updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_by        TEXT
+);

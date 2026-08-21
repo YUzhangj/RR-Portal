@@ -90,20 +90,51 @@ async function loadQuotes() {
     if ($('search-count')) $('search-count').textContent = '';
     return;
   }
+  refreshQuoteFilterOptions();
   renderQuotes();
+}
+
+function refreshQuoteFilterOptions() {
+  const select = $('filter-customer');
+  if (!select) return;
+  const selected = select.value;
+  const customers = [...new Set(window.__allQuotes
+    .map(row => String(row.customer || '').trim())
+    .filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  select.innerHTML = '<option value="">全部客户</option>'
+    + customers.map(customer => `<option value="${esc(customer)}">${esc(customer)}</option>`).join('');
+  select.value = customers.includes(selected) ? selected : '';
 }
 
 function renderQuotes() {
   const tbody = $('quotes-table').querySelector('tbody');
   tbody.innerHTML = '';
-  const q = ($('search-input')?.value || '').trim().toLowerCase();
-  const rows = q
-    ? window.__allQuotes.filter(r =>
-        String(r.quote_no || '').toLowerCase().includes(q) ||
-        String(r.product_name || '').toLowerCase().includes(q) ||
-        String(r.customer || '').toLowerCase().includes(q))
-    : window.__allQuotes;
-  if ($('search-count')) $('search-count').textContent = q ? `匹配 ${rows.length} / ${window.__allQuotes.length}` : `共 ${window.__allQuotes.length} 条`;
+  const searchText = ($('search-input')?.value || '').trim().toLowerCase();
+  const quoteNo = ($('filter-quote-no')?.value || '').trim().toLowerCase();
+  const product = ($('filter-product')?.value || '').trim().toLowerCase();
+  const version = ($('filter-version')?.value || '').trim().toLowerCase();
+  const customer = $('filter-customer')?.value || '';
+  const progress = $('filter-progress')?.value || '';
+  const status = $('filter-status')?.value || '';
+  const hasFilters = !!(searchText || quoteNo || product || version || customer || progress || status);
+  const rows = window.__allQuotes.filter(row => {
+    const total = row.total_depts || 7;
+    const approved = Number(row.approved_count) || 0;
+    const progressValue = approved <= 0 ? 'not_started' : (approved >= total ? 'complete' : 'in_progress');
+    if (searchText && ![
+      row.quote_no, row.product_name, row.customer,
+    ].some(value => String(value || '').toLowerCase().includes(searchText))) return false;
+    if (quoteNo && !String(row.quote_no || '').toLowerCase().includes(quoteNo)) return false;
+    if (product && !String(row.product_name || '').toLowerCase().includes(product)) return false;
+    if (version && !String(row.version || '').toLowerCase().includes(version)) return false;
+    if (customer && String(row.customer || '') !== customer) return false;
+    if (progress && progressValue !== progress) return false;
+    if (status && row.status !== status) return false;
+    return true;
+  });
+  if ($('search-count')) $('search-count').textContent = hasFilters
+    ? `匹配 ${rows.length} / ${window.__allQuotes.length}`
+    : `共 ${window.__allQuotes.length} 条`;
   if (rows.length === 0) {
     tbody.innerHTML = `<tr><td colspan="9" class="ro" style="text-align:center;padding:30px;color:#9ca3af">暂无报价单</td></tr>`;
     return;
@@ -196,14 +227,20 @@ $('btn-logout').onclick = async (e) => {
 };
 
 if ($('btn-create')) $('btn-create').onclick = async () => {
+  const quoteNo = $('q-no').value.trim();
+  const productName = $('q-product').value.trim();
+  const customer = $('q-customer').value.trim();
+  if (!quoteNo) { alert('请填写货号'); $('q-no').focus(); return; }
+  if (!productName) { alert('请填写产品名称'); $('q-product').focus(); return; }
+  if (!customer) { alert('请选择或填写客户'); $('q-customer').focus(); return; }
   try {
     await api('/quotes', {
       method: 'POST',
       body: JSON.stringify({
-        quote_no: $('q-no').value.trim(),
-        product_name: $('q-product').value.trim(),
+        quote_no: quoteNo,
+        product_name: productName,
         version: $('q-version').value.trim() || null,
-        customer: $('q-customer').value.trim(),
+        customer,
         qty: Number($('q-qty').value) || null,
       }),
     });
@@ -333,5 +370,16 @@ $('btn-pwd-submit').onclick = async () => {
 };
 
 if ($('search-input')) $('search-input').oninput = () => renderQuotes();
+['filter-quote-no', 'filter-product', 'filter-version'].forEach(id => {
+  if ($(id)) $(id).oninput = () => renderQuotes();
+});
+['filter-customer', 'filter-progress', 'filter-status'].forEach(id => {
+  if ($(id)) $(id).onchange = () => renderQuotes();
+});
+if ($('btn-clear-filters')) $('btn-clear-filters').onclick = () => {
+  ['filter-quote-no', 'filter-product', 'filter-version', 'filter-customer', 'filter-progress', 'filter-status']
+    .forEach(id => { if ($(id)) $(id).value = ''; });
+  renderQuotes();
+};
 
 refreshMe();
