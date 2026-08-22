@@ -6,7 +6,7 @@ import { useOrdersStore } from '../stores/orders'
 import { useFactoriesStore } from '../stores/factories'
 import { useAuthStore } from '../stores/auth'
 import { CRAFT_LABELS, REGION_LABELS, regionOf, type Craft, type Region } from '../constants/roles'
-import { canEditOrders, allowedRegions } from '../utils/permissions'
+import { canEditOrders, canImportOrdersForScope, allowedRegions } from '../utils/permissions'
 import { buildDeliveryReport, deliveryHeaders, exportDeliveryExcel, parseDeliveryImport, splitSewingContractItemNo, type DeliveryPricingMode, type ReportRow, type DetailRow } from '../utils/deliveryStats'
 import { readDeliveryPdfAsAoa } from '../utils/pdfDeliveryImport'
 import { parseDeliveryExcelFiles, UNMATCHED_IMPORT_FACTORY_PREFIX } from '../utils/deliveryExcelImport'
@@ -54,6 +54,13 @@ const selectedMonth = ref(new Date().toISOString().slice(0, 7))
 const rangeStart = ref('')
 const rangeEnd = ref('')
 const canEdit = computed(() => (auth.role ? canEditOrders(auth.role) : false))
+const canImport = computed(() => !!auth.role && canImportOrdersForScope(auth.role, craft.value, region.value))
+
+function requireImportPermission() {
+  if (canImport.value) return true
+  alert('当前账号没有此厂区或部门的货期数据导入权限')
+  return false
+}
 
 type ImportDraftRow = {
   key: string
@@ -381,6 +388,7 @@ function normalizeDeptPricing(payload: Record<string, any>) {
 }
 
 async function importRows(aoa: any[][]) {
+  if (!requireImportPermission()) return
   const fByName = deliveryImportFactoryMap(factories.items, craft.value, region.value)
   const { payloads, failed } = parseDeliveryImport(aoa, fByName)
   if (!payloads.length && !failed) { alert('未识别到表头(需含「货号/物料名称」)'); return }
@@ -393,6 +401,10 @@ async function importRows(aoa: any[][]) {
 }
 
 async function importExcel(ev: Event) {
+  if (!requireImportPermission()) {
+    if (fileInput.value) fileInput.value.value = ''
+    return
+  }
   const files = Array.from((ev.target as HTMLInputElement).files ?? [])
   if (!files.length) return
   const fByName = deliveryImportFactoryMap(factories.items, craft.value, region.value)
@@ -462,6 +474,10 @@ async function confirmExcelImport() {
 }
 
 async function importPdf(ev: Event) {
+  if (!requireImportPermission()) {
+    if (pdfInput.value) pdfInput.value.value = ''
+    return
+  }
   const files = Array.from((ev.target as HTMLInputElement).files ?? []).filter((file) => file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'))
   if (!files.length) return
   try {
@@ -868,9 +884,9 @@ async function removeRow(row: DetailRow) {
             </label>
           </div>
         </details>
-        <button v-if="canEdit" class="ghost" @click="pdfInput?.click()">导入 PDF</button>
+        <button v-if="canImport" class="ghost" @click="pdfInput?.click()">导入 PDF</button>
         <input ref="pdfInput" type="file" accept=".pdf,application/pdf" multiple style="display:none" @change="importPdf" />
-        <button v-if="canEdit" class="ghost" :disabled="importingExcel" @click="fileInput?.click()">
+        <button v-if="canImport" class="ghost" :disabled="importingExcel" @click="fileInput?.click()">
           {{ importingExcel ? '导入中…' : '批量导入 Excel' }}
         </button>
         <input ref="fileInput" type="file" accept=".xlsx,.xls,.csv" multiple style="display:none" @change="importExcel" />

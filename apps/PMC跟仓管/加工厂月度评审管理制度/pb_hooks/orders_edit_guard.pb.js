@@ -1,25 +1,50 @@
+function parsePermissions(auth) {
+  let permissions = {}
+  const rawPermissions = auth.getString('permissions')
+  if (!rawPermissions) return permissions
+  try {
+    const parsed = JSON.parse(rawPermissions)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : permissions
+  } catch {
+    return permissions
+  }
+}
+
+function authorizedCrafts(auth) {
+  const selected = auth.get('crafts')
+  if (Array.isArray(selected) && selected.length) return selected
+  const legacy = auth.getString('craft')
+  return legacy ? [legacy] : []
+}
+
 function requireOrdersEdit(e) {
   const auth = e.requestInfo().auth
   if (!auth) throw new ApiError(403, '当前账号没有货期管理编辑权限')
-  let permissions = {}
-  const rawPermissions = auth.getString('permissions')
-  if (rawPermissions) {
-    try {
-      const parsed = JSON.parse(rawPermissions)
-      permissions = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-    } catch {
-      permissions = {}
-    }
-  }
+  const permissions = parsePermissions(auth)
   if (permissions['orders.edit'] !== undefined) {
     if (permissions['orders.edit'] !== true) {
       throw new ApiError(403, '当前账号没有货期管理编辑权限')
     }
-    return e.next()
+  } else if (auth.get('role') === 'quality_qc') {
+    throw new ApiError(403, '当前账号没有货期管理编辑权限')
   }
 
-  if (auth.get('role') === 'quality_qc') {
-    throw new ApiError(403, '当前账号没有货期管理编辑权限')
+  const factoryId = e.record.getString('factory')
+  if (!factoryId) throw new ApiError(400, '请选择加工厂')
+  let factory
+  try {
+    factory = $app.findRecordById('factories', factoryId)
+  } catch {
+    throw new ApiError(400, '加工厂不存在')
+  }
+
+  const region = factory.getString('region') || 'dongguan'
+  if (permissions[`region.${region}`] === false) {
+    throw new ApiError(403, '当前账号没有该厂区的货期数据导入或编辑权限')
+  }
+  const crafts = authorizedCrafts(auth)
+  if (crafts.length && !crafts.includes(factory.getString('craft'))) {
+    throw new ApiError(403, '当前账号没有该部门的货期数据导入或编辑权限')
   }
   return e.next()
 }

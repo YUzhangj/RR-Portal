@@ -77,6 +77,8 @@ export const allowedRegions = (r: Role): Region[] => REGIONS.filter((rg) => cap(
 // —— 编辑权限 ——
 export const canEditFactories = (r: Role) => cap(r, 'factories.edit')
 export const canEditOrders = (r: Role) => cap(r, 'orders.edit')
+export const canImportOrdersForScope = (r: Role, craft: Craft, region: Region | null): boolean =>
+  !!region && canEditOrders(r) && canViewCraft(craft) && canViewRegion(r, region)
 export const canEditQuality = (r: Role) => cap(r, 'quality.edit')
 export const canEditOutput = (r: Role) => cap(r, 'output.edit')
 

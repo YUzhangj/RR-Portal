@@ -3,6 +3,7 @@ import {
   allowedCrafts,
   canApproveStatus,
   canEditOrders,
+  canImportOrdersForScope,
   canEditOutput,
   canViewCraft,
   setAuthorizedCrafts,
@@ -49,5 +50,17 @@ describe('permissions', () => {
     expect(visibleCraft('buyer_painting')).toBe('painting')
     setAuthorizedCrafts([])
     expect(allowedCrafts()).toHaveLength(5)
+  })
+  it('requires edit, department and region permissions for delivery imports', () => {
+    setAuthorizedCrafts(['sewing'])
+    setPermissionOverrides({ 'region.dongguan': true, 'region.hunan': false })
+    expect(canImportOrdersForScope('buyer_sewing', 'sewing', 'dongguan')).toBe(true)
+    expect(canImportOrdersForScope('buyer_sewing', 'sewing', 'hunan')).toBe(false)
+    expect(canImportOrdersForScope('buyer_sewing', 'painting', 'dongguan')).toBe(false)
+    expect(canImportOrdersForScope('buyer_sewing', 'sewing', null)).toBe(false)
+    setPermissionOverrides({ 'orders.edit': false, 'region.dongguan': true })
+    expect(canImportOrdersForScope('buyer_sewing', 'sewing', 'dongguan')).toBe(false)
+    setPermissionOverrides(null)
+    setAuthorizedCrafts([])
   })
 })
