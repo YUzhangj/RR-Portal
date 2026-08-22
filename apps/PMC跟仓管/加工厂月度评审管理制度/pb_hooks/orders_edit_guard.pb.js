@@ -38,7 +38,10 @@ function requireOrdersEdit(e) {
     throw new ApiError(400, '加工厂不存在')
   }
 
-  const region = factory.getString('region') || 'dongguan'
+  const region = e.record.getString('region') || factory.getString('region') || 'dongguan'
+  if (!['dongguan', 'hunan', 'heyuan'].includes(region)) {
+    throw new ApiError(400, '请选择有效的订单管理厂区')
+  }
   if (permissions[`region.${region}`] === false) {
     throw new ApiError(403, '当前账号没有该厂区的货期数据导入或编辑权限')
   }
@@ -46,6 +49,7 @@ function requireOrdersEdit(e) {
   if (crafts.length && !crafts.includes(factory.getString('craft'))) {
     throw new ApiError(403, '当前账号没有该部门的货期数据导入或编辑权限')
   }
+  e.record.set('region', region)
   return e.next()
 }
 

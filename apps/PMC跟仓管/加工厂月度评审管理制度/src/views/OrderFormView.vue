@@ -85,7 +85,7 @@ async function submit() {
     return
   }
   if (!draft.value.product) { alert('请输入产品名称'); return }
-  await orders.create({ ...draft.value, amount: draftAmount.value, created_by: auth.userId ?? undefined })
+  await orders.create({ ...draft.value, region: region.value, amount: draftAmount.value, created_by: auth.userId ?? undefined })
   router.push(backTo.value)
 }
 </script>

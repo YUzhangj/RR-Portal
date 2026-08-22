@@ -12,9 +12,10 @@ import { readDeliveryPdfAsAoa } from '../utils/pdfDeliveryImport'
 import { parseDeliveryExcelFiles, UNMATCHED_IMPORT_FACTORY_PREFIX } from '../utils/deliveryExcelImport'
 import { cnyTaxToHkdUntaxed, cnyTaxToUntaxedRmb, DEFAULT_CNY_TO_HKD_RATE } from '../utils/orderPricing'
 import { matchesOrderDate, type OrderDateFilter } from '../utils/orderDateFilter'
-import { deliveryImportFactoryMap, deliveryScopeFactoryIds } from '../utils/deliveryImportScope'
+import { deliveryImportFactoryMap } from '../utils/deliveryImportScope'
 import { isPercentOver100 } from '../utils/percentage'
 import { taxPointFactor } from '../utils/taxPoint'
+import { orderRegion } from '../utils/orderRegion'
 import type { Order } from '../types/order'
 
 const route = useRoute()
@@ -129,15 +130,16 @@ function clearDateFilter() {
 }
 
 const myRegions = computed(() => (auth.role ? allowedRegions(auth.role) : null))
-const scopedFactoryIds = computed(() => region.value
-  ? deliveryScopeFactoryIds(factories.items, craft.value, region.value)
-  : new Set(factories.items.filter((factory) => factory.craft === craft.value).map((factory) => factory.id)))
+const scopedFactoryIds = computed(() => new Set(factories.items
+  .filter((factory) => factory.craft === craft.value)
+  .map((factory) => factory.id)))
 const deptOrders = computed(() => {
   const q = search.value.trim().toLowerCase()
   return orders.items
     // 以当前厂区+部门工厂 ID 白名单为唯一边界，不依赖订单 expand 的缓存字段。
     .filter((o) => scopedFactoryIds.value.has(o.factory))
-    .filter((o) => !myRegions.value || myRegions.value.includes(regionOf(o.expand?.factory)))
+    .filter((o) => !region.value || orderRegion(o) === region.value)
+    .filter((o) => !myRegions.value || myRegions.value.includes(orderRegion(o)))
     .filter((o) => matchesOrderDate(o.order_date, dateFilter.value))
     .filter((o) => {
       if (!q) return true
@@ -389,12 +391,12 @@ function normalizeDeptPricing(payload: Record<string, any>) {
 
 async function importRows(aoa: any[][]) {
   if (!requireImportPermission()) return
-  const fByName = deliveryImportFactoryMap(factories.items, craft.value, region.value)
+  const fByName = deliveryImportFactoryMap(factories.items, craft.value, null)
   const { payloads, failed } = parseDeliveryImport(aoa, fByName)
   if (!payloads.length && !failed) { alert('未识别到表头(需含「货号/物料名称」)'); return }
   let ok = 0, fail = failed
   for (const p of payloads) {
-    try { await orders.create(normalizeDeptPricing({ ...p, created_by: auth.userId ?? undefined }) as any); ok++ } catch { fail++ }
+    try { await orders.create(normalizeDeptPricing({ ...p, region: region.value, created_by: auth.userId ?? undefined }) as any); ok++ } catch { fail++ }
   }
   await orders.fetchAll()
   alert(`导入完成：成功 ${ok} 条` + (fail ? `，失败 ${fail} 条(工厂名对不上或缺物料名称)` : '') + '\n(小计/合计行已自动跳过;加工厂名称需与系统一致)')
@@ -407,7 +409,7 @@ async function importExcel(ev: Event) {
   }
   const files = Array.from((ev.target as HTMLInputElement).files ?? [])
   if (!files.length) return
-  const fByName = deliveryImportFactoryMap(factories.items, craft.value, region.value)
+  const fByName = deliveryImportFactoryMap(factories.items, craft.value, null)
   importingExcel.value = true
   try {
     const parsed = await parseDeliveryExcelFiles(files, fByName, { preferCnyTaxPrice: true })
@@ -453,7 +455,7 @@ async function confirmExcelImport() {
     const p = { ...row.payload }
     if (p.quantity !== '' && p.quantity != null) p.quantity = Number(p.quantity)
     try {
-      await orders.create(normalizeDeptPricing({ ...p, created_by: auth.userId ?? undefined }) as any)
+        await orders.create(normalizeDeptPricing({ ...p, region: region.value, created_by: auth.userId ?? undefined }) as any)
       ok++
     } catch (err: any) {
       failedRows.push(row)
@@ -712,6 +714,7 @@ async function copyRow(row: DetailRow) {
   }
   const payload: Partial<Order> = {
     factory: source.factory,
+    region: region.value ?? source.region,
     process: source.process,
     workshop: source.workshop,
     item_no: source.item_no,
