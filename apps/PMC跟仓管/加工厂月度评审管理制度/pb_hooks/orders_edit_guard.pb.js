@@ -1,23 +1,26 @@
-function parsePermissions(auth) {
-  let permissions = {}
-  const rawPermissions = auth.getString('permissions')
-  if (!rawPermissions) return permissions
-  try {
-    const parsed = JSON.parse(rawPermissions)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : permissions
-  } catch {
-    return permissions
-  }
-}
-
-function authorizedCrafts(auth) {
-  const selected = auth.get('crafts')
-  if (Array.isArray(selected) && selected.length) return selected
-  const legacy = auth.getString('craft')
-  return legacy ? [legacy] : []
-}
-
+// 注意：PocketBase JSVM 会把 handler 源码抽出、在独立的 executor VM 里重新编译执行，
+// 顶层声明的函数/变量在 handler 运行时不可见（ReferenceError）。
+// 因此所有辅助函数必须定义在 handler 函数体内部，handler 必须自包含。
 function requireOrdersEdit(e) {
+  function parsePermissions(auth) {
+    let permissions = {}
+    const rawPermissions = auth.getString('permissions')
+    if (!rawPermissions) return permissions
+    try {
+      const parsed = JSON.parse(rawPermissions)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : permissions
+    } catch {
+      return permissions
+    }
+  }
+
+  function authorizedCrafts(auth) {
+    const selected = auth.get('crafts')
+    if (Array.isArray(selected) && selected.length) return selected
+    const legacy = auth.getString('craft')
+    return legacy ? [legacy] : []
+  }
+
   const auth = e.requestInfo().auth
   if (!auth) throw new ApiError(403, '当前账号没有货期管理编辑权限')
   const permissions = parsePermissions(auth)
