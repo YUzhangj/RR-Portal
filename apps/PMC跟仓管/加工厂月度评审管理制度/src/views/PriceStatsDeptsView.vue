@@ -5,7 +5,8 @@ import AppLayout from '../components/AppLayout.vue'
 import { useOrdersStore } from '../stores/orders'
 import { useAuthStore } from '../stores/auth'
 import { allowedCrafts, allowedRegions } from '../utils/permissions'
-import { REGIONS, REGION_LABELS, regionOf, type Craft } from '../constants/roles'
+import { REGIONS, REGION_LABELS, type Craft } from '../constants/roles'
+import { orderRegion } from '../utils/orderRegion'
 
 const orders = useOrdersStore()
 const auth = useAuthStore()
@@ -27,7 +28,7 @@ const regionBlocks = computed(() =>
     name: REGION_LABELS[region],
     cards: visibleDepts.value.filter((d) => d.craft !== 'electronics' || region !== 'heyuan').map((d) => ({
       ...d,
-      count: orders.items.filter((o) => regionOf(o.expand?.factory) === region && o.expand?.factory?.craft === d.craft).length,
+      count: orders.items.filter((o) => orderRegion(o) === region && o.expand?.factory?.craft === d.craft).length,
     })),
   })),
 )

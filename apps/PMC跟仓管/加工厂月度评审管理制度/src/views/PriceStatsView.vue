@@ -5,7 +5,7 @@ import * as XLSX from 'xlsx'
 import AppLayout from '../components/AppLayout.vue'
 import { useOrdersStore } from '../stores/orders'
 import { useFactoriesStore } from '../stores/factories'
-import { CRAFT_LABELS, REGION_LABELS, regionOf, type Craft, type Region } from '../constants/roles'
+import { CRAFT_LABELS, REGION_LABELS, type Craft, type Region } from '../constants/roles'
 import { allowedRegions } from '../utils/permissions'
 import { useAuthStore } from '../stores/auth'
 import { buildPriceStatsRows, type PriceStatsRow } from '../utils/priceStats'
@@ -14,6 +14,7 @@ import { canEditOrders } from '../utils/permissions'
 import { matchPriceImportRows, parsePriceStatsExcel } from '../utils/priceStatsExcelImport'
 import { taxPointFactor } from '../utils/taxPoint'
 import { useTableColumnPreferences } from '../composables/useTableColumnPreferences'
+import { orderRegion } from '../utils/orderRegion'
 
 const route = useRoute()
 const orders = useOrdersStore()
@@ -72,8 +73,8 @@ const rows = computed<PriceStatsRow[]>(() => {
     return matchesKeyword
       &&
     o.expand?.factory?.craft === craft.value
-    && (!region.value || regionOf(o.expand?.factory) === region.value)
-    && (!myRegions.value || myRegions.value.includes(regionOf(o.expand?.factory)))
+    && (!region.value || orderRegion(o) === region.value)
+    && (!myRegions.value || myRegions.value.includes(orderRegion(o)))
   })
   return buildPriceStatsRows(
     list,
@@ -165,8 +166,8 @@ async function importExcel(event: Event) {
     }
     const visibleOrders = orders.items.filter((o) =>
       o.expand?.factory?.craft === craft.value
-      && (!region.value || regionOf(o.expand?.factory) === region.value)
-      && (!myRegions.value || myRegions.value.includes(regionOf(o.expand?.factory))))
+      && (!region.value || orderRegion(o) === region.value)
+      && (!myRegions.value || myRegions.value.includes(orderRegion(o))))
     const matched = matchPriceImportRows(parsed.rows, visibleOrders)
     if (!matched.updates.length) {
       alert(`未匹配到可更新的记录。\n未匹配 ${matched.unmatchedRows.length} 行，冲突 ${matched.conflictingRows.length} 行，无效 ${parsed.invalidRows} 行。`)

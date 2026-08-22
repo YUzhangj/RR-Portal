@@ -6,15 +6,16 @@ import { useOrdersStore } from '../stores/orders'
 import { useFactoriesStore } from '../stores/factories'
 import { useAuthStore } from '../stores/auth'
 import { CRAFT_LABELS, REGION_LABELS, regionOf, type Craft, type Region } from '../constants/roles'
-import { canEditOrders, allowedRegions } from '../utils/permissions'
+import { canEditOrders, canImportOrdersForScope, allowedRegions } from '../utils/permissions'
 import { buildDeliveryReport, deliveryHeaders, exportDeliveryExcel, parseDeliveryImport, splitSewingContractItemNo, type DeliveryPricingMode, type ReportRow, type DetailRow } from '../utils/deliveryStats'
 import { readDeliveryPdfAsAoa } from '../utils/pdfDeliveryImport'
 import { parseDeliveryExcelFiles, UNMATCHED_IMPORT_FACTORY_PREFIX } from '../utils/deliveryExcelImport'
 import { cnyTaxToHkdUntaxed, cnyTaxToUntaxedRmb, DEFAULT_CNY_TO_HKD_RATE } from '../utils/orderPricing'
 import { matchesOrderDate, type OrderDateFilter } from '../utils/orderDateFilter'
-import { deliveryImportFactoryMap, deliveryScopeFactoryIds } from '../utils/deliveryImportScope'
+import { deliveryImportFactoryMap } from '../utils/deliveryImportScope'
 import { isPercentOver100 } from '../utils/percentage'
 import { taxPointFactor } from '../utils/taxPoint'
+import { orderRegion } from '../utils/orderRegion'
 import type { Order } from '../types/order'
 
 const route = useRoute()
@@ -54,6 +55,13 @@ const selectedMonth = ref(new Date().toISOString().slice(0, 7))
 const rangeStart = ref('')
 const rangeEnd = ref('')
 const canEdit = computed(() => (auth.role ? canEditOrders(auth.role) : false))
+const canImport = computed(() => !!auth.role && canImportOrdersForScope(auth.role, craft.value, region.value))
+
+function requireImportPermission() {
+  if (canImport.value) return true
+  alert('当前账号没有此厂区或部门的货期数据导入权限')
+  return false
+}
 
 type ImportDraftRow = {
   key: string
@@ -122,15 +130,16 @@ function clearDateFilter() {
 }
 
 const myRegions = computed(() => (auth.role ? allowedRegions(auth.role) : null))
-const scopedFactoryIds = computed(() => region.value
-  ? deliveryScopeFactoryIds(factories.items, craft.value, region.value)
-  : new Set(factories.items.filter((factory) => factory.craft === craft.value).map((factory) => factory.id)))
+const scopedFactoryIds = computed(() => new Set(factories.items
+  .filter((factory) => factory.craft === craft.value)
+  .map((factory) => factory.id)))
 const deptOrders = computed(() => {
   const q = search.value.trim().toLowerCase()
   return orders.items
     // 以当前厂区+部门工厂 ID 白名单为唯一边界，不依赖订单 expand 的缓存字段。
     .filter((o) => scopedFactoryIds.value.has(o.factory))
-    .filter((o) => !myRegions.value || myRegions.value.includes(regionOf(o.expand?.factory)))
+    .filter((o) => !region.value || orderRegion(o) === region.value)
+    .filter((o) => !myRegions.value || myRegions.value.includes(orderRegion(o)))
     .filter((o) => matchesOrderDate(o.order_date, dateFilter.value))
     .filter((o) => {
       if (!q) return true
@@ -381,21 +390,26 @@ function normalizeDeptPricing(payload: Record<string, any>) {
 }
 
 async function importRows(aoa: any[][]) {
-  const fByName = deliveryImportFactoryMap(factories.items, craft.value, region.value)
+  if (!requireImportPermission()) return
+  const fByName = deliveryImportFactoryMap(factories.items, craft.value, null)
   const { payloads, failed } = parseDeliveryImport(aoa, fByName)
   if (!payloads.length && !failed) { alert('未识别到表头(需含「货号/物料名称」)'); return }
   let ok = 0, fail = failed
   for (const p of payloads) {
-    try { await orders.create(normalizeDeptPricing({ ...p, created_by: auth.userId ?? undefined }) as any); ok++ } catch { fail++ }
+    try { await orders.create(normalizeDeptPricing({ ...p, region: region.value, created_by: auth.userId ?? undefined }) as any); ok++ } catch { fail++ }
   }
   await orders.fetchAll()
   alert(`导入完成：成功 ${ok} 条` + (fail ? `，失败 ${fail} 条(工厂名对不上或缺物料名称)` : '') + '\n(小计/合计行已自动跳过;加工厂名称需与系统一致)')
 }
 
 async function importExcel(ev: Event) {
+  if (!requireImportPermission()) {
+    if (fileInput.value) fileInput.value.value = ''
+    return
+  }
   const files = Array.from((ev.target as HTMLInputElement).files ?? [])
   if (!files.length) return
-  const fByName = deliveryImportFactoryMap(factories.items, craft.value, region.value)
+  const fByName = deliveryImportFactoryMap(factories.items, craft.value, null)
   importingExcel.value = true
   try {
     const parsed = await parseDeliveryExcelFiles(files, fByName, { preferCnyTaxPrice: true })
@@ -441,7 +455,7 @@ async function confirmExcelImport() {
     const p = { ...row.payload }
     if (p.quantity !== '' && p.quantity != null) p.quantity = Number(p.quantity)
     try {
-      await orders.create(normalizeDeptPricing({ ...p, created_by: auth.userId ?? undefined }) as any)
+        await orders.create(normalizeDeptPricing({ ...p, region: region.value, created_by: auth.userId ?? undefined }) as any)
       ok++
     } catch (err: any) {
       failedRows.push(row)
@@ -462,6 +476,10 @@ async function confirmExcelImport() {
 }
 
 async function importPdf(ev: Event) {
+  if (!requireImportPermission()) {
+    if (pdfInput.value) pdfInput.value.value = ''
+    return
+  }
   const files = Array.from((ev.target as HTMLInputElement).files ?? []).filter((file) => file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'))
   if (!files.length) return
   try {
@@ -696,6 +714,7 @@ async function copyRow(row: DetailRow) {
   }
   const payload: Partial<Order> = {
     factory: source.factory,
+    region: region.value ?? source.region,
     process: source.process,
     workshop: source.workshop,
     item_no: source.item_no,
@@ -868,9 +887,9 @@ async function removeRow(row: DetailRow) {
             </label>
           </div>
         </details>
-        <button v-if="canEdit" class="ghost" @click="pdfInput?.click()">导入 PDF</button>
+        <button v-if="canImport" class="ghost" @click="pdfInput?.click()">导入 PDF</button>
         <input ref="pdfInput" type="file" accept=".pdf,application/pdf" multiple style="display:none" @change="importPdf" />
-        <button v-if="canEdit" class="ghost" :disabled="importingExcel" @click="fileInput?.click()">
+        <button v-if="canImport" class="ghost" :disabled="importingExcel" @click="fileInput?.click()">
           {{ importingExcel ? '导入中…' : '批量导入 Excel' }}
         </button>
         <input ref="fileInput" type="file" accept=".xlsx,.xls,.csv" multiple style="display:none" @change="importExcel" />

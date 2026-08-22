@@ -2,6 +2,7 @@ export type OrderStatus = 'placed' | 'producing' | 'delivered' | 'cancelled' | '
 export interface Order {
   id: string
   factory: string
+  region?: 'dongguan' | 'hunan' | 'heyuan'
   process?: string
   workshop?: string
   item_no?: string
@@ -35,5 +36,5 @@ export interface Order {
   manager_rating?: number
   notes?: string
   created_by?: string
-  expand?: { factory?: { name: string; craft: string } }
+  expand?: { factory?: { name: string; craft: string; region?: string | null } }
 }
