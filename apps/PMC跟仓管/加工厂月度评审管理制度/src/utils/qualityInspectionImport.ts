@@ -33,13 +33,38 @@ export function resolveQualityInspectionFactory(
   region: Region | '',
 ): FactoryNameResolveResult {
   const normalizedProcess = normalizeExcelHeader(processType).replace(/部$/, '')
-  const craft = (Object.entries(CRAFT_LABELS).find(([, label]) =>
+  let craft = (Object.entries(CRAFT_LABELS).find(([, label]) =>
     normalizeExcelHeader(label).replace(/部$/, '') === normalizedProcess,
   )?.[0] ?? '') as Craft | ''
 
+  // Excel 常用的「加工类型」并不一定写成系统部门名，先将业务用语归一到部门。
+  if (!craft) {
+    const aliases: Array<[Craft, RegExp]> = [
+      ['injection', /注塑|塑胶|塑料|啤塑|啤机/],
+      ['painting', /喷油|喷涂|移印|丝印/],
+      ['assembly', /装配|组装|包装/],
+      ['sewing', /车缝|缝纫|毛绒|车花/],
+      ['electronics', /电子|焊接|线路板/],
+    ]
+    craft = aliases.find(([, pattern]) => pattern.test(normalizedProcess))?.[0] ?? ''
+  }
+
   let candidates = factories
-  if (craft) candidates = candidates.filter((factory) => factory.craft === craft)
   if (region) candidates = candidates.filter((factory) => regionOf(factory) === region)
+
+  // 优先用工厂资料中的「加工类型」与 Excel 值做二次核对。
+  if (normalizedProcess) {
+    const processMatched = candidates.filter((factory) => {
+      if (factory.processable_types == null || factory.processable_types === '') return false
+      const configured = normalizeExcelHeader(factory.processable_types).replace(/部$/, '')
+      if (!configured) return false
+      const parts = configured.split(/[,，、/;；|]+/).filter(Boolean)
+      return parts.some((part) => part === normalizedProcess || part.includes(normalizedProcess) || normalizedProcess.includes(part))
+    })
+    if (processMatched.length) candidates = processMatched
+    else if (craft) candidates = candidates.filter((factory) => factory.craft === craft)
+  } else if (craft) candidates = candidates.filter((factory) => factory.craft === craft)
+
   return resolveFactoryName(candidates, name)
 }
 

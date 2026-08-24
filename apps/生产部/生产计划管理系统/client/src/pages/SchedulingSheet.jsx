@@ -453,12 +453,13 @@ export default function SchedulingSheet({ workshop, tab, lineName = 'all', lines
         // 主订单：用预览里选的拉
         const mainLine = rowLine(r);
         orders.push(makeOrder(wt, mainLine));
-        if (mainLine) lineEntries.push({ item_no: itemNo, work_type: wt, line: mainLine });
+        // 「待定」是临时挂单位置，不写进 (货号+做工)→拉 记忆（服务端也会再拦一道）
+        if (mainLine && mainLine !== '待定') lineEntries.push({ item_no: itemNo, work_type: wt, line: mainLine });
         // 半成品自动配一条一样的成品订单（拉用配对成品行选的）
         if (wt === '半成品') {
           const pairLine = rowLine({ ...r, _key: r._key + '__pair', _pairOf: r._key });
           orders.push(makeOrder('成品', pairLine));
-          if (pairLine) lineEntries.push({ item_no: itemNo, work_type: '成品', line: pairLine });
+          if (pairLine && pairLine !== '待定') lineEntries.push({ item_no: itemNo, work_type: '成品', line: pairLine });
         }
       }
       const res2 = await axios.post('/api/orders', orders);
@@ -811,7 +812,7 @@ export default function SchedulingSheet({ workshop, tab, lineName = 'all', lines
           placeholder="选拉"
           value={rowLine(r) || undefined}
           onChange={v => handleLineChange(r, v)}
-          options={lines.map(l => ({ value: l.key, label: `${l.key}(${l.name})` }))}
+          options={lines.map(l => ({ value: l.key, label: l.key === l.name ? l.key : `${l.key}(${l.name})` }))}
         />
       ),
     },
@@ -1029,7 +1030,7 @@ export default function SchedulingSheet({ workshop, tab, lineName = 'all', lines
             placeholder="批量设拉"
             value={undefined}
             onChange={v => setAllLine(v)}
-            options={lines.map(l => ({ value: l.key, label: `全设 ${l.key}(${l.name})` }))}
+            options={lines.map(l => ({ value: l.key, label: l.key === l.name ? `全设 ${l.key}` : `全设 ${l.key}(${l.name})` }))}
           />
         </div>
         <div style={{ marginBottom: 12 }}>

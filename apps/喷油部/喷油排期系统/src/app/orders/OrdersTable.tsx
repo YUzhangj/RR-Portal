@@ -2,10 +2,10 @@
 // 订单总览主体（客户端）：正常单/回收站切换 + 即时筛选 + 表格 + 作废/恢复。
 // 数据由 page.tsx SSR 一次性传入；筛选在浏览器端即时进行（filterOrders）。
 "use client";
-import { apiFetch } from "@/lib/apiFetch";
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { apiFetch } from "@/lib/apiFetch";
 import { filterOrders, type OrderRow, type OrderFilter } from "@/lib/orderFilter";
 import { STATUS_META, ACTIVE_STATUSES } from "@/lib/orderStatus";
 import DatePicker from "./DatePicker";
@@ -67,7 +67,7 @@ export default function OrdersTable({ orders }: { orders: OrderRow[] }) {
       {/* 领导看板 */}
       <div className="grid grid-cols-4 gap-3 mb-4">
         <MetricCard label="未完工订单" value={stats.active} tone="mint" sub={`总数 ${stats.total} 张`} />
-        <MetricCard label="未排期" value={stats.unscheduled} tone={stats.unscheduled > 0 ? "blue" : "muted"} sub="需要进入周排/月排" />
+        <MetricCard label="未排期" value={stats.unscheduled} tone={stats.unscheduled > 0 ? "blue" : "muted"} sub="需要填写工序排期" />
         <MetricCard label="交期风险" value={stats.risk} tone={stats.risk > 0 ? "red" : "muted"} sub={`已超 ${stats.overdue} · 预计超 ${stats.late}`} />
         <MetricCard label="急单" value={stats.urgent} tone={stats.urgent > 0 ? "rose" : "muted"} sub={`7天内交货 ${stats.dueSoon} 张`} />
       </div>
@@ -142,17 +142,24 @@ export default function OrdersTable({ orders }: { orders: OrderRow[] }) {
       <p className="text-xs text-text-tertiary mb-2">共 {rows.length} 张{f.risk ? " · 已按风险筛选" : ""}</p>
 
       {/* 表格 */}
-      <table className="w-full text-sm">
+      <div className="overflow-x-auto">
+      <table className="w-full min-w-[1180px] table-fixed text-sm">
+        <colgroup>
+          <col className="w-[170px]" /><col className="w-[125px]" /><col className="w-[115px]" />
+          <col className="w-[115px]" /><col className="w-[125px]" /><col className="w-[120px]" />
+          <col className="w-[120px]" /><col className="w-[130px]" /><col className="w-[100px]" />
+          <col className="w-[180px]" />
+        </colgroup>
         <thead className="bg-[#f0fdf4] text-[#047857] text-xs">
           <tr>
-            <th className="px-3 py-3 text-left">外部订单号</th>
-            <th className="px-3 py-3 text-left">款号</th>
-            <th className="px-3 py-3 text-center">MA</th>
-            <th className="px-3 py-3 text-left">下单日</th>
-            <th className="px-3 py-3 text-left">交货日</th>
-            <th className="px-3 py-3 text-right">整单总数</th>
-            <th className="px-3 py-3 text-center">进度</th>
-            <th className="px-3 py-3 text-left">预计出单日</th>
+            <th className="px-3 py-3 text-left">订单号</th>
+            <th className="px-3 py-3 text-left">货号</th>
+            <th className="px-3 py-3 text-center">下单日</th>
+            <th className="px-3 py-3 text-center">交货日</th>
+            <th className="px-3 py-3 text-center">计划生产天数</th>
+            <th className="px-3 py-3 text-right">订单总数</th>
+            <th className="px-3 py-3 text-right">订单欠数</th>
+            <th className="px-3 py-3 text-center">预计出单日</th>
             <th className="px-3 py-3 text-center">状态</th>
             <th className="px-3 py-3 text-center">操作</th>
           </tr>
@@ -174,20 +181,16 @@ export default function OrdersTable({ orders }: { orders: OrderRow[] }) {
                   {o.isUrgent && <span className="ml-1.5 text-[11px] font-bold px-1.5 py-0.5 rounded bg-[#F4B7BE] text-[#C91D32] border border-[#E88EA0]">急</span>}
                 </td>
                 <td className="px-3 py-3 font-mono">{o.productNo}</td>
-                <td className="px-3 py-3 text-center">
-                  {o.isMA
-                    ? <span className="text-[11px] font-bold px-1.5 py-0.5 rounded bg-[#FFF8E1] text-[#8a6d1a] border border-[#f0e0a8]">MA</span>
-                    : <span className="text-[#ccc]">—</span>}
-                </td>
-                <td className="px-3 py-3 text-text-secondary">{o.orderDate}</td>
-                <td className="px-3 py-3 text-text-secondary">{o.deliveryDate ?? "—"}</td>
-                <td className="px-3 py-3 text-right">{o.totalQty.toLocaleString("zh-CN")}</td>
-                <td className="px-3 py-3"><ProgressCell order={o} /></td>
-                <td className="px-3 py-3"><ExpectedCell order={o} /></td>
+                <td className="px-3 py-3 text-center text-text-secondary tabular-nums">{o.orderDate}</td>
+                <td className="px-3 py-3 text-center text-text-secondary tabular-nums">{o.deliveryDate ?? "—"}</td>
+                <td className="px-3 py-3 text-center tabular-nums">{o.scheduled ? `${o.planProductionDays ?? 0}天` : "—"}</td>
+                <td className="px-3 py-3 text-right tabular-nums">{(o.demandQty ?? o.totalQty).toLocaleString("zh-CN")}</td>
+                <td className="px-3 py-3 text-right tabular-nums">{(o.remainingQty ?? o.totalQty).toLocaleString("zh-CN")}</td>
+                <td className="px-3 py-3 text-center tabular-nums">{o.expectedOutDate ?? "—"}</td>
                 <td className="px-3 py-3 text-center"><span className={`text-[11px] px-2 py-0.5 rounded-full ${st.cls}`}>{st.text}</span></td>
                 <td className="px-3 py-3 text-center">
                   <span className="inline-flex gap-2.5">
-                    <Link href={`/orders/${o.id}`} className="text-sky hover:underline">查看</Link>
+                    <Link href={`/orders/${o.id}`} className="text-sky hover:underline">编辑</Link>
                     {o.scheduled && o.firstPlanDate && (
                       <Link href={`/schedule?orderId=${o.id}&orderNo=${encodeURIComponent(o.externalOrderNo)}&from=${o.firstPlanDate}&to=${o.scheduleFinishDate ?? o.firstPlanDate}`}
                         className="text-purple hover:underline">查看排期</Link>
@@ -211,6 +214,7 @@ export default function OrdersTable({ orders }: { orders: OrderRow[] }) {
           })}
         </tbody>
       </table>
+      </div>
 
       {completing && (
         <CompletePendingDialog

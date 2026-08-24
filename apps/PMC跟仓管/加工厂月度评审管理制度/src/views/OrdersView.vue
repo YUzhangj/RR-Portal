@@ -6,9 +6,10 @@ import { useOrdersStore } from '../stores/orders'
 import { useFactoriesStore } from '../stores/factories'
 import { useAuthStore } from '../stores/auth'
 import { allowedCrafts, canEditOrders, allowedRegions } from '../utils/permissions'
-import { CRAFT_LABELS, REGIONS, REGION_LABELS, regionOf, type Craft } from '../constants/roles'
+import { CRAFT_LABELS, REGIONS, REGION_LABELS, type Craft } from '../constants/roles'
 import { buildDeliveryReport, exportDeliveryExcel, type ReportRow } from '../utils/deliveryStats'
 import { parseDeliveryExcelFiles } from '../utils/deliveryExcelImport'
+import { orderRegion } from '../utils/orderRegion'
 
 const orders = useOrdersStore()
 const factories = useFactoriesStore()
@@ -34,7 +35,7 @@ const regionBlocks = computed(() =>
     region,
     name: REGION_LABELS[region],
     cards: visibleDepts.value.filter((d) => d.craft !== 'electronics' || region !== 'heyuan').map((d) => {
-      const list = orders.items.filter((o) => regionOf(o.expand?.factory) === region && o.expand?.factory?.craft === d.craft)
+      const list = orders.items.filter((o) => orderRegion(o) === region && o.expand?.factory?.craft === d.craft)
       return { ...d, count: list.length, ongoing: list.filter((o) => o.status !== 'delivered').length }
     }),
   })),

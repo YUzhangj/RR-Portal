@@ -506,7 +506,7 @@ def test_xingxin_nfc_export_uses_legacy_matrix_workbook(client):
     assert wb["出库明细"].cell(3, 3).value == 20
 
 
-def test_xingxin_nfc_record_export_fills_legacy_opening_date(client):
+def test_xingxin_nfc_record_export_keeps_opening_out_of_detail_sheet(client):
     login(client, "兴信B来料仓", "123456", DEFAULT_DEPARTMENT)
     dongguan = loc_id(client, "东莞车间")
     client.post("/api/records", json={
@@ -523,10 +523,13 @@ def test_xingxin_nfc_record_export_fills_legacy_opening_date(client):
     wb = openpyxl.load_workbook(io.BytesIO(r.content), data_only=True)
 
     assert r.status_code == 200
-    assert wb["出库明细"].cell(1, 3).value == "2026-06-27"
+    # 期初只进总表（东莞列），出库明细不再出现期初列
+    assert wb["总表"].cell(3, 13).value == 60
+    assert wb["出库明细"].cell(1, 3).value is None
+    assert wb["出库明细"].cell(2, 3).value is None
 
 
-def test_xingxin_nfc_export_groups_opening_stock_by_document_column(client):
+def test_xingxin_nfc_export_keeps_opening_stock_in_total_sheet_only(client):
     login(client, "兴信B来料仓", "123456", DEFAULT_DEPARTMENT)
     client.post("/api/records", json={
         "rec_type": "inbound_raw",
@@ -552,12 +555,11 @@ def test_xingxin_nfc_export_groups_opening_stock_by_document_column(client):
     ws = wb["入库明细"]
 
     assert r.status_code == 200
-    assert ws.cell(1, 3).value == "2026-06-27"
-    assert ws.cell(2, 3).value == "期初入仓"
-    assert ws.cell(3, 3).value == 846669
-    assert ws.cell(4, 3).value == 865000
-    assert ws.cell(1, 4).value is None
-    assert ws.cell(2, 4).value is None
+    # 期初入仓只体现在总表“截止6月27号”列，明细页只列实际单据
+    assert wb["总表"].cell(3, 3).value == 846669
+    assert wb["总表"].cell(4, 3).value == 865000
+    assert ws.cell(1, 3).value is None
+    assert ws.cell(2, 3).value is None
 
 
 def test_xingxin_nfc_export_does_not_include_regular_june_rows_in_opening_total(client):
@@ -607,7 +609,9 @@ def test_xingxin_nfc_import_does_not_treat_quantity_as_workbook_year(client):
     exported_wb = openpyxl.load_workbook(
         io.BytesIO(exported.content), data_only=True
     )
-    assert exported_wb["入库明细"].cell(1, 3).value == "2026-06-27"
+    # 期初不再进明细页，首列是实际单据 RK-1；期初数仍在总表
+    assert exported_wb["总表"].cell(3, 3).value == 49855
+    assert exported_wb["入库明细"].cell(1, 3).value == "2026-07-01"
 
 
 def test_xingxin_nfc_export_sorts_columns_by_date_and_document(client):
@@ -641,7 +645,7 @@ def test_xingxin_nfc_export_sorts_columns_by_date_and_document(client):
     ]
 
 
-def test_xingxin_nfc_export_repairs_legacy_future_opening_date(client):
+def test_xingxin_nfc_export_excludes_future_dated_opening_from_detail(client):
     login(client, "兴信B来料仓", "123456", DEFAULT_DEPARTMENT)
     response = client.post("/api/records", json={
         "rec_type": "inbound_raw",
@@ -656,7 +660,9 @@ def test_xingxin_nfc_export_repairs_legacy_future_opening_date(client):
 
     exported = client.get("/api/records/export?material=NFC贴纸")
     wb = openpyxl.load_workbook(io.BytesIO(exported.content), data_only=True)
-    assert wb["入库明细"].cell(1, 3).value == "2026-06-27"
+    # 期初只进总表，明细页不再有期初列
+    assert wb["总表"].cell(3, 3).value == 100
+    assert wb["入库明细"].cell(1, 3).value is None
 
 
 def test_semi_finished_export_uses_legacy_matrix_workbook(client):
@@ -1618,6 +1624,93 @@ def test_assembly_pcba_legacy_workbook_imports_issue_and_finished_rows(client):
     assert by_type_doc[("finished", "2510160")]["qty"] == 11328
     assert by_type_doc[("finished", "2510160")]["item_no"] == "MSLD182-77794"
     assert by_type_doc[("finished", "2510160")]["location_name"] == "东莞车间"
+
+
+def test_assembly_pcba_legacy_workbook_skips_subtotal_rows(client):
+    # 东莞车间 PCBA 台账的明细页底部有「X月小计：」汇总行，导入时必须跳过，
+    # 否则汇总值会作为一条无日期记录重复计数（成品总数/36#CD 领料翻倍）。
+    login(client, "东莞车间", "123456", "东莞车间")
+    wb = openpyxl.Workbook()
+    total_ws = wb.active
+    total_ws.title = "总表"
+    total_ws.append(["物料名称", "领料总数", "截6月月结", "8月"])
+    total_ws.append(["PCBA主板", 93339, None, 93339])
+
+    cd_ws = wb.create_sheet("36#CD领料明细")
+    cd_ws.append(["日期", "领料编号", "物料名称", "领料数", "备注"])
+    cd_ws.append(["2026-07-09", "DS260617-01", "36#唱片CD", 16944, None])
+    cd_ws.append([None, None, "7月小计：", 16944, None])
+
+    issue_ws = wb.create_sheet("PCB主板领料明细")
+    issue_ws.append(["日期", "领料编号", "物料名称", "领料数", "备注"])
+    issue_ws.append(["2026-07-06", 2202830, "PCBA主板", 20800, None])
+    issue_ws.append([None, None, "8月小计：", 93339, None])
+
+    finished_ws = wb.create_sheet("成品入仓明细")
+    finished_ws.append(
+        ["日期", "送货单号", "合同号", "货号", "品名/规格", "数量（pcs）", "备注"]
+    )
+    finished_ws.append(
+        ["2026-07-07", 2510160, 4500204119, "MSLD182-77794", None, 11328, None]
+    )
+    finished_ws.append([None, None, None, None, "8月小计：", 168080, None])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    r = upload_bytes(
+        client,
+        "/api/records/import",
+        buf.getvalue(),
+        "东莞车间77794#PCB主板出入明细.xlsx",
+    )
+    records = client.get("/api/records").json()
+
+    assert r.status_code == 200
+    assert r.json()["created"] == 3
+    assert sum(row["qty"] for row in records if row["rec_type"] == "finished") == 11328
+    assert sum(
+        row["qty"] for row in records
+        if row["rec_type"] == "issue" and row["sticker_type"] == "36#NFC贴纸"
+    ) == 16944
+    assert sum(
+        row["qty"] for row in records
+        if row["rec_type"] == "issue" and row["material"] == "77794-PCBA板"
+    ) == 20800
+
+
+def test_assembly_pcba_export_shows_cd_sticker_quantities(client):
+    # 「36#唱片CD」= 36#NFC贴纸（车间沿用旧称）：PCBA 导出的 36#唱片CD 行
+    # 领料取贴纸领料记录，成品沿用 PCBA 成品数（一比一），不再恒为 0。
+    login(client, "东莞车间", "123456", "东莞车间")
+    dongguan = loc_id(client, "东莞车间")
+    client.post("/api/records", json={
+        "rec_type": "issue", "location_id": dongguan, "material": "NFC贴纸",
+        "sticker_type": "36#NFC贴纸", "rec_date": "2026-07-09",
+        "doc_no": "DS260617-01", "qty": 16944, "remark": "36#CD领料明细导入",
+    })
+    client.post("/api/records", json={
+        "rec_type": "finished", "location_id": dongguan, "material": "77794-PCBA板",
+        "rec_date": "2026-07-07", "doc_no": "2510160", "qty": 168080,
+    })
+
+    r = client.get("/api/records/export?material=77794-PCBA板")
+    wb = openpyxl.load_workbook(io.BytesIO(r.content), data_only=True)
+
+    assert r.status_code == 200
+    # 领料总数区：36#唱片CD = 贴纸领料
+    assert wb["总表"].cell(3, 1).value == "36#唱片CD"
+    assert wb["总表"].cell(3, 2).value == 16944
+    assert wb["总表"].cell(3, 4).value == 16944  # 7月
+    # 成品总数区：36#唱片CD 沿用 PCBA 成品（一比一）
+    assert wb["总表"].cell(7, 1).value == "36#唱片CD"
+    assert wb["总表"].cell(7, 2).value == 168080
+    # 理论结存数区：36#唱片CD = 领料 - 成品
+    assert wb["总表"].cell(11, 1).value == "36#唱片CD"
+    assert wb["总表"].cell(11, 2).value == -151136
+    # 36#CD领料明细页包含贴纸领料记录
+    assert wb["36#CD领料明细"].cell(2, 2).value == "DS260617-01"
+    assert wb["36#CD领料明细"].cell(2, 3).value == "36#唱片CD"
+    assert wb["36#CD领料明细"].cell(2, 4).value == 16944
 
 
 def test_assembly_pcba_export_matches_import_workbook_format(client):

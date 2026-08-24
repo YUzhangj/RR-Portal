@@ -1,6 +1,6 @@
 export type Role =
   | 'admin' | 'gm' | 'sc_manager'
-  | 'buyer_injection' | 'buyer_painting' | 'buyer_assembly' | 'buyer_sewing'
+  | 'buyer_injection' | 'buyer_painting' | 'buyer_assembly' | 'buyer_sewing' | 'buyer_electronics'
   | 'finance_cost' | 'finance_mgr' | 'quality_qc' | 'sc_clerk'
 
 export type Craft = 'injection' | 'painting' | 'assembly' | 'sewing' | 'electronics'
@@ -19,7 +19,7 @@ export function regionOf(f?: { region?: string | null; [k: string]: any } | null
 export const ROLE_LABELS: Record<Role, string> = {
   admin: '管理员', gm: '总经理', sc_manager: '供应链经理',
   buyer_injection: '注塑部采购', buyer_painting: '喷油部采购',
-  buyer_assembly: '装配部采购', buyer_sewing: '车缝部采购',
+  buyer_assembly: '装配部采购', buyer_sewing: '车缝部采购', buyer_electronics: '电子部采购',
   finance_cost: '财务成本会计', finance_mgr: '财务主管',
   quality_qc: '品质QC', sc_clerk: '供应链文员',
 }
@@ -33,7 +33,7 @@ export const CRAFTS = Object.keys(CRAFT_LABELS) as Craft[]
 // 采购角色 → 其负责的工艺
 export const BUYER_CRAFT: Partial<Record<Role, Craft>> = {
   buyer_injection: 'injection', buyer_painting: 'painting',
-  buyer_assembly: 'assembly', buyer_sewing: 'sewing',
+  buyer_assembly: 'assembly', buyer_sewing: 'sewing', buyer_electronics: 'electronics',
 }
 
 export function isBuyer(role: Role): boolean {

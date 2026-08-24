@@ -11,7 +11,7 @@ migrate((app) => {
   })
   c.fields.add(new TextField({ name: 'name', required: true }))
   c.fields.add(new SelectField({ name: 'module', required: true, maxSelect: 1,
-    values: ['qualification', 'delivery', 'cooperation', 'defect_rate', 'process', '5s', 'craft_specific'] }))
+    values: ['qualification', 'ip_control', 'delivery', 'cooperation', 'defect_rate', 'process', '5s', 'craft_specific'] }))
   c.fields.add(new NumberField({ name: 'max_score', required: true }))
   c.fields.add(new SelectField({ name: 'scoring_role', required: true, maxSelect: 1,
     values: ['buyer', 'quality_qc'] }))

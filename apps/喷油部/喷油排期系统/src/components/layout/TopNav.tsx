@@ -8,7 +8,6 @@ const NAV_ITEMS = [
   { href: "/",          label: "仪表盘",     allowed: ["admin", "clerk", "viewer"], ready: true },
   { href: "/orders",    label: "订单总览",   allowed: ["admin", "clerk"],           ready: true },
   { href: "/schedule",  label: "排期",       allowed: ["admin", "clerk"],           ready: true  },
-  { href: "/recording", label: "实绩录入",   allowed: ["admin", "clerk"],           ready: true },
   { href: "/products",  label: "产品核价表", allowed: ["admin", "clerk"],           ready: true },
   { href: "/inventory", label: "库存",       allowed: ["admin", "clerk", "viewer"], ready: true },
   { href: "/basic",     label: "基础数据库", allowed: ["admin", "clerk"],           ready: true },

@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx'
 import { parseDeliveryImport } from './deliveryStats'
 import { applyCnyTaxPrice } from './orderPricing'
+import { resolveFactoryName } from './factoryName'
 
 export interface DeliveryExcelFile {
   name: string
@@ -10,6 +11,7 @@ export interface DeliveryExcelFile {
 export interface DeliveryExcelBatchResult {
   fileCount: number
   payloads: Record<string, any>[]
+  sources: string[]
   failedRows: number
   unrecognizedFiles: string[]
   readFailedFiles: string[]
@@ -17,6 +19,32 @@ export interface DeliveryExcelBatchResult {
 
 export interface DeliveryExcelImportOptions {
   preferCnyTaxPrice?: boolean
+}
+
+export const UNMATCHED_IMPORT_FACTORY_PREFIX = '__unmatched_factory__:'
+
+function factoryMapWithDraftPlaceholders(aoa: any[][], factoryIdByName: Record<string, string>) {
+  const next = { ...factoryIdByName }
+  const registeredFactories = Object.entries(factoryIdByName).map(([name, id]) => ({ name, id }))
+  for (const row of aoa) {
+    for (let index = 0; index < row.length; index++) {
+      const text = String(row[index] ?? '').trim()
+      const compact = text.replace(/\s+/g, '')
+      const match = compact.match(/^(加工厂|供应商|厂商)[:：]?(.*)$/)
+      if (!match) continue
+      let name = match[2].trim()
+      if (!name) {
+        for (let nextIndex = index + 1; nextIndex < row.length; nextIndex++) {
+          name = String(row[nextIndex] ?? '').trim()
+          if (name) break
+        }
+      }
+      if (name && !next[name] && resolveFactoryName(registeredFactories, name).status !== 'matched') {
+        next[name] = `${UNMATCHED_IMPORT_FACTORY_PREFIX}${name}`
+      }
+    }
+  }
+  return next
 }
 
 export async function parseDeliveryExcelFiles(
@@ -27,6 +55,7 @@ export async function parseDeliveryExcelFiles(
   const result: DeliveryExcelBatchResult = {
     fileCount: files.length,
     payloads: [],
+    sources: [],
     failedRows: 0,
     unrecognizedFiles: [],
     readFailedFiles: [],
@@ -47,11 +76,14 @@ export async function parseDeliveryExcelFiles(
         const sheet = wb.Sheets[sheetName]
         if (!sheet) continue
         const aoa = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1, defval: '' })
-        const parsed = parseDeliveryImport(aoa, factoryIdByName)
+        // 草稿阶段保留“工厂名未匹配”的明细，让用户在预览表中手动选择，
+        // 而不是像旧流程一样直接丢弃这些行。
+        const parsed = parseDeliveryImport(aoa, factoryMapWithDraftPlaceholders(aoa, factoryIdByName))
         if (!parsed.payloads.length && !parsed.failed) continue
         result.failedRows += parsed.failed
         result.payloads.push(...parsed.payloads.map((payload) =>
           applyCnyTaxPrice(payload, options.preferCnyTaxPrice)))
+        result.sources.push(...parsed.payloads.map(() => `${file.name} · ${sheetName}`))
         recognized = true
         break
       }

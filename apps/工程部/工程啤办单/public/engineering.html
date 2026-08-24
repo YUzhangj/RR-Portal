@@ -80,7 +80,7 @@
       <button class="btn btn-outline-secondary" onclick="openSummary()">
         <i class="bi bi-table me-1"></i>总表
       </button>
-      <button class="btn btn-primary" onclick="openNewModal()">
+      <button class="btn btn-primary" id="newOrderBtn" onclick="openNewModal()">
         <i class="bi bi-plus-lg me-1"></i>新建单据
       </button>
     </div>
@@ -268,7 +268,7 @@
               <option>T0</option><option>EP</option><option>FEP</option><option>PP</option>
             </select>
           </div>
-          <div class="col-md-3"><label class="form-label fw-bold">类型</label>
+          <div class="col-md-3" style="display:none"><label class="form-label fw-bold">类型</label>
             <select class="form-select" id="spray-order_type">
               <option>喷油</option><option>试色</option><option>返工</option>
             </select>
@@ -296,8 +296,8 @@
           <table class="table table-bordered table-sm items-table" id="sprayItemsTable">
             <thead>
               <tr>
-                <th>客名</th><th>产品名称 <span class="text-danger">*</span></th><th>零件名称</th><th>工序</th><th>样板数量</th><th>提供胶件时间</th>
-                <th>工程预计完成时间</th><th style="color:#dc3545">喷油复交货时间</th><th>工程师</th><th>跟进人</th><th></th>
+                <th>产品名称 <span class="text-danger">*</span></th><th>零件名称</th><th>工序</th><th>样板数量</th><th>提供胶件时间</th>
+                <th>工程需求完成时间</th><th style="color:#dc3545">喷油收到胶件时间</th><th>工程师</th><th></th>
               </tr>
             </thead>
             <tbody id="sprayItemsBody"></tbody>
@@ -587,6 +587,14 @@ const lockedStatuses = ['待经理审核', '待生产', '生产中', '已完成'
 let _supervisors = [], _managers = [];
 apiFetch('/api/roles').then(r => r.json()).then(d => { _supervisors = d.supervisors || []; _managers = d.managers || []; }).catch(() => {});
 function isPrivileged() { return _supervisors.includes(currentUser) || _managers.includes(currentUser); }
+function isManager() { return _managers.includes(currentUser); }
+// 修改规则：未审核（待审核/已驳回等非锁定状态）的单据所有人可新建/编辑/删除；
+// 审核后（待经理审核/待生产/生产中/已完成）仅经理可修改
+function canModifyOrder(status) { return !lockedStatuses.includes(status) || isManager(); }
+function applyNavPermissions() {
+  const btn = document.getElementById('newOrderBtn');
+  if (btn) btn.style.display = '';
+}
 const isLocked = s => lockedStatuses.includes(s) && !isPrivileged();
 
 const statusBadge = s => ({
@@ -623,8 +631,8 @@ function renderOrderList(orders) {
         <td class="text-nowrap" onclick="event.stopPropagation()">
           <div class="btn-group btn-group-sm">
             ${(o.status === '待审核' || o.status === '待经理审核') ? `<button class="btn ${o.status === '待经理审核' ? 'btn-primary' : 'btn-warning'} fw-bold" onclick="reviewOrder(${o.id},'${(o.order_number||'').replace(/'/g,'')}')">审核</button>` : ''}
-            ${!isLocked(o.status) ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ''}
-            ${!isLocked(o.status) ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ''}
+            ${canModifyOrder(o.status) ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ''}
+            ${canModifyOrder(o.status) ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ''}
             <button class="btn btn-outline-secondary" onclick="printOrder(${o.id})" title="打印"><i class="bi bi-printer"></i></button>
           </div>
         </td>
@@ -640,8 +648,8 @@ function renderOrderList(orders) {
           <td><strong>${esc(o.order_number||'-')}</strong></td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
           <td>${statusBadge(o.status)}</td>
           <td class="text-nowrap" onclick="event.stopPropagation()"><div class="btn-group btn-group-sm">
-            <button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>
-            <button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>
+            ${canModifyOrder(o.status) ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ``}
+            ${canModifyOrder(o.status) ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ``}
             <button class="btn btn-outline-secondary" onclick="printOrder(${o.id})" title="打印"><i class="bi bi-printer"></i></button>
           </div></td></tr>`);
         return;
@@ -660,8 +668,8 @@ function renderOrderList(orders) {
           <td>${idx===0 ? statusBadge(o.status) : ''}</td>
           <td class="text-nowrap" onclick="event.stopPropagation()">${idx===0 ? `<div class="btn-group btn-group-sm">
             ${(o.status === '待审核' || o.status === '待经理审核') ? `<button class="btn ${o.status === '待经理审核' ? 'btn-primary' : 'btn-warning'} fw-bold" onclick="reviewOrder(${o.id},'${(o.order_number||'').replace(/'/g,'')}')">审核</button>` : ''}
-            ${!isLocked(o.status) ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ''}
-            ${!isLocked(o.status) ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ''}
+            ${canModifyOrder(o.status) ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ''}
+            ${canModifyOrder(o.status) ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ''}
             <button class="btn btn-outline-success" onclick="editOrder(${o.id},true)" title="复制"><i class="bi bi-copy"></i></button>
             <button class="btn btn-outline-secondary" onclick="printOrder(${o.id})" title="打印"><i class="bi bi-printer"></i></button>
           </div>` : ''}</td>
@@ -701,8 +709,8 @@ function renderOrderList(orders) {
       <td class="text-nowrap" onclick="event.stopPropagation()">
         <div class="btn-group btn-group-sm">
           ${(o.status === '待审核' || o.status === '待经理审核') ? `<button class="btn ${o.status === '待经理审核' ? 'btn-primary' : 'btn-warning'} fw-bold" onclick="reviewOrder(${o.id},'${(o.order_number||'').replace(/'/g,'')}')">审核</button>` : ''}
-          ${!isLocked(o.status) ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ''}
-          ${!isLocked(o.status) ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ''}
+          ${canModifyOrder(o.status) ? `<button class="btn btn-outline-primary" onclick="editOrder(${o.id})" title="编辑"><i class="bi bi-pencil"></i></button>` : ''}
+          ${canModifyOrder(o.status) ? `<button class="btn btn-outline-danger" onclick="deleteOrder(${o.id})" title="删除"><i class="bi bi-trash"></i></button>` : ''}
           <button class="btn btn-outline-success"   onclick="editOrder(${o.id},true)" title="复制"><i class="bi bi-copy"></i></button>
           <button class="btn btn-outline-secondary"  onclick="printOrder(${o.id})" title="打印"><i class="bi bi-printer"></i></button>
           ${engProblemsMap[o.id] ? `<button class="btn btn-danger" onclick="viewEngProblems(${o.id},'${(o.order_number||'').replace(/'/g,'')}')" title="查看问题"><i class="bi bi-exclamation-triangle-fill"></i></button>` : ''}
@@ -718,7 +726,7 @@ function renderOrderList(orders) {
         <tr>
           ${isAsm ? `<th>货号</th><th>客名</th><th>夹具数</th><th>申请人</th><th>申请时间</th>` :
             isSpray ? `<th>编号</th><th>客名</th><th>名称</th><th>工序</th><th>样板数量</th>
-            <th>提供胶件时间</th><th>工程预计完成时间</th><th style="color:#fca5a5">喷油复交货时间</th><th>工程师</th>` :
+            <th>提供胶件时间</th><th>工程需求完成时间</th><th style="color:#fca5a5">喷油收到胶件时间</th><th>工程师</th>` :
             `<th>产品编号</th><th>产品名称</th><th>客名</th><th>日期</th><th>类型</th><th>车间</th><th>主管</th><th>工程师</th><th>原因</th>`}
           <th>状态</th><th>操作</th>
         </tr>
@@ -794,6 +802,7 @@ function editOrder(id, isDuplicate = false) {
   apiFetch(`/api/${currentTab}/${id}`)
     .then(r => r.json())
     .then(order => {
+      if (!isDuplicate && !canModifyOrder(order.status)) { showToast('审核后的单据仅经理可修改', 'danger'); return; }
       const prefix  = currentTab === 'injection' ? 'inj' : currentTab === 'slush' ? 'slush' : 'spray';
       const modalId = { injection: 'injModal', slush: 'slushModal', spray: 'sprayModal' }[currentTab];
       const titleId = { injection: 'injModalTitle', slush: 'slushModalTitle', spray: 'sprayModalTitle' }[currentTab];
@@ -1141,7 +1150,6 @@ function clientSel(val) {
 function addSprayRow(it={}) {
   const tr = document.createElement('tr');
   tr.innerHTML = `
-    <td>${clientSel(it.client_name)}</td>
     <td>${inp('text','product_name',it.product_name)}</td>
     <td>${inp('text','part_name',it.part_name)}</td>
     <td><select name="process" class="form-select form-select-sm" style="min-width:90px">
@@ -1158,7 +1166,6 @@ function addSprayRow(it={}) {
     <td>${inp('date','eng_complete_time',it.eng_complete_time,'class="w-date"')}</td>
     <td>${inp('date','delivery_time',it.delivery_time,'class="w-date"')}</td>
     <td>${inp('text','engineer',it.engineer)}</td>
-    <td>${inp('text','follower',it.follower)}</td>
     <td>${delBtn()}</td>`;
   document.getElementById('sprayItemsBody').appendChild(tr);
 }
@@ -1208,6 +1215,15 @@ function saveOrder(type) {
          : type === 'slush'     ? collectRows('slushItemsBody', slushFields)
          :                        collectRows('sprayItemsBody', sprayFields),
   };
+
+  // 喷油单明细行自动带入表头数据：客名、跟进人（明细未单独填写时取表头值）
+  if (type === 'spray') {
+    body.items = (body.items || []).map(it => ({
+      ...it,
+      client_name: it.client_name || body.client_name || '',
+      follower: it.follower || body.eng_name || '',
+    }))
+  }
 
   // 产品名称必填：注塑/搪胶检查头部字段，喷油检查明细行
   if (type === 'spray') {
@@ -1358,14 +1374,17 @@ function resolveProblem(problemId) {
 
 // ─── 删除/打印 ────────────────────────────────────────────────────────────────
 function deleteOrder(id) {
-  if (!confirm(`确定删除这条单据吗？删除后无法恢复。`)) return;
-  apiFetch(`/api/${currentTab}/${id}`, { method: 'DELETE', headers: { 'X-User': encodeURIComponent(currentUser) } })
+  apiFetch(`/api/${currentTab}/${id}`).then(r => r.json()).then(order => {
+    if (!canModifyOrder(order.status)) { showToast('审核后的单据仅经理可删除', 'danger'); return; }
+    if (!confirm(`确定删除这条单据吗？删除后无法恢复。`)) return;
+    apiFetch(`/api/${currentTab}/${id}`, { method: 'DELETE', headers: { 'X-User': encodeURIComponent(currentUser) } })
     .then(r => r.json())
     .then(d => {
       if (d.error) { showToast(d.error, 'danger'); return; }
-      showToast('删除成功', 'success'); loadOrders();
-    })
-    .catch(() => showToast('删除失败', 'danger'));
+        showToast('删除成功', 'success'); loadOrders();
+      })
+      .catch(() => showToast('删除失败', 'danger'));
+  });
 }
 
 function printOrder(id) {
@@ -1503,7 +1522,7 @@ function renderReviewDetails(order, type) {
     thead = '<tr><th>序号</th><th>名称</th><th>数量</th><th>要求完成日期</th><th>价格</th><th>完成时间</th></tr>';
     rows = items.map((it, i) => `<tr><td>${i+1}</td><td>${esc(it.product_name||'-')}</td><td>${esc(it.quantity||'-')}</td><td>${esc(it.required_date||'-')}</td><td>${esc(it.price||'-')}</td><td>${esc(it.completion_time||'-')}</td></tr>`).join('');
   } else {
-    thead = '<tr><th>客名</th><th>名称</th><th>样板数量</th><th>提供胶件时间</th><th>收到胶件时间</th><th>工程预计完成时间</th><th>喷油交货时间</th><th>工程师/PMC</th><th>备注</th></tr>';
+    thead = '<tr><th>客名</th><th>名称</th><th>样板数量</th><th>提供胶件时间</th><th>收到胶件时间</th><th>工程需求完成时间</th><th>喷油交货时间</th><th>工程师/PMC</th><th>备注</th></tr>';
     rows = items.map(it => `<tr><td>${esc(it.client_name||'-')}</td><td>${esc(it.product_name||'-')}</td><td>${esc(it.sample_qty||'-')}</td><td>${esc(it.provide_time||'-')}</td><td>${esc(it.receive_time||'-')}</td><td>${esc(it.eng_complete_time||'-')}</td><td>${esc(it.delivery_time||'-')}</td><td>${esc(it.engineer||'-')}</td><td>${esc(it.notes||'-')}</td></tr>`).join('');
   }
 
@@ -2250,6 +2269,7 @@ function finishLogin(name) {
   sessionStorage.setItem('eng_user', name);
   document.getElementById('navUserBadge').textContent = '👤 ' + name;
   bootstrap.Modal.getInstance(document.getElementById('engLoginModal'))?.hide();
+  applyNavPermissions();
   loadOrders(); // 重新渲染列表（根据权限显示按钮）
 }
 
@@ -2260,10 +2280,12 @@ function switchUser() {
   document.getElementById('engLoginPin').value = '';
   document.getElementById('engLoginPinWrap').style.display = 'none';
   document.getElementById('engLoginBtn').setAttribute('onclick', 'checkLoginRole()');
+  applyNavPermissions();
   showLoginModal();
 }
 
 // 初始化用户
+applyNavPermissions();
 if (currentUser) {
   document.getElementById('navUserBadge').textContent = '👤 ' + currentUser;
 } else {

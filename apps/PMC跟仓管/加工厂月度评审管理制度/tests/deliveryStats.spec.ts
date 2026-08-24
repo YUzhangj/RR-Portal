@@ -359,7 +359,8 @@ describe('parseDeliveryImport', () => {
     const result = parseDeliveryImport(aoa, { 华宏: 'factory-huahong' })
 
     expect(result.failed).toBe(0)
-    expect(result.payloads).toHaveLength(2)
+    // 连续两张采购单分段解析：各自取自己的单号与下单/交货日期
+    expect(result.payloads).toHaveLength(3)
     expect(result.payloads[0]).toMatchObject({
       factory: 'factory-huahong', pmc: '伍计红', order_no: 'HH20260701-1',
       item_no: '9565GQ1-S001', product: '松鼠', process_category: '成品',
@@ -368,9 +369,13 @@ describe('parseDeliveryImport', () => {
     expect(result.payloads[1]).toMatchObject({
       item_no: '9565GQ5-SLB-S002', order_date: '2026-07-01', delivery_date: '2026-07-06',
     })
+    expect(result.payloads[2]).toMatchObject({
+      factory: 'factory-huahong', order_no: 'HH20260706-1',
+      item_no: '9565GQ1-S002', order_date: '2026-07-06', delivery_date: '2026-07-10',
+    })
   })
 
-  it('uses the first matching order date for a visible sheet containing consecutive assembly orders', () => {
+  it('imports consecutive assembly orders in one visible sheet with per-order dates', () => {
     const aoa = [
       ['邵阳市华登塑胶制品有限公司'],
       ['供应商：', '大罗', '', '', '订单编号：', '', '', 'DL20260701-1'],
@@ -390,10 +395,15 @@ describe('parseDeliveryImport', () => {
     const result = parseDeliveryImport(aoa, { 大罗: 'factory-daluo' })
 
     expect(result.failed).toBe(0)
-    expect(result.payloads).toHaveLength(1)
+    // 两张采购单分别导入，各自取自己段内的下单日期与交货日期
+    expect(result.payloads).toHaveLength(2)
     expect(result.payloads[0]).toMatchObject({
       factory: 'factory-daluo', order_no: 'DL20260701-1', order_date: '2026-07-01',
       delivery_date: '2026-07-20', item_no: '77782GQ1-S001-INT',
+    })
+    expect(result.payloads[1]).toMatchObject({
+      factory: 'factory-daluo', order_no: 'DL20260727-1', order_date: '2026-07-27',
+      delivery_date: '2026-08-12', item_no: '77711GQ2-S001-NA',
     })
   })
 
@@ -474,6 +484,41 @@ describe('parseDeliveryImport', () => {
     })
     expect(result.payloads[2]).toMatchObject({
       product: 'IC', process: '邦定', process_category: '邦定', quantity: 2040, unit_price_cny_tax: 0.5, amount: 1020,
+    })
+  })
+
+  it('imports electronics contracts without a product category and expands two-digit signing years', () => {
+    const aoa = [
+      ['东莞市登信电子有限公司'],
+      ['', '', '', '委外加工合同'],
+      [],
+      ['供应商：', '邵阳市华登塑胶制品有限公司', '', '', '', '', '订单编号：', 'Dz 20260000022'],
+      [], [], [], [],
+      ['货 号', '货 品 名 称', '工序', '数量', '单位', '单 价', '金 额', '单重（G)', '重量（KG)', '货期', '备注'],
+      ['7149绿', '焊线', '后焊', '10000', 'PCS', 0.098, 980, '', '', '', 'BBA2502462-01'],
+      ['', '', '', '', '', '合计', 980],
+      [],
+      ['供应商确认：', '', '', '采购签核：胡爱莲'],
+      ['时间： 26 年7月10日', '', '', '', '时间：      年    月     日'],
+    ]
+
+    const result = parseDeliveryImport(aoa, { '邵阳市华登塑胶制品有限公司': 'factory-electronics' })
+
+    expect(result.failed).toBe(0)
+    expect(result.payloads).toHaveLength(1)
+    expect(result.payloads[0]).toMatchObject({
+      factory: 'factory-electronics',
+      pmc: '胡爱莲',
+      item_no: '7149绿',
+      order_no: 'Dz 20260000022',
+      product: '焊线',
+      process: '后焊',
+      process_category: '后焊',
+      quantity: 10000,
+      unit_price_cny_tax: 0.098,
+      amount: 980,
+      order_date: '2026-07-10',
+      notes: 'BBA2502462-01',
     })
   })
 })

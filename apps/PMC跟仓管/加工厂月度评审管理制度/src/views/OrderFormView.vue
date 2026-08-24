@@ -5,7 +5,7 @@ import AppLayout from '../components/AppLayout.vue'
 import { useOrdersStore } from '../stores/orders'
 import { useFactoriesStore } from '../stores/factories'
 import { useAuthStore } from '../stores/auth'
-import { CRAFT_LABELS, type Craft } from '../constants/roles'
+import { CRAFT_LABELS, REGION_LABELS, regionOf, type Craft, type Region } from '../constants/roles'
 import type { Order } from '../types/order'
 import { cnyTaxToHkdUntaxed, cnyTaxToUntaxedRmb, DEFAULT_CNY_TO_HKD_RATE } from '../utils/orderPricing'
 
@@ -16,12 +16,18 @@ const factories = useFactoriesStore()
 const auth = useAuthStore()
 
 const craft = computed(() => route.params.craft as Craft | undefined)
-const deptName = computed(() => (craft.value ? CRAFT_LABELS[craft.value] ?? '部门' : '全部'))
-const backTo = computed(() => (craft.value ? `/orders/dept/${craft.value}` : '/orders'))
+const region = computed(() => route.query.region as Region | undefined)
+const deptName = computed(() =>
+  (region.value ? `${REGION_LABELS[region.value]}厂区 · ` : '') + (craft.value ? CRAFT_LABELS[craft.value] ?? '部门' : '全部'))
+const backTo = computed(() => craft.value
+  ? `/orders/dept/${craft.value}${region.value ? `?region=${region.value}` : ''}`
+  : '/orders')
 
 const draft = ref<Partial<Order>>({ status: 'placed', exchange_rate: DEFAULT_CNY_TO_HKD_RATE })
 // 指定部门只列该部门工厂；不限部门(从货期管理落地页进入)则列全部
-const deptFactories = computed(() => (craft.value ? factories.items.filter((f) => f.craft === craft.value) : factories.items))
+const deptFactories = computed(() => factories.items.filter((factory) =>
+  (!craft.value || factory.craft === craft.value)
+  && (!region.value || regionOf(factory) === region.value)))
 const draftAmount = computed(() => {
   const price = draft.value.unit_price_cny_tax ?? draft.value.unit_price ?? 0
   return (Number(draft.value.quantity) || 0) * (Number(price) || 0)
@@ -72,8 +78,14 @@ function closeFactoryPicker() {
 
 async function submit() {
   if (!draft.value.factory) { alert('请选择工厂'); return }
+  if (!deptFactories.value.some((factory) => factory.id === draft.value.factory)) {
+    alert('所选工厂不属于当前厂区和部门，请重新选择')
+    draft.value.factory = ''
+    factorySearch.value = ''
+    return
+  }
   if (!draft.value.product) { alert('请输入产品名称'); return }
-  await orders.create({ ...draft.value, amount: draftAmount.value, created_by: auth.userId ?? undefined })
+  await orders.create({ ...draft.value, region: region.value, amount: draftAmount.value, created_by: auth.userId ?? undefined })
   router.push(backTo.value)
 }
 </script>

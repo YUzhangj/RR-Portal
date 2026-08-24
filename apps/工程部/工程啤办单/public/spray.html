@@ -11,6 +11,27 @@
     .proc-done { color:#0f5132; background:#d1e7dd; border-radius:4px; padding:1px 6px; font-size:.75rem; }
     .proc-pending { color:#664d03; background:#fff3cd; border-radius:4px; padding:1px 6px; font-size:.75rem; cursor:pointer; }
     .proc-pending:hover { background:#ffe69c; }
+    /* 打印总表：只保留标题和总表内容 */
+    @media print {
+      nav.navbar, .modal, .toast, .no-print { display: none !important; }
+      body { background: #fff !important; }
+      /* flex 容器（Bootstrap .card 是 flex）在 Chrome 打印中无法正常跨页拆分，
+         打印时退化为 block */
+      .card, .card-body, .container-fluid, #orderList { display: block !important; }
+      .card { border: none !important; box-shadow: none !important; }
+      .card-body { padding: 0 !important; }
+      /* overflow 容器打印时无法跨页拆分（整表被推到新页留大片空白），取消之 */
+      #orderList .table-responsive { overflow: visible !important; }
+      #orderList { padding: 0; }
+      #orderList .mb-4 { margin-bottom: 8px !important; }
+      #orderList table { font-size: 9pt !important; page-break-inside: auto !important; }
+      #orderList table th, #orderList table td { border: 1px solid #333 !important; }
+      #orderList h6 { border-radius: 0 !important; background: #e8e8e8 !important; color: #000 !important; }
+      @page { size: A4 landscape; margin: 8mm; }
+      /* 表头跨页重复；注意不要再给 tr 加 page-break-inside:avoid——
+         Chrome 下它会让过高的表格无法开始跨页，前一页留下大片空白 */
+      #orderList thead { display: table-header-group; }
+    }
   </style>
 </head>
 <body class="bg-light">
@@ -28,7 +49,7 @@
 </nav>
 
 <div class="container-fluid mt-3">
-  <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+  <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3 no-print">
     <div class="d-flex flex-wrap gap-2 align-items-center">
       <select id="workshopFilter" class="form-select form-select-sm" style="width:auto" onchange="applyFilters()">
         <option value="">全部车间</option>
@@ -47,8 +68,21 @@
         <button class="btn btn-outline-primary active" id="viewListBtn" onclick="switchView('list')"><i class="bi bi-list-ul me-1"></i>列表</button>
         <button class="btn btn-outline-primary" id="viewSummaryBtn" onclick="switchView('summary')"><i class="bi bi-table me-1"></i>总表</button>
       </div>
+      <button class="btn btn-sm btn-outline-secondary no-print" onclick="printSummary()"><i class="bi bi-printer me-1"></i>打印总表</button>
       <small class="text-muted"><i class="bi bi-arrow-clockwise me-1"></i>每30秒自动刷新</small>
     </div>
+  </div>
+
+  <!-- 筛选行（列表/总表/打印共用） -->
+  <div class="d-flex flex-wrap gap-2 align-items-center mb-3 no-print">
+    <input type="month" id="monthFilter" class="form-control form-control-sm" style="width:auto" onchange="applyFilters()">
+    <button class="btn btn-sm btn-warning" onclick="clearMonthFilter()">全部</button>
+    <input id="orderNoFilter" class="form-control form-control-sm" style="width:150px" placeholder="搜索产品编号..." oninput="applyFilters()">
+    <input id="docNoFilter" class="form-control form-control-sm" style="width:150px" placeholder="搜索订单编号..." oninput="applyFilters()">
+    <select id="clientFilter" class="form-select form-select-sm" style="width:auto" onchange="applyFilters()">
+      <option value="">全部客户</option>
+    </select>
+    <button class="btn btn-sm btn-outline-secondary" onclick="loadOrders()"><i class="bi bi-arrow-clockwise me-1"></i>刷新数据</button>
   </div>
 
   <div class="card shadow-sm">
@@ -137,6 +171,22 @@ const statusBadge = s => ({
   '已取消': '<span class="badge bg-secondary">已取消</span>'
 }[s] || `<span class="badge bg-secondary">${esc(s)}</span>`);
 
+// 待生产 → 生产中（开始生产）
+function setSprayStatus(id, status) {
+  apiFetch(`/api/spray/${id}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'X-User': encodeURIComponent('喷油部') },
+    body: JSON.stringify({ status })
+  }).then(async r => {
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      alert(d.error || `操作失败 (HTTP ${r.status})`);
+      return;
+    }
+    loadOrders();
+  });
+}
+
 function filterStatus(status, el) {
   currentFilter = status;
   document.querySelectorAll('.status-filter .btn').forEach(b => b.classList.remove('active'));
@@ -150,11 +200,31 @@ function switchView(view) {
   applyFilters();
 }
 
+// 打印总表：先切到总表视图（沿用当前车间/状态筛选），渲染完成后调起打印
+function printSummary() {
+  if (currentView !== 'summary') switchView('summary');
+  setTimeout(() => window.print(), 50);
+}
+
+function clearMonthFilter() {
+  document.getElementById('monthFilter').value = '';
+  applyFilters();
+}
+
 function applyFilters() {
   let filtered = allOrders;
   const ws = document.getElementById('workshopFilter')?.value || '';
   if (ws) filtered = filtered.filter(o => o.workshop === ws);
   if (currentFilter) filtered = filtered.filter(o => o.status === currentFilter);
+  const month = document.getElementById('monthFilter')?.value || '';
+  if (month) filtered = filtered.filter(o => String(o.date || '').startsWith(month));
+  const noKw = (document.getElementById('orderNoFilter')?.value || '').trim().toLowerCase();
+  if (noKw) filtered = filtered.filter(o => String(o.order_number || '').toLowerCase().includes(noKw));
+  const docKw = (document.getElementById('docNoFilter')?.value || '').trim().toLowerCase();
+  if (docKw) filtered = filtered.filter(o => String(o.doc_number || '').toLowerCase().includes(docKw));
+  const client = document.getElementById('clientFilter')?.value || '';
+  if (client) filtered = filtered.filter(o =>
+    o.client_name === client || (o.items || []).some(it => (it.client_name || o.client_name) === client));
   if (currentView === 'summary') {
     renderSummary(filtered);
   } else {
@@ -172,6 +242,16 @@ function loadOrders() {
     problems.filter(p => p.status === '待处理').forEach(p => {
       problemsMap[p.order_id] = (problemsMap[p.order_id] || 0) + 1;
     });
+    // 客户下拉：从订单/明细收集去重
+    const clientSel = document.getElementById('clientFilter');
+    if (clientSel) {
+      const clients = [...new Set(orders.flatMap(o =>
+        (o.items || []).map(it => it.client_name || o.client_name).filter(Boolean)))].sort();
+      const cur = clientSel.value;
+      clientSel.innerHTML = '<option value="">全部客户</option>'
+        + clients.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+      clientSel.value = clients.includes(cur) ? cur : '';
+    }
     applyFilters();
   }).catch(() => {
     document.getElementById('orderList').innerHTML = '<div class="text-center p-4 text-danger">加载失败，请刷新页面</div>';
@@ -192,11 +272,12 @@ function renderOrders(orders) {
         <tr class="order-row" onclick="viewOrder(${o.id})">
           <td>${esc(o.workshop||'-')}</td>
           <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
-          <td>-</td><td>-</td>
-          <td>${statusBadge(o.status)} ${problemsMap[o.id]?`<span class="badge bg-danger ms-1">${problemsMap[o.id]}问题</span>`:''}</td>
+          <td>-</td>
+          <td>${statusBadge(o.status)} ${o.status === '待生产' ? `<button class="btn btn-warning btn-sm" onclick="event.stopPropagation();setSprayStatus(${o.id},'生产中')"><i class="bi bi-play-fill"></i>开始生产</button>` : ''} ${problemsMap[o.id]?`<span class="badge bg-danger ms-1">${problemsMap[o.id]}问题</span>`:''}</td>
           <td><div class="btn-group btn-group-sm">
             <button class="btn btn-outline-danger" data-order-id="${o.id}" data-order-num="${esc(o.order_number||'')}" onclick="event.stopPropagation();openProblemModalFromBtn(this)" title="问题反馈"><i class="bi bi-exclamation-triangle"></i></button>
             <button class="btn btn-outline-secondary" onclick="event.stopPropagation();printOrder(${o.id})"><i class="bi bi-printer"></i></button>
+            <button class="btn btn-outline-danger" onclick="event.stopPropagation();deleteSprayOrder(${o.id},'${esc(o.order_number||'')}','${esc(o.status||'')}')" title="删除"><i class="bi bi-trash"></i></button>
           </div></td>
         </tr>`);
       return;
@@ -211,7 +292,6 @@ function renderOrders(orders) {
           <td>${esc(it.process||'-')}</td>
           <td>${esc(it.sample_qty||'-')}</td>
           <td>${esc(it.provide_time||'-')}</td>
-          <td>${esc(it.receive_time || o.actual_receive_time || '-')}</td>
           <td>${esc(it.eng_complete_time||'-')}</td>
           <td>${esc(it.delivery_time||'-')}</td>
           <td>${esc(it.engineer||'-')}</td>
@@ -223,9 +303,11 @@ function renderOrders(orders) {
           <td>
             ${idx===0 ? `<div class="btn-group btn-group-sm">
               ${statusBadge(o.status)}
+              ${o.status === '待生产' ? `<button class="btn btn-warning" style="font-size:.75rem;padding:2px 7px;white-space:nowrap" onclick="event.stopPropagation();setSprayStatus(${o.id},'生产中')" title="开始生产"><i class="bi bi-play-fill me-1"></i>开始生产</button>` : ''}
               ${problemsMap[o.id]?`<span class="badge bg-danger ms-1">${problemsMap[o.id]}问题</span>`:''}
               <button class="btn btn-outline-danger" data-order-id="${o.id}" data-order-num="${esc(o.order_number||'')}" onclick="event.stopPropagation();openProblemModalFromBtn(this)" title="问题反馈"><i class="bi bi-exclamation-triangle"></i></button>
               <button class="btn btn-outline-secondary" onclick="event.stopPropagation();printOrder(${o.id})"><i class="bi bi-printer"></i></button>
+              <button class="btn btn-outline-danger" onclick="event.stopPropagation();deleteSprayOrder(${o.id},'${esc(o.order_number||'')}','${esc(o.status||'')}')" title="删除"><i class="bi bi-trash"></i></button>
             </div>` : ''}
           </td>
         </tr>`);
@@ -238,9 +320,8 @@ function renderOrders(orders) {
       <thead class="table-dark">
         <tr>
           <th>车间</th><th>客名</th><th>产品名称</th><th>零件名称</th><th>工序</th><th>样板数量</th><th>提供胶件时间</th>
-          <th style="color:#86efac">收到胶件时间</th>
-          <th style="color:#f9a8d4">工程预计完成时间</th>
-          <th style="color:#fca5a5">喷油复交货时间</th>
+          <th style="color:#f9a8d4">工程需求完成时间</th>
+          <th style="color:#fca5a5">喷油收到胶件时间</th>
           <th>工程师</th><th>跟进人</th><th style="color:#86efac">完成时间</th><th>进度</th><th>状态/操作</th>
         </tr>
       </thead>
@@ -290,8 +371,8 @@ function renderSummary(orders) {
             <th style="width:70px">样板数量</th>
             <th>提供胶件时间</th>
             <th>收到胶件时间</th>
-            <th>工程预计完成时间</th>
-            <th style="color:#dc3545">喷油复交货时间</th>
+            <th>工程需求完成时间</th>
+            <th style="color:#dc3545">喷油收到胶件时间</th>
             <th>工程师</th>
             <th>跟进人</th>
             <th style="width:180px">进度</th>
@@ -377,7 +458,6 @@ function viewOrder(id) {
           <td>${esc(it.process||'-')}</td>
           <td>${esc(it.sample_qty||'-')}</td>
           <td>${esc(it.provide_time||'-')}</td>
-          <td>${esc(it.receive_time || order.actual_receive_time || '-')}</td>
           <td>${esc(it.eng_complete_time||'-')}</td>
           <td><input type="date" class="form-control form-control-sm spray-delivery" data-order-id="${order.id}" data-item-id="${it.id}" value="${esc(it.delivery_time||'')}" onchange="saveItemDelivery(this)" style="min-width:130px"></td>
           <td>${esc(it.engineer||'-')}</td>
@@ -401,28 +481,29 @@ function viewOrder(id) {
             <thead class="table-dark" style="font-size:.8rem">
               <tr>
                 <th>客名</th><th>产品名称</th><th>零件名称</th><th>工序</th><th>样板数量</th><th>提供胶件时间</th>
-                <th>收到胶件时间</th><th>工程预计完成时间</th>
-                <th style="color:#fca5a5">喷油复交货时间</th><th>工程师</th><th>跟进人</th><th>进度</th>
+                <th>工程需求完成时间</th>
+                <th style="color:#fca5a5">喷油收到胶件时间</th><th>工程师</th><th>跟进人</th><th>进度</th>
               </tr>
             </thead>
-            <tbody>${itemRows || '<tr><td colspan="11" class="text-muted text-center">无明细</td></tr>'}</tbody>
+            <tbody>${itemRows || '<tr><td colspan="10" class="text-muted text-center">无明细</td></tr>'}</tbody>
           </table>
         </div>
 
         <h6 class="mt-3 mb-2 fw-bold">喷油部填写</h6>
         <div class="row g-3">
-          <div class="col-md-4">
-            <label class="form-label">实际收到胶件时间</label>
-            <input type="date" class="form-control" id="sf-actual-receive" value="${esc(order.actual_receive_time||'')}" onchange="saveSprayFields(${order.id})">
-          </div>
-          <div class="col-md-8">
+          <div class="col-12">
             <label class="form-label">备注</label>
             <input type="text" class="form-control" id="sf-notes" value="${esc(order.spray_notes||'')}" placeholder="喷油部备注" onchange="saveSprayFields(${order.id})">
           </div>
         </div>
         ${order.completed_date ? '<div class="mt-2"><span class="badge bg-success">完成时间: '+esc(order.completed_date)+'</span></div>' : ''}`;
 
-      new bootstrap.Modal(document.getElementById('detailModal')).show();
+      // 已在打开状态（如工序保存后刷新内容）时不要重复 show，
+      // 否则叠加第二层背景导致整页变灰无法点击
+      const detailModalEl = document.getElementById('detailModal');
+      if (!detailModalEl.classList.contains('show')) {
+        new bootstrap.Modal(detailModalEl).show();
+      }
     });
 }
 
@@ -431,13 +512,12 @@ function saveSprayFields(id) {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', 'X-User': encodeURIComponent('喷油部') },
     body: JSON.stringify({
-      actual_receive_time: document.getElementById('sf-actual-receive').value,
       spray_notes: document.getElementById('sf-notes').value
     })
   }).then(r => { if (r.ok) loadOrders(); });
 }
 
-// ─── 喷油复交货时间（per-item） ───────────────────────────────────────────────
+// ─── 喷油收到胶件时间（per-item） ───────────────────────────────────────────────
 function saveItemDelivery(el) {
   const orderId = el.dataset.orderId;
   const itemId = +el.dataset.itemId;
@@ -595,6 +675,33 @@ function submitProblem() {
 
 function printOrder(id) {
   window.open(`print.html?type=spray&id=${id}`, '_blank');
+}
+
+// 删除喷油单：锁定状态（待经理审核/待生产/生产中/已完成）需经理 PIN
+const SPRAY_LOCKED = ['待经理审核', '待生产', '生产中', '已完成'];
+async function deleteSprayOrder(id, orderNum, status) {
+  let body = null;
+  if (SPRAY_LOCKED.includes(status)) {
+    if (!confirm(`「${orderNum || '#' + id}」已是 ${status} 状态，删除需要经理 PIN。继续？`)) return;
+    const pin = window.prompt('请输入经理 PIN：');
+    if (pin === null) return;
+    if (!pin.trim()) { alert('未输入 PIN，已取消'); return; }
+    body = { manager_name: '易东存', pin: pin.trim() };
+  } else {
+    if (!confirm(`确定删除喷油单「${orderNum || '#' + id}」吗？删除后无法恢复。`)) return;
+  }
+  try {
+    const r = await apiFetch(`/api/spray/${id}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', 'X-User': encodeURIComponent('喷油部') },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) { alert(d.error || '删除失败'); return; }
+    loadOrders();
+  } catch (e) {
+    alert('网络错误，删除失败');
+  }
 }
 
 loadOrders();

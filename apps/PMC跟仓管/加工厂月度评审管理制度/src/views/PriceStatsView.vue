@@ -5,7 +5,7 @@ import * as XLSX from 'xlsx'
 import AppLayout from '../components/AppLayout.vue'
 import { useOrdersStore } from '../stores/orders'
 import { useFactoriesStore } from '../stores/factories'
-import { CRAFT_LABELS, REGION_LABELS, regionOf, type Craft, type Region } from '../constants/roles'
+import { CRAFT_LABELS, REGION_LABELS, type Craft, type Region } from '../constants/roles'
 import { allowedRegions } from '../utils/permissions'
 import { useAuthStore } from '../stores/auth'
 import { buildPriceStatsRows, type PriceStatsRow } from '../utils/priceStats'
@@ -13,6 +13,8 @@ import { isPercentOver100 } from '../utils/percentage'
 import { canEditOrders } from '../utils/permissions'
 import { matchPriceImportRows, parsePriceStatsExcel } from '../utils/priceStatsExcelImport'
 import { taxPointFactor } from '../utils/taxPoint'
+import { useTableColumnPreferences } from '../composables/useTableColumnPreferences'
+import { orderRegion } from '../utils/orderRegion'
 
 const route = useRoute()
 const orders = useOrdersStore()
@@ -35,6 +37,24 @@ const priceHeaders = computed(() => isSewing.value
   ? ['核价工价(不含税RMB)', '外发工价(人民币含税)', '税点', '扣税点后单价', '占比']
   : ['核价生产工价', '外发单价', '扣税点1.13后单价', '占比'])
 
+const tableColumns = [
+  { key: 'workshop', label: '车间', width: 100 },
+  { key: 'factory', label: '加工厂名称', width: 190 },
+  { key: 'category', label: '加工类别', width: 120 },
+  { key: 'itemNo', label: '货号', width: 180, hideable: false },
+  ...(showMoldNumber.value ? [{ key: 'moldNo', label: '模具编号', width: 180 }] : []),
+  { key: 'product', label: '配件名称/模号', width: 220 },
+  { key: 'quotePrice', label: isSewing.value ? '核价工价(不含税RMB)' : '核价生产工价', width: 180 },
+  { key: 'unitPrice', label: isSewing.value ? '外发工价(人民币含税)' : '外发单价', width: 180 },
+  ...(isSewing.value ? [{ key: 'taxPoint', label: '税点', width: 100 }] : []),
+  { key: 'afterTax', label: isSewing.value ? '扣税点后单价' : '扣税点1.13后单价', width: 180 },
+  { key: 'ratio', label: '占比', width: 100 },
+  { key: 'notes', label: '备注', width: 180 },
+]
+const { frozenThrough, columnPanelOpen, visibleColumns, isVisible, isFrozen, columnStyle, toggleColumn, showAllColumns } =
+  useTableColumnPreferences(`price-stats-table-columns-${craft.value}`, tableColumns)
+const visibleColumnCount = computed(() => visibleColumns.value.length)
+
 onMounted(() => Promise.all([orders.fetchAll(), factories.fetchAll()]))
 
 function linkedFactoryTaxPoint(factoryId: string | null | undefined) {
@@ -53,8 +73,8 @@ const rows = computed<PriceStatsRow[]>(() => {
     return matchesKeyword
       &&
     o.expand?.factory?.craft === craft.value
-    && (!region.value || regionOf(o.expand?.factory) === region.value)
-    && (!myRegions.value || myRegions.value.includes(regionOf(o.expand?.factory)))
+    && (!region.value || orderRegion(o) === region.value)
+    && (!myRegions.value || myRegions.value.includes(orderRegion(o)))
   })
   return buildPriceStatsRows(
     list,
@@ -146,8 +166,8 @@ async function importExcel(event: Event) {
     }
     const visibleOrders = orders.items.filter((o) =>
       o.expand?.factory?.craft === craft.value
-      && (!region.value || regionOf(o.expand?.factory) === region.value)
-      && (!myRegions.value || myRegions.value.includes(regionOf(o.expand?.factory))))
+      && (!region.value || orderRegion(o) === region.value)
+      && (!myRegions.value || myRegions.value.includes(orderRegion(o))))
     const matched = matchPriceImportRows(parsed.rows, visibleOrders)
     if (!matched.updates.length) {
       alert(`未匹配到可更新的记录。\n未匹配 ${matched.unmatchedRows.length} 行，冲突 ${matched.conflictingRows.length} 行，无效 ${parsed.invalidRows} 行。`)
@@ -176,42 +196,52 @@ async function importExcel(event: Event) {
         <span class="spacer"></span>
         <input v-model="searchKeyword" class="price-search" type="search"
           placeholder="搜索加工厂/货号/模具编号/配件名称" aria-label="搜索加工厂、货号、模具编号或配件名称" />
+        <label class="freeze-control">冻结至
+          <select v-model="frozenThrough" class="column-select">
+            <option value="">不冻结列</option>
+            <option v-for="column in visibleColumns" :key="column.key" :value="column.key">{{ column.label }}</option>
+          </select>
+        </label>
+        <div class="column-menu">
+          <button class="ghost" @click="columnPanelOpen = !columnPanelOpen">栏目显示</button>
+          <div v-if="columnPanelOpen" class="column-panel">
+            <div class="column-panel-head"><b>显示/隐藏栏目</b><button class="link-btn" @click="showAllColumns">全部显示</button></div>
+            <label v-for="column in tableColumns.filter(c => c.hideable !== false)" :key="column.key">
+              <input type="checkbox" :checked="isVisible(column.key)" @change="toggleColumn(column.key)" /> {{ column.label }}
+            </label>
+          </div>
+        </div>
         <button v-if="canImport" class="ghost" :disabled="importing" @click="fileInput?.click()">
           {{ importing ? '导入中…' : '导入 Excel' }}
         </button>
         <input ref="fileInput" type="file" accept=".xlsx,.xls,.csv" style="display:none" @change="importExcel" />
         <button @click="exportExcel">导出 Excel</button>
       </div>
-      <div class="scroll">
+      <div class="scroll" tabindex="0" aria-label="单价统计表格滚动区域">
         <table class="stats">
           <thead>
             <tr>
-              <th rowspan="2">车间</th><th rowspan="2">加工厂名称</th><th rowspan="2">加工类别</th>
-              <th rowspan="2" class="item-no-col">货号</th><th v-if="showMoldNumber" rowspan="2">模具编号</th><th rowspan="2">配件名称/模号</th>
-
-              <th :colspan="priceHeaders.length">价格管理</th>
-              <th rowspan="2">备注</th>
-            </tr>
-            <tr>
-              <th v-for="header in priceHeaders" :key="header">{{ header }}</th>
+              <th v-for="column in visibleColumns" :key="column.key"
+                :class="{ frozen: isFrozen(column.key), 'freeze-edge': frozenThrough === column.key, 'item-no-col': column.key === 'itemNo' }"
+                :style="columnStyle(column.key)">{{ column.label }}</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="(r, i) in rows" :key="i">
-              <td v-if="r.workshopSpan" :rowspan="r.workshopSpan">{{ r.workshop || '-' }}</td>
-              <td v-if="r.factorySpan" :rowspan="r.factorySpan">{{ r.factory || '-' }}</td>
-              <td v-if="r.categorySpan" :rowspan="r.categorySpan">{{ r.category || '-' }}</td>
-              <td class="item-no-col">{{ r.item_no || '-' }}</td>
-              <td v-if="showMoldNumber">{{ r.mold_no || '-' }}</td>
-              <td>{{ r.product || '-' }}</td>
-              <td>{{ num(r.quote_labor_price) }}</td>
-              <td>{{ num(r.unit_price) }}</td>
-              <td v-if="isSewing">{{ num(r.tax_point) }}</td>
-              <td>{{ num(r.after_tax) }}</td>
-              <td :class="{ 'over-limit': isPercentOver100(r.ratio_pct) }">{{ pct(r.ratio_pct) }}</td>
-              <td>{{ r.notes || '-' }}</td>
+              <td v-if="isVisible('workshop') && r.workshopSpan" :rowspan="r.workshopSpan" :class="{ frozen: isFrozen('workshop'), 'freeze-edge': frozenThrough === 'workshop' }" :style="columnStyle('workshop')">{{ r.workshop || '-' }}</td>
+              <td v-if="isVisible('factory') && r.factorySpan" :rowspan="r.factorySpan" :class="{ frozen: isFrozen('factory'), 'freeze-edge': frozenThrough === 'factory' }" :style="columnStyle('factory')">{{ r.factory || '-' }}</td>
+              <td v-if="isVisible('category') && r.categorySpan" :rowspan="r.categorySpan" :class="{ frozen: isFrozen('category'), 'freeze-edge': frozenThrough === 'category' }" :style="columnStyle('category')">{{ r.category || '-' }}</td>
+              <td class="item-no-col" :class="{ frozen: isFrozen('itemNo'), 'freeze-edge': frozenThrough === 'itemNo' }" :style="columnStyle('itemNo')">{{ r.item_no || '-' }}</td>
+              <td v-if="showMoldNumber && isVisible('moldNo')" :class="{ frozen: isFrozen('moldNo'), 'freeze-edge': frozenThrough === 'moldNo' }" :style="columnStyle('moldNo')">{{ r.mold_no || '-' }}</td>
+              <td v-if="isVisible('product')" :class="{ frozen: isFrozen('product'), 'freeze-edge': frozenThrough === 'product' }" :style="columnStyle('product')">{{ r.product || '-' }}</td>
+              <td v-if="isVisible('quotePrice')" :class="{ frozen: isFrozen('quotePrice'), 'freeze-edge': frozenThrough === 'quotePrice' }" :style="columnStyle('quotePrice')">{{ num(r.quote_labor_price) }}</td>
+              <td v-if="isVisible('unitPrice')" :class="{ frozen: isFrozen('unitPrice'), 'freeze-edge': frozenThrough === 'unitPrice' }" :style="columnStyle('unitPrice')">{{ num(r.unit_price) }}</td>
+              <td v-if="isSewing && isVisible('taxPoint')" :class="{ frozen: isFrozen('taxPoint'), 'freeze-edge': frozenThrough === 'taxPoint' }" :style="columnStyle('taxPoint')">{{ num(r.tax_point) }}</td>
+              <td v-if="isVisible('afterTax')" :class="{ frozen: isFrozen('afterTax'), 'freeze-edge': frozenThrough === 'afterTax' }" :style="columnStyle('afterTax')">{{ num(r.after_tax) }}</td>
+              <td v-if="isVisible('ratio')" :class="{ 'over-limit': isPercentOver100(r.ratio_pct), frozen: isFrozen('ratio'), 'freeze-edge': frozenThrough === 'ratio' }" :style="columnStyle('ratio')">{{ pct(r.ratio_pct) }}</td>
+              <td v-if="isVisible('notes')" :class="{ frozen: isFrozen('notes'), 'freeze-edge': frozenThrough === 'notes' }" :style="columnStyle('notes')">{{ r.notes || '-' }}</td>
             </tr>
-            <tr v-if="!rows.length"><td :colspan="6 + priceHeaders.length + (showMoldNumber ? 1 : 0)" class="hint" style="text-align:center">该部门暂无数据</td></tr>
+            <tr v-if="!rows.length"><td :colspan="visibleColumnCount" class="hint" style="text-align:center">该部门暂无数据</td></tr>
 
           </tbody>
         </table>
@@ -220,11 +250,49 @@ async function importExcel(event: Event) {
   </AppLayout>
 </template>
 <style scoped>
-.wide { max-width: none; }
+.wide {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  height: calc(100vh - 106px);
+  height: calc(100dvh - 106px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 .back { font-size: .9rem; }
-.scroll { overflow-x: auto; }
-.stats { min-width: 1100px; }
+.toolbar {
+  position: relative;
+  z-index: 9;
+  flex: 0 0 auto;
+  margin: -.35rem 0 1rem;
+  padding: .35rem 0;
+  background: var(--bg);
+  flex-wrap: wrap;
+}
+.scroll {
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  isolation: isolate;
+}
+.stats {
+  width: max-content;
+  min-width: 100%;
+  table-layout: fixed;
+  /* 全局 table 的 overflow:hidden 会成为 sticky 的错误包含块，导致冻结列跟随滚动。 */
+  overflow: visible;
+}
 .stats th, .stats td { text-align: left; white-space: nowrap; }
+.stats thead th { position: sticky; top: 0; z-index: 3; background: #fafbfc; }
+.stats .frozen { position: sticky; z-index: 2; background: var(--surface); }
+.stats thead .frozen { z-index: 5; background: #fafbfc; }
+.stats .freeze-edge { box-shadow: 5px 0 7px -7px rgba(31, 37, 51, .55); }
 .stats .item-no-col {
   width: 180px;
   min-width: 180px;
@@ -236,4 +304,11 @@ async function importExcel(event: Event) {
 
 .stats .over-limit { color: #dc2626; font-weight: 600; }
 .price-search { width: min(320px, 36vw); }
+.freeze-control { display: flex; align-items: center; gap: .35rem; color: var(--text-soft); font-size: .85rem; white-space: nowrap; }
+.column-select { height: 36px; max-width: 190px; padding: 0 .55rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); }
+.column-menu { position: relative; }
+.column-panel { position: absolute; top: calc(100% + .4rem); right: 0; z-index: 20; width: 310px; max-height: 430px; overflow: auto; padding: .75rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); box-shadow: var(--shadow); display: grid; gap: .45rem; }
+.column-panel label { display: flex; align-items: flex-start; gap: .45rem; font-size: .84rem; }
+.column-panel-head { display: flex; justify-content: space-between; align-items: center; padding-bottom: .35rem; border-bottom: 1px solid var(--border); }
+.link-btn { padding: 0; border: 0; background: transparent; color: var(--primary); font-size: .82rem; }
 </style>

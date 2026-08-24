@@ -9,6 +9,8 @@ import { useAuthStore } from '../stores/auth'
 import { canEditQuality, allowedRegions, canViewCraft } from '../utils/permissions'
 import { REGIONS, REGION_LABELS, regionOf, type Craft, type Region } from '../constants/roles'
 import type { Quality5sCheck } from '../types/quality5s'
+import { useTableColumnPreferences } from '../composables/useTableColumnPreferences'
+import { resolveFactoryName } from '../utils/factoryName'
 
 const factories = useFactoriesStore()
 const auth = useAuthStore()
@@ -49,6 +51,37 @@ const SCORE_FIELDS = [
   { key: 's_correction', label: '整改及记录管理(10分)' },
 ] as const
 const CHECK_TYPES = ['首次审核', '复审', '定期巡查']
+interface Quality5sImportDraftRow {
+  rowNo: number
+  factoryName: string
+  payload: Record<string, any>
+  error: string
+  // 写入失败可重试，不计入异常行（否则会禁用确认按钮导致永远无法重试）
+  saveError?: string
+}
+const importDraftRows = ref<Quality5sImportDraftRow[]>([])
+const importPreviewOpen = ref(false)
+const importConfirming = ref(false)
+const importDraftInvalidCount = computed(() => importDraftRows.value.filter((row) => row.error).length)
+
+const tableColumns = [
+  { key: 'index', label: '序号', width: 64, hideable: false },
+  { key: 'date', label: '检查日期', width: 138 },
+  { key: 'factory', label: '加工厂名称', width: 260 },
+  { key: 'type', label: '检查类型', width: 120 },
+  { key: 'project', label: '加工项目', width: 130 },
+  { key: 'customer', label: '客户', width: 120 },
+  { key: 'inspector', label: '检查人员', width: 120 },
+  ...SCORE_FIELDS.map((field) => ({ key: field.key, label: field.label, width: 150 })),
+  { key: 'rate', label: '达成率', width: 100 },
+  { key: 'ip', label: 'IP保护得分', width: 120 },
+  { key: 'finalRate', label: '折算总达成率', width: 130 },
+  { key: 'notes', label: '备注', width: 160 },
+  { key: 'actions', label: '操作', width: 190 },
+]
+const columnPrefs = useTableColumnPreferences('quality-5s-table-columns', tableColumns)
+const { frozenThrough, columnPanelOpen, visibleColumns, isVisible, isFrozen, columnStyle, toggleColumn, showAllColumns } = columnPrefs
+const visibleColumnCount = computed(() => visibleColumns.value.filter((column) => column.key !== 'actions' || canOperate.value).length)
 
 async function load() {
   records.value = await pb.collection('quality_5s_checks').getFullList<Quality5sCheck>({
@@ -196,18 +229,20 @@ async function importExcel(ev: Event) {
     ip: colOf('IP保护得分(NA=不适用;适用)', 'IP保护得分', 'IP控制(如适用)', 'IP控制'), notes: colOf('备注'),
   }
   for (const f of SCORE_FIELDS) idx[f.key] = colOf(f.label, f.label.replace(/\(.*\)/, ''))
-  const fByName: Record<string, string> = {}
-  for (const f of factories.items) fByName[f.name] = f.id
   const toDate = (v: any) => (v instanceof Date ? v.toISOString() : String(v ?? '').trim())
   const cell = (row: any[], i: number) => (i >= 0 ? row[i] : '')
-  let ok = 0, fail = 0
-  for (const row of aoa.slice(headerIdx + 1)) {
+  const candidates = regionFilter.value
+    ? factories.items.filter((factory) => regionOf(factory) === regionFilter.value)
+    : factories.items
+  const preview: Quality5sImportDraftRow[] = []
+  for (const [offset, row] of aoa.slice(headerIdx + 1).entries()) {
     const fname = String(cell(row, idx.factory) ?? '').trim()
     const dv = cell(row, idx.date)
     if (!fname && !dv) continue // 跳过空行
+    const factoryMatch = resolveFactoryName(candidates, fname)
     const payload: Record<string, any> = { created_by: auth.userId ?? undefined }
     if (dv) payload.check_date = toDate(dv)
-    if (fname && fByName[fname]) payload.factory = fByName[fname]
+    if (factoryMatch.status === 'matched') payload.factory = factoryMatch.id
     const str = (i: number) => { const v = cell(row, i); return v == null ? '' : String(v).trim() }
     payload.check_type = str(idx.type)
     payload.project = str(idx.project)
@@ -219,11 +254,49 @@ async function importExcel(ev: Event) {
       const v = cell(row, idx[f.key])
       if (v !== '' && v != null) payload[f.key] = Number(v)
     }
-    try { await pb.collection('quality_5s_checks').create(payload); ok++ } catch { fail++ }
+    const errors: string[] = []
+    if (!fname) errors.push('缺少加工厂名称')
+    else if (factoryMatch.status !== 'matched') errors.push(factoryMatch.status === 'ambiguous' ? '工厂简称匹配到多家工厂' : '工厂名未匹配')
+    if (!dv) errors.push('缺少检查日期')
+    preview.push({ rowNo: headerIdx + offset + 2, factoryName: fname, payload, error: errors.join('；') })
   }
   if (fileInput.value) fileInput.value.value = ''
-  await load()
-  alert(`导入完成：成功 ${ok} 条` + (fail ? `，失败 ${fail} 条` : '') + '\n(加工厂名称需与系统中工厂名一致才会关联)')
+  if (!preview.length) { alert('未识别到可预览的数据行'); return }
+  importDraftRows.value = preview
+  importPreviewOpen.value = true
+}
+
+function cancelImportPreview() {
+  importPreviewOpen.value = false
+  importDraftRows.value = []
+}
+
+async function confirmImportPreview() {
+  if (importDraftInvalidCount.value) { alert('草稿中仍有异常行，请取消后修正 Excel 再重新导入'); return }
+  if (!importDraftRows.value.length || importConfirming.value) return
+  importConfirming.value = true
+  const failedRows: Quality5sImportDraftRow[] = []
+  let ok = 0
+  try {
+    for (const row of importDraftRows.value) {
+      try {
+        await pb.collection('quality_5s_checks').create(row.payload)
+        ok++
+      } catch (error: any) {
+        console.error(error)
+        const message = error?.response?.message || error?.message || '写入失败'
+        failedRows.push({ ...row, error: '', saveError: `写入失败：${message}` })
+      }
+    }
+    if (ok) await load()
+    if (!failedRows.length) {
+      cancelImportPreview()
+      alert(`正式导入完成：成功 ${ok} 条`)
+    } else {
+      importDraftRows.value = failedRows
+      alert(`正式导入完成：成功 ${ok} 条，失败 ${failedRows.length} 条；失败行已保留在草稿中`)
+    }
+  } finally { importConfirming.value = false }
 }
 
 function exportExcel() {
@@ -275,6 +348,23 @@ function exportExcel() {
           class="search-box"
           placeholder="搜索 加工厂/客户"
         />
+        <label class="freeze-control">冻结至
+          <select v-model="frozenThrough" class="region-sel">
+            <option value="">不冻结列</option>
+            <option v-for="column in visibleColumns" :key="column.key" :value="column.key" :disabled="column.key === 'actions'">
+              {{ column.label }}
+            </option>
+          </select>
+        </label>
+        <div class="column-menu">
+          <button class="ghost" @click="columnPanelOpen = !columnPanelOpen">栏目显示</button>
+          <div v-if="columnPanelOpen" class="column-panel">
+            <div class="column-panel-head"><b>显示/隐藏栏目</b><button class="link-btn" @click="showAllColumns">全部显示</button></div>
+            <label v-for="column in tableColumns.filter(c => c.hideable !== false && (c.key !== 'actions' || canOperate))" :key="column.key">
+              <input type="checkbox" :checked="isVisible(column.key)" @change="toggleColumn(column.key)" /> {{ column.label }}
+            </label>
+          </div>
+        </div>
         <span class="spacer"></span>
         <button v-if="canEdit" class="ghost" @click="fileInput?.click()">导入 Excel</button>
         <input ref="fileInput" type="file" accept=".xlsx,.xls,.csv" style="display:none" @change="importExcel" />
@@ -319,37 +409,67 @@ function exportExcel() {
         </div>
       </section>
 
+      <div v-if="importPreviewOpen" class="import-overlay" @click.self="cancelImportPreview">
+        <section class="import-dialog" role="dialog" aria-modal="true" aria-label="5S Excel 导入草稿预览">
+          <div class="import-dialog-head">
+            <div><h3>Excel 导入草稿预览</h3><span class="muted">共 {{ importDraftRows.length }} 条，异常 {{ importDraftInvalidCount }} 条</span></div>
+            <button class="ghost" @click="cancelImportPreview">关闭</button>
+          </div>
+          <p class="import-tip">此时尚未写入系统。请检查内容；如有异常行，请取消并修正 Excel 后重新导入。</p>
+          <div class="import-table-wrap">
+            <table class="import-preview-table">
+              <thead><tr><th>Excel行</th><th>检查日期</th><th>加工厂</th><th>检查类型</th><th>加工项目</th><th>客户</th><th>检查人员</th><th>现场得分</th><th>IP保护</th><th>检查结果</th></tr></thead>
+              <tbody>
+                <tr v-for="row in importDraftRows" :key="row.rowNo" :class="{ 'import-row-error': row.error || row.saveError }">
+                  <td>{{ row.rowNo }}</td><td>{{ row.payload.check_date || '-' }}</td><td>{{ row.factoryName || '-' }}</td>
+                  <td>{{ row.payload.check_type || '-' }}</td><td>{{ row.payload.project || '-' }}</td><td>{{ row.payload.customer || '-' }}</td>
+                  <td>{{ row.payload.inspector || '-' }}</td>
+                  <td>{{ SCORE_FIELDS.reduce((sum, field) => sum + (Number(row.payload[field.key]) || 0), 0) }}</td>
+                  <td>{{ row.payload.ip_control || 'NA' }}</td><td>{{ row.error || row.saveError || '可导入' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="import-actions">
+            <button class="ghost" :disabled="importConfirming" @click="cancelImportPreview">取消导入</button>
+            <button :disabled="importConfirming || !!importDraftInvalidCount" @click="confirmImportPreview">
+              {{ importConfirming ? '导入中…' : `确认导入 ${importDraftRows.length} 条` }}
+            </button>
+          </div>
+        </section>
+      </div>
+
       <div class="scroll">
         <table class="q5s">
           <thead>
             <tr>
-              <th>序号</th><th>检查日期</th><th>加工厂名称</th><th>检查类型</th><th>加工项目</th><th>客户</th><th>检查人员</th>
-              <th v-for="f in SCORE_FIELDS" :key="f.key">{{ f.label }}</th>
-              <th>达成率</th><th>IP保护得分</th><th>折算总达成率</th><th>备注</th>
-              <th v-if="canOperate">操作</th>
+              <th v-for="column in visibleColumns.filter(c => c.key !== 'actions' || canOperate)" :key="column.key"
+                :class="{ frozen: isFrozen(column.key), 'freeze-edge': frozenThrough === column.key }" :style="columnStyle(column.key)">
+                {{ column.label }}
+              </th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="(r, i) in filteredRecords" :key="r.id">
-              <td>{{ i + 1 }}</td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.check_date" class="table-input date-input" type="date" /><template v-else>{{ r.check_date ? r.check_date.slice(0, 10) : '-' }}</template></td>
-              <td>
+              <td :class="{ frozen: isFrozen('index'), 'freeze-edge': frozenThrough === 'index' }" :style="columnStyle('index')">{{ i + 1 }}</td>
+              <td v-if="isVisible('date')" :class="{ frozen: isFrozen('date'), 'freeze-edge': frozenThrough === 'date' }" :style="columnStyle('date')"><input v-if="editingId === r.id" v-model="rowDraft.check_date" class="table-input date-input" type="date" /><template v-else>{{ r.check_date ? r.check_date.slice(0, 10) : '-' }}</template></td>
+              <td v-if="isVisible('factory')" :class="{ frozen: isFrozen('factory'), 'freeze-edge': frozenThrough === 'factory' }" :style="columnStyle('factory')">
                 <select v-if="editingId === r.id" v-model="rowDraft.factory" class="table-input factory-input">
                   <option value="">选择工厂</option>
                   <option v-for="f in factories.items" :key="f.id" :value="f.id">{{ f.name }}</option>
                 </select>
                 <template v-else>{{ factoryName(r) }}</template>
               </td>
-              <td><select v-if="editingId === r.id" v-model="rowDraft.check_type" class="table-input"><option value="">-</option><option v-for="t in CHECK_TYPES" :key="t" :value="t">{{ t }}</option></select><template v-else>{{ r.check_type || '-' }}</template></td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.project" class="table-input" /><template v-else>{{ r.project || '-' }}</template></td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.customer" class="table-input" /><template v-else>{{ r.customer || '-' }}</template></td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.inspector" class="table-input" /><template v-else>{{ r.inspector || '-' }}</template></td>
-              <td v-for="f in SCORE_FIELDS" :key="f.key"><input v-if="editingId === r.id" v-model.number="rowDraft[f.key]" class="table-input score-input" type="number" min="0" step="0.1" /><template v-else>{{ r[f.key] ?? '-' }}</template></td>
-              <td class="score">{{ achieveRate(rowPreview(r)) }}</td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.ip_control" class="table-input score-input" placeholder="NA/0-10" /><template v-else>{{ ipDisplay(r) }}</template></td>
-              <td class="score">{{ finalRate(rowPreview(r)) }}</td>
-              <td><input v-if="editingId === r.id" v-model="rowDraft.notes" class="table-input notes-input" /><template v-else>{{ r.notes || '-' }}</template></td>
-              <td v-if="canOperate">
+              <td v-if="isVisible('type')" :class="{ frozen: isFrozen('type'), 'freeze-edge': frozenThrough === 'type' }" :style="columnStyle('type')"><select v-if="editingId === r.id" v-model="rowDraft.check_type" class="table-input"><option value="">-</option><option v-for="t in CHECK_TYPES" :key="t" :value="t">{{ t }}</option></select><template v-else>{{ r.check_type || '-' }}</template></td>
+              <td v-if="isVisible('project')" :class="{ frozen: isFrozen('project'), 'freeze-edge': frozenThrough === 'project' }" :style="columnStyle('project')"><input v-if="editingId === r.id" v-model="rowDraft.project" class="table-input" /><template v-else>{{ r.project || '-' }}</template></td>
+              <td v-if="isVisible('customer')" :class="{ frozen: isFrozen('customer'), 'freeze-edge': frozenThrough === 'customer' }" :style="columnStyle('customer')"><input v-if="editingId === r.id" v-model="rowDraft.customer" class="table-input" /><template v-else>{{ r.customer || '-' }}</template></td>
+              <td v-if="isVisible('inspector')" :class="{ frozen: isFrozen('inspector'), 'freeze-edge': frozenThrough === 'inspector' }" :style="columnStyle('inspector')"><input v-if="editingId === r.id" v-model="rowDraft.inspector" class="table-input" /><template v-else>{{ r.inspector || '-' }}</template></td>
+              <template v-for="f in SCORE_FIELDS" :key="f.key"><td v-if="isVisible(f.key)" :class="{ frozen: isFrozen(f.key), 'freeze-edge': frozenThrough === f.key }" :style="columnStyle(f.key)"><input v-if="editingId === r.id" v-model.number="rowDraft[f.key]" class="table-input score-input" type="number" min="0" step="0.1" /><template v-else>{{ r[f.key] ?? '-' }}</template></td></template>
+              <td v-if="isVisible('rate')" class="score" :class="{ frozen: isFrozen('rate'), 'freeze-edge': frozenThrough === 'rate' }" :style="columnStyle('rate')">{{ achieveRate(rowPreview(r)) }}</td>
+              <td v-if="isVisible('ip')" :class="{ frozen: isFrozen('ip'), 'freeze-edge': frozenThrough === 'ip' }" :style="columnStyle('ip')"><input v-if="editingId === r.id" v-model="rowDraft.ip_control" class="table-input score-input" placeholder="NA/0-10" /><template v-else>{{ ipDisplay(r) }}</template></td>
+              <td v-if="isVisible('finalRate')" class="score" :class="{ frozen: isFrozen('finalRate'), 'freeze-edge': frozenThrough === 'finalRate' }" :style="columnStyle('finalRate')">{{ finalRate(rowPreview(r)) }}</td>
+              <td v-if="isVisible('notes')" :class="{ frozen: isFrozen('notes'), 'freeze-edge': frozenThrough === 'notes' }" :style="columnStyle('notes')"><input v-if="editingId === r.id" v-model="rowDraft.notes" class="table-input notes-input" /><template v-else>{{ r.notes || '-' }}</template></td>
+              <td v-if="canOperate && isVisible('actions')">
                 <div class="op-actions">
                   <button v-if="canEdit" class="ghost mini" @click="startEdit(r)">编辑</button>
                   <button v-if="canEdit" class="ghost mini" :disabled="editingId !== r.id || rowSavingId === r.id" @click="saveEdit(r)">{{ rowSavingId === r.id ? '保存中…' : '保存' }}</button>
@@ -357,7 +477,7 @@ function exportExcel() {
                 </div>
               </td>
             </tr>
-            <tr v-if="!filteredRecords.length"><td :colspan="canOperate ? 20 : 19" class="hint" style="text-align:center">暂无检查记录</td></tr>
+            <tr v-if="!filteredRecords.length"><td :colspan="visibleColumnCount" class="hint" style="text-align:center">暂无检查记录</td></tr>
           </tbody>
         </table>
       </div>
@@ -379,12 +499,26 @@ function exportExcel() {
 .q5s { min-width: 2200px; margin-top: 0; overflow: visible; }
 .q5s th, .q5s td { white-space: nowrap; text-align: left; }
 .q5s thead th { position: sticky; top: 0; z-index: 3; background: #fafbfc; }
-.q5s th:nth-child(1), .q5s td:nth-child(1) { left: 0; width: 64px; min-width: 64px; max-width: 64px; }
-.q5s th:nth-child(2), .q5s td:nth-child(2) { left: 64px; width: 138px; min-width: 138px; max-width: 138px; }
-.q5s th:nth-child(3), .q5s td:nth-child(3) { left: 202px; width: 260px; min-width: 260px; max-width: 260px; }
-.q5s tbody td:nth-child(-n+3) { position: sticky; z-index: 2; background: var(--surface); }
-.q5s thead th:nth-child(-n+3) { z-index: 5; }
-.q5s th:nth-child(3), .q5s td:nth-child(3) { box-shadow: 5px 0 7px -7px rgba(31, 37, 51, .55); }
+.q5s .frozen { position: sticky; z-index: 2; background: var(--surface); }
+.q5s thead .frozen { z-index: 5; background: #fafbfc; }
+.q5s .freeze-edge { box-shadow: 5px 0 7px -7px rgba(31, 37, 51, .55); }
+.freeze-control { display: flex; align-items: center; gap: .35rem; color: var(--text-soft); font-size: .85rem; white-space: nowrap; }
+.column-menu { position: relative; }
+.column-panel { position: absolute; top: calc(100% + .4rem); left: 0; z-index: 20; width: 330px; max-height: 430px; overflow: auto; padding: .75rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); box-shadow: var(--shadow); display: grid; grid-template-columns: 1fr; gap: .45rem; }
+.column-panel label { display: flex; align-items: flex-start; gap: .45rem; font-size: .84rem; }
+.column-panel-head { display: flex; justify-content: space-between; align-items: center; padding-bottom: .35rem; border-bottom: 1px solid var(--border); }
+.link-btn { padding: 0; border: 0; background: transparent; color: var(--primary); font-size: .82rem; }
+.import-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 2rem; background: rgba(31,37,51,.42); }
+.import-dialog { width: min(1180px, 96vw); max-height: 88vh; display: flex; flex-direction: column; gap: .8rem; padding: 1rem; border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-lg); }
+.import-dialog-head, .import-actions { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.import-dialog-head h3 { margin: 0; }
+.import-tip { color: var(--text-soft); font-size: .88rem; }
+.import-table-wrap { min-height: 0; overflow: auto; }
+.import-preview-table { min-width: 1100px; margin: 0; overflow: visible; }
+.import-preview-table th { position: sticky; top: 0; z-index: 2; }
+.import-preview-table th, .import-preview-table td { text-align: left; white-space: nowrap; }
+.import-row-error td { background: #fff1f2; color: #b91c1c; }
+.import-actions { justify-content: flex-end; }
 .score { font-weight: 600; }
 .mini { padding: .25rem .6rem; font-size: .82rem; }
 .table-input { width: 112px; min-width: 0; height: 32px; padding: 0 .45rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); }

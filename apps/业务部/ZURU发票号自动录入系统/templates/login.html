@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · 发票号自动录入系统</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "PingFang SC", -apple-system, sans-serif;
+    background: #f9fbfc; color: rgba(0,0,0,.9);
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh; -webkit-font-smoothing: antialiased;
+  }
+  .box {
+    background: #fff; border-radius: 12px; padding: 40px 36px;
+    width: 340px; text-align: center;
+  }
+  h1 { font-size: 20px; font-weight: 600; line-height: 30px; margin-bottom: 4px; }
+  .sub { font-size: 12px; color: rgba(0,0,0,.45); margin-bottom: 20px; }
+  input {
+    width: 100%; height: 40px; padding: 0 12px;
+    font-family: inherit; font-size: 14px;
+    background: rgba(0,0,0,.03); border: 0; border-radius: 10px;
+    outline: none; margin-bottom: 12px;
+    transition: background 150ms, box-shadow 150ms;
+  }
+  input:focus { background: #fff; box-shadow: 0 0 0 2px #1783ff; }
+  button {
+    width: 100%; height: 36px; border: 0; border-radius: 10px;
+    background: rgba(0,0,0,.9); color: #fff;
+    font-family: inherit; font-size: 14px; font-weight: 500;
+    cursor: pointer; transition: transform 120ms, background 150ms;
+  }
+  button:hover { background: rgba(37,37,37,1); }
+  button:active { transform: scale(0.97); }
+  .err { color: #ff3849; font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <form class="box" method="post">
+    <h1>发票号自动录入系统</h1>
+    <div class="sub">请输入访问口令</div>
+    <input type="password" name="token" autofocus placeholder="访问口令">
+    <button type="submit">进入</button>
+    {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  </form>
+</body>
+</html>

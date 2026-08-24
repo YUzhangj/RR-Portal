@@ -402,9 +402,10 @@ function formatImportDate(value: any): string {
     return `${y}-${m}-${d}`
   }
   const text = cleanText(value)
-  const m = text.match(/(\d{4})[\/\-年.](\d{1,2})[\/\-月.](\d{1,2})/)
+  const m = text.match(/(\d{2}|\d{4})[\/\-年.](\d{1,2})[\/\-月.](\d{1,2})/)
   if (!m) return text
-  return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`
+  const year = m[1].length === 2 ? `20${m[1]}` : m[1]
+  return `${year}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`
 }
 
 function lastDateInText(value: any): string {
@@ -549,80 +550,81 @@ function parseAssemblyContractImport(
   header: string[],
   factoryIdByName: Record<string, string>,
 ): { payloads: Record<string, any>[]; failed: number } {
-  const colContaining = (...aliases: string[]) => header.findIndex((value) =>
-    aliases.some((alias) => value.includes(compactText(alias))))
-  const C = {
-    item_no: colContaining('货号'),
-    product: colContaining('货品名称'),
-    process: colContaining('工序'),
-    qty: colContaining('数量'),
-    out: colContaining('单价'),
-    amount: colContaining('金额'),
-    category: colContaining('商品名称'),
-    delivery_date: colContaining('交货期', '交货日期', '交货时间'),
-    notes: colContaining('备注'),
-  }
-  const beforeHeader = aoa.slice(0, headerIdx)
-  const factoryName = labeledValues(beforeHeader, '厂商').at(-1)
-    || labeledValues(beforeHeader, '供应商').at(-1)
-    || ''
-  const orderNo = labeledValues(beforeHeader, '订单编号').at(-1) ?? ''
-  const standaloneOrderDate = beforeHeader.flat()
-    .map(formatImportDate)
-    .find((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)) ?? ''
-  // 连续采购单的“下单时间/下单日期”位于各自明细表之后；当前段取表头后
-  // 遇到的第一个值，避免误用工作表最后一张采购单的日期。
-  const orderDate = labeledDates(aoa.slice(headerIdx + 1), '下单时间').at(0)
-    || labeledDates(aoa.slice(headerIdx + 1), '下单日期').at(0)
-    || labeledDates(aoa.slice(headerIdx + 1), '时间').at(0)
-    || standaloneOrderDate
-  const pmc = labeledValue(aoa.flat(), '采购签核', ['主管', '生产经理', '经理'])
-    || labeledValues(aoa, '采购签核').at(-1)
-    || ''
-  const deliveryText = aoa.flat().map(cleanText)
-    .find((value) => /前交货/.test(value) && /\d{4}\s*年/.test(value)) ?? ''
-  const deliveryDate = lastDateInText(deliveryText)
-  const factoryId = factoryIdOf(factoryIdByName, factoryName)
-
   const payloads: Record<string, any>[] = []
   let failed = 0
-  let lastCategory = ''
-  let lastDeliveryDate = ''
-  const cell = (row: any[], index: number) => (index >= 0 ? row[index] : '')
-  for (const row of aoa.slice(headerIdx + 1)) {
-    if (row.some((value) => /\u5408\u8ba1|\u5c0f\u8ba1/.test(cleanText(value)))) break
-    const itemNo = cleanText(cell(row, C.item_no))
-    const product = cleanText(cell(row, C.product))
-    if (!itemNo && !product) continue
-    if (!product || !factoryId) { failed++; continue }
-    const category = cleanText(cell(row, C.category))
-    if (category) lastCategory = category
-    const process = cleanText(cell(row, C.process))
-    const rowDeliveryDate = formatImportDate(cell(row, C.delivery_date))
-    if (/^\d{4}-\d{2}-\d{2}$/.test(rowDeliveryDate)) lastDeliveryDate = rowDeliveryDate
-    const qty = parseNumberCell(cell(row, C.qty))
-    const out = parseNumberCell(cell(row, C.out))
-    const amount = parseNumberCell(cell(row, C.amount))
-    const payload: Record<string, any> = {
-      factory: factoryId,
-      pmc,
-      item_no: itemNo,
-      order_no: orderNo,
-      process,
-      // 电子部合同没有“商品名称”时，以工序作为列表中的加工类别展示。
-      process_category: lastCategory || process,
-      product,
-      notes: cleanText(cell(row, C.notes)),
-      status: 'placed',
-      is_delayed: false,
+  const isHeader = (row: any[]) => {
+    const cells = row.map(compactText)
+    return cells.includes('货号') && cells.includes('货品名称') && cells.includes('数量')
+      && cells.some((cell) => cell.includes('单价'))
+      && (cells.includes('商品名称') || cells.includes('工序'))
+  }
+  const headerIndexes = aoa.reduce<number[]>((indexes, row, index) => {
+    if (isHeader(row)) indexes.push(index)
+    return indexes
+  }, [])
+  // headerIdx/header 保留在入参中，便于兼容旧调用；实际按每个重复表头分段解析。
+  if (!headerIndexes.length) headerIndexes.push(headerIdx)
+
+  for (let section = 0; section < headerIndexes.length; section++) {
+    const currentHeaderIdx = headerIndexes[section]
+    const nextHeaderIdx = headerIndexes[section + 1] ?? aoa.length
+    const previousHeaderIdx = headerIndexes[section - 1] ?? -1
+    const sectionHeader = (currentHeaderIdx === headerIdx ? header : aoa[currentHeaderIdx].map(compactText))
+    const colContaining = (...aliases: string[]) => sectionHeader.findIndex((value) =>
+      aliases.some((alias) => value.includes(compactText(alias))))
+    const C = {
+      item_no: colContaining('货号'), product: colContaining('货品名称'), process: colContaining('工序'),
+      qty: colContaining('数量'), out: colContaining('单价'), amount: colContaining('金额'),
+      category: colContaining('商品名称'), delivery_date: colContaining('交货期', '交货日期', '交货时间'),
+      notes: colContaining('备注'),
     }
-    if (qty != null) payload.quantity = qty
-    if (out != null) payload.unit_price_cny_tax = out
-    if (amount != null) payload.amount = amount
-    else if (qty != null && out != null) payload.amount = qty * out
-    if (orderDate) payload.order_date = orderDate
-    if (lastDeliveryDate || deliveryDate) payload.delivery_date = lastDeliveryDate || deliveryDate
-    payloads.push(payload)
+    const metadata = aoa.slice(previousHeaderIdx + 1, currentHeaderIdx)
+    const sectionRows = aoa.slice(currentHeaderIdx + 1, nextHeaderIdx)
+    const factoryName = labeledValues(metadata, '厂商').at(-1)
+      || labeledValues(metadata, '供应商').at(-1) || ''
+    const orderNo = labeledValues(metadata, '订单编号').at(-1) ?? ''
+    const standaloneOrderDate = metadata.flat().map(formatImportDate)
+      .find((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)) ?? ''
+    const orderDate = labeledDates(sectionRows, '下单时间').at(0)
+      || labeledDates(sectionRows, '下单日期').at(0)
+      || labeledDates(sectionRows, '时间').at(0) || standaloneOrderDate
+    const pmc = labeledValue(sectionRows.flat(), '采购签核', ['主管', '生产经理', '经理'])
+      || labeledValues(sectionRows, '采购签核').at(-1) || ''
+    const deliveryText = sectionRows.flat().map(cleanText)
+      .find((value) => /前交货/.test(value) && /\d{4}\s*年/.test(value)) ?? ''
+    const deliveryDate = lastDateInText(deliveryText)
+    const factoryId = factoryIdOf(factoryIdByName, factoryName)
+    const cell = (row: any[], index: number) => (index >= 0 ? row[index] : '')
+    let lastCategory = ''
+    let lastDeliveryDate = ''
+
+    for (const row of sectionRows) {
+      if (row.some((value) => /合计|小计/.test(cleanText(value)))) break
+      const itemNo = cleanText(cell(row, C.item_no))
+      const product = cleanText(cell(row, C.product))
+      if (!itemNo && !product) continue
+      if (!product || !factoryId) { failed++; continue }
+      const category = cleanText(cell(row, C.category))
+      if (category) lastCategory = category
+      const process = cleanText(cell(row, C.process))
+      const rowDeliveryDate = formatImportDate(cell(row, C.delivery_date))
+      if (/^\d{4}-\d{2}-\d{2}$/.test(rowDeliveryDate)) lastDeliveryDate = rowDeliveryDate
+      const qty = parseNumberCell(cell(row, C.qty))
+      const out = parseNumberCell(cell(row, C.out))
+      const amount = parseNumberCell(cell(row, C.amount))
+      const payload: Record<string, any> = {
+        factory: factoryId, pmc, item_no: itemNo, order_no: orderNo, process,
+        process_category: lastCategory || process, product, notes: cleanText(cell(row, C.notes)),
+        status: 'placed', is_delayed: false,
+      }
+      if (qty != null) payload.quantity = qty
+      if (out != null) payload.unit_price_cny_tax = out
+      if (amount != null) payload.amount = amount
+      else if (qty != null && out != null) payload.amount = qty * out
+      if (orderDate) payload.order_date = orderDate
+      if (lastDeliveryDate || deliveryDate) payload.delivery_date = lastDeliveryDate || deliveryDate
+      payloads.push(payload)
+    }
   }
   return { payloads, failed }
 }
@@ -1088,7 +1090,9 @@ export function parseDeliveryImport(
   if (header.includes('款号') && header.includes('加工内容') && header.includes('单价')) {
     return parsePurchaseOrderImport(aoa, headerIdx, header, factoryIdByName)
   }
-  if (header.includes('货号') && header.includes('货品名称') && header.includes('商品名称') && header.some((value) => value.includes('单价'))) {
+  if (header.includes('货号') && header.includes('货品名称') && header.includes('数量')
+    && header.some((value) => value.includes('单价'))
+    && (header.includes('商品名称') || header.includes('工序'))) {
     return parseAssemblyContractImport(aoa, headerIdx, header, factoryIdByName)
   }
   const C = {

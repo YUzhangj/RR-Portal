@@ -64,6 +64,11 @@ export default function ScheduleResult({ workshop = 'B' }) {
   const [copyModalVisible, setCopyModalVisible] = useState(false);
   const [copyItem, setCopyItem] = useState(null);
   const [copyTargetMachine, setCopyTargetMachine] = useState('');
+  // 批量移动机台
+  const [selectedRowKeys, setSelectedRowKeys] = useState([]);
+  const [batchMoveVisible, setBatchMoveVisible] = useState(false);
+  const [batchTargetMachine, setBatchTargetMachine] = useState('');
+  const [batchMoving, setBatchMoving] = useState(false);
 
   const fetchSchedules = async () => {
     setLoading(true);
@@ -83,8 +88,46 @@ export default function ScheduleResult({ workshop = 'B' }) {
       setItems(data.items || []);
       setEditingKey(null);
       setMachineEditKey(null);
+      setSelectedRowKeys([]);
     } catch (e) {
       message.error('获取详情失败');
+    }
+  };
+
+  // 查看明细 / 收起明细（再次点击同一行即收起）
+  const toggleDetail = (id) => {
+    if (selectedSchedule?.id === id) {
+      setSelectedSchedule(null);
+      setItems([]);
+      setSelectedRowKeys([]);
+    } else {
+      fetchDetail(id);
+    }
+  };
+
+  const collapseDetail = () => {
+    setSelectedSchedule(null);
+    setItems([]);
+    setSelectedRowKeys([]);
+  };
+
+  // 批量移动选中行到目标机台
+  const handleBatchMove = async () => {
+    if (!batchTargetMachine || selectedRowKeys.length === 0) return;
+    setBatchMoving(true);
+    try {
+      await Promise.all(selectedRowKeys.map(itemId =>
+        axios.put(`${API}/${selectedSchedule.id}/items/${itemId}`, { machine_no: batchTargetMachine })
+      ));
+      message.success(`已将 ${selectedRowKeys.length} 条记录移动到 ${batchTargetMachine}`);
+      setBatchMoveVisible(false);
+      setBatchTargetMachine('');
+      setSelectedRowKeys([]);
+      fetchDetail(selectedSchedule.id);
+    } catch (e) {
+      message.error('批量移动失败：' + (e.response?.data?.message || e.message));
+    } finally {
+      setBatchMoving(false);
     }
   };
 
@@ -398,7 +441,9 @@ export default function ScheduleResult({ workshop = 'B' }) {
     { title: '操作', width: 420,
       render: (_, r) => (
         <Space>
-          <Button size="small" onClick={() => fetchDetail(r.id)}>查看明细</Button>
+          <Button size="small" type={selectedSchedule?.id === r.id ? 'primary' : 'default'} onClick={() => toggleDetail(r.id)}>
+            {selectedSchedule?.id === r.id ? '收起明细' : '查看明细'}
+          </Button>
           <Button size="small" icon={<DownloadOutlined />} onClick={() => handleExport(r.id, r.shift)}>排机单</Button>
           <Button size="small" icon={<DownloadOutlined />} onClick={() => handleExportDailyReport(r.schedule_date)}>日报表(夜+白)</Button>
           <Popconfirm title="确定删除此排机单?" onConfirm={() => handleDelete(r.id)} okText="确定" cancelText="取消">
@@ -629,17 +674,30 @@ export default function ScheduleResult({ workshop = 'B' }) {
         size="small"
         style={{ margin: '8px 0' }}
         extra={
-          !isConfirmed && (
-            <Popconfirm
-              title="按机台号升序重排当前排机单？"
-              description="A-6# → A-12# → A-26# → A-40# 这样升序排列，同机台多行保留现有顺序。"
-              onConfirm={handleSortByMachine}
-              okText="确定排序"
-              cancelText="取消"
-            >
-              <Button size="small" icon={<SortAscendingOutlined />}>按机台号排序</Button>
-            </Popconfirm>
-          )
+          <Space>
+            {!isConfirmed && (
+              <Button
+                size="small"
+                icon={<SwapOutlined />}
+                disabled={selectedRowKeys.length === 0}
+                onClick={() => setBatchMoveVisible(true)}
+              >
+                批量移动机台{selectedRowKeys.length > 0 ? ` (${selectedRowKeys.length})` : ''}
+              </Button>
+            )}
+            {!isConfirmed && (
+              <Popconfirm
+                title="按机台号升序重排当前排机单？"
+                description="A-6# → A-12# → A-26# → A-40# 这样升序排列，同机台多行保留现有顺序。"
+                onConfirm={handleSortByMachine}
+                okText="确定排序"
+                cancelText="取消"
+              >
+                <Button size="small" icon={<SortAscendingOutlined />}>按机台号排序</Button>
+              </Popconfirm>
+            )}
+            <Button size="small" onClick={collapseDetail}>收起</Button>
+          </Space>
         }
       >
         <DndContext sensors={dndSensors} onDragEnd={handleDragEnd}>
@@ -652,6 +710,11 @@ export default function ScheduleResult({ workshop = 'B' }) {
               size="small"
               pagination={false}
               scroll={{ x: 2200 }}
+              rowSelection={isConfirmed ? undefined : {
+                selectedRowKeys,
+                onChange: setSelectedRowKeys,
+                getCheckboxProps: r => ({ disabled: !!r._isDayShift }),
+              }}
               rowClassName={item => item._isDayShift ? 'day-shift-row' : ''}
             />
           </SortableContext>
@@ -678,6 +741,30 @@ export default function ScheduleResult({ workshop = 'B' }) {
           }}
         />
       </Card>
+
+      {/* 批量移动机台弹窗 */}
+      <Modal
+        title={`批量移动机台（已选 ${selectedRowKeys.length} 条）`}
+        open={batchMoveVisible}
+        onOk={handleBatchMove}
+        onCancel={() => { setBatchMoveVisible(false); setBatchTargetMachine(''); }}
+        okText="确定移动"
+        cancelText="取消"
+        confirmLoading={batchMoving}
+        okButtonProps={{ disabled: !batchTargetMachine }}
+      >
+        <p><strong>移动到机台：</strong></p>
+        <Select
+          style={{ width: '100%' }}
+          value={batchTargetMachine || undefined}
+          onChange={setBatchTargetMachine}
+          placeholder="选择目标机台"
+          showSearch
+          filterOption={(input, option) => option.children.toLowerCase().includes(input.toLowerCase())}
+        >
+          {machines.map(m => <Select.Option key={m.machine_no} value={m.machine_no}>{m.machine_no}</Select.Option>)}
+        </Select>
+      </Modal>
 
       {/* 复制到其他机台弹窗 */}
       <Modal

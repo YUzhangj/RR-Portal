@@ -1020,7 +1020,8 @@ export default function PurchasePage() {
     message.success('已还原合并前的明细')
   }
 
-  // 套用报价: for each item, look up quotes by (supplier, name_zh~=notes, spec, qty) and set price
+  // 套用报价：货号优先级为「具体货号 → 共用 → 空白旧报价」，
+  // 每一级再按供应商、物料名、规格和采购数量选择阶梯价。
   async function applyQuotes() {
     try {
       const { data: quotes } = await api.get<any[]>('/quotes/blob')
@@ -1034,12 +1035,33 @@ export default function PurchasePage() {
           (q.supplier ?? '').trim() === supplier.trim()
           && ((q.matName ?? '').trim() === matName || (matName && matName.includes((q.matName ?? '').trim())))
         )
+        const normalizeCode = (value: unknown) => String(value ?? '').trim().toUpperCase()
+        const purchaseCodes = new Set(String(it.product_code ?? '')
+          .split(/\s*\/\s*|[,，;]/)
+          .map(normalizeCode)
+          .filter(Boolean))
+        const quoteCode = (q: any) => normalizeCode(
+          q.productCode
+          || q.product_code
+          || q.code
+          || String(q.notes ?? '').match(/(?:^|\/)\s*货号\s*[:：]\s*([^/]+?)\s*$/)?.[1]
+          || '')
         const normalizeSpec = (value: unknown) => String(value ?? '')
           .trim().toUpperCase().replace(/[×*]/g, 'X').replace(/\s+/g, '')
-        const exactGroup = nameGroup.filter((q: any) => normalizeSpec(q.spec) === normalizeSpec(it.spec))
-        const quoteSpecs = new Set(nameGroup.map((q: any) => normalizeSpec(q.spec)))
-        // 规格优先精确匹配；名称下只有一种报价规格时，允许名称唯一回退。
-        const sameGroup = exactGroup.length ? exactGroup : (quoteSpecs.size === 1 ? nameGroup : [])
+        const codeGroups = [
+          nameGroup.filter((q: any) => purchaseCodes.has(quoteCode(q))),
+          nameGroup.filter((q: any) => quoteCode(q) === '共用'),
+          nameGroup.filter((q: any) => !quoteCode(q)),
+        ]
+        let sameGroup: any[] = []
+        for (const codeGroup of codeGroups) {
+          if (!codeGroup.length) continue
+          const exactGroup = codeGroup.filter((q: any) => normalizeSpec(q.spec) === normalizeSpec(it.spec))
+          const quoteSpecs = new Set(codeGroup.map((q: any) => normalizeSpec(q.spec)))
+          // 规格优先精确匹配；该货号层级下只有一种报价规格时，允许名称唯一回退。
+          const matched = exactGroup.length ? exactGroup : (quoteSpecs.size === 1 ? codeGroup : [])
+          if (matched.length) { sameGroup = matched; break }
+        }
         if (!sameGroup.length) return it
         // 报价档位使用报价单的采购口径；导出合同时再换算为走货数量/单价。
         const qty = it.purchase_qty ?? it.qty ?? 0

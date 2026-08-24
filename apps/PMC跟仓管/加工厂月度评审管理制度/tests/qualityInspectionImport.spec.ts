@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest'
 import { buildQualityInspectionImportColumns, formatImportedDate, resolveQualityInspectionFactory } from '../src/utils/qualityInspectionImport'
 import type { Factory } from '../src/types/factory'
 
-const factory = (id: string, name: string, craft: Factory['craft'], region: Factory['region']): Factory =>
-  ({ id, name, craft, region, status: 'active' })
+const factory = (id: string, name: string, craft: Factory['craft'], region: Factory['region'], processable_types?: string): Factory =>
+  ({ id, name, craft, region, processable_types, status: 'active' })
 
 describe('buildQualityInspectionImportColumns', () => {
   it('starts internal inspection fields after 单数 when the exported template has that column', () => {
@@ -86,5 +86,16 @@ describe('resolveQualityInspectionFactory', () => {
 
   it('also narrows an import to the selected region', () => {
     expect(resolveQualityInspectionFactory(factories, '晨风', '装配', 'hunan')).toMatchObject({ status: 'matched', id: 'hunan-spring' })
+  })
+
+  it('uses the configured processing type to disambiguate factories with the same abbreviation', () => {
+    const sameNameFactories = [
+      factory('longxin-plastic', '邵阳县罗城乡隆鑫加工厂', 'injection', 'hunan', '塑胶半成品'),
+      factory('longxin-assembly', '邵阳县罗城乡隆鑫加工厂', 'assembly', 'hunan', '装配加工'),
+    ]
+    expect(resolveQualityInspectionFactory(sameNameFactories, '隆鑫', '塑胶半成品', 'hunan'))
+      .toMatchObject({ status: 'matched', id: 'longxin-plastic' })
+    expect(resolveQualityInspectionFactory(sameNameFactories, '隆鑫', '装配加工', 'hunan'))
+      .toMatchObject({ status: 'matched', id: 'longxin-assembly' })
   })
 })
