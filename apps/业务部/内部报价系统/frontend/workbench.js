@@ -25,6 +25,40 @@ async function api(p, opts = {}) {
   return r.json();
 }
 
+// 内置浏览器不支持原生文字输入弹窗；统一使用页面内输入组件。
+function requestText(title, initialValue = '', options = {}) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;padding:20px';
+    const dialog = document.createElement('div');
+    dialog.style.cssText = 'width:min(520px,100%);background:#fff;border-radius:16px;box-shadow:0 24px 70px rgba(15,23,42,.28);padding:22px';
+    const heading = document.createElement('div');
+    heading.textContent = title;
+    heading.style.cssText = 'font-size:18px;font-weight:700;color:#1f2937;margin-bottom:14px;white-space:pre-wrap';
+    const input = options.multiline ? document.createElement('textarea') : document.createElement('input');
+    input.value = initialValue == null ? '' : String(initialValue);
+    input.placeholder = options.placeholder || '';
+    input.style.cssText = 'box-sizing:border-box;width:100%;min-height:46px;border:1px solid #cbd5e1;border-radius:10px;padding:10px 12px;font:inherit;outline:none;resize:vertical';
+    if (options.multiline) input.style.minHeight = '100px';
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;margin-top:16px';
+    const cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.textContent = '取消'; cancel.className = 'mini';
+    const ok = document.createElement('button');
+    ok.type = 'button'; ok.textContent = '确定';
+    const finish = value => { overlay.remove(); resolve(value); };
+    cancel.onclick = () => finish(null);
+    ok.onclick = () => finish(input.value);
+    overlay.onclick = event => { if (event.target === overlay) finish(null); };
+    input.onkeydown = event => {
+      if (event.key === 'Escape') finish(null);
+      if (event.key === 'Enter' && !options.multiline) { event.preventDefault(); finish(input.value); }
+    };
+    actions.append(cancel, ok); dialog.append(heading, input, actions); overlay.appendChild(dialog); document.body.appendChild(overlay);
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+  });
+}
+
 // 保存 section（带轻量并发提醒）：带上加载时的 filled_at；后端若发现被别人改过会回 conflict
 // 不挡保存，仅弹一次提示；成功后更新本地 filled_at 作为新基线（避免自己的后续保存误报）
 async function putSection(sec, payload, submit) {
@@ -127,7 +161,7 @@ function renderTable(container, columns, rows, opts = {}) {
         const td = document.createElement('td');
         if (c.className) td.classList.add(c.className);
         if (c.renderCell) {
-          c.renderCell(td, row, { readonly, onChange, rebuild });
+          c.renderCell(td, row, { readonly, onChange, rebuild, refreshCalcs });
           tr.appendChild(td);
           return;
         }
@@ -179,7 +213,14 @@ function renderTable(container, columns, rows, opts = {}) {
               op.value = val; op.textContent = val; op.selected = true;
               sel.appendChild(op);
             }
-            sel.onchange = () => { row[c.key] = sel.value; refreshCalcs(); onChange(); if (c.affectsOptions) rebuild(); };
+            sel.onchange = () => {
+              const previousValue = row[c.key];
+              row[c.key] = sel.value;
+              if (c.onValue) c.onValue(row, row[c.key], previousValue);
+              refreshCalcs();
+              onChange();
+              if (c.affectsOptions) rebuild();
+            };
             td.appendChild(sel);
           }
         } else {
@@ -2787,12 +2828,65 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
     row.unit_price_rmb = null;
     row.unit_price = null;
   };
+  const getFreeSourceCurrency = row => usesFreeUsdPrice(row) ? 'USD' : 'RMB';
+  const syncFreeSourceCurrency = (row, currency, previousValue) => {
+    const previousCurrency = previousValue === 'USD' ? 'USD' : 'RMB';
+    const previousKey = previousCurrency === 'USD' ? 'unit_price_usd' : 'unit_price_rmb';
+    const nextCurrency = currency === 'USD' ? 'USD' : 'RMB';
+    const nextKey = nextCurrency === 'USD' ? 'unit_price_usd' : 'unit_price_rmb';
+    const value = row[previousKey];
+    const raw = row[previousKey + '_raw'];
+    row.source_currency = nextCurrency;
+    row[nextKey] = value;
+    row[nextKey + '_raw'] = raw;
+    if (nextKey !== previousKey) {
+      row[previousKey] = null;
+      row[previousKey + '_raw'] = null;
+    }
+    if (nextCurrency === 'USD') syncFreeUsdPrice(row);
+    else syncFreeRmbPrice(row, value);
+  };
+  const sourceCurrencyCol = {
+    key: 'source_currency', label: '币种', type: 'select', options: ['RMB', 'USD'], width: '80px',
+    onValue: syncFreeSourceCurrency, affectsOptions: true,
+  };
+  const sourcePriceCol = {
+    key: 'source_unit_price', label: '原币单价', width: '105px',
+    renderCell(td, row, { readonly, onChange, refreshCalcs }) {
+      const currency = getFreeSourceCurrency(row);
+      const key = currency === 'USD' ? 'unit_price_usd' : 'unit_price_rmb';
+      const rawKey = key + '_raw';
+      const value = row[rawKey] != null && row[rawKey] !== '' ? row[rawKey] : (row[key] ?? '');
+      if (readonly) {
+        td.classList.add('ro');
+        td.textContent = value === '' ? '' : formatNum(row[key]);
+        return;
+      }
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = value;
+      input.placeholder = '如 1/2';
+      input.title = '可输入算式：1/2、3*0.25、(10+2)/4；也可直接输入数字';
+      input.style.minWidth = '105px';
+      input.oninput = () => {
+        const parsed = parseFormulaInput(input.value);
+        row[key] = parsed;
+        row[rawKey] = input.value;
+        input.style.color = input.value.trim() !== '' && parsed == null ? '#b91c1c' : '';
+        if (currency === 'USD') syncFreeUsdPrice(row);
+        else syncFreeRmbPrice(row, parsed);
+        refreshCalcs();
+        onChange();
+      };
+      td.appendChild(input);
+    },
+  };
   const freeCols = [
     { key: 'name', label: '零件名称' },
     { key: 'spec', label: '规格' },
     { key: 'qty', label: '用量', type: 'formula', width: '80px' },
-    { key: 'unit_price_rmb', label: '单价 RMB', type: 'formula', onValue: syncFreeRmbPrice, width: '100px' },
-    { key: 'unit_price_usd', label: '单价 USD', type: 'formula', onValue: syncFreeUsdPrice, width: '100px' },
+    sourceCurrencyCol,
+    sourcePriceCol,
     { key: 'unit_price_hkd', label: '单价 HKD', readonly: true, calc: r => freeUnitHkd(r, fxRmbHkd, fxHkdUsd), width: '100px' },
     { key: 'amount', label: '金额 HKD', readonly: true, calc: r => freeAmountHkd(r, fxRmbHkd, fxHkdUsd), width: '90px' },
     { key: 'indo_amt', label: '印尼运费', readonly: true, width: '150px',
@@ -2807,8 +2901,8 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
     { key: 'spec', label: '规格' },
     { key: 'category', label: '类别', type: 'select', options: MAT_CATEGORIES, width: '120px' },
     { key: 'qty', label: '用量', type: 'formula', width: '80px' },
-    { key: 'unit_price_rmb', label: '单价 RMB', type: 'formula', onValue: syncFreeRmbPrice, width: '100px' },
-    { key: 'unit_price_usd', label: '单价 USD', type: 'formula', onValue: syncFreeUsdPrice, width: '100px' },
+    sourceCurrencyCol,
+    sourcePriceCol,
     { key: 'unit_price_hkd', label: '单价 HKD', readonly: true, calc: r => freeUnitHkd(r, fxRmbHkd, fxHkdUsd), width: '100px' },
     { key: 'amount', label: '金额 HKD', readonly: true, calc: r => freeAmountHkd(r, fxRmbHkd, fxHkdUsd), width: '90px' },
     { key: 'indo_amt', label: '印尼运费', readonly: true, width: '150px',
@@ -2824,6 +2918,9 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
   ensureFreeRmbPrices(payload.hardware, fxRmbHkd);
   ensureFreeRmbPrices(payload.aux_materials, fxRmbHkd);
   ensureFreeRmbPrices(payload.packaging_materials, fxRmbHkd);
+  [...payload.hardware, ...payload.aux_materials, ...payload.packaging_materials].forEach(row => {
+    row.source_currency = getFreeSourceCurrency(row);
+  });
   renderTable(host.querySelector('#wb-hw'), freeCols, payload.hardware, { readonly: !canEdit, onChange: wrappedOnChange });
   refreshes.push(renderHwExtra(host.querySelector('#wb-hw-extra'), payload, wrappedOnChange, canEdit, fxRmbHkd, fxHkdUsd));
   renderTable(host.querySelector('#wb-aux'), auxCols, payload.aux_materials, { readonly: !canEdit, onChange: wrappedOnChange });
@@ -2837,8 +2934,8 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
     { key: 'spec', label: '规格', type: 'textarea' },
     { key: 'category', label: '类别', type: 'select', options: MAT_CATEGORIES, width: '120px' },
     { key: 'qty', label: '用量', type: 'formula', width: '80px' },
-    { key: 'unit_price_rmb', label: '单价 RMB', type: 'formula', onValue: syncFreeRmbPrice, width: '100px' },
-    { key: 'unit_price_usd', label: '单价 USD', type: 'formula', onValue: syncFreeUsdPrice, width: '100px' },
+    sourceCurrencyCol,
+    sourcePriceCol,
     { key: 'unit_price_hkd', label: '单价 HKD', readonly: true, calc: r => freeUnitHkd(r, fxRmbHkd, fxHkdUsd), width: '100px' },
     { key: 'amount', label: '成品金额 HKD', readonly: true, calc: r => freeAmountHkd(r, fxRmbHkd, fxHkdUsd), width: '90px' },
     { key: 'indo_amt', label: '印尼运费', readonly: true, width: '150px',
@@ -3218,18 +3315,21 @@ const DEFAULT_MATERIAL_PRICES = [
   { name: 'PC料', model: '2605', price: 12.50 },
 ];
 
-// 按 材质/颜色 在料价表里找最匹配的单价（优先匹配 name+model 都命中，否则只匹配 name）
-// 仅在 材质 + 料型 同时匹配时返回价格；缺一个都返回 null
+// 料型列在注塑主表中隐藏：有料型时优先精确匹配；无匹配时按材质取参考表首条默认价。
 function lookupMaterialPrice(material, grade, prices) {
   if (!prices || !prices.length) return null;
-  if (!material || !grade) return null;  // 必须两者都有
-  const m = String(material).replace(/\s+/g, '').toUpperCase();
-  const g = String(grade).replace(/\s+/g, '').toUpperCase();
-  return prices.find(p => {
-    const pn = String(p.name || '').replace(/\s+/g, '').toUpperCase();
+  if (!material) return null;
+  const normalizeMaterial = value => String(value || '')
+    .replace(/\s+/g, '').replace(/^1#/, '').replace(/料$/, '').toUpperCase();
+  const m = normalizeMaterial(material);
+  const g = String(grade || '').replace(/\s+/g, '').toUpperCase();
+  const candidates = prices.filter(p => normalizeMaterial(p.name) === m);
+  if (!candidates.length) return null;
+  const exact = g && candidates.find(p => {
     const pm = String(p.model || '').replace(/\s+/g, '').toUpperCase();
-    return pn === m && pm === g;
-  }) || null;
+    return pm === g;
+  });
+  return exact || candidates[0];
 }
 
 function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, userRole) {
@@ -3471,9 +3571,12 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     if (autoBtn) autoBtn.onclick = () => {
       let hit = 0, miss = [];
       for (const row of payload.injection) {
-        // 材质 + 料型 都匹配才提取
         const m = lookupMaterialPrice(row.material, row.material_grade, payload.material_prices);
-        if (m) { row.material_unit_price = +(m.price / 454).toFixed(5); hit++; }
+        if (m) {
+          row.material_grade = m.model || row.material_grade || '';
+          row.material_unit_price = +(m.price / 454).toFixed(5);
+          hit++;
+        }
         else {
           const key = [row.material, row.material_grade].filter(Boolean).join(' ').trim();
           if (key) miss.push(key);
@@ -3570,16 +3673,6 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
         return [...new Set(names)];
       }
     },
-    { key: 'material_grade', label: '料型', width: '150px', type: 'select', fixedWhenSingle: true,
-      options: (row) => {
-        const mat = String(row.material || '').trim().toUpperCase();
-        if (!mat) return [];
-        return [...new Set((payload.material_prices || [])
-          .filter(p => String(p.name || '').trim().toUpperCase() === mat)
-          .map(p => p.model).filter(Boolean))];
-      }
-    },
-    { key: 'color', label: '颜色', width: '90px' },
     { key: 'weight_g', label: '啤净重(g)', type: 'number', width: '100px' },
     { key: 'weight_loss_g', label: `料损耗 ${num(payload.injection_loss_pct ?? 3)}%`, readonly: true, width: '90px',
       calc: r => num(r.weight_g) * (1 + num(payload.injection_loss_pct ?? 3)/100) },
@@ -4602,8 +4695,8 @@ function renderGroupedLabor(container, rows, onChange, canEdit) {
     const addProd = document.createElement('button');
     addProd.textContent = '+ 新增产品组'; addProd.className = 'mini';
     addProd.style.marginTop = '8px';
-    addProd.onclick = () => {
-      const name = prompt('新产品名称：'); if (!name) return;
+    addProd.onclick = async () => {
+      const name = await requestText('新产品名称'); if (!name || !name.trim()) return;
       rows.push({ product: name, step: '', qty: 1 });
       renderGroupedLabor(container, rows, onChange, canEdit); onChange();
     };
@@ -5308,10 +5401,10 @@ async function renderQuotePage() {
               } else if (act === 'approve') {
                 await api('/reviews/' + s.id, { method: 'POST', body: JSON.stringify({ action: 'approve' }) });
               } else if (act === 'reject') {
-                const comment = prompt('驳回理由：'); if (comment == null) return;
+                const comment = await requestText('驳回理由', '', { multiline: true }); if (comment == null) return;
                 await api('/reviews/' + s.id, { method: 'POST', body: JSON.stringify({ action: 'reject', comment }) });
               } else if (act === 'reopen') {
-                const reason = prompt('解除理由（写入修改记录）：'); if (reason == null) return;
+                const reason = await requestText('解除理由（写入修改记录）', '', { multiline: true }); if (reason == null) return;
                 await api('/reviews/' + s.id + '/reopen', { method: 'POST', body: JSON.stringify({ reason }) });
               }
               renderQuotePage();
@@ -5355,7 +5448,7 @@ async function renderQuotePage() {
     catch (e) { alert(e.message); }
   });
   $('btn-reject') && ($('btn-reject').onclick = async () => {
-    const comment = prompt('驳回理由：'); if (comment == null) return;
+    const comment = await requestText('驳回理由', '', { multiline: true }); if (comment == null) return;
     try { await api('/reviews/' + mySec.id, { method: 'POST', body: JSON.stringify({ action: 'reject', comment }) }); renderQuotePage(); }
     catch (e) { alert(e.message); }
   });
@@ -5375,7 +5468,7 @@ async function renderQuotePage() {
     } catch (e) { alert(e.message); }
   };
   if ($('btn-reopen')) $('btn-reopen').onclick = async () => {
-    const reason = prompt('解除审核理由（会写入修改记录）：');
+    const reason = await requestText('解除审核理由（会写入修改记录）', '', { multiline: true });
     if (reason == null) return;
     try {
       await api('/reviews/' + mySec.id + '/reopen', { method: 'POST', body: JSON.stringify({ reason }) });

@@ -96,6 +96,64 @@ function colLetter(column) {
   return result;
 }
 
+function applyPrintLayout(workbook) {
+  workbook.eachSheet(worksheet => {
+    // columnCount/rowCount 会把只有样式的空白格也算进去，导致打印区域被无意义地
+    // 拉宽后整页缩小。这里只按真正有内容（含公式）的单元格确定打印边界。
+    let lastRow = 1;
+    let lastColumn = 1;
+    worksheet.eachRow({ includeEmpty: false }, row => {
+      row.eachCell({ includeEmpty: false }, cell => {
+        if (cell.value === null || cell.value === undefined || cell.value === '') return;
+        lastRow = Math.max(lastRow, cell.row);
+        lastColumn = Math.max(lastColumn, cell.col);
+
+        // 标题（14号及以上）保持原设计；仅将正文和普通表头适度放大到12号，
+        // 避免正文/合计反而大过章节标题。
+        const font = cell.font || {};
+        const currentSize = Number(font.size) || 11;
+        const nextSize = currentSize >= 14 ? currentSize : Math.max(currentSize, 12);
+        cell.font = { ...font, name: FONT, size: nextSize };
+      });
+    });
+    const isMain = worksheet.name === '报价明细';
+
+    worksheet.properties.defaultRowHeight = 20;
+    worksheet.views = [{
+      ...(worksheet.views && worksheet.views[0] ? worksheet.views[0] : {}),
+      showGridLines: false,
+      zoomScale: isMain ? 85 : 90,
+    }];
+    worksheet.pageSetup = {
+      ...(worksheet.pageSetup || {}),
+      paperSize: 9,
+      orientation: 'landscape',
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 0,
+      horizontalCentered: true,
+      verticalCentered: false,
+      pageOrder: 'overThenDown',
+      margins: {
+        left: 0.25,
+        right: 0.25,
+        top: 0.5,
+        bottom: 0.5,
+        header: 0.2,
+        footer: 0.2,
+      },
+      printArea: `A1:${colLetter(lastColumn)}${lastRow}`,
+      printTitlesRow: isMain ? '1:2' : '1:1',
+    };
+    worksheet.headerFooter = {
+      oddHeader: isMain ? '&C&B内部报价明细' : `&C&B${worksheet.name}`,
+      oddFooter: '&L内部报价系统&C第 &P 页 / 共 &N 页&R&D',
+      evenHeader: isMain ? '&C&B内部报价明细' : `&C&B${worksheet.name}`,
+      evenFooter: '&L内部报价系统&C第 &P 页 / 共 &N 页&R&D',
+    };
+  });
+}
+
 function findRow(ws, value, column = 1) {
   let found = 0;
   ws.eachRow(row => {
@@ -311,7 +369,7 @@ function patchSimpleIndoColumns(ws, payloads) {
     ? electronic.electronics
     : (engineering.electronics || []);
   const patches = [
-    { title: '二、注塑部分', dept: payloads.molding || {}, amountCol: 16, indoCol: 17, weighted: true },
+    { title: '二、注塑部分', dept: payloads.molding || {}, amountCol: 14, indoCol: 15, weighted: true },
     { title: '二·B、吹气部分 (HKD)', dept: payloads.molding || {}, amountCol: 12, indoCol: 15 },
     { title: '三、二次加工（印喷报价）', dept: payloads.painting || {}, amountCol: 24, indoCol: 25, factor: 0.3, totalFromAmount: true },
     {
@@ -492,7 +550,7 @@ function patchMoldingProductGroups(ws, payloads) {
       ws.getCell(row, 1).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
       ws.getCell(row, 1).font = { ...ws.getCell(row, 1).font, bold: true, name: FONT };
       ws.getRow(row).height = Math.max(ws.getRow(row).height || 0, 34);
-      for (let column = 1; column <= 17; column += 1) {
+      for (let column = 1; column <= 15; column += 1) {
         ws.getCell(row, column).fill = {
           type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0F2FE' },
         };
@@ -529,85 +587,123 @@ function patchSlush(ws, slush) {
   const titleRow = findRow(ws, '二·C、搪胶部分');
   const items = (slush && slush.slush_items) || [];
   if (!titleRow || !items.length) return {};
-  const headerRow = titleRow + 1;
-  const dataStart = headerRow + 1;
-  const totalRow = dataStart + items.length;
   const pct = num(slush.indo_pct);
   const titleStyle = cloneStyle(ws.getCell(titleRow, 1).style);
-  const headerStyle = cloneStyle(ws.getCell(headerRow, 1).style);
-  const dataStyle = cloneStyle(ws.getCell(dataStart, 1).style);
-  const totalStyle = cloneStyle(ws.getCell(totalRow, 1).style);
-  unmergeRows(ws, titleRow, totalRow);
-  for (let row = titleRow; row <= totalRow; row += 1) {
+  const clearEnd = Math.max(ws.rowCount, titleRow + items.length * 20 + 5);
+  unmergeRows(ws, titleRow, clearEnd);
+  for (let row = titleRow; row <= clearEnd; row += 1) {
     for (let column = 1; column <= 31; column += 1) ws.getCell(row, column).value = null;
   }
-
-  ws.mergeCells(titleRow, 1, titleRow, 31);
-  ws.getCell(titleRow, 1).value = '二·C、搪胶部分';
-  applyStyle(ws.getCell(titleRow, 1), titleStyle);
-  const headers = [
-    '序号', '图片', '产品编号', '胶件名称', '材料', '料重(g)', '料价 HK$/lb',
-    '24H搪工', '12H批工/烤工', '24H柴油', '24H电费', '色粉', '日产量24H',
-    '12H批产量', '腊样', '模费金额', '模费币种', '运费/胶袋', '料价成本',
-    '搪工成本', '批工成本', '色粉成本', '柴油成本', '电费成本', '码点',
-    '成本合计', '用量(PC)', '货价 HKD', '总价 HKD', `印尼运费 ${pct}%`, '备注',
+  ws.columns = [
+    { width: 17 }, { width: 18 }, { width: 16 }, { width: 16 },
+    { width: 20 }, { width: 18 }, { width: 16 }, { width: 18 },
   ];
-  headers.forEach((value, index) => {
-    ws.getCell(headerRow, index + 1).value = value;
-    applyStyle(ws.getCell(headerRow, index + 1), headerStyle);
-  });
-
+  const border = {
+    top: { style: 'thin', color: { argb: 'FFD6C28A' } },
+    left: { style: 'thin', color: { argb: 'FFD6C28A' } },
+    bottom: { style: 'thin', color: { argb: 'FFD6C28A' } },
+    right: { style: 'thin', color: { argb: 'FFD6C28A' } },
+  };
+  const fill = argb => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
+  const styleRange = (row, start, end, options = {}) => {
+    for (let column = start; column <= end; column += 1) {
+      const cell = ws.getCell(row, column);
+      cell.border = border;
+      cell.font = { name: FONT, size: 10, bold: !!options.bold, color: options.color ? { argb: options.color } : undefined };
+      cell.alignment = { vertical: 'middle', horizontal: options.align || 'center', wrapText: true };
+      if (options.fill) cell.fill = fill(options.fill);
+      if (options.numFmt) cell.numFmt = options.numFmt;
+    }
+  };
   let total = 0;
+  const totalCells = [];
+  const indoCells = [];
+  let row = titleRow;
   items.forEach((item, index) => {
-    const row = dataStart + index;
     const costing = slushCosting(item);
     const unitPrice = slushUnitPrice(item);
-    const values = [
-      index + 1, (item.images || []).length ? `${item.images.length} 张` : '',
-      item.item_code || '', item.name || '', item.material || '', num(item.weight_g),
-      num(item.material_price_lb), num(item.slush_labor_24h), num(item.batch_labor_12h),
-      num(item.diesel_24h), num(item.electricity_24h), num(item.pigment_price),
-      num(item.daily_output), num(item.batch_output_12h), num(item.wax_sample),
-      num(item.mold_fee), item.mold_fee_currency || '', num(item.shipping_bag),
-    ];
-    values.forEach((value, offset) => { ws.getCell(row, offset + 1).value = value; });
-    ws.getCell(row, 19).value = { formula: `F${row}*G${row}/454`, result: costing.material };
-    ws.getCell(row, 20).value = { formula: `IFERROR(H${row}/M${row},0)`, result: costing.slushLabor };
-    ws.getCell(row, 21).value = { formula: `IFERROR(I${row}/N${row},0)`, result: costing.batchLabor };
-    ws.getCell(row, 22).value = { formula: `F${row}*L${row}/25000`, result: costing.pigment };
-    ws.getCell(row, 23).value = { formula: `IFERROR(J${row}/M${row},0)`, result: costing.diesel };
-    ws.getCell(row, 24).value = { formula: `IFERROR(K${row}/M${row},0)`, result: costing.electricity };
-    ws.getCell(row, 25).value = num(item.markup_x) || 1;
-    ws.getCell(row, 26).value = { formula: `SUM(S${row}:X${row})+R${row}`, result: costing.subtotal };
-    ws.getCell(row, 27).value = num(item.qty);
-    ws.getCell(row, 28).value = hasSlushCostingInputs(item)
-      ? { formula: `Z${row}*Y${row}`, result: unitPrice }
-      : num(item.unit_price_hkd);
-    ws.getCell(row, 29).value = { formula: `AA${row}*AB${row}`, result: num(item.qty) * unitPrice };
-    ws.getCell(row, 30).value = { formula: `AC${row}*${pct}/100`, result: num(item.qty) * unitPrice * pct / 100 };
-    ws.getCell(row, 31).value = item.note || '';
-    for (let column = 1; column <= 31; column += 1) {
-      applyStyle(ws.getCell(row, column), dataStyle, column >= 6 && column <= 30 && column !== 17 ? '0.0000' : undefined);
+    ws.mergeCells(row, 1, row, 8);
+    ws.getCell(row, 1).value = `搪胶报价 · ${index + 1}# ${item.name || item.source_sheet || '产品'}`;
+    applyStyle(ws.getCell(row, 1), titleStyle);
+    ws.getCell(row, 1).fill = fill('FFF4D98B');
+    row += 1;
+    [['产品编号', item.item_code || ''], ['胶件名称', item.name || ''], ['材料', item.material || ''], ['来源工作表', item.source_sheet || '']]
+      .forEach(([label, value], pair) => {
+        const column = pair * 2 + 1;
+        ws.getCell(row, column).value = label;
+        ws.getCell(row, column + 1).value = value;
+        styleRange(row, column, column, { bold: true, fill: 'FFEAF2F8' });
+        styleRange(row, column + 1, column + 1, { align: 'left' });
+      });
+    row += 1;
+    ws.mergeCells(row, 1, row, 4); ws.getCell(row, 1).value = '成本明细（HK$/PC）';
+    ws.mergeCells(row, 5, row, 8); ws.getCell(row, 5).value = '生产参数（按导入模板）';
+    styleRange(row, 1, 8, { bold: true, fill: 'FFD9EAD3' });
+    row += 1;
+    const costStart = row;
+    const costLabels = ['产品料价', '搪工', '批工/烤工', '色粉', '柴油', '电费', '运费/胶袋'];
+    const paramLabels = ['料重(g)', '料价 HK$/lb', '24H搪工', '12H批工/烤工', '24H柴油', '24H电费', '色粉'];
+    const paramValues = [item.weight_g, item.material_price_lb, item.slush_labor_24h, item.batch_labor_12h, item.diesel_24h, item.electricity_24h, item.pigment_price];
+    for (let offset = 0; offset < 7; offset += 1) {
+      const dataRow = row + offset;
+      ws.mergeCells(dataRow, 1, dataRow, 2); ws.getCell(dataRow, 1).value = costLabels[offset];
+      ws.mergeCells(dataRow, 3, dataRow, 4);
+      ws.mergeCells(dataRow, 5, dataRow, 6); ws.getCell(dataRow, 5).value = paramLabels[offset];
+      ws.mergeCells(dataRow, 7, dataRow, 8); ws.getCell(dataRow, 7).value = num(paramValues[offset]);
+      styleRange(dataRow, 1, 2, { align: 'left' }); styleRange(dataRow, 3, 4, { numFmt: HKD4 });
+      styleRange(dataRow, 5, 6, { align: 'left', fill: 'FFF8F8F8' }); styleRange(dataRow, 7, 8, { numFmt: '0.0000' });
     }
+    ws.getCell(costStart, 3).value = { formula: `G${costStart}*G${costStart + 1}/454`, result: costing.material };
+    ws.getCell(costStart + 1, 3).value = { formula: `IFERROR(G${costStart + 2}/G${costStart + 7},0)`, result: costing.slushLabor };
+    ws.getCell(costStart + 2, 3).value = { formula: `IFERROR(G${costStart + 3}/G${costStart + 8},0)`, result: costing.batchLabor };
+    ws.getCell(costStart + 3, 3).value = { formula: `G${costStart}*G${costStart + 6}/25000`, result: costing.pigment };
+    ws.getCell(costStart + 4, 3).value = { formula: `IFERROR(G${costStart + 4}/G${costStart + 7},0)`, result: costing.diesel };
+    ws.getCell(costStart + 5, 3).value = { formula: `IFERROR(G${costStart + 5}/G${costStart + 7},0)`, result: costing.electricity };
+    ws.getCell(costStart + 6, 3).value = num(item.shipping_bag);
+    row += 7;
+    const extraParams = [
+      ['日产量24H', item.daily_output], ['12H批产量', item.batch_output_12h],
+      ['腊样', item.wax_sample], ['模费', item.mold_fee],
+      ['模费币种', item.mold_fee_currency || ''], ['备注', item.note || ''],
+    ];
+    extraParams.forEach(([label, value], offset) => {
+      const dataRow = costStart + 7 + offset;
+      ws.mergeCells(dataRow, 5, dataRow, 6); ws.getCell(dataRow, 5).value = label;
+      ws.mergeCells(dataRow, 7, dataRow, 8); ws.getCell(dataRow, 7).value = typeof value === 'number' ? num(value) : value;
+      styleRange(dataRow, 5, 6, { align: 'left', fill: 'FFF8F8F8' }); styleRange(dataRow, 7, 8, { numFmt: '0.0000' });
+    });
+    const subtotalRow = row;
+    const rows = [
+      ['成本合计', { formula: `SUM(C${costStart}:C${costStart + 6})`, result: costing.subtotal }],
+      ['利润 ×', num(item.markup_x) || 1],
+      ['货价 HKD/PC', hasSlushCostingInputs(item) ? { formula: `C${subtotalRow}*C${subtotalRow + 1}`, result: unitPrice } : num(item.unit_price_hkd)],
+      ['用量(PC)', num(item.qty)],
+      ['总价 HKD', { formula: `C${subtotalRow + 2}*C${subtotalRow + 3}`, result: num(item.qty) * unitPrice }],
+      [`印尼运费 ${pct}%`, { formula: `C${subtotalRow + 4}*${pct}/100`, result: num(item.qty) * unitPrice * pct / 100 }],
+    ];
+    rows.forEach(([label, value], offset) => {
+      const dataRow = subtotalRow + offset;
+      ws.mergeCells(dataRow, 1, dataRow, 2); ws.getCell(dataRow, 1).value = label;
+      ws.mergeCells(dataRow, 3, dataRow, 4); ws.getCell(dataRow, 3).value = value;
+      styleRange(dataRow, 1, 2, { bold: offset >= 4, align: 'left', fill: offset >= 4 ? 'FFFFF2CC' : undefined });
+      styleRange(dataRow, 3, 4, { bold: offset >= 4, numFmt: offset === 1 || offset === 3 ? '0.0000' : HKD4, fill: offset >= 4 ? 'FFFFF2CC' : undefined });
+    });
+    totalCells.push(`C${subtotalRow + 4}`);
+    indoCells.push(`C${subtotalRow + 5}`);
     total += num(item.qty) * unitPrice;
+    row = subtotalRow + 7;
   });
-
-  ws.mergeCells(totalRow, 1, totalRow, 28);
-  ws.getCell(totalRow, 1).value = '合计 HKD';
-  applyStyle(ws.getCell(totalRow, 1), totalStyle);
-  ws.getCell(totalRow, 29).value = {
-    formula: `SUM(AC${dataStart}:AC${totalRow - 1})`,
-    result: total,
-  };
-  ws.getCell(totalRow, 30).value = {
-    formula: `SUM(AD${dataStart}:AD${totalRow - 1})`,
-    result: total * pct / 100,
-  };
-  for (let column = 29; column <= 30; column += 1) {
-    applyStyle(ws.getCell(totalRow, column), totalStyle, HKD4);
-    ws.getCell(totalRow, column).font = { bold: true, name: FONT };
-  }
-  return { slush: `AC${totalRow}`, slushIndo: `AD${totalRow}`, total };
+  ws.mergeCells(row, 1, row, 6); ws.getCell(row, 1).value = '搪胶合计 HKD';
+  ws.mergeCells(row, 7, row, 8); ws.getCell(row, 7).value = { formula: totalCells.join('+'), result: total };
+  styleRange(row, 1, 8, { bold: true, fill: 'FFD9EAD3', numFmt: HKD4 });
+  const totalRow = row;
+  row += 1;
+  ws.mergeCells(row, 1, row, 6); ws.getCell(row, 1).value = `搪胶印尼运费合计 HKD（${pct}%）`;
+  ws.mergeCells(row, 7, row, 8); ws.getCell(row, 7).value = { formula: indoCells.join('+'), result: total * pct / 100 };
+  styleRange(row, 1, 8, { bold: true, fill: 'FFFFF2CC', numFmt: HKD4 });
+  ws.views = [{ state: 'frozen', ySplit: titleRow - 1 }];
+  ws.pageSetup = { orientation: 'portrait', fitToPage: true, fitToWidth: 1, fitToHeight: 0 };
+  return { slush: `G${totalRow}`, slushIndo: `G${row}`, total };
 }
 
 function patchSewingDetail(workbook, sewing) {
@@ -894,25 +990,63 @@ function appendSpinTransportBlock(ws, row, quote, sales, engineering, styles) {
 function enhanceWorkbook(workbook, { quote, sections }) {
   const ws = workbook.getWorksheet('报价明细');
   if (!ws) return workbook;
+  const paintingWs = workbook.getWorksheet('喷油明细');
+  const slushWs = workbook.getWorksheet('搪胶明细');
   const payloads = parseSections(sections);
   const sales = payloads.sales || {};
   const fx = num(sales.header && sales.header.fx_rmb_hkd) || 0.85;
 
   patchMoldProductGroups(ws, payloads);
   patchMoldingProductGroups(ws, payloads);
-  patchPaintingProductMix(ws, payloads.painting || {});
+  patchPaintingProductMix(paintingWs || ws, payloads.painting || {});
   patchUnitLabels(ws);
   patchFreeInputFormulas(ws, payloads);
   patchZeroCartonRate(ws, payloads);
   const refs = patchSimpleIndoColumns(ws, payloads);
-  Object.assign(refs, patchSlush(ws, payloads.slush || {}));
+  if (paintingWs) Object.assign(refs, patchSimpleIndoColumns(paintingWs, payloads));
+  Object.assign(refs, patchSlush(slushWs || ws, payloads.slush || {}));
+  const paintingSummaryRow = findRow(ws, '三、二次加工（印喷汇总）');
+  if (paintingSummaryRow && refs['三、二次加工（印喷报价）']) {
+    ws.getCell(paintingSummaryRow + 1, 9).value = {
+      formula: `'喷油明细'!${refs['三、二次加工（印喷报价）']}`,
+      result: weightedRowsSum(
+        payloads.painting || {},
+        (payloads.painting && payloads.painting.painting_items) || [],
+        item => sum(
+          ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv'],
+          key => num(item[`${key}_qty`]) * num(item[`${key}_unit`])
+        )
+      ),
+    };
+    ws.getCell(paintingSummaryRow + 1, 9).numFmt = HKD4;
+    refs.secondProc = `I${paintingSummaryRow + 1}`;
+    // 印尼运费明细的「二次加工（印喷）」基数公式引用本键，必须指回主表 I 列汇总
+    // 单元格；否则公式会拿着「喷油明细」的裸地址在主表上解析到空单元格。
+    refs['三、二次加工（印喷报价）'] = `I${paintingSummaryRow + 1}`;
+  }
+  const slushSummaryRow = findRow(ws, '二·C、搪胶部分（汇总）');
+  if (slushSummaryRow && refs.slush) {
+    ws.getCell(slushSummaryRow + 1, 9).value = {
+      formula: `'搪胶明细'!${refs.slush}`,
+      result: num(refs.total),
+    };
+    ws.getCell(slushSummaryRow + 1, 9).numFmt = HKD4;
+    refs.slush = `I${slushSummaryRow + 1}`;
+  }
   const sewingRefs = patchSewingDetail(workbook, payloads.sewing || {});
   if (sewingRefs.sewingMaterialHkd) {
     refs.sewingMaterialHkd = String(sewingRefs.sewingMaterialHkd);
   }
 
   const summaryTitleRow = findRow(ws, '十、合计');
-  if (!summaryTitleRow) return workbook;
+  if (!summaryTitleRow) {
+    applyPrintLayout(workbook);
+    return workbook;
+  }
+  // 若存在生产模具费用，印尼运费插在它前面，使导出顺序为：
+  // 印尼运费明细 → 生产模具费用/各项分摊 → 十、合计。
+  const moldCostsTitleRow = findRow(ws, '生产模具费用');
+  const insertRow = moldCostsTitleRow || summaryTitleRow;
   const extraRows = 10 + (String(quote && quote.customer || '').trim().toUpperCase() === 'SPIN' ? 10 : 0);
   const styles = {
     section: cloneStyle(ws.getCell(summaryTitleRow, 1).style),
@@ -920,8 +1054,8 @@ function enhanceWorkbook(workbook, { quote, sections }) {
     data: cloneStyle(ws.getCell(Math.max(1, summaryTitleRow - 9), 1).style),
     total: cloneStyle(ws.getCell(summaryTitleRow + 2, 1).style),
   };
-  shiftRowsDown(ws, summaryTitleRow, extraRows);
-  let row = summaryTitleRow;
+  shiftRowsDown(ws, insertRow, extraRows);
+  let row = insertRow;
   const indo = appendIndonesiaBlock(ws, row, payloads, refs, fx, styles);
   row = indo.nextRow;
   row = appendSpinTransportBlock(
@@ -942,6 +1076,7 @@ function enhanceWorkbook(workbook, { quote, sections }) {
     ws.getCell(movedSummaryTitle + 2, 9).numFmt = HKD4;
   }
   workbook.calcProperties = { fullCalcOnLoad: true };
+  applyPrintLayout(workbook);
   return workbook;
 }
 
