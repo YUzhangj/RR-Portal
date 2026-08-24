@@ -1,8 +1,8 @@
 "use client";
-import { apiFetch } from "@/lib/apiFetch";
 import Link from "next/link";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { apiFetch } from "@/lib/apiFetch";
 import { filterProducts, PRODUCT_STATUS_META } from "@/lib/product";
 
 // 列表行结构（与 page.tsx 取数后传入的字段一致）
@@ -10,7 +10,7 @@ export type ProductRow = {
   id: number;
   productNo: string;
   status: string;            // draft 待审核 / active 已生效 / archived 作废
-  itemCount: number;
+  partCount: number;
   totalUnitCost: number;     // 核价合计
   totalPaintCost: number;    // 油漆合计
   totalQuotedPrice: number;
@@ -85,7 +85,7 @@ export function ProductsTable({ products }: { products: ProductRow[] }) {
           <thead className="bg-[#f0fdf4] text-[#047857] text-xs">
             <tr>
               <th className="px-3 py-3 text-left w-[18%]">产品货号</th>
-              <th className="px-3 py-3 text-center w-[9%]">子件数</th>
+              <th className="px-3 py-3 text-center w-[9%]">部位数</th>
               <th className="px-3 py-3 text-center w-[10%]">总核价</th>
               <th className="px-3 py-3 text-center w-[10%]">总报价</th>
               <th className="px-3 py-3 text-center w-[10%]">状态</th>
@@ -100,9 +100,9 @@ export function ProductsTable({ products }: { products: ProductRow[] }) {
               return (
                 <tr key={p.id} className={i % 2 ? "bg-[#fafdfb]" : ""}>
                   <td className="px-3 py-3 font-mono">{p.productNo}</td>
-                  <td className="px-3 py-3 text-center">{p.itemCount}</td>
-                  <td className="px-3 py-3 text-center">{(p.totalUnitCost + p.totalPaintCost).toFixed(3)}</td>
-                  <td className="px-3 py-3 text-center">{p.totalQuotedPrice.toFixed(3)}</td>
+                  <td className="px-3 py-3 text-center">{p.partCount ?? 0}</td>
+                  <td className="px-3 py-3 text-center">{((p.totalUnitCost ?? 0) + (p.totalPaintCost ?? 0)).toFixed(3)}</td>
+                  <td className="px-3 py-3 text-center">{(p.totalQuotedPrice ?? 0).toFixed(3)}</td>
                   <td className="px-3 py-3 text-center"><span className={`text-[11px] px-2 py-0.5 rounded-full ${st.cls}`}>{st.text}</span></td>
                   <td className="px-3 py-3 text-center text-text-secondary">{new Date(p.updatedAt).toLocaleDateString("zh-CN")}</td>
                   <td className="px-3 py-3 text-center text-text-secondary">{p.lastUpdatedBy ?? "—"}</td>
