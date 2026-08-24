@@ -3,7 +3,13 @@
 const ExcelJS = require('exceljs');
 const path = require('path');
 const fs = require('fs');
-const { injectionProductGroups, weightedInjectionSum, weightedColumnFormula } = require('./productMix');
+const {
+  ensureExplicitProductGroups,
+  injectionProductGroups,
+  weightedRowsSum,
+  weightedInjectionSum,
+  weightedColumnFormula,
+} = require('./productMix');
 
 const RMB = '￥#,##0.00';
 const HKD = '"HK$"#,##0.00';
@@ -313,19 +319,18 @@ async function buildWorkbook({ quote, sections }) {
   // 模具分摊 套数（与下方 九、合计 同源，确保 模具费用表 分摊 与 模具分摊 公式一致）
   const moldAmortQty = Math.max(num((eng.mold_costs || {}).amortization_qty) || num((sales.pricing || {}).mold_amortization_qty) || num(quote.qty), 1);
 
-  // ---------- 模具费用（mold_costs 子表）----------
-  row = renderMoldCosts(ws, row, eng.mold_costs, quote, subRefs, moldAmortQty);
-
   // ---------- 二、注塑部分 ----------
   row = renderInjection(ws, row, mold, fxRH, subRefs);
   const injSubtotal = injectionSubtotal(mold);
 
   // ---------- 二·B、吹气 / 二·C、搪胶 ----------
   row = renderBlowBlock(ws, row, mold, subRefs);
-  row = renderSlushBlock(ws, row, slush, fxRH, subRefs);
+  const slushDetail = addSlushDetailSheet(wb, slush, fxRH);
+  row = renderDetailSummary(ws, row, '二·C、搪胶部分（汇总）', slushDetail, subRefs, 'slush');
 
-  // ---------- 三、二次加工 ----------
-  row = renderSecondProc(ws, row, pnt, fxRH, subRefs);
+  // ---------- 三、二次加工：明细独立分表，主表只保留汇总 ----------
+  const paintingDetail = addPaintingDetailSheet(wb, pnt, fxRH);
+  row = renderDetailSummary(ws, row, '三、二次加工（印喷汇总）', paintingDetail, subRefs, 'secondProc');
   const ppSubtotal = secondProcSubtotal(pnt);
 
   // ---------- 四、电子 / 五、五金（两张子表，五金不计损耗） ----------
@@ -364,6 +369,10 @@ async function buildWorkbook({ quote, sections }) {
 
   // ---------- 纸箱 / 运费（在九、合计前） ----------
   row = renderCartonAndFreight(ws, row, eng, sales, subRefs);
+
+  // ---------- 生产模具费用（置于印尼运费明细之后、十、合计之前） ----------
+  // exportInternal 会在本区块前插入印尼运费明细；分摊引用仍由本函数写入 subRefs。
+  row = renderMoldCosts(ws, row, eng.mold_costs, quote, subRefs, moldAmortQty);
 
   // ---------- 九、合计（含搪胶/车缝/纸箱/附加税） ----------
   ws.mergeCells(row, 1, row, 14); styleSection(ws.getCell(row, 1));
@@ -884,6 +893,9 @@ function addAssemblyDetailSheet(wb, asm, baseRate, stdTime) {
 // 主表：按总表样式列出各产品（产品/标准工时/基数/生产量/小组/总人数/合计），合计套活公式
 // 每产品 合计 = 基数 × 总人数 × 小组 ÷ 生产量（= Σ 基数×人数×小组/生产量）；段合计 = SUM
 function renderAssemblyMainSummary(ws, row, title, groups, baseRate, stdTime, peopleCells, refs, refKey) {
+  // 正文打印字号提高后，HK$0.0000 在原 G 列宽度中会显示为 #######。
+  // 主表两段人工汇总共用 G 列，统一加宽以完整显示公式结果。
+  ws.getColumn(7).width = Math.max(Number(ws.getColumn(7).width) || 0, 20);
   ws.mergeCells(row, 1, row, 7); styleSection(ws.getCell(row, 1));
   ws.getCell(row, 1).value = title + '（明细见"装配明细" sheet）';
   row += 1;
@@ -1136,7 +1148,7 @@ function renderShippingBlock(ws, row, shipping, header, fxRH, refs = {}) {
 // ----- 子渲染函数 -----
 function renderInjection(ws, row, payload, fxRH, refs) {
   const lossPct = num(payload.injection_loss_pct ?? 3);  // 注塑料损耗（默认3%）
-  const h = ['序号', '模具名称', '材质', '料型', '颜色', '啤净重(g)', `料损耗 ${lossPct}%`, '料价 HK$/g', '原料单价 HK$', '机台', '啤价 HK$/啤', '套数', '机型', '目标数', '周期(秒)', '成品金额 HK$'];
+  const h = ['序号', '模具名称', '材质', '啤净重(g)', `料损耗 ${lossPct}%`, '料价 HK$/g', '原料单价 HK$', '机台', '啤价 HK$/啤', '套数', '机型', '目标数', '周期(秒)', '成品金额 HK$'];
   ws.mergeCells(row, 1, row, h.length); styleSection(ws.getCell(row, 1));
   ws.getCell(row, 1).value = '二、注塑部分';
   row += 1;
@@ -1144,7 +1156,7 @@ function renderInjection(ws, row, payload, fxRH, refs) {
   row += 1;
   const dataStart = row;
   const lossM = 1 + lossPct / 100;
-  const impMatCells = [], domMatCells = [];  // 原料单价(I列)单元格，按材质分进口料/国内料（与前端 autoFill 同逻辑）
+  const impMatCells = [], domMatCells = [];  // 原料单价(G列)单元格，按材质分进口料/国内料（与前端 autoFill 同逻辑）
   (payload.injection || []).forEach((r, i) => {
     const wg = num(r.weight_g);
     const up = num(r.material_unit_price);
@@ -1155,36 +1167,34 @@ function renderInjection(ws, row, payload, fxRH, refs) {
     ws.getCell(row, 1).value = i + 1;
     ws.getCell(row, 2).value = r.name || '';
     ws.getCell(row, 3).value = r.material || '';
-    ws.getCell(row, 4).value = r.material_grade || '';
-    ws.getCell(row, 5).value = r.color || '';
-    ws.getCell(row, 6).value = wg;
+    ws.getCell(row, 4).value = wg;
     // 料损耗 = 啤净重 × (1+损耗%)
-    ws.getCell(row, 7).value = { formula: `F${row}*${lossM}`, result: wg * lossM };
-    ws.getCell(row, 7).numFmt = '0.00';
+    ws.getCell(row, 5).value = { formula: `D${row}*${lossM}`, result: wg * lossM };
+    ws.getCell(row, 5).numFmt = '0.00';
     // 料价 HK$/g = Lb单价 ÷ 454（Lb单价用反推常量 = 料价HK$/g × 454）
-    ws.getCell(row, 8).value = up ? { formula: `${+(up * 454).toFixed(4)}/454`, result: up } : up;
-    ws.getCell(row, 8).numFmt = '0.00000';
+    ws.getCell(row, 6).value = up ? { formula: `${+(up * 454).toFixed(4)}/454`, result: up } : up;
+    ws.getCell(row, 6).numFmt = '0.00000';
     // 原料单价 = 料损耗 × 料价
-    ws.getCell(row, 9).value = { formula: `G${row}*H${row}`, result: rawUnit };
-    ws.getCell(row, 9).numFmt = '0.0000';
-    ws.getCell(row, 10).value = r.machine || '';
-    // 啤价 = 机型价 ÷ 套数(L) ÷ 目标数(N)；机型价用反推常量(=啤价×套数×目标数)，套数/目标数引用本行可改重算
+    ws.getCell(row, 7).value = { formula: `E${row}*F${row}`, result: rawUnit };
+    ws.getCell(row, 7).numFmt = '0.0000';
+    ws.getCell(row, 8).value = r.machine || '';
+    // 啤价 = 机型价 ÷ 套数(J) ÷ 目标数(L)；机型价用反推常量，套数/目标数引用本行可改重算
     const machinePrice = sp * num(r.sets) * num(r.target);
-    ws.getCell(row, 11).value = (sp && num(r.sets) > 0 && num(r.target) > 0)
-      ? { formula: `${+machinePrice.toFixed(2)}/L${row}/N${row}`, result: sp }
+    ws.getCell(row, 9).value = (sp && num(r.sets) > 0 && num(r.target) > 0)
+      ? { formula: `${+machinePrice.toFixed(2)}/J${row}/L${row}`, result: sp }
       : sp;
-    ws.getCell(row, 12).value = r.sets ?? 1;
-    ws.getCell(row, 13).value = r.machine_model || '';
-    ws.getCell(row, 14).value = num(r.target);
-    ws.getCell(row, 15).value = r.cycle_sec == null || r.cycle_sec === '' ? '' : num(r.cycle_sec);
+    ws.getCell(row, 10).value = r.sets ?? 1;
+    ws.getCell(row, 11).value = r.machine_model || '';
+    ws.getCell(row, 12).value = num(r.target);
+    ws.getCell(row, 13).value = r.cycle_sec == null || r.cycle_sec === '' ? '' : num(r.cycle_sec);
     // 成品金额 = 原料单价 + 啤价
-    ws.getCell(row, 16).value = { formula: `I${row}+K${row}`, result: finished };
-    ws.getCell(row, 16).numFmt = '0.0000';
+    ws.getCell(row, 14).value = { formula: `G${row}+I${row}`, result: finished };
+    ws.getCell(row, 14).numFmt = '0.0000';
     for (let c = 1; c <= h.length; c++) styleData(ws.getCell(row, c));
     // 按材质分进口料/国内料（与前端 workbench.js 同逻辑）：POM/PVC/C-PVC = 国内料；其余非空 = 进口料
     const _mat = String(r.material || '').toUpperCase().trim();
-    if (/^(POM|PVC|C[- ]?PVC)/.test(_mat)) domMatCells.push(`I${row}`);
-    else if (_mat) impMatCells.push(`I${row}`);
+    if (/^(POM|PVC|C[- ]?PVC)/.test(_mat)) domMatCells.push(`G${row}`);
+    else if (_mat) impMatCells.push(`G${row}`);
     row += 1;
   });
   const cnt = (payload.injection || []).length;
@@ -1192,27 +1202,27 @@ function renderInjection(ws, row, payload, fxRH, refs) {
     const rawSumVal = weightedInjectionSum(payload, r => num(r.weight_g) * lossM * num(r.material_unit_price));
     const shotSumVal = weightedInjectionSum(payload, r => num(r.shot_price));
     const finSumVal = rawSumVal + shotSumVal;
-    // 合计行：按产品配比分别加权原料单价(I) / 啤价(K) / 成品金额(P)
+    // 合计行：按产品配比分别加权原料单价(G) / 啤价(I) / 成品金额(N)
     const totalRow = row;
     const mixGroups = injectionProductGroups(payload);
     const totalRatio = sum(mixGroups, group => group.ratio);
     ws.getCell(row, 1).value = mixGroups.length > 1 ? `加权合计（总配比 ${totalRatio}）` : '合计';
     ws.getCell(row, 1).alignment = { horizontal: 'right', vertical: 'middle' };
-    ws.mergeCells(row, 1, row, 8);
-    ws.getCell(row, 9).value = { formula: weightedColumnFormula(payload, dataStart, 'I'), result: rawSumVal };
+    ws.mergeCells(row, 1, row, 6);
+    ws.getCell(row, 7).value = { formula: weightedColumnFormula(payload, dataStart, 'G'), result: rawSumVal };
+    ws.getCell(row, 7).numFmt = '0.0000';
+    ws.getCell(row, 9).value = { formula: weightedColumnFormula(payload, dataStart, 'I'), result: shotSumVal };
     ws.getCell(row, 9).numFmt = '0.0000';
-    ws.getCell(row, 11).value = { formula: weightedColumnFormula(payload, dataStart, 'K'), result: shotSumVal };
-    ws.getCell(row, 11).numFmt = '0.0000';
-    ws.getCell(row, 16).value = { formula: weightedColumnFormula(payload, dataStart, 'P'), result: finSumVal };
-    ws.getCell(row, 16).numFmt = '0.0000';
-    for (let c = 1; c <= 16; c++) styleSubtotal(ws.getCell(row, c), 'hkd');
+    ws.getCell(row, 14).value = { formula: weightedColumnFormula(payload, dataStart, 'N'), result: finSumVal };
+    ws.getCell(row, 14).numFmt = '0.0000';
+    for (let c = 1; c <= 14; c++) styleSubtotal(ws.getCell(row, c), 'hkd');
     // 加粗 合计 标签 + 3 个数值
-    [1, 9, 11, 16].forEach(c => {
+    [1, 7, 9, 14].forEach(c => {
       ws.getCell(row, c).font = { bold: true, color: { argb: 'FF1F2937' }, name: 'Microsoft YaHei' };
     });
     ws.getRow(row).height = 22;
     row += 1;
-    if (refs) { refs.injection = `P${totalRow}`; refs.injShotSum = `K${totalRow}`; }  // K = Σ啤价 → 表3 啤工
+    if (refs) { refs.injection = `N${totalRow}`; refs.injShotSum = `I${totalRow}`; }  // I = Σ啤价 → 表3 啤工
   }
   if (refs) { refs.impMatCells = impMatCells; refs.domMatCells = domMatCells; }
   return row;
@@ -1307,11 +1317,71 @@ function renderSecondProc(ws, row, payload, fxRH, refs) {
 function secondProcSubtotal(p) {
   const procKeys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv'];
   const items = p.painting_items || p.second_proc || [];
-  const s = sum(items, r => {
+  ensureExplicitProductGroups(items);
+  const s = weightedRowsSum(p, items, r => {
     if (r.price !== undefined) return num(r.price) * num(r.qty); // 旧结构兼容
     return procKeys.reduce((acc, k) => acc + num(r[k+'_qty']) * num(r[k+'_unit']), 0);
   });
   return s;  // 不计损耗
+}
+
+function renderDetailSummary(ws, row, title, detail, refs, refKey) {
+  if (!detail) return row;
+  ws.mergeCells(row, 1, row, 13);
+  styleSection(ws.getCell(row, 1));
+  ws.getCell(row, 1).value = title;
+  row += 1;
+  ws.mergeCells(row, 1, row, 8);
+  ws.getCell(row, 1).value = '合计 HKD';
+  ws.getCell(row, 1).alignment = { horizontal: 'right', vertical: 'middle' };
+  ws.mergeCells(row, 9, row, 10);
+  ws.getCell(row, 9).value = {
+    formula: `'${detail.sheetName}'!${detail.totalCell}`,
+    result: detail.totalValue,
+  };
+  ws.getCell(row, 9).numFmt = HKD4;
+  for (let c = 1; c <= 13; c++) {
+    const cell = ws.getCell(row, c);
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+    cell.border = thinBorder();
+  }
+  styleSubtotal(ws.getCell(row, 9), 'total');
+  ws.getCell(row, 1).font = { bold: true, color: { argb: 'FF1F2937' }, name: FONT };
+  ws.getCell(row, 9).font = { bold: true, color: { argb: 'FF1F2937' }, name: FONT };
+  if (refs) refs[refKey] = `I${row}`;
+  return row + 2;
+}
+
+function addPaintingDetailSheet(wb, painting, fxRH) {
+  const items = painting.painting_items || painting.second_proc || [];
+  if (!items.length) return null;
+  const ws = wb.addWorksheet('喷油明细');
+  ws.columns = Array.from({ length: 24 }, (_, index) => ({ width: index < 3 ? [7, 28, 18][index] : 13 }));
+  const refs = {};
+  renderSecondProc(ws, 1, painting, fxRH, refs);
+  return {
+    sheetName: ws.name,
+    totalCell: refs.secondProc,
+    totalValue: secondProcSubtotal(painting),
+  };
+}
+
+function addSlushDetailSheet(wb, slush, fxRH) {
+  const items = slush.slush_items || [];
+  if (!items.length) return null;
+  const ws = wb.addWorksheet('搪胶明细');
+  ws.columns = [
+    { width: 8 }, { width: 18 }, { width: 26 }, { width: 14 }, { width: 13 },
+    { width: 16 }, { width: 12 }, { width: 14 }, { width: 16 }, { width: 12 },
+    { width: 12 }, { width: 12 }, { width: 24 },
+  ];
+  const refs = {};
+  renderSlushBlock(ws, 1, slush, fxRH, refs);
+  return {
+    sheetName: ws.name,
+    totalCell: refs.slush,
+    totalValue: sum(items, item => num(item.qty) * num(item.unit_price_hkd)),
+  };
 }
 
 function renderFreeTable(ws, row, title, rows, lossPct, fxRH, refs, refKey, opts) {
