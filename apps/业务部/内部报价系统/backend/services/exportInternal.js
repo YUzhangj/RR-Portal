@@ -1006,9 +1006,9 @@ function enhanceWorkbook(workbook, { quote, sections }) {
   if (paintingWs) Object.assign(refs, patchSimpleIndoColumns(paintingWs, payloads));
   Object.assign(refs, patchSlush(slushWs || ws, payloads.slush || {}));
   const paintingSummaryRow = findRow(ws, '三、二次加工（印喷汇总）');
-  if (paintingSummaryRow && refs.secondProc) {
+  if (paintingSummaryRow && refs['三、二次加工（印喷报价）']) {
     ws.getCell(paintingSummaryRow + 1, 9).value = {
-      formula: `'喷油明细'!${refs.secondProc}`,
+      formula: `'喷油明细'!${refs['三、二次加工（印喷报价）']}`,
       result: weightedRowsSum(
         payloads.painting || {},
         (payloads.painting && payloads.painting.painting_items) || [],
@@ -1020,6 +1020,9 @@ function enhanceWorkbook(workbook, { quote, sections }) {
     };
     ws.getCell(paintingSummaryRow + 1, 9).numFmt = HKD4;
     refs.secondProc = `I${paintingSummaryRow + 1}`;
+    // 印尼运费明细的「二次加工（印喷）」基数公式引用本键，必须指回主表 I 列汇总
+    // 单元格；否则公式会拿着「喷油明细」的裸地址在主表上解析到空单元格。
+    refs['三、二次加工（印喷报价）'] = `I${paintingSummaryRow + 1}`;
   }
   const slushSummaryRow = findRow(ws, '二·C、搪胶部分（汇总）');
   if (slushSummaryRow && refs.slush) {
