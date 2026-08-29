@@ -59,6 +59,31 @@ function requestText(title, initialValue = '', options = {}) {
   });
 }
 
+// 部门切换前的未保存提示：保存后跳转，或取消并留在当前部门。
+function requestUnsavedAction(deptName) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;padding:20px';
+    const dialog = document.createElement('div');
+    dialog.style.cssText = 'width:min(500px,100%);background:#fff;border-radius:16px;box-shadow:0 24px 70px rgba(15,23,42,.28);padding:22px';
+    dialog.innerHTML = `<div style="font-size:18px;font-weight:700;color:#1f2937;margin-bottom:10px">当前部门有未保存修改</div>
+      <div style="color:#64748b;line-height:1.6">${escapeHtml(deptName || '当前部门')}的数据尚未保存，是否先保存再跳转？</div>`;
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;margin-top:18px';
+    const finish = action => { overlay.remove(); resolve(action); };
+    const makeButton = (label, action, style = '') => {
+      const button = document.createElement('button');
+      button.type = 'button'; button.textContent = label; button.className = action === 'save' ? '' : 'mini';
+      if (style) button.style.cssText = style;
+      button.onclick = () => finish(action);
+      return button;
+    };
+    actions.append(makeButton('取消', 'cancel'), makeButton('保存', 'save'));
+    dialog.appendChild(actions); overlay.appendChild(dialog); document.body.appendChild(overlay);
+    overlay.onclick = event => { if (event.target === overlay) finish('cancel'); };
+  });
+}
+
 // 保存 section（带轻量并发提醒）：带上加载时的 filled_at；后端若发现被别人改过会回 conflict
 // 不挡保存，仅弹一次提示；成功后更新本地 filled_at 作为新基线（避免自己的后续保存误报）
 async function putSection(sec, payload, submit) {
@@ -1980,13 +2005,9 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
       </table></div></div>`;
   }
 
-  // 印尼运费由各部门表格自动汇总，只读显示。
+  // 印尼运费仍由各部门表格自动汇总并参与成本计算；此处不重复展示。
   ps.indo_freight = ps.indo_freight ?? 0;
   host.innerHTML = `<h2>🧾 减税明细 / 成本汇总</h2>
-    <div style="display:flex;gap:14px;align-items:center;margin:6px 0 10px;padding:8px 12px;background:#fef9c3;border-radius:6px;font-size:13px">
-      <label>📦 印尼运费 (HKD) <input id="tk-indo-freight" type="number" step="0.0001" value="${num(ps.indo_freight) || ''}" style="width:100px;background:#f3f4f6" disabled title="由各部门表格金额与印尼运费点数自动汇总"/></label>
-      <small class="muted">印尼运费 = 各表金额合计 × 表头点数% 自动汇总</small>
-    </div>
     <style>
       .tk-block{margin-top:16px}
       .tk-title{font-weight:600;margin-bottom:6px;color:#44403c}
@@ -2084,14 +2105,6 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
   recalc();
 
   if (canEdit) {
-    const indoInp = host.querySelector('#tk-indo-freight');
-    if (indoInp) indoInp.oninput = () => {
-      ps.indo_freight = Number(indoInp.value) || 0;
-      // 杂项 = 印尼运费 + 附加税(HKD)，单一公式重算，避免之前增量法丢掉附加税
-      // 不设 override：重渲染时 autoFill 会用 indo_freight+surtax 同公式重算，保持一致
-      ps.t2.misc = +((Number(indoInp.value) || 0) + num(autoFill.surtax_hkd)).toFixed(4);
-      recalc();
-    };
     host.querySelectorAll('input.tk-edit').forEach(inp => {
       inp.oninput = () => {
         const tbl = inp.dataset.tbl, key = inp.dataset.key;
@@ -2482,6 +2495,9 @@ function renderCartonCalc(host, c, canEdit, onChange) {
   const rate = () => c.paper_rate == null || c.paper_rate === ''
     ? 2.75
     : num(c.paper_rate);
+  const cartonDimInput = (b, key) => b[`${key}_raw`] != null && b[`${key}_raw`] !== ''
+    ? b[`${key}_raw`]
+    : (b[key] || '');
   const cuftOf = (b) => num(b.cl) * num(b.cw) * num(b.ch) / 1728;
   const boxPriceOf = (b) => (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * rate() / 1000;
   // 平卡 L/W 留空时对应所在纸箱的长/宽
@@ -2512,9 +2528,9 @@ function renderCartonCalc(host, c, canEdit, onChange) {
           <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
             <strong style="color:#7c2d12">📦</strong>
             <input data-bi="${i}" data-k="name" type="text" value="${b.name || ''}" placeholder="纸箱名称" ${canEdit?'':'disabled'} style="width:130px;font-weight:600"/>
-            <span class="muted">L</span><input data-bi="${i}" data-k="cl" type="number" step="any" value="${b.cl || ''}" ${canEdit?'':'disabled'} style="width:80px"/>
-            <span class="muted">W</span><input data-bi="${i}" data-k="cw" type="number" step="any" value="${b.cw || ''}" ${canEdit?'':'disabled'} style="width:80px"/>
-            <span class="muted">H</span><input data-bi="${i}" data-k="ch" type="number" step="any" value="${b.ch || ''}" ${canEdit?'':'disabled'} style="width:80px"/>
+            <span class="muted">L</span><input data-bi="${i}" data-k="cl" data-formula-dim type="text" value="${escapeHtml(String(cartonDimInput(b, 'cl')))}" title="可输入公式，如 =15.5+16.375" placeholder="如 =15.5+16.375" ${canEdit?'':'disabled'} style="width:80px"/>
+            <span class="muted">W</span><input data-bi="${i}" data-k="cw" data-formula-dim type="text" value="${escapeHtml(String(cartonDimInput(b, 'cw')))}" title="可输入公式，如 =10+8.25" placeholder="如 =10+8.25" ${canEdit?'':'disabled'} style="width:80px"/>
+            <span class="muted">H</span><input data-bi="${i}" data-k="ch" data-formula-dim type="text" value="${escapeHtml(String(cartonDimInput(b, 'ch')))}" title="可输入公式，如 =11+0.375" placeholder="如 =11+0.375" ${canEdit?'':'disabled'} style="width:80px"/>
             <span class="muted">inch</span>
             ${canEdit ? `<button class="mini danger" data-del-b="${i}" style="margin-left:auto">删除纸箱</button>` : ''}
           </div>
@@ -2573,7 +2589,14 @@ function renderCartonCalc(host, c, canEdit, onChange) {
     host.querySelectorAll('input[data-bi]:not([data-fj])').forEach(el => {
       el.oninput = () => {
         const i = +el.dataset.bi, k = el.dataset.k;
-        c.cartons[i][k] = el.type === 'number' ? (el.value === '' ? 0 : Number(el.value)) : el.value;
+        if (el.hasAttribute('data-formula-dim')) {
+          const parsed = parseFormulaInput(el.value);
+          c.cartons[i][k] = parsed == null ? 0 : parsed;
+          c.cartons[i][`${k}_raw`] = el.value;
+          el.style.color = el.value.trim() !== '' && parsed == null ? '#b91c1c' : '';
+        } else {
+          c.cartons[i][k] = el.type === 'number' ? (el.value === '' ? 0 : Number(el.value)) : el.value;
+        }
         onChange();
       };
       el.onchange = () => render();
@@ -3332,6 +3355,57 @@ function lookupMaterialPrice(material, grade, prices) {
   return exact || candidates[0];
 }
 
+function isBlankInjectionPrice(value) {
+  return value === null || value === undefined || value === '';
+}
+
+// 默认只补齐空白料价/啤价，避免进入页面时覆盖人工调整；按钮手动套价时可传 overwrite=true。
+function applyInjectionReferencePrices(payload, { overwrite = false, material = true, machine = true } = {}) {
+  let materialHits = 0;
+  let machineHits = 0;
+  let changed = false;
+  const materialMisses = [];
+  const machineMisses = [];
+
+  for (const row of payload.injection || []) {
+    if (material && (overwrite || isBlankInjectionPrice(row.material_unit_price))) {
+      const matchedMaterial = lookupMaterialPrice(row.material, row.material_grade, payload.material_prices);
+      if (matchedMaterial) {
+        const nextPrice = +(num(matchedMaterial.price) / 454).toFixed(5);
+        if (row.material_unit_price !== nextPrice) changed = true;
+        row.material_unit_price = nextPrice;
+        if (overwrite || !row.material_grade) row.material_grade = matchedMaterial.model || row.material_grade || '';
+        materialHits++;
+      } else {
+        const key = [row.material, row.material_grade].filter(Boolean).join(' ').trim();
+        if (key) materialMisses.push(key);
+      }
+    }
+
+    if (machine) {
+      const matchedMachine = lookupMachinePrice(row.machine_model, payload.machine_prices);
+      const sets = num(row.sets) || 1;
+      const target = num(row.target) || 0;
+      if ((overwrite || isBlankInjectionPrice(row.shot_price)) && matchedMachine && target > 0) {
+        const nextPrice = num(row.mold_part_index) > 0
+          ? 0
+          : +(num(matchedMachine.price) / sets / target).toFixed(4);
+        if (row.shot_price !== nextPrice) changed = true;
+        row.shot_price = nextPrice;
+        machineHits++;
+      } else if ((overwrite || isBlankInjectionPrice(row.shot_price)) && row.machine_model && (!matchedMachine || target <= 0)) {
+        machineMisses.push(`${row.machine_model}${target <= 0 ? '(无目标数)' : ''}`);
+      }
+      if (!row.machine && matchedMachine && matchedMachine.normal) {
+        row.machine = matchedMachine.normal;
+        changed = true;
+      }
+    }
+  }
+
+  return { changed, materialHits, machineHits, materialMisses, machineMisses };
+}
+
 function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, userRole) {
   payload.injection = payload.injection || [];
   payload.product_mix_ratios = payload.product_mix_ratios || {};
@@ -3368,10 +3442,15 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     ]).then(([mat, mac]) => {
       if (mat.length) window.__refs.material_prices = mat;
       if (mac.length) window.__refs.machine_prices = mac;
+      window.__refs._ready = true;
       // 新单（无自有副本）：把刚加载的全局表填进去并重渲染，避免停留在写死的默认值
       let changed = false;
       if (!ownMaterial && mat.length) { payload.material_prices = JSON.parse(JSON.stringify(mat)); changed = true; }
       if (!ownMachine && mac.length) { payload.machine_prices = JSON.parse(JSON.stringify(mac)); changed = true; }
+      if (canEdit) {
+        const autoResult = applyInjectionReferencePrices(payload, { overwrite: false });
+        if (autoResult.changed) { changed = true; onChange(); }
+      }
       if (changed || window.__refs.material_meta) {
         renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, userRole);
       }
@@ -3420,6 +3499,12 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       shot_price: m.shot_price ?? null,
       note: m.note || '',
     }));
+  }
+
+  // 已有本单参考表，或全局参考表已加载完成时，进入啤机部即自动补齐空白料价与啤价。
+  // 全局表仍在异步加载时不使用临时兜底值，待上面的加载回调拿到最新价格后再套价。
+  if (canEdit && ((ownMaterial && ownMachine) || window.__refs._ready)) {
+    applyInjectionReferencePrices(payload, { overwrite: false });
   }
 
   const canEditPrices = canEdit;
@@ -3500,6 +3585,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       ]);
       if (mat.length) payload.material_prices = JSON.parse(JSON.stringify(mat));
       if (mac.length) payload.machine_prices = JSON.parse(JSON.stringify(mac));
+      applyInjectionReferencePrices(payload, { overwrite: false });
       onChange();
       renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, userRole);
       alert('✓ 已同步：' + mat.length + ' 料价 + ' + mac.length + ' 机型');
@@ -3565,52 +3651,20 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
           note: m.note || existing.note || '',
         };
       });
+      applyInjectionReferencePrices(payload, { overwrite: false });
       onChange(); renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, userRole);
     };
     const autoBtn = host.querySelector('#btn-auto-price');
     if (autoBtn) autoBtn.onclick = () => {
-      let hit = 0, miss = [];
-      for (const row of payload.injection) {
-        const m = lookupMaterialPrice(row.material, row.material_grade, payload.material_prices);
-        if (m) {
-          row.material_grade = m.model || row.material_grade || '';
-          row.material_unit_price = +(m.price / 454).toFixed(5);
-          hit++;
-        }
-        else {
-          const key = [row.material, row.material_grade].filter(Boolean).join(' ').trim();
-          if (key) miss.push(key);
-        }
-      }
+      const result = applyInjectionReferencePrices(payload, { overwrite: true, machine: false });
       onChange(); renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, userRole);
-      alert(`已套料价：成功 ${hit} 行${miss.length ? ' / 未匹配 ' + miss.length + ' 行: ' + [...new Set(miss)].join(', ') : ''}`);
+      alert(`已套料价：成功 ${result.materialHits} 行${result.materialMisses.length ? ' / 未匹配 ' + result.materialMisses.length + ' 行: ' + [...new Set(result.materialMisses)].join(', ') : ''}`);
     };
     const autoShot = host.querySelector('#btn-auto-shot');
     if (autoShot) autoShot.onclick = () => {
-      let hit = 0, miss = [];
-      for (const row of payload.injection) {
-        const m = lookupMachinePrice(row.machine_model, payload.machine_prices);
-        const sets = num(row.sets) || 1;
-        const target = num(row.target) || 0;
-        if (m && target > 0) {
-          row.shot_price = num(row.mold_part_index) > 0
-            ? 0
-            : +(num(m.price) / sets / target).toFixed(4);
-          if (m.normal) row.machine = m.normal;  // 同步"机台"（=普通机）
-          hit++;
-        } else if (row.machine_model) {
-          miss.push(`${row.machine_model}${target<=0?'(无目标数)':''}`);
-        }
-      }
-      // 即使没目标数也尽量填机台
-      for (const row of payload.injection) {
-        if (!row.machine && row.machine_model) {
-          const m = lookupMachinePrice(row.machine_model, payload.machine_prices);
-          if (m && m.normal) row.machine = m.normal;
-        }
-      }
+      const result = applyInjectionReferencePrices(payload, { overwrite: true, material: false });
       onChange(); renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, userRole);
-      alert(`已套啤价：成功 ${hit} 行${miss.length ? ' / 未处理 ' + miss.length + ' 行: ' + [...new Set(miss)].join(', ') : ''}\n公式：机型价 ÷ 套数 ÷ 目标数`);
+      alert(`已套啤价：成功 ${result.machineHits} 行${result.machineMisses.length ? ' / 未处理 ' + result.machineMisses.length + ' 行: ' + [...new Set(result.machineMisses)].join(', ') : ''}\n公式：机型价 ÷ 套数 ÷ 目标数`);
     };
   }
 
@@ -4967,7 +5021,7 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
             <span style="white-space:nowrap">客供成品</span>
             ${canEdit
               ? `<input class="customer-supplied-name" data-item="${itemIndex}" value="${escapeHtml(item.name || '')}" placeholder="成品名称" style="width:105px">
-                 <input class="customer-supplied-amount" data-item="${itemIndex}" type="number" step="any" value="${item.amount_usd ?? 0}" title="金额 USD" style="width:72px">
+                 <input class="customer-supplied-amount" data-item="${itemIndex}" type="text" value="${escapeHtml(String(item.amount_usd_raw != null && item.amount_usd_raw !== '' ? item.amount_usd_raw : (item.amount_usd ?? 0)))}" title="可输入 USD 金额或公式，如 =2.5+1.25" placeholder="如 =2.5+1.25" style="width:90px">
                  <span>USD</span>
                  <button class="mini danger customer-supplied-del" data-item="${itemIndex}" title="删除">×</button>`
               : `<span>${escapeHtml(item.name || '未命名')}</span>`}
@@ -5046,7 +5100,11 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
       onChange();
     });
     host.querySelectorAll('.customer-supplied-amount').forEach(inp => inp.oninput = () => {
-      s.customer_supplied_products[+inp.dataset.item].amount_usd = inp.value === '' ? 0 : Number(inp.value);
+      const item = s.customer_supplied_products[+inp.dataset.item];
+      const parsed = parseFormulaInput(inp.value);
+      item.amount_usd = parsed == null ? 0 : parsed;
+      item.amount_usd_raw = inp.value;
+      inp.style.color = inp.value.trim() !== '' && parsed == null ? '#b91c1c' : '';
       onChange(); refresh();
     });
     host.querySelectorAll('.customer-supplied-del').forEach(btn => btn.onclick = () => {
@@ -5233,6 +5291,25 @@ async function renderQuotePage() {
   const canEditMine = mySec.status !== 'approved';
 
   const host = document.getElementById('sections'); host.innerHTML = '';
+  const dirtyByDept = new Map();
+  const saveHandlers = new Map();
+  let dirtyTrackingReady = false;
+  const markDirty = dept => {
+    if (!dirtyTrackingReady || !dept) return;
+    dirtyByDept.set(dept, true);
+    const tab = host.querySelector(`.dept-tab[data-dept="${dept}"]`);
+    if (tab) tab.title = '有未保存修改';
+  };
+  const clearDirty = dept => {
+    dirtyByDept.set(dept, false);
+    const tab = host.querySelector(`.dept-tab[data-dept="${dept}"]`);
+    if (tab) tab.title = '';
+  };
+  const activateTab = (tabKey, dept) => {
+    sessionStorage.setItem(tabKey, dept);
+    host.querySelectorAll('.dept-tab').forEach(tab => tab.classList.toggle('active', tab.dataset.dept === dept));
+    host.querySelectorAll('.section-pane').forEach(pane => { pane.style.display = pane.dataset.dept === dept ? '' : 'none'; });
+  };
 
   // 基于权限决定能看哪些部门 tab
   const visibleDepts = sections.filter(s => hasPerm(me, DEPT_MENU[s.dept], 'view') || s.dept === me.dept);
@@ -5243,17 +5320,28 @@ async function renderQuotePage() {
     const tabBar = document.createElement('div'); tabBar.className = 'dept-tabs';
     const tabKey = 'activeTab:' + quote.id;
     const savedTab = sessionStorage.getItem(tabKey) || me.dept;
+    const switchTab = async targetDept => {
+      const activeDept = host.querySelector('.dept-tab.active')?.dataset.dept;
+      if (!activeDept || activeDept === targetDept) return;
+      if (dirtyByDept.get(activeDept)) {
+        const activeSection = sections.find(section => section.dept === activeDept);
+        const action = await requestUnsavedAction(activeSection?.dept_name || DEPT_MENU[activeDept] || activeDept);
+        if (action === 'cancel') return;
+        if (action === 'save') {
+          const save = saveHandlers.get(activeDept);
+          if (!save) { alert('当前部门暂时无法保存，请先使用页面上的保存按钮。'); return; }
+          try { await save(); }
+          catch (error) { alert(error.message); return; }
+        }
+      }
+      activateTab(tabKey, targetDept);
+    };
     visibleDepts.forEach(s => {
       const tab = document.createElement('div'); tab.className = 'dept-tab';
       if (s.dept === savedTab) tab.classList.add('active');
       tab.dataset.dept = s.dept;
       tab.innerHTML = `${s.dept_name} <small class="badge ${STATUS_CLS[s.status]}">${STATUS_TXT[s.status]}</small>`;
-      tab.onclick = () => {
-        sessionStorage.setItem(tabKey, s.dept);
-        host.querySelectorAll('.dept-tab').forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-        host.querySelectorAll('.section-pane').forEach(p => p.style.display = p.dataset.dept === s.dept ? '' : 'none');
-      };
+      tab.onclick = () => switchTab(s.dept);
       tabBar.appendChild(tab);
     });
     if (canSeeSummary) {
@@ -5262,12 +5350,7 @@ async function renderQuotePage() {
       if (savedTab === '__summary__') sumTab.classList.add('active');
       sumTab.dataset.dept = '__summary__';
       sumTab.innerHTML = '📊 汇总';
-      sumTab.onclick = () => {
-        sessionStorage.setItem(tabKey, '__summary__');
-        host.querySelectorAll('.dept-tab').forEach(t => t.classList.remove('active'));
-        sumTab.classList.add('active');
-        host.querySelectorAll('.section-pane').forEach(p => p.style.display = p.dataset.dept === '__summary__' ? '' : 'none');
-      };
+      sumTab.onclick = () => switchTab('__summary__');
       tabBar.appendChild(sumTab);
     }
     host.appendChild(tabBar);
@@ -5295,8 +5378,13 @@ async function renderQuotePage() {
       ${mySec.review_comment ? `<span class="muted">${mySec.review_comment}</span>` : ''}
     </div>`;
 
-  const onChange = () => {}; // 实时刷新留给各 render 内部
+  const onChange = () => markDirty(mySec.dept); // 各 render 内部实时刷新，同时记录未保存状态
   const body = wb.querySelector('#wb-body');
+  saveHandlers.set(mySec.dept, async () => {
+    await putSection(mySec, payload, false);
+    mySec.payload_json = JSON.stringify(payload);
+    clearDirty(mySec.dept);
+  });
 
   // 取工程已审模具，供啤机参考行使用
   // 工程模具摘要：后端不论审核状态都会返回，供啤机/喷油/装配作参考
@@ -5356,7 +5444,7 @@ async function renderQuotePage() {
       const body = c.querySelector('.ro-body');
       const renderBody = () => {
         body.innerHTML = '';
-        const onChangeOther = () => {};
+        const onChangeOther = () => markDirty(s.dept);
         if (s.dept === 'engineering') renderEngineering(body, sectionPayload, inEdit, onChangeOther, fxRate, fxRateUsd, quote.qty);
         else if (s.dept === 'electronic') renderElectronic(body, sectionPayload, inEdit, onChangeOther, fxRate, fxRateUsd);
         else if (s.dept === 'sales') renderSales(body, sectionPayload, quote, inEdit, inEdit, sections, onChangeOther, async (patch) => {
@@ -5368,6 +5456,11 @@ async function renderQuotePage() {
         else if (s.dept === 'sewing') renderSewing(body, sectionPayload, inEdit, onChangeOther, fxRate);
         else if (s.dept === 'assembly') renderAssembly(body, sectionPayload, inEdit, onChangeOther, fxRate);
       };
+      saveHandlers.set(s.dept, async () => {
+        await putSection(s, sectionPayload, false);
+        s.payload_json = JSON.stringify(sectionPayload);
+        clearDirty(s.dept);
+      });
       renderBody();
 
       // 绑定本卡操作（每次重渲染都重新绑定）
@@ -5385,6 +5478,7 @@ async function renderQuotePage() {
             }
             if (act === 'exit-edit') {
               inEdit = false;
+              clearDirty(s.dept);
               // 重新解析原始 payload，丢弃未保存改动
               Object.keys(sectionPayload).forEach(k => delete sectionPayload[k]);
               Object.assign(sectionPayload, s.payload_json ? JSON.parse(s.payload_json) : {});
@@ -5398,6 +5492,8 @@ async function renderQuotePage() {
               if (act === 'save' || act === 'submit') {
                 if (!confirm(`确认保存到 ${s.dept_name} section？该部门已有数据会被覆盖。`)) return;
                 await putSection(s, sectionPayload, act === 'submit');
+                s.payload_json = JSON.stringify(sectionPayload);
+                clearDirty(s.dept);
               } else if (act === 'approve') {
                 await api('/reviews/' + s.id, { method: 'POST', body: JSON.stringify({ action: 'approve' }) });
               } else if (act === 'reject') {
@@ -5425,6 +5521,8 @@ async function renderQuotePage() {
       p.style.display = p.dataset.dept === savedTab ? '' : 'none';
     });
   }
+  // 部分渲染器会在初始化时补默认值；等这些初始化回调执行完再开始记录用户修改。
+  setTimeout(() => { dirtyTrackingReady = true; }, 0);
 
   // 导出按钮
   const exp = document.createElement('div'); exp.className = 'card';
@@ -5438,6 +5536,8 @@ async function renderQuotePage() {
   const saveSection = async (submit) => {
     try {
       await putSection(mySec, payload, submit);
+      mySec.payload_json = JSON.stringify(payload);
+      clearDirty(mySec.dept);
       renderQuotePage();
     } catch (e) { alert(e.message); }
   };

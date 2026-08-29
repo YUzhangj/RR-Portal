@@ -127,7 +127,7 @@ function applyPrintLayout(workbook) {
     worksheet.pageSetup = {
       ...(worksheet.pageSetup || {}),
       paperSize: 9,
-      orientation: 'landscape',
+      orientation: 'portrait',
       fitToPage: true,
       fitToWidth: 1,
       fitToHeight: 0,
@@ -316,7 +316,7 @@ function patchPaintingProductMix(ws, painting) {
   const groups = productGroups(payload, items);
   if (groups.length <= 1) return;
 
-  const titleRow = findRow(ws, '三、二次加工（印喷报价）');
+  const titleRow = findRow(ws, '五、二次加工（印喷报价）');
   if (!titleRow) return;
   const headerRow = titleRow + 1;
   // 喷油表使用两层表头（工序名 + 数量/单价），数据从标题下第 3 行开始。
@@ -371,18 +371,19 @@ function patchSimpleIndoColumns(ws, payloads) {
   const patches = [
     { title: '二、注塑部分', dept: payloads.molding || {}, amountCol: 14, indoCol: 15, weighted: true },
     { title: '二·B、吹气部分 (HKD)', dept: payloads.molding || {}, amountCol: 12, indoCol: 15 },
-    { title: '三、二次加工（印喷报价）', dept: payloads.painting || {}, amountCol: 24, indoCol: 25, factor: 0.3, totalFromAmount: true },
+    { title: '五、二次加工（印喷报价）', refKey: 'paintingDetail', dept: payloads.painting || {}, amountCol: 24, indoCol: 25, factor: 0.3, totalFromAmount: true },
     {
-      title: '四、电子',
+      title: '六、电子',
+      refKey: 'electronic',
       dept: electronic,
       amountCol: 10,
       indoCol: 11,
       rows: electronicRows,
       exclude: isIcElectronicRow,
     },
-    { title: '五、五金', dept: payloads.engineering || {}, amountCol: 10, indoCol: 11 },
-    { title: '六、辅助材料', dept: payloads.engineering || {}, amountCol: 10, indoCol: 11 },
-    { title: '七、包装材料', dept: payloads.engineering || {}, amountCol: 10, indoCol: 11 },
+    { title: '七、五金', refKey: 'hardware', dept: payloads.engineering || {}, amountCol: 10, indoCol: 11 },
+    { title: '八、包装材料', refKey: 'packaging', dept: payloads.engineering || {}, amountCol: 10, indoCol: 11 },
+    { title: '九、辅助材料', refKey: 'aux', dept: payloads.engineering || {}, amountCol: 10, indoCol: 11 },
   ];
 
   const refs = {};
@@ -451,7 +452,103 @@ function patchSimpleIndoColumns(ws, payloads) {
     refs[patch.title] = `${colLetter(patch.amountCol)}${totalRow}`;
     refs[`${patch.title}:indo`] = `${colLetter(patch.indoCol)}${totalRow}`;
     refs[`${patch.title}:indoBase`] = eligibleAmountCells.join('+') || '0';
+    if (patch.refKey) {
+      refs[patch.refKey] = refs[patch.title];
+      refs[`${patch.refKey}:indo`] = refs[`${patch.title}:indo`];
+      refs[`${patch.refKey}:indoBase`] = refs[`${patch.title}:indoBase`];
+    }
   }
+  return refs;
+}
+
+function patchUnifiedCostTable(ws, payloads) {
+  let headerRow = 0;
+  for (let row = 1; row <= ws.rowCount; row += 1) {
+    if (String(ws.getCell(row, 1).value || '').trim() === '序号'
+      && String(ws.getCell(row, 2).value || '').trim() === '类别'
+      && String(ws.getCell(row, 3).value || '').trim() === '名称'
+      && String(ws.getCell(row, 11).value || '').trim() === '金额 HKD') {
+      headerRow = row;
+      break;
+    }
+  }
+  if (!headerRow) return {};
+
+  let totalRow = 0;
+  for (let row = headerRow + 1; row <= ws.rowCount; row += 1) {
+    if (String(ws.getCell(row, 1).value || '').trim() === '合计 HKD') {
+      totalRow = row;
+      break;
+    }
+  }
+  if (!totalRow) return {};
+
+  const refs = { partRows: { electronic: [], hardware: [], packaging: [], aux: [] } };
+  const buckets = {
+    '组装人工': 'asmLabor',
+    '包装/混装人工': 'pkgLabor',
+    '印喷': 'secondProc',
+    '电子': 'electronic',
+    '五金': 'hardware',
+    '包装材料': 'packaging',
+    '辅助材料': 'aux',
+    '车缝': 'sewingHkd',
+  };
+  const amountCells = {};
+  const eligibleElectronicCells = [];
+  const electronicRows = ((payloads.electronic && payloads.electronic.electronics) || []).length
+    ? payloads.electronic.electronics
+    : (((payloads.engineering || {}).electronics) || []);
+  const payloadRows = {
+    electronic: electronicRows.filter(item => !item.is_subtotal),
+    hardware: (((payloads.engineering || {}).hardware) || []).filter(item => !item.is_subtotal),
+    packaging: (((payloads.engineering || {}).packaging_materials) || []).filter(item => !item.is_subtotal),
+    aux: (((payloads.engineering || {}).aux_materials) || []).filter(item => !item.is_subtotal),
+  };
+  const indexes = { electronic: 0, hardware: 0, packaging: 0, aux: 0 };
+
+  for (let row = headerRow + 1; row < totalRow; row += 1) {
+    const category = String(ws.getCell(row, 2).value || '').trim();
+    const key = buckets[category];
+    if (!key) continue;
+    amountCells[key] = amountCells[key] || [];
+    amountCells[key].push(`K${row}`);
+    if (key === 'sewingHkd' && String(ws.getCell(row, 3).value || '').trim() === '车缝物料') {
+      refs.sewingMaterialRmb = `I${row}`;
+    }
+    if (!Object.prototype.hasOwnProperty.call(payloadRows, key)) continue;
+
+    const item = payloadRows[key][indexes[key]++] || {};
+    const qtyFormula = toExcelFormulaInput(item.qty_raw);
+    const priceFormula = toExcelFormulaInput(item.unit_price_rmb_raw);
+    const qtyFractionFmt = fractionNumberFormat(item.qty_raw);
+    const priceFractionFmt = fractionNumberFormat(item.unit_price_rmb_raw);
+    if (qtyFormula) ws.getCell(row, 8).value = { formula: qtyFormula, result: num(item.qty) };
+    else if (qtyFractionFmt) ws.getCell(row, 8).numFmt = qtyFractionFmt;
+    if (priceFormula && String(item.source_currency || '').toUpperCase() !== 'USD') {
+      ws.getCell(row, 9).value = { formula: priceFormula, result: num(item.unit_price_rmb) };
+    } else if (priceFractionFmt && String(item.source_currency || '').toUpperCase() !== 'USD') {
+      ws.getCell(row, 9).numFmt = priceFractionFmt;
+    }
+    ws.getCell(row, 11).value = {
+      formula: `H${row}*J${row}`,
+      result: num(ws.getCell(row, 11).value && ws.getCell(row, 11).value.result),
+    };
+    refs.partRows[key].push({
+      name: item.name || ws.getCell(row, 3).value || '',
+      spec: item.spec || ws.getCell(row, 4).value || '',
+      category: item.category || '',
+      cell: `K${row}`,
+    });
+    if (key === 'electronic' && !isIcElectronicRow(item)) eligibleElectronicCells.push(`K${row}`);
+  }
+
+  Object.entries(buckets).forEach(([, key]) => {
+    refs[key] = (amountCells[key] || []).join('+') || '0';
+  });
+  refs['electronic:indoBase'] = eligibleElectronicCells.join('+') || '0';
+  refs.unifiedCostTotal = `K${totalRow}`;
+  refs.unifiedIndoTotal = `L${totalRow}`;
   return refs;
 }
 
@@ -459,12 +556,12 @@ function patchFreeInputFormulas(ws, payloads) {
   const engineering = payloads.engineering || {};
   const sections = [
     {
-      title: '四、电子',
+      title: '六、电子',
       rows: (payloads.electronic && payloads.electronic.electronics) || [],
     },
-    { title: '五、五金', rows: engineering.hardware || [] },
-    { title: '六、辅助材料', rows: engineering.aux_materials || [] },
-    { title: '七、包装材料', rows: engineering.packaging_materials || [] },
+    { title: '七、五金', rows: engineering.hardware || [] },
+    { title: '八、包装材料', rows: engineering.packaging_materials || [] },
+    { title: '九、辅助材料', rows: engineering.aux_materials || [] },
   ];
 
   for (const section of sections) {
@@ -563,7 +660,7 @@ function patchMoldingProductGroups(ws, payloads) {
 function patchZeroCartonRate(ws, payloads) {
   const cartonCalc = payloads.engineering && payloads.engineering.carton_calc;
   if (!cartonCalc || Number(cartonCalc.paper_rate) !== 0) return;
-  const titleRow = findRow(ws, '📦 纸箱 / 运费 计算（参考）');
+  const titleRow = findRow(ws, '📦 纸箱 / 运费 计算');
   if (!titleRow) return;
   const cartons = Array.isArray(cartonCalc.cartons) ? cartonCalc.cartons : [];
   const names = new Set(cartons.map((carton, index) => carton.name || `纸箱${index + 1}`));
@@ -789,7 +886,7 @@ function secondProcSubtotal(painting) {
   );
 }
 
-function appendIndonesiaBlock(ws, row, payloads, refs, fx, styles) {
+function indonesiaEntries(payloads, refs, fx) {
   const engineering = payloads.engineering || {};
   const electronic = payloads.electronic || {};
   const molding = payloads.molding || {};
@@ -799,21 +896,21 @@ function appendIndonesiaBlock(ws, row, payloads, refs, fx, styles) {
   const electronicRows = (electronic.electronics || []).length
     ? electronic.electronics
     : (engineering.electronics || []);
-  const entries = [
+  return [
     {
       label: '工程：五金＋辅助＋包装',
       base: freeSubtotal(engineering.hardware, fx)
         + freeSubtotal(engineering.aux_materials, fx)
         + freeSubtotal(engineering.packaging_materials, fx),
       rate: num(engineering.indo_pct),
-      formula: [refs['五、五金'], refs['六、辅助材料'], refs['七、包装材料']].filter(Boolean).join('+') || '0',
+      formula: [refs.hardware, refs.packaging, refs.aux].filter(Boolean).join('+') || '0',
       note: '三表金额合计',
     },
     {
       label: '电子',
       base: freeSubtotal(electronicRows.filter(row => !isIcElectronicRow(row)), fx),
       rate: num(electronic.indo_pct),
-      formula: refs['四、电子:indoBase'] || '0',
+      formula: refs['electronic:indoBase'] || '0',
       note: '电子金额合计（IC除外）',
     },
     {
@@ -831,24 +928,51 @@ function appendIndonesiaBlock(ws, row, payloads, refs, fx, styles) {
       note: '搪胶金额合计',
     },
     {
-      label: '车缝材料（不含人工）',
+      label: '车缝物料（不含人工）',
       base: sewWeightedMaterialRmb(sewing) / fx,
       rate: num(sewing.indo_pct),
-      formula: refs.sewingMaterialHkd
-        ? `${refs.sewingMaterialHkd}/${fx}`
+      formula: refs.sewingMaterialRmb
+        ? `${refs.sewingMaterialRmb}/${fx}`
         : String(sewWeightedMaterialRmb(sewing) / fx),
-      note: '材料加权合计 RMB ÷ RMB→HKD',
+      note: '车缝物料加权合计 RMB ÷ RMB→HKD',
     },
     {
       label: '二次加工（印喷）',
       base: secondProcSubtotal(painting) * 0.3,
       rate: num(painting.indo_pct),
-      formula: refs['三、二次加工（印喷报价）']
-        ? `${refs['三、二次加工（印喷报价）']}*30%`
+      formula: refs.secondProc
+        ? `${refs.secondProc}*30%`
         : '0',
       note: '喷油总价 × 30%为基数',
     },
   ];
+}
+
+function calculateIndonesiaSummary(workbook, ws, refs) {
+  const terms = [];
+  let total = 0;
+  const append = (sheet, cellRef, formulaRef) => {
+    if (!sheet || !cellRef || cellRef === '0') return;
+    const value = sheet.getCell(cellRef).value;
+    terms.push(formulaRef || cellRef);
+    total += num(value && typeof value === 'object' ? value.result : value);
+  };
+
+  // 统一成本表已经包含：工程三表、电子（IC 除外）、印喷、车缝物料。
+  append(ws, refs.unifiedIndoTotal);
+  // 注塑、吹气与搪胶不在统一成本表中，直接引用各部门已经计算好的运费合计。
+  append(ws, refs['二、注塑部分:indo']);
+  append(ws, refs['二·B、吹气部分 (HKD):indo']);
+  const slushWs = workbook.getWorksheet('搪胶明细');
+  if (slushWs && refs.slushIndo) {
+    append(slushWs, refs.slushIndo, `'搪胶明细'!${refs.slushIndo}`);
+  }
+
+  return { formula: terms.length ? terms.join('+') : '0', total };
+}
+
+function appendIndonesiaBlock(ws, row, payloads, refs, fx, styles) {
+  const entries = indonesiaEntries(payloads, refs, fx);
 
   ws.mergeCells(row, 1, row, 14);
   ws.getCell(row, 1).value = '印尼运费明细（各部门基数 × 点数%）';
@@ -887,7 +1011,11 @@ function appendIndonesiaBlock(ws, row, payloads, refs, fx, styles) {
 }
 
 function findFreightRow(ws, name) {
-  return findRowMatching(ws, value => value === name);
+  let match = null;
+  ws.eachRow(row => row.eachCell(cell => {
+    if (!match && cell.value === name) match = { row: row.number, col: cell.col };
+  }));
+  return match;
 }
 
 function findMainCartonRow(ws) {
@@ -895,7 +1023,7 @@ function findMainCartonRow(ws) {
   for (let row = 1; row < freightHeader; row += 1) {
     const cuft = ws.getCell(row, 5).value;
     const qty = ws.getCell(row, 7).value;
-    if (cuft && qty && row > findRow(ws, '📦 纸箱 / 运费 计算（参考）')) return row;
+    if (cuft && qty && row > findRow(ws, '📦 纸箱 / 运费 计算')) return row;
   }
   return 0;
 }
@@ -951,13 +1079,13 @@ function appendSpinTransportBlock(ws, row, quote, sales, engineering, styles) {
       ws.getCell(row, 2).value = { formula: `L${row}`, result: entry.capacity };
       ws.getCell(row, 3).value = { formula: `M${row}`, result: entry.fee };
     } else {
-      const sourceRow = findFreightRow(ws, entry.source);
+      const sourceCell = findFreightRow(ws, entry.source);
       ws.getCell(row, 2).value = {
-        formula: sourceRow ? `B${sourceRow}` : String(entry.capacity),
+        formula: sourceCell ? ws.getCell(sourceCell.row, sourceCell.col + 1).address : String(entry.capacity),
         result: entry.capacity,
       };
       ws.getCell(row, 3).value = {
-        formula: sourceRow ? `C${sourceRow}` : String(entry.fee),
+        formula: sourceCell ? ws.getCell(sourceCell.row, sourceCell.col + 2).address : String(entry.fee),
         result: entry.fee,
       };
     }
@@ -1003,9 +1131,10 @@ function enhanceWorkbook(workbook, { quote, sections }) {
   patchFreeInputFormulas(ws, payloads);
   patchZeroCartonRate(ws, payloads);
   const refs = patchSimpleIndoColumns(ws, payloads);
+  Object.assign(refs, patchUnifiedCostTable(ws, payloads));
   if (paintingWs) Object.assign(refs, patchSimpleIndoColumns(paintingWs, payloads));
   Object.assign(refs, patchSlush(slushWs || ws, payloads.slush || {}));
-  const paintingSummaryRow = findRow(ws, '三、二次加工（印喷汇总）');
+  const paintingSummaryRow = findRow(ws, '五、二次加工（印喷汇总）');
   if (paintingSummaryRow && refs.secondProc) {
     ws.getCell(paintingSummaryRow + 1, 9).value = {
       formula: `'喷油明细'!${refs.secondProc}`,
@@ -1031,8 +1160,8 @@ function enhanceWorkbook(workbook, { quote, sections }) {
     refs.slush = `I${slushSummaryRow + 1}`;
   }
   const sewingRefs = patchSewingDetail(workbook, payloads.sewing || {});
-  if (sewingRefs.sewingMaterialHkd) {
-    refs.sewingMaterialHkd = String(sewingRefs.sewingMaterialHkd);
+  if (!refs.sewingMaterialRmb && sewingRefs.sewingMaterialHkd) {
+    refs.sewingMaterialRmb = String(sewingRefs.sewingMaterialHkd);
   }
 
   const summaryTitleRow = findRow(ws, '十、合计');
@@ -1040,34 +1169,36 @@ function enhanceWorkbook(workbook, { quote, sections }) {
     applyPrintLayout(workbook);
     return workbook;
   }
-  // 若存在生产模具费用，印尼运费插在它前面，使导出顺序为：
-  // 印尼运费明细 → 生产模具费用/各项分摊 → 十、合计。
+  // 主表不再重复插入印尼运费明细，只在「十、合计」显示汇总。
+  // SPIN 专用运费计算表仍放在生产模具费用前面。
   const moldCostsTitleRow = findRow(ws, '生产模具费用');
   const insertRow = moldCostsTitleRow || summaryTitleRow;
-  const extraRows = 10 + (String(quote && quote.customer || '').trim().toUpperCase() === 'SPIN' ? 10 : 0);
+  const isSpin = String(quote && quote.customer || '').trim().toUpperCase() === 'SPIN';
+  const extraRows = isSpin ? 10 : 0;
   const styles = {
     section: cloneStyle(ws.getCell(summaryTitleRow, 1).style),
     header: cloneStyle(ws.getCell(Math.max(1, summaryTitleRow - 10), 1).style),
     data: cloneStyle(ws.getCell(Math.max(1, summaryTitleRow - 9), 1).style),
     total: cloneStyle(ws.getCell(summaryTitleRow + 2, 1).style),
   };
-  shiftRowsDown(ws, insertRow, extraRows);
-  let row = insertRow;
-  const indo = appendIndonesiaBlock(ws, row, payloads, refs, fx, styles);
-  row = indo.nextRow;
-  row = appendSpinTransportBlock(
-    ws,
-    row,
-    quote,
-    sales,
-    payloads.engineering || {},
-    styles
-  );
+  if (extraRows > 0) {
+    shiftRowsDown(ws, insertRow, extraRows);
+    appendSpinTransportBlock(
+      ws,
+      insertRow,
+      quote,
+      sales,
+      payloads.engineering || {},
+      styles
+    );
+  }
+
+  const indo = calculateIndonesiaSummary(workbook, ws, refs);
 
   const movedSummaryTitle = findRow(ws, '十、合计');
   if (movedSummaryTitle) {
     ws.getCell(movedSummaryTitle + 2, 9).value = {
-      formula: indo.totalCell,
+      formula: indo.formula,
       result: indo.total,
     };
     ws.getCell(movedSummaryTitle + 2, 9).numFmt = HKD4;

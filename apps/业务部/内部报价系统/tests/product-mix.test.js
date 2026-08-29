@@ -90,6 +90,16 @@ test('molding UI visually separates multiple product groups', () => {
   assert.match(styles, /tbody td\.molding-machine-key input/);
 });
 
+test('molding defaults automatically fill missing material and shot prices without overwriting manual prices', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  assert.match(source, /function applyInjectionReferencePrices\(payload/);
+  assert.match(source, /isBlankInjectionPrice\(row\.material_unit_price\)/);
+  assert.match(source, /isBlankInjectionPrice\(row\.shot_price\)/);
+  assert.match(source, /applyInjectionReferencePrices\(payload, \{ overwrite: false \}\)/);
+  assert.match(source, /applyInjectionReferencePrices\(payload, \{ overwrite: true, machine: false \}\)/);
+  assert.match(source, /applyInjectionReferencePrices\(payload, \{ overwrite: true, material: false \}\)/);
+});
+
 test('electronic IC rows are excluded only from Indonesian freight', () => {
   const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
   assert.match(source, /function isIcElectronicRow\(row\)/);
@@ -104,4 +114,20 @@ test('shipping UI supports named customer-supplied products in final USD', () =>
   assert.match(source, /\+ customerSuppliedUSD/);
   assert.match(source, /customer-supplied-name/);
   assert.match(source, /\+ 客供成品/);
+});
+
+test('tax summary does not repeat the Indonesian freight field', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  assert.doesNotMatch(source, /id="tk-indo-freight"/);
+  assert.match(source, /misc: num\(sales\.pricing_summary\?\.indo_freight\) \+ surtaxHkd/);
+});
+
+test('department tabs require save or cancel before leaving dirty edits', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  assert.match(source, /function requestUnsavedAction\(deptName\)/);
+  assert.match(source, /makeButton\('取消', 'cancel'\)/);
+  assert.match(source, /makeButton\('保存', 'save'\)/);
+  assert.doesNotMatch(source, /不保存跳转/);
+  assert.match(source, /dirtyByDept\.get\(activeDept\)/);
+  assert.match(source, /await save\(\)/);
 });
