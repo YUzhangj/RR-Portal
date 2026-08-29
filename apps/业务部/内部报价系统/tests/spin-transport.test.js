@@ -475,15 +475,20 @@ test('internal quotation export includes the SPIN transportation formula table',
   });
   const worksheet = workbook.getWorksheet('报价明细');
   let titleRow = 0;
+  let yt40Source = null;
   worksheet.eachRow(row => {
     if (row.getCell(1).value === 'SPIN 报客表运费计算（公式）') titleRow = row.number;
+    row.eachCell(cell => {
+      if (!yt40Source && cell.value === 'YT 40柜') yt40Source = { row: row.number, col: cell.col };
+    });
   });
   assert.ok(titleRow, 'SPIN transportation table should exist');
+  assert.ok(yt40Source, 'right-side freight panel should provide the YT 40 container source');
 
   const firstDataRow = titleRow + 2;
   assert.equal(worksheet.getCell(firstDataRow, 1).value, '盐田 40HQ');
-  assert.match(worksheet.getCell(firstDataRow, 2).value.formula, /B\d+/);
-  assert.match(worksheet.getCell(firstDataRow, 3).value.formula, /C\d+/);
+  assert.equal(worksheet.getCell(firstDataRow, 2).value.formula, worksheet.getCell(yt40Source.row, yt40Source.col + 1).address);
+  assert.equal(worksheet.getCell(firstDataRow, 3).value.formula, worksheet.getCell(yt40Source.row, yt40Source.col + 2).address);
   assert.match(worksheet.getCell(firstDataRow, 8).value.formula, /IFERROR\(INT\(B\d+\/F\d+\),0\)/);
   assert.match(worksheet.getCell(firstDataRow, 9).value.formula, /H\d+\*G\d+/);
   assert.match(worksheet.getCell(firstDataRow, 10).value.formula, /C\d+\/D\d+\/I\d+/);
