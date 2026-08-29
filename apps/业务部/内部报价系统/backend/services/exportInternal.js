@@ -1135,9 +1135,9 @@ function enhanceWorkbook(workbook, { quote, sections }) {
   if (paintingWs) Object.assign(refs, patchSimpleIndoColumns(paintingWs, payloads));
   Object.assign(refs, patchSlush(slushWs || ws, payloads.slush || {}));
   const paintingSummaryRow = findRow(ws, '五、二次加工（印喷汇总）');
-  if (paintingSummaryRow && refs.secondProc) {
+  if (paintingSummaryRow && refs.paintingDetail) {
     ws.getCell(paintingSummaryRow + 1, 9).value = {
-      formula: `'喷油明细'!${refs.secondProc}`,
+      formula: `'喷油明细'!${refs.paintingDetail}`,
       result: weightedRowsSum(
         payloads.painting || {},
         (payloads.painting && payloads.painting.painting_items) || [],
@@ -1148,6 +1148,8 @@ function enhanceWorkbook(workbook, { quote, sections }) {
       ),
     };
     ws.getCell(paintingSummaryRow + 1, 9).numFmt = HKD4;
+    // 印尼运费与后续汇总统一引用主表上的印喷汇总单元格，避免把喷油明细
+    // 工作表里的裸地址误当作主表地址，Excel 重算后得到 0。
     refs.secondProc = `I${paintingSummaryRow + 1}`;
   }
   const slushSummaryRow = findRow(ws, '二·C、搪胶部分（汇总）');
