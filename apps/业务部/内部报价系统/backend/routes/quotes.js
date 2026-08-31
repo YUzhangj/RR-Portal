@@ -44,10 +44,17 @@ router.get('/customers', async (req, res) => {
   const isAdmin = req.user.perms && req.user.perms['账号管理'] && req.user.perms['账号管理'].can_admin;
   const customers = isAdmin
     ? (await db.prepare(`
-        SELECT DISTINCT customer FROM quotes
-        WHERE factory_code = ? AND customer IS NOT NULL AND customer != ''
+        SELECT customer FROM (
+          SELECT customer FROM quotes WHERE factory_code = ?
+          UNION
+          SELECT uc.customer
+          FROM user_customers uc
+          JOIN user_factories uf ON uf.user_id = uc.user_id
+          WHERE uf.factory_code = ?
+        ) configured_customers
+        WHERE customer IS NOT NULL AND customer != ''
         ORDER BY customer
-      `).all(req.user.active_factory_code)).map(r => r.customer)
+      `).all(req.user.active_factory_code, req.user.active_factory_code)).map(r => r.customer)
     : (await db.prepare('SELECT customer FROM user_customers WHERE user_id = ? ORDER BY customer')
       .all(req.user.id)).map(r => r.customer);
   res.json({ customers });
@@ -63,6 +70,11 @@ router.post('/', async (req, res) => {
   if (!normalizedQuoteNo || !normalizedProductName || !normalizedCustomer) {
     return res.status(400).json({ error: '货号、产品名称和客户均为必填项' });
   }
+  if (req.user.role !== 'admin') {
+    const allowedCustomer = await db.prepare('SELECT 1 FROM user_customers WHERE user_id = ? AND customer = ?')
+      .get(req.user.id, normalizedCustomer);
+    if (!allowedCustomer) return res.status(403).json({ error: '该客户不在当前账号的授权范围内' });
+  }
 
   const tx = db.transaction(async () => {
     const info = await db.prepare(`
@@ -74,11 +86,6 @@ router.post('/', async (req, res) => {
     for (const d of DEPT_CODES) await ins.run(id, d);
     await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action) VALUES (?, 'sales', ?, 'create')`)
       .run(id, req.user.name);
-    // 新客户建单后自动加入当前业务账号的可见范围，避免建完后自己看不到。
-    if (req.user.role !== 'admin') {
-      await db.prepare('INSERT INTO user_customers (user_id, customer) VALUES (?, ?) ON CONFLICT DO NOTHING')
-        .run(req.user.id, normalizedCustomer);
-    }
     return id;
   });
 

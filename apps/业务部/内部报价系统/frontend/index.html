@@ -64,7 +64,7 @@
             <label><span>版本</span><input id="q-version" placeholder="选填，如 V1" /></label>
             <label><span>客户 <b>*</b></span>
               <div id="q-customer-combo" class="combo">
-                <input id="q-customer" placeholder="选择或输入客户" autocomplete="off" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="q-customer-list" required />
+                <input id="q-customer" placeholder="请选择授权客户" autocomplete="off" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="q-customer-list" readonly required />
                 <button type="button" id="q-customer-toggle" class="combo-caret" tabindex="-1" aria-label="展开客户列表">▾</button>
                 <div id="q-customer-list" class="combo-list hidden" role="listbox"></div>
               </div>
@@ -125,6 +125,6 @@
       };
     })();
   </script>
-  <script src="./main.js?v=20260818-quote-filters"></script>
+  <script src="./main.js?v=20260831-authorized-customer-selector"></script>
 </body>
 </html>

@@ -250,7 +250,7 @@ if ($('btn-create')) $('btn-create').onclick = async () => {
   } catch (e) { alert(e.message); }
 };
 
-// 客户组合框：可从本人可见客户中选择，也可直接输入新客户。
+// 客户组合框：仅可从当前账号已授权客户中选择。
 window.__customers = [];
 async function loadCustomers() {
   try {
@@ -280,15 +280,11 @@ async function loadCustomers() {
     const query = input.value.trim();
     const lowered = query.toLowerCase();
     const matches = window.__customers.filter(c => c.toLowerCase().includes(lowered));
-    const exact = window.__customers.some(c => c === query);
     let html = '';
-    if (query && !exact) {
-      html += `<div class="combo-item combo-new" data-val="${esc(query)}" role="option">＋ 新建客户「${esc(query)}」</div>`;
-    }
     if (matches.length) {
       html += matches.map(c => `<div class="combo-item" data-val="${esc(c)}" role="option">${esc(c)}</div>`).join('');
     } else if (!query) {
-      html += '<div class="combo-empty">暂无已设置客户，直接输入即可新建</div>';
+      html += '<div class="combo-empty">当前账号暂无授权客户，请联系管理员配置</div>';
     }
     list.innerHTML = html;
     activeIdx = -1;
