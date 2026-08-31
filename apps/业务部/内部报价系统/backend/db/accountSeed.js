@@ -5,7 +5,7 @@ const { templateFor } = require('../permissions/role_templates');
 
 const MIGRATION_KEY = 'configured_accounts_20260831_v1';
 const SEED_FILE = path.join(__dirname, 'account-seed.csv');
-const DEPTS = { 业务: 'sales', 工程: 'engineering', 电子: 'electronic', 车缝: 'sewing', 喷油: 'painting', 搪胶: 'slush', 啤机部: 'molding' };
+const DEPTS = { 业务: 'sales', 工程: 'engineering', 电子: 'electronic', 车缝: 'sewing', 喷油: 'painting', 搪胶: 'slush', 啤机部: 'molding', 装配部: 'assembly' };
 
 function loadAccounts() {
   return fs.readFileSync(SEED_FILE, 'utf8').replace(/^\uFEFF/, '').trim().split(/\r?\n/).slice(1).map(line => {
