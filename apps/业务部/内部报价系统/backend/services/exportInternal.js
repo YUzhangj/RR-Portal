@@ -4,6 +4,7 @@
 // check rejects a new blob larger than 50 KB, so new formula sections live in
 // this small post-processor instead of growing exportXlsx.js further.
 const { buildWorkbook: buildBaseWorkbook } = require('./exportXlsx');
+const { isSpinCustomer } = require('./customerProfiles');
 const { toExcelFormulaInput, fractionNumberFormat } = require('../../frontend/formula-input');
 const {
   ensureExplicitProductGroups,
@@ -1030,7 +1031,7 @@ function findMainCartonRow(ws) {
 }
 
 function appendSpinTransportBlock(ws, row, quote, sales, engineering, styles) {
-  if (String(quote && quote.customer || '').trim().toUpperCase() !== 'SPIN') return row;
+  if (!isSpinCustomer(quote && quote.customer)) return row;
   const freight = sales.freight_calc || {};
   const spin = sales.spin_transport || {};
   const fx = num(spin.fx_hkd_usd) || 7.75;
@@ -1187,7 +1188,7 @@ function enhanceWorkbook(workbook, { quote, sections }) {
   // SPIN 专用运费计算表仍放在生产模具费用前面。
   const moldCostsTitleRow = findRow(ws, '生产模具费用');
   const insertRow = moldCostsTitleRow || summaryTitleRow;
-  const isSpin = String(quote && quote.customer || '').trim().toUpperCase() === 'SPIN';
+  const isSpin = isSpinCustomer(quote && quote.customer);
   const extraRows = isSpin ? 10 : 0;
   const styles = {
     section: cloneStyle(ws.getCell(summaryTitleRow, 1).style),

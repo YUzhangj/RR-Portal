@@ -9,6 +9,14 @@ const {
   exportSpin,
   sectionsToSpinData,
 } = require('../backend/services/exportSpin');
+const { isSpinCustomer, vqCustomerProfile } = require('../backend/services/customerProfiles');
+
+test('SpinMaster Indonesia customer uses the legacy SPIN profile', () => {
+  assert.equal(isSpinCustomer('SpinMaster-毛绒（印尼）'), true);
+  assert.equal(vqCustomerProfile('SpinMaster-毛绒（印尼）'), 'SPIN');
+  assert.equal(vqCustomerProfile('SPIN'), 'SPIN');
+  assert.equal(vqCustomerProfile('TOMY'), 'TOMY');
+});
 
 test('SPIN data preserves named customer-supplied products for misc-cost rows', () => {
   const data = sectionsToSpinData({
@@ -107,7 +115,7 @@ test('SPIN VQ uses the shared paper rate instead of stale legacy carton prices',
       id: 328,
       quote_no: 'SPIN-CARTON-RATE',
       product_name: 'Carton Plush',
-      customer: 'SPIN',
+      customer: 'SpinMaster-毛绒（印尼）',
       qty: 1000,
     },
     sections: [
@@ -453,7 +461,7 @@ test('internal quotation export includes the SPIN transportation formula table',
       id: 1,
       quote_no: 'SPIN-INTERNAL',
       product_name: 'Formula Plush',
-      customer: 'SPIN',
+      customer: 'SpinMaster-毛绒（印尼）',
     },
     sections: [
       {

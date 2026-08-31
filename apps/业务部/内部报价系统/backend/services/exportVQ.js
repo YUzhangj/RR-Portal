@@ -11,6 +11,7 @@
  */
 const ExcelJS = require('exceljs');
 const { exportSpin } = require('./exportSpin');
+const { vqCustomerProfile } = require('./customerProfiles');
 const { readTemplateParts } = require('./templateParts');
 const { customerEnglish } = require('./vqEnglish');
 const { ensureExplicitProductGroups, weightedRowsSum } = require('./productMix');
@@ -1069,7 +1070,7 @@ function sectionsToData({ quote, sections }) {
 // ─── 对外入口 ────────────────────────────────────────────────────────────────
 
 async function exportVQ({ quote, sections }) {
-  const client = String(quote.customer || '').trim().toUpperCase();
+  const client = vqCustomerProfile(quote.customer);
   if (client === 'SPIN') {
     return exportSpin({ quote, sections });
   }

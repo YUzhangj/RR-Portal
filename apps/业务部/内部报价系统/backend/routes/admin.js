@@ -41,7 +41,11 @@ router.get('/users', async (req, res) => {
     FROM users u
     LEFT JOIN departments d ON d.code = u.dept
     LEFT JOIN factories f ON f.code = u.factory_code
-    ORDER BY u.id
+    ORDER BY
+      CASE WHEN u.username = 'admin' THEN 0
+           WHEN u.role = 'admin' THEN 1
+           ELSE 2 END,
+      u.id
   `).all();
   const factoryRows = await db.prepare('SELECT user_id, factory_code FROM user_factories ORDER BY user_id, factory_code').all();
   const factoryMap = new Map();
@@ -232,18 +236,36 @@ router.delete('/users/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
-// GET /api/admin/customers — 现有所有 distinct 客户
+// GET /api/admin/customers — 当前厂区已有报价或已预授权过的所有 distinct 客户
 router.get('/customers', async (req, res) => {
   const userId = Number(req.query.user_id);
   const rows = userId
     ? await db.prepare(`
-        SELECT DISTINCT q.customer FROM quotes q
-        WHERE q.factory_code IN (SELECT factory_code FROM user_factories WHERE user_id = ?)
-          AND q.customer IS NOT NULL AND q.customer != ''
-        ORDER BY q.customer
-      `).all(userId)
-    : await db.prepare("SELECT DISTINCT customer FROM quotes WHERE factory_code = ? AND customer IS NOT NULL AND customer != '' ORDER BY customer")
-        .all(req.user.active_factory_code);
+        SELECT customer FROM (
+          SELECT q.customer
+          FROM quotes q
+          WHERE q.factory_code IN (SELECT factory_code FROM user_factories WHERE user_id = ?)
+          UNION
+          SELECT uc.customer
+          FROM user_customers uc
+          JOIN user_factories uf ON uf.user_id = uc.user_id
+          WHERE uf.factory_code IN (SELECT factory_code FROM user_factories WHERE user_id = ?)
+        ) scoped_customers
+        WHERE customer IS NOT NULL AND customer != ''
+        ORDER BY customer
+      `).all(userId, userId)
+    : await db.prepare(`
+        SELECT customer FROM (
+          SELECT customer FROM quotes WHERE factory_code = ?
+          UNION
+          SELECT uc.customer
+          FROM user_customers uc
+          JOIN user_factories uf ON uf.user_id = uc.user_id
+          WHERE uf.factory_code = ?
+        ) scoped_customers
+        WHERE customer IS NOT NULL AND customer != ''
+        ORDER BY customer
+      `).all(req.user.active_factory_code, req.user.active_factory_code);
   res.json({ customers: rows.map(r => r.customer) });
 });
 
