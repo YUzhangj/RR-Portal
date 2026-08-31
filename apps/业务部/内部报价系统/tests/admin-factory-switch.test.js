@@ -92,3 +92,10 @@ test('failed admin factory switch restores the previous factory and re-enables t
   assert.equal(reloads, 0);
   assert.deepEqual(alerts, ['switch failed']);
 });
+
+test('material price managers can add selectors for multiple existing accounts', () => {
+  assert.match(adminSource, /renderMaterialManagerSelectors\(\[\.\.\.selectedIds, null\]\)/);
+  assert.match(adminSource, /document\.querySelectorAll\('\.material-manager-user'\)/);
+  assert.match(adminSource, /manager_user_ids: managerUserIds/);
+  assert.doesNotMatch(adminSource, /showNewUserForm\(\);\s*\$\('new-user-form'\)\.scrollIntoView/);
+});

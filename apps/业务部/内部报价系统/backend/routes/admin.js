@@ -62,7 +62,7 @@ router.get('/users', async (req, res) => {
   res.json(out);
 });
 
-// 每个厂区仅指定一个全局料价管理员。
+// 每个厂区可指定多个已有账号作为全局料价管理员。
 router.get('/material-price-manager', async (req, res) => {
   const users = await db.prepare(`
     SELECT DISTINCT u.id, u.username, u.display_name, u.dept, d.name_cn AS dept_name
@@ -72,46 +72,61 @@ router.get('/material-price-manager', async (req, res) => {
     WHERE uf.factory_code = ?
     ORDER BY u.display_name, u.username
   `).all(req.user.active_factory_code);
-  const control = await db.prepare(`
-    SELECT c.manager_user_id, c.last_effective_at, c.updated_at, c.updated_by,
-           u.username AS manager_username, u.display_name AS manager_name
-    FROM factory_material_price_control c
-    LEFT JOIN users u ON u.id = c.manager_user_id
-    WHERE c.factory_code = ?
-  `).get(req.user.active_factory_code);
+  const control = await db.prepare(`SELECT last_effective_at FROM factory_material_price_control
+    WHERE factory_code = ?`).get(req.user.active_factory_code);
+  const managers = await db.prepare(`
+    SELECT u.id, u.username, u.display_name
+    FROM factory_material_price_managers m
+    JOIN users u ON u.id = m.user_id
+    WHERE m.factory_code = ?
+    ORDER BY u.display_name, u.username
+  `).all(req.user.active_factory_code);
   res.json({
     factory_code: req.user.active_factory_code,
-    manager_user_id: control?.manager_user_id || null,
-    manager_name: control?.manager_name || control?.manager_username || null,
+    manager_user_ids: managers.map(manager => manager.id),
+    manager_names: managers.map(manager => manager.display_name || manager.username),
     last_effective_at: control?.last_effective_at || null,
     users,
   });
 });
 
 router.put('/material-price-manager', async (req, res) => {
-  const managerUserId = Number(req.body && req.body.manager_user_id);
-  if (!Number.isInteger(managerUserId) || managerUserId <= 0) {
-    return res.status(400).json({ error: '请选择一个料价管理员账号' });
+  const managerUserIds = [...new Set((req.body && req.body.manager_user_ids || [])
+    .map(Number).filter(id => Number.isInteger(id) && id > 0))];
+  if (!managerUserIds.length) {
+    return res.status(400).json({ error: '请至少选择一个料价管理员账号' });
   }
-  const manager = await db.prepare(`
+  const placeholders = managerUserIds.map(() => '?').join(',');
+  const managers = await db.prepare(`
     SELECT u.id, u.username, u.display_name
     FROM users u JOIN user_factories uf ON uf.user_id = u.id
-    WHERE u.id = ? AND uf.factory_code = ?
-  `).get(managerUserId, req.user.active_factory_code);
-  if (!manager) return res.status(400).json({ error: '该账号无权访问当前厂区' });
+    WHERE u.id IN (${placeholders}) AND uf.factory_code = ?
+  `).all(...managerUserIds, req.user.active_factory_code);
+  if (managers.length !== managerUserIds.length) return res.status(400).json({ error: '所选账号中有账号无权访问当前厂区' });
 
-  await db.prepare(`
-    INSERT INTO factory_material_price_control (factory_code, manager_user_id, updated_at, updated_by)
-    VALUES (?, ?, datetime('now'), ?)
-    ON CONFLICT(factory_code) DO UPDATE SET
-      manager_user_id = excluded.manager_user_id,
-      updated_at = excluded.updated_at,
-      updated_by = excluded.updated_by
-  `).run(req.user.active_factory_code, managerUserId, req.user.username);
+  const saveManagers = db.transaction(async () => {
+    await db.prepare('DELETE FROM factory_material_price_managers WHERE factory_code = ?')
+      .run(req.user.active_factory_code);
+    const insertManager = db.prepare(`INSERT INTO factory_material_price_managers (factory_code, user_id)
+      VALUES (?, ?)`);
+    for (const managerUserId of managerUserIds) {
+      await insertManager.run(req.user.active_factory_code, managerUserId);
+    }
+    await db.prepare(`
+      INSERT INTO factory_material_price_control (factory_code, manager_user_id, updated_at, updated_by)
+      VALUES (?, ?, datetime('now'), ?)
+      ON CONFLICT(factory_code) DO UPDATE SET
+        manager_user_id = excluded.manager_user_id,
+        updated_at = excluded.updated_at,
+        updated_by = excluded.updated_by
+    `).run(req.user.active_factory_code, managerUserIds[0], req.user.username);
+  });
+  await saveManagers();
+  const managerNames = managers.map(manager => manager.display_name || manager.username);
   await db.prepare(`INSERT INTO audit_log (actor, action, detail)
     VALUES (?, 'set_material_price_manager', ?)`)
-    .run(req.user.username, `${req.user.active_factory_code} -> ${manager.username}`);
-  res.json({ ok: true, manager_user_id: manager.id, manager_name: manager.display_name || manager.username });
+    .run(req.user.username, `${req.user.active_factory_code} -> ${managerNames.join(', ')}`);
+  res.json({ ok: true, manager_user_ids: managerUserIds, manager_names: managerNames });
 });
 
 // POST /api/admin/users  { username, password, display_name, dept, role, factory_code }

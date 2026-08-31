@@ -3540,7 +3540,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
         <small class="muted">生效时间之前已全部审核完成的报价保持原价；尚未全部审核的报价自动同步最新料价并重新套价。</small>
       </div>` : ''}
       ${!canManageGlobalMaterial && materialMeta.manager_name ? `<div class="muted" style="margin-top:8px;font-size:12px">全局料价管理员：${escapeHtml(materialMeta.manager_name)}；当前账号只能修改本报价单。</div>` : ''}
-      ${!canManageGlobalMaterial && !materialMeta.manager_name ? '<div class="muted" style="margin-top:8px;font-size:12px">当前厂区尚未指定全局料价管理员；当前账号只能修改本报价单，请由管理员在“账号管理”中指定唯一账号。</div>' : ''}
+      ${!canManageGlobalMaterial && !materialMeta.manager_name ? '<div class="muted" style="margin-top:8px;font-size:12px">当前厂区尚未指定全局料价管理员；当前账号只能修改本报价单，请由管理员在“账号管理”中指定账号。</div>' : ''}
       <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:16px">
         <div>
           <h4 style="margin:0 0 6px;font-size:13px;color:#475569">料价表 <small class="muted">(HK$/Lb, 1 Lb≈454 g)</small></h4>
