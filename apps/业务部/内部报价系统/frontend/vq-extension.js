@@ -3,6 +3,14 @@
 (function () {
   'use strict';
 
+  const SPIN_MASTER_INDONESIA = 'SPINMASTER-毛绒（印尼）';
+  const customerProfile = customer => {
+    const normalized = String(customer || '').trim().toUpperCase();
+    if (normalized === 'SPIN' || normalized === SPIN_MASTER_INDONESIA) return 'SPIN';
+    if (normalized === 'TOMY') return 'TOMY';
+    return '';
+  };
+
   const LCL_DEFAULTS = [
     { label: '盐田散货 3吨', capacity_cuft: 450, unit_hkd: 16.8 },
     { label: '盐田散货 5吨', capacity_cuft: 850, unit_hkd: 11.24 },
@@ -304,7 +312,7 @@
         };
       }
 
-      if (String(quote.customer || '').trim().toUpperCase() !== 'SPIN') return;
+      if (customerProfile(quote.customer) !== 'SPIN') return;
       const freightHost = host.querySelector('#wb-freight');
       if (!freightHost) return;
       payload.freight_calc = payload.freight_calc || {
@@ -340,8 +348,8 @@
     const data = window.__data;
     const exportButton = document.getElementById('btn-export');
     if (!data || !exportButton || document.getElementById('btn-export-vq')) return;
-    const customer = String(data.quote?.customer || '').trim().toUpperCase();
-    if (customer !== 'SPIN' && customer !== 'TOMY') return;
+    const customer = customerProfile(data.quote?.customer);
+    if (!customer) return;
     const approved = (data.sections || []).filter(section => section.status === 'approved').length;
     const total = (data.sections || []).length;
     const button = document.createElement('button');

@@ -20,34 +20,33 @@ router.get('/:key', async (req, res) => {
   if (key !== 'material_prices') {
     return res.json({ data, updated_at: row.updated_at, updated_by: row.updated_by });
   }
-  const control = await db.prepare(`
-    SELECT c.manager_user_id, c.last_effective_at, u.username AS manager_username,
-           u.display_name AS manager_name
-    FROM factory_material_price_control c
-    LEFT JOIN users u ON u.id = c.manager_user_id
-    WHERE c.factory_code = ?
-  `).get(req.user.active_factory_code);
+  const control = await db.prepare(`SELECT last_effective_at FROM factory_material_price_control
+    WHERE factory_code = ?`).get(req.user.active_factory_code);
+  const managers = await db.prepare(`SELECT u.id, u.username, u.display_name
+    FROM factory_material_price_managers m JOIN users u ON u.id = m.user_id
+    WHERE m.factory_code = ? ORDER BY u.display_name, u.username`).all(req.user.active_factory_code);
   res.json({
     data,
     updated_at: row.updated_at,
     updated_by: row.updated_by,
-    can_manage_global: !!(control && Number(control.manager_user_id) === Number(req.user.id)),
-    manager_user_id: control?.manager_user_id || null,
-    manager_name: control?.manager_name || control?.manager_username || null,
+    can_manage_global: managers.some(manager => Number(manager.id) === Number(req.user.id)),
+    manager_user_ids: managers.map(manager => manager.id),
+    manager_names: managers.map(manager => manager.display_name || manager.username),
+    manager_name: managers.map(manager => manager.display_name || manager.username).join('、') || null,
     last_effective_at: control?.last_effective_at || null,
   });
 });
 
-// PUT /api/refs/:key — 料价仅允许本厂区唯一指定账号发布；机型价沿用原权限。
+// PUT /api/refs/:key — 料价仅允许本厂区指定账号发布；机型价沿用原权限。
 router.put('/:key', async (req, res) => {
   const key = req.params.key;
   if (!ALLOWED.has(key)) return res.status(400).json({ error: 'invalid key' });
   const data = Array.isArray(req.body && req.body.data) ? req.body.data : [];
 
   if (key === 'material_prices') {
-    const control = await db.prepare(`SELECT manager_user_id FROM factory_material_price_control WHERE factory_code = ?`)
-      .get(req.user.active_factory_code);
-    if (!control || Number(control.manager_user_id) !== Number(req.user.id)) {
+    const manager = await db.prepare(`SELECT 1 FROM factory_material_price_managers
+      WHERE factory_code = ? AND user_id = ?`).get(req.user.active_factory_code, req.user.id);
+    if (!manager) {
       return res.status(403).json({ error: '只有本厂区指定的全局料价管理员可以发布并同步全部报价' });
     }
     const requestedEffectiveAt = String((req.body && req.body.effective_at) || '').trim();

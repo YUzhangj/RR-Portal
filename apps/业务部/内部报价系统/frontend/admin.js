@@ -11,6 +11,7 @@ async function api(path, opts = {}) {
 }
 
 const ROLE_ZH = { admin: '管理员', supervisor: '主管', staff: '员工' };
+let __materialManagerUsers = [];
 
 // HTML 转义：用户可控字段(用户名/姓名/客户名)插入 innerHTML 前必须过它，防 XSS
 function esc(s) {
@@ -55,33 +56,51 @@ async function init() {
 async function loadMaterialPriceManager() {
   try {
     const result = await api('/admin/material-price-manager');
-    const select = $('material-manager-user');
-    select.innerHTML = '<option value="">请选择账号</option>' + (result.users || []).map(user =>
-      `<option value="${user.id}" ${Number(user.id) === Number(result.manager_user_id) ? 'selected' : ''}>${esc(user.display_name || user.username)} · ${esc(user.dept_name || user.dept)} · ${esc(user.username)}</option>`
-    ).join('');
+    __materialManagerUsers = result.users || [];
+    const selectedIds = (result.manager_user_ids || []).map(Number);
+    renderMaterialManagerSelectors(selectedIds.length ? selectedIds : [null]);
     const effective = result.last_effective_at
       ? new Date(result.last_effective_at).toLocaleString()
       : '尚未发布过全局料价';
-    $('material-manager-meta').textContent = result.manager_name
-      ? `当前指定：${result.manager_name}；上次生效时间：${effective}`
+    $('material-manager-meta').textContent = (result.manager_names || []).length
+      ? `当前指定：${result.manager_names.join('、')}；上次生效时间：${effective}`
       : `当前厂区尚未指定料价管理员；${effective}`;
   } catch (error) {
     $('material-manager-meta').textContent = `料价权限读取失败：${error.message}`;
   }
 }
 
+function materialManagerOptions(selectedId) {
+  return '<option value="">请选择账号</option>' + __materialManagerUsers.map(user =>
+    `<option value="${user.id}" ${Number(user.id) === Number(selectedId) ? 'selected' : ''}>${esc(user.display_name || user.username)} · ${esc(user.dept_name || user.dept)} · ${esc(user.username)}</option>`
+  ).join('');
+}
+
+function renderMaterialManagerSelectors(selectedIds) {
+  const host = $('material-manager-users');
+  host.innerHTML = '';
+  selectedIds.forEach((selectedId, index) => {
+    const row = document.createElement('label');
+    row.style.minWidth = '300px';
+    row.innerHTML = `${index === 0 ? '指定料价管理员' : '追加料价管理员'}<div style="display:flex;gap:6px"><select class="material-manager-user" style="width:100%">${materialManagerOptions(selectedId)}</select>${index > 0 ? '<button type="button" class="mini material-manager-remove" aria-label="移除该账号">移除</button>' : ''}</div>`;
+    row.querySelector('.material-manager-remove')?.addEventListener('click', () => row.remove());
+    host.appendChild(row);
+  });
+}
+
 $('btn-save-material-manager').onclick = async () => {
-  const managerUserId = Number($('material-manager-user').value);
-  if (!managerUserId) return alert('请选择一个账号');
-  if (!confirm('确认将该账号设为当前厂区唯一的全局料价管理员？原指定账号将立即失去全局发布权限。')) return;
+  const managerUserIds = [...new Set([...document.querySelectorAll('.material-manager-user')]
+    .map(select => Number(select.value)).filter(Boolean))];
+  if (!managerUserIds.length) return alert('请至少选择一个账号');
+  if (!confirm(`确认将所选 ${managerUserIds.length} 个账号设为当前厂区的全局料价管理员？`)) return;
   const msg = $('material-manager-msg');
   msg.textContent = '';
   try {
     const result = await api('/admin/material-price-manager', {
-      method: 'PUT', body: JSON.stringify({ manager_user_id: managerUserId }),
+      method: 'PUT', body: JSON.stringify({ manager_user_ids: managerUserIds }),
     });
     msg.style.color = 'green';
-    msg.textContent = `✓ 已指定 ${result.manager_name}`;
+    msg.textContent = `✓ 已指定 ${result.manager_names.join('、')}`;
     await loadMaterialPriceManager();
   } catch (error) {
     msg.style.color = '';
@@ -284,8 +303,10 @@ function showNewUserForm() {
 
 $('btn-new-user').onclick = showNewUserForm;
 $('btn-add-material-manager-user').onclick = () => {
-  showNewUserForm();
-  $('new-user-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const host = $('material-manager-users');
+  const selectedIds = [...host.querySelectorAll('.material-manager-user')].map(select => Number(select.value) || null);
+  renderMaterialManagerSelectors([...selectedIds, null]);
+  host.lastElementChild?.querySelector('.material-manager-user')?.focus();
 };
 $('btn-cancel-user').onclick = () => $('new-user-form').classList.add('hidden');
 

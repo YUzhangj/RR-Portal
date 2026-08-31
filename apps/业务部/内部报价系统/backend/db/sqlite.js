@@ -110,6 +110,9 @@ if (quoteHasGlobalNumberUnique) {
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_quotes_factory ON quotes(factory_code)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_users_factory ON users(factory_code)');
+db.prepare(`INSERT OR IGNORE INTO factory_material_price_managers (factory_code, user_id)
+  SELECT factory_code, manager_user_id FROM factory_material_price_control
+  WHERE manager_user_id IS NOT NULL`).run();
 
 const count = db.prepare('SELECT COUNT(*) AS n FROM departments').get().n;
 if (count === 0) {
@@ -459,6 +462,7 @@ if (!db.prepare('SELECT 1 FROM app_migrations WHERE key = ?').get(retireHeyuanFa
     db.prepare("UPDATE users SET factory_code = 'qingxi' WHERE factory_code = 'heyuan'").run();
     db.prepare("INSERT OR IGNORE INTO user_factories (user_id, factory_code) SELECT id, 'qingxi' FROM users").run();
     db.prepare("DELETE FROM user_factories WHERE factory_code = 'heyuan'").run();
+    db.prepare("DELETE FROM factory_material_price_managers WHERE factory_code = 'heyuan'").run();
     db.prepare("DELETE FROM factory_material_price_control WHERE factory_code = 'heyuan'").run();
     db.prepare('INSERT INTO app_migrations (key) VALUES (?)').run(retireHeyuanFactoryMigration);
     db.exec('COMMIT');
@@ -478,6 +482,7 @@ db.transaction = function (fn) {
   };
 };
 
-db.ready = Promise.resolve();
+const { seedConfiguredAccounts } = require('./accountSeed');
+db.ready = seedConfiguredAccounts(db);
 
 module.exports = db;

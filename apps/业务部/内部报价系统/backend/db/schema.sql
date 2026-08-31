@@ -131,11 +131,18 @@ CREATE TABLE IF NOT EXISTS user_perms (
   PRIMARY KEY (user_id, menu)
 );
 
--- 每个厂区仅允许指定一个账号发布全局料价；普通账号仍可修改自己报价单内的料价副本。
+-- 全局料价发布控制；普通账号仍可修改自己报价单内的料价副本。
 CREATE TABLE IF NOT EXISTS factory_material_price_control (
   factory_code      TEXT PRIMARY KEY REFERENCES factories(code),
   manager_user_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
   last_effective_at TEXT,
   updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
   updated_by        TEXT
+);
+
+-- 每个厂区可指定多个已有账号发布全局料价。
+CREATE TABLE IF NOT EXISTS factory_material_price_managers (
+  factory_code TEXT NOT NULL REFERENCES factories(code) ON DELETE CASCADE,
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  PRIMARY KEY (factory_code, user_id)
 );

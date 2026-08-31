@@ -94,7 +94,7 @@ const db = { prepare, exec, transaction, close: () => pool.end(), pool };
 const migrationTables = [
   'factories', 'departments', 'users', 'quotes', 'quote_sections', 'audit_log',
   'ref_tables', 'app_migrations', 'factory_ref_tables', 'user_factories',
-  'user_customers', 'user_perms', 'factory_material_price_control',
+  'user_customers', 'user_perms', 'factory_material_price_control', 'factory_material_price_managers',
 ];
 
 async function migrateLegacySqlite() {
@@ -187,6 +187,9 @@ async function initialize() {
   await pool.query(`CREATE SCHEMA IF NOT EXISTS ${dbSchema}`);
   await pool.query(fs.readFileSync(path.join(__dirname, 'schema.postgres.sql'), 'utf8'));
   await migrateLegacySqlite();
+  await prepare(`INSERT INTO factory_material_price_managers (factory_code, user_id)
+    SELECT factory_code, manager_user_id FROM factory_material_price_control
+    WHERE manager_user_id IS NOT NULL ON CONFLICT DO NOTHING`).run();
   for (const factory of factories) {
     await prepare(`INSERT INTO factories (code, name_cn, sort_order, active) VALUES (?, ?, ?, ?)
       ON CONFLICT (code) DO UPDATE SET
@@ -265,12 +268,15 @@ async function initialize() {
       await prepare(`INSERT INTO user_factories (user_id, factory_code)
         SELECT id, 'qingxi' FROM users ON CONFLICT DO NOTHING`).run();
       await prepare("DELETE FROM user_factories WHERE factory_code = 'heyuan'").run();
+      await prepare("DELETE FROM factory_material_price_managers WHERE factory_code = 'heyuan'").run();
       await prepare("DELETE FROM factory_material_price_control WHERE factory_code = 'heyuan'").run();
       await prepare('INSERT INTO app_migrations (key) VALUES (?)').run(retireHeyuanFactoryMigration);
     });
     await retireHeyuan();
     console.log('[migrate] 河源厂区已下线；账号统一归入清溪，河源历史报价保留');
   }
+  const { seedConfiguredAccounts } = require('./accountSeed');
+  await seedConfiguredAccounts(db);
 }
 
 db.ready = initialize().catch((error) => {

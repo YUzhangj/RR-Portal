@@ -4,6 +4,7 @@ const { requireAuth, quoteAccess } = require('../middleware/auth');
 const { buildWorkbook } = require('../services/exportInternal');
 const { exportVQ } = require('../services/exportVQ');
 const { translateSectionsForVq } = require('../services/vqTranslate');
+const { vqCustomerProfile } = require('../services/customerProfiles');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -97,8 +98,8 @@ router.post('/:id/translate-vq', async (req, res) => {
   if (acc.status !== 200) {
     return res.status(acc.status).json({ error: acc.status === 404 ? '不存在' : '无权操作该客户的报价单' });
   }
-  const customer = String(quote.customer || '').trim().toUpperCase();
-  if (!['SPIN', 'TOMY'].includes(customer)) {
+  const customer = vqCustomerProfile(quote.customer);
+  if (!customer) {
     return res.status(400).json({ error: `客户「${quote.customer || '未设置'}」暂未配置报客表翻译` });
   }
 

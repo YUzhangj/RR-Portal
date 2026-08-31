@@ -25,15 +25,13 @@
       <div class="list-head">
         <div>
           <h2 style="margin:0">全局料价权限</h2>
-          <p class="muted" style="margin:6px 0 0">每个厂区只能指定一个账号发布全局料价；其他账号只能修改当前报价单内的料价。</p>
+          <p class="muted" style="margin:6px 0 0">可从已创建账号中指定多个账号发布全局料价；其他账号只能修改当前报价单内的料价。</p>
         </div>
       </div>
       <div style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-top:14px">
-        <label style="min-width:300px">指定料价管理员
-          <select id="material-manager-user" style="width:100%"></select>
-        </label>
+        <div id="material-manager-users" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap"></div>
+        <button id="btn-add-material-manager-user" type="button" class="mini">＋ 添加已有账号</button>
         <button id="btn-save-material-manager" type="button">保存指定账号</button>
-        <button id="btn-add-material-manager-user" type="button" class="mini">＋ 新增账号</button>
         <span id="material-manager-msg" class="msg"></span>
       </div>
       <p id="material-manager-meta" class="muted" style="margin:10px 0 0;font-size:13px"></p>
@@ -171,6 +169,6 @@
       };
     })();
   </script>
-  <script src="./admin.js?v=20260819-material-manager-account-add"></script>
+  <script src="./admin.js?v=20260831-multiple-material-managers"></script>
 </body>
 </html>
