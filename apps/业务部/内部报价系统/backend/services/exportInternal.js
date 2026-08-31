@@ -612,7 +612,8 @@ function patchMoldProductGroups(ws, payloads) {
       ws.getCell(row, 1).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
       ws.getCell(row, 1).font = { ...ws.getCell(row, 1).font, bold: true, name: FONT };
       ws.getRow(row).height = Math.max(ws.getRow(row).height || 0, 34);
-      for (let column = 1; column <= 18; column += 1) {
+      // 模具表最后一个实际业务列是 Q（17）；不要把表格外的 R 列也染成分组蓝色。
+      for (let column = 1; column <= 17; column += 1) {
         ws.getCell(row, column).fill = {
           type: 'pattern',
           pattern: 'solid',
@@ -1052,6 +1053,7 @@ function appendSpinTransportBlock(ws, row, quote, sales, engineering, styles) {
     ...lcl.map(item => ({ label: item.label, capacity: num(item.capacity_cuft), fee: num(item.unit_hkd), lcl: true })),
   ];
 
+  const blockStartRow = row;
   ws.mergeCells(row, 1, row, 13);
   ws.getCell(row, 1).value = 'SPIN 报客表运费计算（公式）';
   applyStyle(ws.getCell(row, 1), styles.section);
@@ -1111,6 +1113,16 @@ function appendSpinTransportBlock(ws, row, quote, sales, engineering, styles) {
   // 避免导出后 E:M 列看起来像缺失单元格。
   for (let column = 1; column <= 13; column += 1) {
     applyStyle(ws.getCell(row, column), styles.data);
+  }
+  // SPIN 运费表只使用 A:M。模板在 N:Q 可能残留黄色表头样式；这些格子没有内容，
+  // 导出时应保持无填充，避免表格右侧出现悬空色块。
+  for (let clearRow = blockStartRow; clearRow <= row; clearRow += 1) {
+    for (let column = 14; column <= 17; column += 1) {
+      const cell = ws.getCell(clearRow, column);
+      if (cell.value === null || cell.value === undefined || cell.value === '') {
+        cell.fill = { type: 'pattern', pattern: 'none' };
+      }
+    }
   }
   return row + 1;
 }

@@ -507,4 +507,9 @@ test('internal quotation export includes the SPIN transportation formula table',
     assert.equal(border.left.style, 'thin');
     assert.equal(border.right.style, 'thin');
   }
+  for (let row = titleRow; row <= spacerRow; row += 1) {
+    for (let column = 14; column <= 17; column += 1) {
+      assert.notEqual(worksheet.getCell(row, column).fill?.pattern, 'solid');
+    }
+  }
 });

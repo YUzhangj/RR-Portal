@@ -533,6 +533,8 @@ test('internal export keeps mold rows separated by product group', async () => {
   assert.equal(rows['NO.01'].getCell(2).value, '产品一外壳');
   assert.equal(rows['NO.03'].getCell(2).value, '产品二外壳');
   assert.equal(worksheet.getCell(rows['NO.01'].number - 1, 1).value, '产品 / 序号');
+  assert.notEqual(rows['NO.01'].getCell(18).fill?.fgColor?.argb, 'FFE0F2FE');
+  assert.notEqual(rows['NO.03'].getCell(18).fill?.fgColor?.argb, 'FFE0F2FE');
 });
 
 test('internal export keeps molding rows separated by engineering product group', async () => {
