@@ -275,6 +275,8 @@ async function initialize() {
     await retireHeyuan();
     console.log('[migrate] 河源厂区已下线；账号统一归入清溪，河源历史报价保留');
   }
+  const { seedConfiguredAccounts } = require('./accountSeed');
+  await seedConfiguredAccounts(db);
 }
 
 db.ready = initialize().catch((error) => {

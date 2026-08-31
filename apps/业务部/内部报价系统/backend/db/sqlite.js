@@ -482,6 +482,7 @@ db.transaction = function (fn) {
   };
 };
 
-db.ready = Promise.resolve();
+const { seedConfiguredAccounts } = require('./accountSeed');
+db.ready = seedConfiguredAccounts(db);
 
 module.exports = db;

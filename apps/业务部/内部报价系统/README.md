@@ -34,12 +34,14 @@ BAIDU_KEY=your_secret_key
 - **环境变量**:
   - `SESSION_SECRET`（必填，生产随机长串）
   - `ADMIN_INITIAL_PASSWORD`（可选；不设则首启随机生成并打印在日志）
+  - `ACCOUNT_INITIAL_PASSWORD`（配置账号首次创建时的统一临时密码；通过 `INTERNAL_QUOTE_ACCOUNT_PASSWORD` 注入，不写入仓库）
+  - `APPLY_CONFIGURED_ACCOUNT_SEED=1`（按 `backend/db/account-seed.csv` 同步账号、部门、角色、客户范围和菜单权限；不覆盖现有密码）
   - `DATABASE_URL`（必填，PostgreSQL 连接串）
   - `DB_SCHEMA`（默认 `internal_quote`）
   - `DB_POOL_SIZE`（默认 `20`）
   - `LEGACY_SQLITE_FILE`（可选；首次升级自动导入的旧库路径）
   - `NODE_ENV=production`（已在 Dockerfile 设置，启用 secure cookie；app 已 `trust proxy`）
-- 首次启动自动建库种子：创建 `admin` 账号 + 各部门初始 PIN（见容器日志），登录后请立即改密。
+- 首次启动自动建库种子：创建 `admin` 账号，并在提供账号临时密码后补充配置账号；登录后请立即改密。
 
 ## 本地运行
 ```bash
