@@ -2780,14 +2780,14 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
     }
   };
 
-  // 五金 / 辅助材料 / 包装材料共用统一供应商报价模板，固定采用 5K 档。
+  // 五金 / 辅助材料 / 包装材料共用统一供应商报价模板；导入预览可逐项选择 MOQ 和币种。
   const attachSupplierMaterialImport = ({ inputId, previewId, targetKey, label }) => {
     const fileInput = host.querySelector(inputId);
     if (!fileInput) return;
     fileInput.onchange = async (e) => {
       const file = e.target.files[0]; if (!file) return;
       const preview = host.querySelector(previewId);
-      preview.innerHTML = '<i class="muted">正在解析 5K 档报价…</i>';
+      preview.innerHTML = '<i class="muted">正在识别 MOQ 与币种报价…</i>';
       try {
         const fd = new FormData();
         fd.append('file', file);
@@ -2795,41 +2795,91 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
         const response = await fetch('/api/uploads/hardware-sheet', { method: 'POST', credentials: 'include', body: fd });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || '解析失败');
-        const normalizedItems = result.items.map(item => ({
-          ...item,
-          source_currency: item.source_currency || (item.unit_price_usd != null ? 'USD' : 'RMB'),
+        const selections = result.items.map(item => ({
+          moqQty: item.moq_qty ?? item.price_tiers?.[0]?.moq_qty ?? null,
+          currency: item.source_currency || (item.unit_price_usd != null ? 'USD' : 'RMB'),
         }));
-        preview.innerHTML = `
-          <div class="card" style="background:#f0fdf4;border:1px solid #86efac;">
-            <p>从 <b>${escapeHtml(result.sheet_used || '')}</b> 解析到 <b>${normalizedItems.length}</b> 条${escapeHtml(label)}明细；统一取 <b>5K</b> 档报价：</p>
-            <table class="wb-table"><thead><tr>
-              <th>产品名称</th><th>规格 / 材料</th><th>用量</th><th>选中 MOQ</th><th>币种</th><th>原币单价</th><th>单价 HKD</th><th>备注</th>
-            </tr></thead><tbody>
-            ${normalizedItems.map(item => `<tr>
-              <td>${escapeHtml(item.name || '')}</td><td>${escapeHtml(item.spec || '')}</td>
-              <td>${escapeHtml(item.qty ?? '')}</td><td>${escapeHtml(item.moq || (result.template_type === 'supplier_quote' ? '5K' : ''))}</td>
-              <td>${escapeHtml(item.source_currency || 'RMB')}</td><td>${escapeHtml(item.source_currency === 'USD' ? item.unit_price_usd : item.unit_price_rmb)}</td>
-              <td>${escapeHtml(formatNum(freeUnitHkd(item, fxRmbHkd, fxHkdUsd)))}</td><td>${escapeHtml(item.note || '')}</td>
-            </tr>`).join('')}
-            </tbody></table>
-            <div style="margin-top:10px">
-              <button data-action="replace">应用（替换全部${escapeHtml(label)}）</button>
-              <button data-action="append" class="mini">追加到现有列表</button>
-              <button data-action="cancel" class="mini danger">取消</button>
-            </div>
-          </div>`;
-        const finish = (mode) => {
-          payload[targetKey] = mode === 'replace'
-            ? normalizedItems.map(item => ({ ...item }))
-            : (payload[targetKey] || []).concat(normalizedItems.map(item => ({ ...item })));
-          preview.innerHTML = '';
-          fileInput.value = '';
-          renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quoteQty);
-          onChange();
+        const tierOptions = item => {
+          const tiers = Array.isArray(item.price_tiers) ? item.price_tiers : [];
+          const map = new Map();
+          tiers.forEach(tier => { if (tier.moq_qty != null && !map.has(tier.moq_qty)) map.set(tier.moq_qty, tier.moq || tier.moq_qty); });
+          return [...map.entries()].sort((a, b) => a[0] - b[0]);
         };
-        preview.querySelector('[data-action="replace"]').onclick = () => finish('replace');
-        preview.querySelector('[data-action="append"]').onclick = () => finish('append');
-        preview.querySelector('[data-action="cancel"]').onclick = () => { preview.innerHTML = ''; fileInput.value = ''; };
+        const selectedItem = (item, index) => {
+          const tiers = Array.isArray(item.price_tiers) ? item.price_tiers : [];
+          if (!tiers.length) return { ...item, source_currency: item.source_currency || 'RMB' };
+          const selection = selections[index];
+          const tier = tiers.find(value => value.moq_qty === selection.moqQty) || tiers[0];
+          const currencies = [tier.unit_price_rmb != null ? 'RMB' : null, tier.unit_price_usd != null ? 'USD' : null].filter(Boolean);
+          if (!currencies.includes(selection.currency)) selection.currency = currencies[0] || 'RMB';
+          const useUsd = selection.currency === 'USD';
+          const baseNote = String(item.note || '').split('；').filter(part => !/^适用MOQ：|^价格来源：/.test(part));
+          const priceSource = useUsd ? 'USD不含税' : (tier.rmb_price_source || '人民币不含税');
+          return {
+            ...item,
+            moq: tier.moq,
+            moq_qty: tier.moq_qty,
+            source_currency: selection.currency,
+            unit_price_rmb: useUsd ? null : tier.unit_price_rmb,
+            unit_price_usd: useUsd ? tier.unit_price_usd : null,
+            tax_pct: useUsd ? 0 : (tier.rmb_tax_pct || 0),
+            price_source: priceSource,
+            note: [...baseNote, tier.moq ? `适用MOQ：${tier.moq}` : '', `价格来源：${priceSource}`].filter(Boolean).join('；'),
+          };
+        };
+        const renderPreview = () => {
+          const normalizedItems = result.items.map(selectedItem);
+          preview.innerHTML = `
+            <div class="card" style="background:#f0fdf4;border:1px solid #86efac;">
+              <p>从 <b>${escapeHtml(result.sheet_used || '')}</b> 解析到 <b>${normalizedItems.length}</b> 条${escapeHtml(label)}明细；可逐项选择识别到的 MOQ 与币种：</p>
+              <table class="wb-table"><thead><tr>
+                <th>产品名称</th><th>规格 / 材料</th><th>用量</th><th>选择 MOQ</th><th>选择币种</th><th>原币单价</th><th>单价 HKD</th><th>备注</th>
+              </tr></thead><tbody>
+              ${normalizedItems.map((item, index) => {
+                const source = result.items[index];
+                const tiers = source.price_tiers || [];
+                const activeTier = tiers.find(tier => tier.moq_qty === selections[index].moqQty) || tiers[0];
+                const currencies = activeTier
+                  ? [activeTier.unit_price_rmb != null ? 'RMB' : null, activeTier.unit_price_usd != null ? 'USD' : null].filter(Boolean)
+                  : [item.source_currency || 'RMB'];
+                return `<tr>
+                  <td>${escapeHtml(item.name || '')}</td><td>${escapeHtml(item.spec || '')}</td><td>${escapeHtml(item.qty ?? '')}</td>
+                  <td><select data-tier-index="${index}" ${tiers.length ? '' : 'disabled'}>${tierOptions(source).map(([qty, text]) => `<option value="${qty}" ${qty === item.moq_qty ? 'selected' : ''}>${escapeHtml(text)}</option>`).join('') || `<option>${escapeHtml(item.moq || '')}</option>`}</select></td>
+                  <td><select data-currency-index="${index}" ${currencies.length > 1 ? '' : 'disabled'}>${currencies.map(currency => `<option value="${currency}" ${currency === item.source_currency ? 'selected' : ''}>${currency}</option>`).join('')}</select></td>
+                  <td>${escapeHtml(item.source_currency === 'USD' ? item.unit_price_usd : item.unit_price_rmb)}</td>
+                  <td>${escapeHtml(formatNum(freeUnitHkd(item, fxRmbHkd, fxHkdUsd)))}</td><td>${escapeHtml(item.note || '')}</td>
+                </tr>`;
+              }).join('')}
+              </tbody></table>
+              <div style="margin-top:10px">
+                <button data-action="replace">应用（替换全部${escapeHtml(label)}）</button>
+                <button data-action="append" class="mini">追加到现有列表</button>
+                <button data-action="cancel" class="mini danger">取消</button>
+              </div>
+            </div>`;
+          preview.querySelectorAll('[data-tier-index]').forEach(select => select.onchange = () => {
+            selections[Number(select.dataset.tierIndex)].moqQty = Number(select.value);
+            renderPreview();
+          });
+          preview.querySelectorAll('[data-currency-index]').forEach(select => select.onchange = () => {
+            selections[Number(select.dataset.currencyIndex)].currency = select.value;
+            renderPreview();
+          });
+          const finish = (mode) => {
+            const appliedItems = result.items.map(selectedItem);
+            payload[targetKey] = mode === 'replace'
+              ? appliedItems.map(item => ({ ...item }))
+              : (payload[targetKey] || []).concat(appliedItems.map(item => ({ ...item })));
+            preview.innerHTML = '';
+            fileInput.value = '';
+            renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quoteQty);
+            onChange();
+          };
+          preview.querySelector('[data-action="replace"]').onclick = () => finish('replace');
+          preview.querySelector('[data-action="append"]').onclick = () => finish('append');
+          preview.querySelector('[data-action="cancel"]').onclick = () => { preview.innerHTML = ''; fileInput.value = ''; };
+        };
+        renderPreview();
       } catch (err) {
         preview.innerHTML = `<div class="card" style="background:#fef2f2;border:1px solid #fecaca">解析失败：${escapeHtml(err.message)}</div>`;
       }

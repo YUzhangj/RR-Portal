@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 const ExcelJS = require('exceljs');
 const { parseWorkbook } = require('../backend/services/parseHardwareSheet');
@@ -14,7 +16,7 @@ async function buildSupplierWorkbook() {
   ];
   sheet.getRow(14).values = [1, '五金件A', '20×30mm', '镀锌', 'PCS', '1K', 10, 11.3, null, 'A备注', 15];
   sheet.getRow(15).values = [null, null, null, null, null, '3K', 8, 9.04];
-  sheet.getRow(16).values = [null, null, null, null, null, '5K', 7, 7.91];
+  sheet.getRow(16).values = [null, null, null, null, null, '5K', 7, 7.91, 0.95];
   sheet.getRow(17).values = [null, null, null, null, null, '10K', 6, 6.78];
   sheet.getRow(18).values = [2, '包装件B', '彩盒', '过哑膜', 'PCS', '5K', null, null, 1.2, 'B备注', 20];
   sheet.getCell('A48').value = '📌 备注说明';
@@ -41,6 +43,26 @@ test('unified supplier quote imports the 5K tier for hardware, auxiliary and pac
   assert.equal(result.items[1].unit_price_usd, 1.2);
   assert.equal(result.items[1].source_currency, 'USD');
   assert.equal(result.items[1].moq, '5K');
+});
+
+test('unified supplier quote can select MOQ and source currency independently', async () => {
+  const usd5k = await parseWorkbook(await buildSupplierWorkbook(), { targetQty: 5000, targetCurrency: 'USD' });
+  assert.equal(usd5k.items[0].moq, '5K');
+  assert.equal(usd5k.items[0].source_currency, 'USD');
+  assert.equal(usd5k.items[0].unit_price_usd, 0.95);
+  assert.equal(usd5k.items[0].unit_price_rmb, null);
+
+  const rmb3k = await parseWorkbook(await buildSupplierWorkbook(), { targetQty: 3000, targetCurrency: 'RMB' });
+  assert.equal(rmb3k.items[0].moq, '3K');
+  assert.equal(rmb3k.items[0].source_currency, 'RMB');
+  assert.equal(rmb3k.items[0].unit_price_rmb, 8);
+});
+
+test('supplier import preview provides per-item MOQ and currency selectors', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  assert.match(source, /data-tier-index/);
+  assert.match(source, /data-currency-index/);
+  assert.match(source, /可逐项选择识别到的 MOQ 与币种/);
 });
 
 test('legacy hardware quotation header remains supported', async () => {
