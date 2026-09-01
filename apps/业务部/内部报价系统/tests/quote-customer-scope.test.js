@@ -12,7 +12,10 @@ test('new quote customer is selected only from account-authorized customers', ()
   assert.match(route, /JOIN user_factories uf ON uf\.user_id = uc\.user_id/);
   assert.match(route, /该客户不在当前账号的授权范围内/);
   assert.match(html, /id="q-customer"[^>]+readonly/);
+  assert.match(html, /id="q-customer-clear"[^>]+清空已选客户/);
   assert.match(main, /当前账号暂无授权客户，请联系管理员配置/);
+  assert.match(main, /function clearSelection\(\)/);
+  assert.match(main, /event\.key === 'Backspace' \|\| event\.key === 'Delete'/);
   assert.doesNotMatch(main, /＋ 新建客户/);
 });
 
