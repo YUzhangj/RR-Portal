@@ -60,9 +60,9 @@ router.get('/customers', async (req, res) => {
   res.json({ customers });
 });
 
-// POST /api/quotes  仅业务可建
+// POST /api/quotes  业务 / 工程可建
 router.post('/', async (req, res) => {
-  if (req.user.dept !== 'sales') return res.status(403).json({ error: '只有业务可以创建报价单' });
+  if (!['sales', 'engineering'].includes(req.user.dept)) return res.status(403).json({ error: '只有业务或工程可以创建报价单' });
   const { quote_no, product_name, customer, qty, version } = req.body || {};
   const normalizedQuoteNo = String(quote_no || '').trim();
   const normalizedProductName = String(product_name || '').trim();
@@ -79,13 +79,13 @@ router.post('/', async (req, res) => {
   const tx = db.transaction(async () => {
     const info = await db.prepare(`
       INSERT INTO quotes (quote_no, product_name, customer, qty, version, created_by_dept, created_by_name, factory_code)
-      VALUES (?, ?, ?, ?, ?, 'sales', ?, ?)
-    `).run(normalizedQuoteNo, normalizedProductName, normalizedCustomer, qty || null, version || null, req.user.name, req.user.active_factory_code);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(normalizedQuoteNo, normalizedProductName, normalizedCustomer, qty || null, version || null, req.user.dept, req.user.name, req.user.active_factory_code);
     const id = info.lastInsertRowid;
     const ins = db.prepare(`INSERT INTO quote_sections (quote_id, dept) VALUES (?, ?)`);
     for (const d of DEPT_CODES) await ins.run(id, d);
-    await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action) VALUES (?, 'sales', ?, 'create')`)
-      .run(id, req.user.name);
+    await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action) VALUES (?, ?, ?, 'create')`)
+      .run(id, req.user.dept, req.user.name);
     return id;
   });
 

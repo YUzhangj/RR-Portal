@@ -53,8 +53,8 @@ async function refreshMe() {
       factorySwitch.classList.add('hidden');
       factoryChip.classList.remove('hidden');
     }
-    // 新建报价：业务 dept 才显示
-    if (hasPerm(me, '报价单列表', 'edit') && me.dept === 'sales') {
+    // 新建报价：业务 / 工程可建
+    if (hasPerm(me, '报价单列表', 'edit') && (me.dept === 'sales' || me.dept === 'engineering')) {
       $('new-quote-form').classList.remove('hidden');
       loadCustomers();
     } else $('new-quote-form').classList.add('hidden');
