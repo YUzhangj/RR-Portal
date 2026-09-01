@@ -5208,6 +5208,54 @@ function renderSales(host, payload, quote, canEditHeader, canEditPricing, allSec
   }
 }
 
+function renderEngineeringQuoteHeader(host, quote, customers, onSave) {
+  const allowedCustomers = [...new Set((customers || []).map(value => String(value || '').trim()).filter(Boolean))];
+  if (quote.customer && !allowedCustomers.includes(quote.customer)) allowedCustomers.unshift(quote.customer);
+  host.innerHTML = `
+    <h3>报价单表头资料</h3>
+    <div class="wb-grid2">
+      <label>货号 <input value="${escapeHtml(quote.quote_no || '')}" disabled /></label>
+      <label>产品名称 <input id="eng-h-pn" value="${escapeHtml(quote.product_name || '')}" /></label>
+      <label>版本 <input id="eng-h-ver" value="${escapeHtml(quote.version || '')}" placeholder="如 V1/改色版" /></label>
+      <label>客户
+        <select id="eng-h-cu">
+          ${allowedCustomers.map(customer => `<option value="${escapeHtml(customer)}" ${customer === quote.customer ? 'selected' : ''}>${escapeHtml(customer)}</option>`).join('')}
+        </select>
+      </label>
+      <label>出货数量 <input id="eng-h-qty" type="number" min="0" value="${quote.qty || ''}" /></label>
+    </div>
+    <div class="wb-bar">
+      <button type="button" id="eng-h-save">保存表头资料</button>
+      <span id="eng-h-msg" class="muted"></span>
+    </div>`;
+  const saveButton = host.querySelector('#eng-h-save');
+  const message = host.querySelector('#eng-h-msg');
+  if (!allowedCustomers.length) {
+    saveButton.disabled = true;
+    message.textContent = '当前账号暂无授权客户，请联系管理员配置';
+    return;
+  }
+  saveButton.onclick = async () => {
+    const patch = {
+      product_name: host.querySelector('#eng-h-pn').value.trim(),
+      version: host.querySelector('#eng-h-ver').value.trim() || null,
+      customer: host.querySelector('#eng-h-cu').value,
+      qty: Number(host.querySelector('#eng-h-qty').value) || null,
+    };
+    saveButton.disabled = true;
+    message.textContent = '保存中…';
+    try {
+      await onSave(patch);
+      Object.assign(quote, patch);
+      message.textContent = '✓ 已保存';
+    } catch (error) {
+      message.textContent = error.message;
+    } finally {
+      saveButton.disabled = false;
+    }
+  };
+}
+
 // ==================== 跨部门汇总 ====================
 function computeTotals(sections, p) {
   const get = (dept) => {
@@ -5269,6 +5317,11 @@ async function renderQuotePage() {
   };
   const data = await api('/quotes/' + id);
   const { quote, sections } = data;
+  let authorizedCustomers = [];
+  if (me.dept === 'engineering') {
+    try { authorizedCustomers = (await api('/quotes/customers')).customers || []; }
+    catch { authorizedCustomers = []; }
+  }
   window.__data = { quote, sections, me };
   // 从业务 section 读税率，给所有 loss-summary 用
   const salesSecForTax = sections.find(s => s.dept === 'sales');
@@ -5400,7 +5453,14 @@ async function renderQuotePage() {
     const salesHdr = salesSec && salesSec.payload_json ? (JSON.parse(salesSec.payload_json).header || {}) : {};
     const fx = num(salesHdr.fx_rmb_hkd) || 0.85;
     const fxHU = num(salesHdr.fx_hkd_usd) || 7.8;
-    if (me.dept === 'engineering') renderEngineering(body, payload, canEditMine, onChange, fx, fxHU, quote.qty);
+    if (me.dept === 'engineering') {
+      const headerHost = document.createElement('div');
+      const engineeringHost = document.createElement('div');
+      body.append(headerHost, engineeringHost);
+      renderEngineeringQuoteHeader(headerHost, quote, authorizedCustomers, patch =>
+        api('/quotes/' + id + '/header', { method: 'PUT', body: JSON.stringify(patch) }));
+      renderEngineering(engineeringHost, payload, canEditMine, onChange, fx, fxHU, quote.qty);
+    }
     else if (me.dept === 'electronic') renderElectronic(body, payload, canEditMine, onChange, fx, fxHU);
     else if (me.dept === 'molding') renderMolding(body, payload, canEditMine, onChange, refMolds, fx, me.role);
     else if (me.dept === 'painting') renderPainting(body, payload, canEditMine, onChange, fx);

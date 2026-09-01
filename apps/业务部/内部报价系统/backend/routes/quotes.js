@@ -182,7 +182,16 @@ router.put('/:id/header', async (req, res) => {
   const { product_name, customer, qty, version } = req.body || {};
   const fields = []; const vals = [];
   if (product_name !== undefined) { fields.push('product_name = ?'); vals.push(product_name); }
-  if (customer !== undefined)     { fields.push('customer = ?');     vals.push(customer); }
+  if (customer !== undefined) {
+    const normalizedCustomer = String(customer || '').trim();
+    if (!normalizedCustomer) return res.status(400).json({ error: '客户不能为空' });
+    if (req.user.role !== 'admin') {
+      const allowedCustomer = await db.prepare('SELECT 1 FROM user_customers WHERE user_id = ? AND customer = ?')
+        .get(req.user.id, normalizedCustomer);
+      if (!allowedCustomer) return res.status(403).json({ error: '该客户不在当前账号的授权范围内' });
+    }
+    fields.push('customer = ?'); vals.push(normalizedCustomer);
+  }
   if (qty !== undefined)          { fields.push('qty = ?');          vals.push(qty); }
   if (version !== undefined)      { fields.push('version = ?');      vals.push(version); }
   if (!fields.length) return res.json({ ok: true });
