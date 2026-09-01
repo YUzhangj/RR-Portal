@@ -185,7 +185,7 @@ async function buildWorkbook({ quote, sections }) {
   let row = 1;
 
   // 报价单标题
-  ws.mergeCells(row, 1, row, 13);
+  ws.mergeCells(row, 1, row, 18);
   const titleCell = ws.getCell(row, 1);
   titleCell.value = `${quote.quote_no || ''} ${quote.product_name || ''} 内部报价明细`;
   titleCell.font = { bold: true, size: 18, color: { argb: COLORS.white }, name: 'Microsoft YaHei' };
@@ -195,7 +195,7 @@ async function buildWorkbook({ quote, sections }) {
   row += 1;
 
   // 报价单元信息
-  ws.mergeCells(row, 1, row, 13);
+  ws.mergeCells(row, 1, row, 18);
   const subCell = ws.getCell(row, 1);
   subCell.value = `客户: ${quote.customer || '—'}    数量: ${quote.qty || '—'}    创建: ${quote.created_at || ''}`;
   subCell.alignment = { horizontal: 'center', vertical: 'middle' };
@@ -2686,12 +2686,14 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
     ['减税后利润率', { formula: `IFERROR(((${basePriceRef}-((${noLaborRefExpanded})-${totalDedRef}))-D${t3Row})/${basePriceRef},0)`, result: basePrice ? afterProfit/basePrice : 0 }, '0.00%'],
   ];
   let afterCostRow = null;
+  const summaryValueCol = 7;
+  const summaryValueColL = colL(summaryValueCol);
   summaryRows.forEach(([k, v, fmt]) => {
-    if (k === '减税后成本') afterCostRow = row;  // 减税后成本 值在 I 列
-    ws.getCell(row, 1).value = k; ws.mergeCells(row, 1, row, 8);
-    ws.getCell(row, 9).value = v; ws.mergeCells(row, 9, row, 13);
-    ws.getCell(row, 9).numFmt = fmt;
-    for (let cc = 1; cc <= 13; cc++) styleSubtotal(ws.getCell(row, cc), 'sub');
+    if (k === '减税后成本') afterCostRow = row;
+    ws.getCell(row, 1).value = k; ws.mergeCells(row, 1, row, 6);
+    ws.getCell(row, summaryValueCol).value = v; ws.mergeCells(row, summaryValueCol, row, sumCol);
+    ws.getCell(row, summaryValueCol).numFmt = fmt;
+    for (let cc = 1; cc <= sumCol; cc++) styleSubtotal(ws.getCell(row, cc), 'sub');
     row += 1;
   });
   row += 1;
@@ -2699,9 +2701,10 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   // 减税后码数(表2) = 货价 / 减税后成本（前向引用：减税后成本 此处才渲染完，回填公式）
   const codeAfterIdx = t2Cols.findIndex(c => c[1] === 'code_after') + 1;
   if (afterCostRow && codeAfterIdx && !ov['t2.code_after']) {
-    const baseLive = cellVal(basePriceRef), afterLive = cellVal(`I${afterCostRow}`);
+    const afterCostRef = `${summaryValueColL}${afterCostRow}`;
+    const baseLive = cellVal(basePriceRef), afterLive = cellVal(afterCostRef);
     const cell = ws.getCell(t2DataRow, codeAfterIdx);
-    cell.value = { formula: `IFERROR(${basePriceRef}/I${afterCostRow},0)`, result: afterLive > 0 ? baseLive / afterLive : 0 };
+    cell.value = { formula: `IFERROR(${basePriceRef}/${afterCostRef},0)`, result: afterLive > 0 ? baseLive / afterLive : 0 };
     cell.numFmt = '0.0000';
   }
   return row;
