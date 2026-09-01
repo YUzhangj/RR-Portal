@@ -185,7 +185,7 @@ async function buildWorkbook({ quote, sections }) {
   let row = 1;
 
   // 报价单标题
-  ws.mergeCells(row, 1, row, 18);
+  ws.mergeCells(row, 1, row, 17);
   const titleCell = ws.getCell(row, 1);
   titleCell.value = `${quote.quote_no || ''} ${quote.product_name || ''} 内部报价明细`;
   titleCell.font = { bold: true, size: 18, color: { argb: COLORS.white }, name: 'Microsoft YaHei' };
@@ -195,7 +195,7 @@ async function buildWorkbook({ quote, sections }) {
   row += 1;
 
   // 报价单元信息
-  ws.mergeCells(row, 1, row, 18);
+  ws.mergeCells(row, 1, row, 17);
   const subCell = ws.getCell(row, 1);
   subCell.value = `客户: ${quote.customer || '—'}    数量: ${quote.qty || '—'}    创建: ${quote.created_at || ''}`;
   subCell.alignment = { horizontal: 'center', vertical: 'middle' };
