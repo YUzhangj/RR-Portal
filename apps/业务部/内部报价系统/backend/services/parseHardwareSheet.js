@@ -173,7 +173,12 @@ async function parseWorkbook(buffer, options = {}) {
         || untaxed != null || taxed != null || usd != null;
       if (!hasContent) continue;
 
-      const startsProduct = !!(rawSerial || (rawName && rawName !== carried.name));
+      // 部分供应商会给同一物料的每个 MOQ 档都填独立序号；名称和规格相同的连续行
+      // 仍应合并成一个物料的阶梯价，不能因序号不同拆成多个单选档。
+      const repeatsCurrentProduct = !!(current && rawName && rawName === current.name
+        && (!rawSpec || !current.spec || rawSpec === current.spec)
+        && (!rawMaterial || !current.material || rawMaterial === current.material));
+      const startsProduct = !repeatsCurrentProduct && !!(rawSerial || (rawName && rawName !== carried.name));
       if (startsProduct) {
         carried = {
           serial: rawSerial || carried.serial,

@@ -65,6 +65,24 @@ test('supplier import preview provides per-item MOQ and currency selectors', () 
   assert.match(source, /可逐项选择识别到的 MOQ 与币种/);
 });
 
+test('numbered rows with the same product and spec merge into selectable MOQ tiers', async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('供应商报价单');
+  sheet.addRow([
+    '序号', '产品编号&产品名称', '规格描述', '材料&表面处理', '单位', 'MOQ',
+    '单价(元)不含税', '单价(元)含税', '单价（USD）不含税', '备注', '交期(天)',
+  ]);
+  sheet.addRow([1, 'ABS透明拉管料价', '14.3×22×0.06, 1C', '', '个', '5K', 3]);
+  sheet.addRow([2, 'ABS透明拉管料价', '14.3×22×0.06, 1C', '', '个', '30K', 2]);
+  sheet.addRow([3, 'ABS透明拉管料价', '14.3×22×0.06, 1C', '', '个', '50K', 1.5]);
+
+  const result = await parseWorkbook(await workbook.xlsx.writeBuffer(), { targetQty: 30000, targetCurrency: 'RMB' });
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].moq, '30K');
+  assert.equal(result.items[0].unit_price_rmb, 2);
+  assert.deepEqual(result.items[0].price_tiers.map(tier => tier.moq), ['5K', '30K', '50K']);
+});
+
 test('legacy hardware quotation header remains supported', async () => {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('旧五金报价');
