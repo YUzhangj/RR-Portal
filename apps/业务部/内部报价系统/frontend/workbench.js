@@ -2797,7 +2797,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
         if (!response.ok) throw new Error(result.error || '解析失败');
         const selections = result.items.map(item => ({
           moqQty: item.moq_qty ?? item.price_tiers?.[0]?.moq_qty ?? null,
-          currency: item.source_currency || (item.unit_price_usd != null ? 'USD' : 'RMB'),
+          priceType: item.price_type || (item.source_currency === 'USD' ? 'USD_UNTAXED' : (item.tax_pct ? 'RMB_TAXED' : 'RMB_UNTAXED')),
         }));
         const tierOptions = item => {
           const tiers = Array.isArray(item.price_tiers) ? item.price_tiers : [];
@@ -2810,19 +2810,25 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
           if (!tiers.length) return { ...item, source_currency: item.source_currency || 'RMB' };
           const selection = selections[index];
           const tier = tiers.find(value => value.moq_qty === selection.moqQty) || tiers[0];
-          const currencies = [tier.unit_price_rmb != null ? 'RMB' : null, tier.unit_price_usd != null ? 'USD' : null].filter(Boolean);
-          if (!currencies.includes(selection.currency)) selection.currency = currencies[0] || 'RMB';
-          const useUsd = selection.currency === 'USD';
+          const priceTypes = [
+            tier.unit_price_rmb_untaxed != null ? 'RMB_UNTAXED' : null,
+            tier.unit_price_rmb_taxed != null ? 'RMB_TAXED' : null,
+            tier.unit_price_usd != null ? 'USD_UNTAXED' : null,
+          ].filter(Boolean);
+          if (!priceTypes.includes(selection.priceType)) selection.priceType = priceTypes[0] || 'RMB_UNTAXED';
+          const useUsd = selection.priceType === 'USD_UNTAXED';
+          const useTaxedRmb = selection.priceType === 'RMB_TAXED';
           const baseNote = String(item.note || '').split('；').filter(part => !/^适用MOQ：|^价格来源：/.test(part));
-          const priceSource = useUsd ? 'USD不含税' : (tier.rmb_price_source || '人民币不含税');
+          const priceSource = useUsd ? 'USD不含税' : (useTaxedRmb ? '人民币含税' : '人民币不含税');
           return {
             ...item,
             moq: tier.moq,
             moq_qty: tier.moq_qty,
-            source_currency: selection.currency,
-            unit_price_rmb: useUsd ? null : tier.unit_price_rmb,
+            source_currency: useUsd ? 'USD' : 'RMB',
+            price_type: selection.priceType,
+            unit_price_rmb: useUsd ? null : (useTaxedRmb ? tier.unit_price_rmb_taxed : tier.unit_price_rmb_untaxed),
             unit_price_usd: useUsd ? tier.unit_price_usd : null,
-            tax_pct: useUsd ? 0 : (tier.rmb_tax_pct || 0),
+            tax_pct: useTaxedRmb ? 13 : 0,
             price_source: priceSource,
             note: [...baseNote, tier.moq ? `适用MOQ：${tier.moq}` : '', `价格来源：${priceSource}`].filter(Boolean).join('；'),
           };
@@ -2833,19 +2839,21 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
             <div class="card" style="background:#f0fdf4;border:1px solid #86efac;">
               <p>从 <b>${escapeHtml(result.sheet_used || '')}</b> 解析到 <b>${normalizedItems.length}</b> 条${escapeHtml(label)}明细；可逐项选择识别到的 MOQ 与币种：</p>
               <table class="wb-table"><thead><tr>
-                <th>产品名称</th><th>规格 / 材料</th><th>用量</th><th>选择 MOQ</th><th>选择币种</th><th>原币单价</th><th>单价 HKD</th><th>备注</th>
+                <th>产品名称</th><th>规格 / 材料</th><th>用量</th><th>选择 MOQ</th><th>选择价格类型</th><th>原币单价</th><th>单价 HKD</th><th>备注</th>
               </tr></thead><tbody>
               ${normalizedItems.map((item, index) => {
                 const source = result.items[index];
                 const tiers = source.price_tiers || [];
                 const activeTier = tiers.find(tier => tier.moq_qty === selections[index].moqQty) || tiers[0];
-                const currencies = activeTier
-                  ? [activeTier.unit_price_rmb != null ? 'RMB' : null, activeTier.unit_price_usd != null ? 'USD' : null].filter(Boolean)
-                  : [item.source_currency || 'RMB'];
+                const priceTypes = activeTier ? [
+                  activeTier.unit_price_rmb_untaxed != null ? ['RMB_UNTAXED', '人民币不含税'] : null,
+                  activeTier.unit_price_rmb_taxed != null ? ['RMB_TAXED', '人民币含税'] : null,
+                  activeTier.unit_price_usd != null ? ['USD_UNTAXED', '美金不含税'] : null,
+                ].filter(Boolean) : [[item.price_type || 'RMB_UNTAXED', item.price_source || item.source_currency || 'RMB']];
                 return `<tr>
                   <td>${escapeHtml(item.name || '')}</td><td>${escapeHtml(item.spec || '')}</td><td>${escapeHtml(item.qty ?? '')}</td>
                   <td><select data-tier-index="${index}" ${tiers.length ? '' : 'disabled'}>${tierOptions(source).map(([qty, text]) => `<option value="${qty}" ${qty === item.moq_qty ? 'selected' : ''}>${escapeHtml(text)}</option>`).join('') || `<option>${escapeHtml(item.moq || '')}</option>`}</select></td>
-                  <td><select data-currency-index="${index}" ${currencies.length > 1 ? '' : 'disabled'}>${currencies.map(currency => `<option value="${currency}" ${currency === item.source_currency ? 'selected' : ''}>${currency}</option>`).join('')}</select></td>
+                  <td><select data-price-type-index="${index}" ${priceTypes.length > 1 ? '' : 'disabled'}>${priceTypes.map(([value, text]) => `<option value="${value}" ${value === item.price_type ? 'selected' : ''}>${text}</option>`).join('')}</select></td>
                   <td>${escapeHtml(item.source_currency === 'USD' ? item.unit_price_usd : item.unit_price_rmb)}</td>
                   <td>${escapeHtml(formatNum(freeUnitHkd(item, fxRmbHkd, fxHkdUsd)))}</td><td>${escapeHtml(item.note || '')}</td>
                 </tr>`;
@@ -2861,8 +2869,8 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
             selections[Number(select.dataset.tierIndex)].moqQty = Number(select.value);
             renderPreview();
           });
-          preview.querySelectorAll('[data-currency-index]').forEach(select => select.onchange = () => {
-            selections[Number(select.dataset.currencyIndex)].currency = select.value;
+          preview.querySelectorAll('[data-price-type-index]').forEach(select => select.onchange = () => {
+            selections[Number(select.dataset.priceTypeIndex)].priceType = select.value;
             renderPreview();
           });
           const finish = (mode) => {

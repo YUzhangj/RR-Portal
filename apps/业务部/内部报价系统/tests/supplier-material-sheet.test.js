@@ -32,6 +32,9 @@ test('unified supplier quote imports the 5K tier for hardware, auxiliary and pac
 
   assert.equal(result.items[0].name, '五金件A');
   assert.equal(result.items[0].unit_price_rmb, 7);
+  assert.equal(result.items[0].price_type, 'RMB_UNTAXED');
+  assert.equal(result.items[0].price_tiers.find(tier => tier.moq === '5K').unit_price_rmb_taxed, 7.91);
+  assert.equal(result.items[0].price_tiers.find(tier => tier.moq === '5K').unit_price_usd, 0.95);
   assert.equal(result.items[0].moq, '5K');
   assert.equal(result.items[0].qty, 1);
   assert.match(result.items[0].spec, /20×30mm/);
@@ -61,7 +64,10 @@ test('unified supplier quote can select MOQ and source currency independently', 
 test('supplier import preview provides per-item MOQ and currency selectors', () => {
   const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
   assert.match(source, /data-tier-index/);
-  assert.match(source, /data-currency-index/);
+  assert.match(source, /data-price-type-index/);
+  assert.match(source, /人民币不含税/);
+  assert.match(source, /人民币含税/);
+  assert.match(source, /美金不含税/);
   assert.match(source, /可逐项选择识别到的 MOQ 与币种/);
 });
 

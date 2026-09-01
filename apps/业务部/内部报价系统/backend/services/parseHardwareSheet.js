@@ -82,13 +82,15 @@ function chooseTier(tiers, targetQty, targetCurrency) {
       return eligible.length ? eligible[eligible.length - 1] : sorted[0];
     })();
   const useUsd = currency === 'USD' || (currency !== 'RMB' && picked.unit_price_rmb == null && picked.unit_price_usd != null);
+  const useTaxedRmb = !useUsd && picked.unit_price_rmb_untaxed == null && picked.unit_price_rmb_taxed != null;
   return {
     ...picked,
-    unit_price_rmb: useUsd ? null : picked.unit_price_rmb,
+    unit_price_rmb: useUsd ? null : (useTaxedRmb ? picked.unit_price_rmb_taxed : picked.unit_price_rmb_untaxed),
     unit_price_usd: useUsd ? picked.unit_price_usd : null,
     source_currency: useUsd ? 'USD' : 'RMB',
-    tax_pct: useUsd ? 0 : (picked.rmb_tax_pct || 0),
-    price_source: useUsd ? 'USD不含税' : (picked.rmb_price_source || '人民币不含税'),
+    tax_pct: useUsd ? 0 : (useTaxedRmb ? 13 : 0),
+    price_source: useUsd ? 'USD不含税' : (useTaxedRmb ? '人民币含税' : '人民币不含税'),
+    price_type: useUsd ? 'USD_UNTAXED' : (useTaxedRmb ? 'RMB_TAXED' : 'RMB_UNTAXED'),
   };
 }
 
@@ -221,6 +223,8 @@ async function parseWorkbook(buffer, options = {}) {
           moq: moqText,
           moq_qty: parseMoq(moqText),
           unit_price_rmb: untaxed ?? taxed,
+          unit_price_rmb_untaxed: untaxed,
+          unit_price_rmb_taxed: taxed,
           unit_price_usd: usd,
           rmb_tax_pct: taxed != null && untaxed == null ? 13 : 0,
           rmb_price_source: untaxed != null ? '人民币不含税' : (taxed != null ? '人民币含税' : null),
@@ -240,6 +244,7 @@ async function parseWorkbook(buffer, options = {}) {
         unit_price_rmb: tier.unit_price_rmb,
         unit_price_usd: tier.unit_price_usd,
         source_currency: tier.source_currency,
+        price_type: tier.price_type,
         tax_pct: tier.tax_pct,
         note: joinNote([
           group.note,
