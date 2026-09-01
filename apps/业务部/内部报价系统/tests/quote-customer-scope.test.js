@@ -29,8 +29,11 @@ test('engineering accounts can create quotes and edit quote header data', () => 
   assert.match(route, /VALUES \(\?, \?, \?, \?, \?, \?, \?, \?\)/);
   assert.match(route, /run\(normalizedQuoteNo, normalizedProductName, normalizedCustomer, qty \|\| null, version \|\| null, req\.user\.dept/);
   assert.match(route, /只有业务或工程可改表头/);
+  assert.match(route, /quote_no, product_name, customer, qty, version/);
+  assert.match(route, /货号「\$\{normalizedQuoteNo\}」已被占用/);
   assert.match(route, /if \(customer !== undefined\)[\s\S]+该客户不在当前账号的授权范围内/);
   assert.match(workbench, /function renderEngineeringQuoteHeader\(/);
   assert.match(workbench, /保存表头资料/);
+  assert.match(workbench, /id="eng-h-no"/);
   assert.match(workbench, /renderEngineeringQuoteHeader\(headerHost, quote, authorizedCustomers/);
 });

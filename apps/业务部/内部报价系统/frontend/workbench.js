@@ -5155,7 +5155,7 @@ function renderSales(host, payload, quote, canEditHeader, canEditPricing, allSec
   host.innerHTML = `
     <h3>报价单表头</h3>
     <div class="wb-grid2">
-      <label>货号 <input id="h-no" value="${escapeHtml(quote.quote_no)}" disabled /></label>
+      <label>货号 <input id="h-no" value="${escapeHtml(quote.quote_no)}" ${canEditHeader ? '' : 'disabled'} /></label>
       <label>产品名称 <input id="h-pn" value="${escapeHtml(quote.product_name || '')}" ${canEditHeader ? '' : 'disabled'} /></label>
       <label>版本 <input id="h-ver" value="${escapeHtml(quote.version || '')}" placeholder="如 V1/改色版" ${canEditHeader ? '' : 'disabled'} /></label>
       <label>客户 <input id="h-cu" value="${escapeHtml(quote.customer || '')}" ${canEditHeader ? '' : 'disabled'} /></label>
@@ -5195,9 +5195,11 @@ function renderSales(host, payload, quote, canEditHeader, canEditPricing, allSec
   renderFreightCalc(host.querySelector('#wb-freight'), payload.freight_calc, eCarton, true, onChange);
 
   if (canEditHeader) {
-    ['h-pn', 'h-ver', 'h-cu', 'h-qty'].forEach(id => $(id).oninput = () => onHeaderChange({
-      product_name: $('h-pn').value, version: $('h-ver').value, customer: $('h-cu').value, qty: Number($('h-qty').value) || null,
-    }));
+    const saveHeader = () => onHeaderChange({
+      quote_no: $('h-no').value, product_name: $('h-pn').value, version: $('h-ver').value, customer: $('h-cu').value, qty: Number($('h-qty').value) || null,
+    });
+    $('h-no').onchange = saveHeader;
+    ['h-pn', 'h-ver', 'h-cu', 'h-qty'].forEach(id => $(id).oninput = saveHeader);
   }
   if (canEditPricing) {
     $('h-cy').onchange = () => { h.currency = $('h-cy').value; onChange(); };
@@ -5214,7 +5216,7 @@ function renderEngineeringQuoteHeader(host, quote, customers, onSave) {
   host.innerHTML = `
     <h3>报价单表头资料</h3>
     <div class="wb-grid2">
-      <label>货号 <input value="${escapeHtml(quote.quote_no || '')}" disabled /></label>
+      <label>货号 <input id="eng-h-no" value="${escapeHtml(quote.quote_no || '')}" /></label>
       <label>产品名称 <input id="eng-h-pn" value="${escapeHtml(quote.product_name || '')}" /></label>
       <label>版本 <input id="eng-h-ver" value="${escapeHtml(quote.version || '')}" placeholder="如 V1/改色版" /></label>
       <label>客户
@@ -5237,6 +5239,7 @@ function renderEngineeringQuoteHeader(host, quote, customers, onSave) {
   }
   saveButton.onclick = async () => {
     const patch = {
+      quote_no: host.querySelector('#eng-h-no').value.trim(),
       product_name: host.querySelector('#eng-h-pn').value.trim(),
       version: host.querySelector('#eng-h-ver').value.trim() || null,
       customer: host.querySelector('#eng-h-cu').value,

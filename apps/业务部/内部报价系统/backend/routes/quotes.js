@@ -179,8 +179,16 @@ router.put('/:id/header', async (req, res) => {
   const id = Number(req.params.id);
   const acc = await quoteAccess(req.user, id);
   if (acc.status !== 200) return res.status(acc.status).json({ error: acc.status === 404 ? '不存在' : '无权修改该客户的报价单' });
-  const { product_name, customer, qty, version } = req.body || {};
+  const { quote_no, product_name, customer, qty, version } = req.body || {};
   const fields = []; const vals = [];
+  if (quote_no !== undefined) {
+    const normalizedQuoteNo = String(quote_no || '').trim();
+    if (!normalizedQuoteNo) return res.status(400).json({ error: '货号不能为空' });
+    const duplicate = await db.prepare('SELECT id, customer FROM quotes WHERE quote_no = ? AND factory_code = ? AND id != ?')
+      .get(normalizedQuoteNo, req.user.active_factory_code, id);
+    if (duplicate) return res.status(409).json({ error: `货号「${normalizedQuoteNo}」已被占用（客户：${duplicate.customer || '未填写'}）` });
+    fields.push('quote_no = ?'); vals.push(normalizedQuoteNo);
+  }
   if (product_name !== undefined) { fields.push('product_name = ?'); vals.push(product_name); }
   if (customer !== undefined) {
     const normalizedCustomer = String(customer || '').trim();
