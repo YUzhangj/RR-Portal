@@ -444,12 +444,12 @@ async function buildWorkbook({ quote, sections }) {
   const ccx = eng.carton_calc || {};
   const cartonListX = (ccx.cartons && ccx.cartons.length) ? ccx.cartons : (ccx.cl ? [{
     cl: ccx.cl, cw: ccx.cw, ch: ccx.ch, qty: ccx.qty,
-    flat_cards: ccx.flat_card ? [{ l: ccx.cl, w: ccx.cw }] : [],
+    flat_cards: ccx.flat_card ? [{ l: ccx.cl, w: ccx.cw, qty: 1 }] : [],
   }] : []);
   const cartonRateX = num(ccx.paper_rate) || 2.75;
   const cartonRmb = cartonListX.reduce((s, b) => {
     const boxPrice = (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * cartonRateX / 1000;
-    const flatSum = (b.flat_cards || []).reduce((a, f) => a + ((num(f.l) || num(b.cl)) + 1) * ((num(f.w) || num(b.cw)) + 1) * 2 / 1000, 0);
+    const flatSum = (b.flat_cards || []).reduce((a, f) => a + ((num(f.l) || num(b.cl)) + 1) * ((num(f.w) || num(b.cw)) + 1) * 2 / 1000 * (f.qty == null || f.qty === '' ? 1 : num(f.qty)), 0);
     const q = Math.max(num(b.qty), 1);
     return s + (boxPrice + flatSum) / q;
   }, 0) * fxRH;
@@ -2225,7 +2225,7 @@ function renderCartonAndFreight(ws, row, eng, sales, refs) {
   const cartonRate = num(c.paper_rate) || 2.75;  // 纸价系数（可调）
   const cartonCandidates = (c.cartons && c.cartons.length) ? c.cartons : (c.cl ? [{
     name: '主纸箱', cl: c.cl, cw: c.cw, ch: c.ch, qty: c.qty,
-    flat_cards: c.flat_card ? [{ name: '主平卡', l: c.cl, w: c.cw }] : [],
+    flat_cards: c.flat_card ? [{ name: '主平卡', l: c.cl, w: c.cw, qty: 1 }] : [],
   }] : []);
   const cartons = cartonCandidates.filter(box => num(box.cl) > 0 && num(box.cw) > 0 && num(box.ch) > 0);
 
@@ -2277,7 +2277,9 @@ function renderCartonAndFreight(ws, row, eng, sales, refs) {
           ws.getCell(row, 1).value = f.name || '平卡';
           ws.getCell(row, 2).value = fl;
           ws.getCell(row, 3).value = fw;
-          ws.getCell(row, 6).value = { formula: `(B${row}+1)*(C${row}+1)*2/1000`, result: (fl + 1) * (fw + 1) * 2 / 1000 };
+          const flatQty = f.qty == null || f.qty === '' ? 1 : num(f.qty);
+          ws.getCell(row, 4).value = flatQty;
+          ws.getCell(row, 6).value = { formula: `(B${row}+1)*(C${row}+1)*2/1000*D${row}`, result: (fl + 1) * (fw + 1) * 2 / 1000 * flatQty };
           ws.getCell(row, 6).numFmt = HKD;
           for (let cc = 1; cc <= 7; cc++) styleData(ws.getCell(row, cc));
           cartonRef.flatCells.push(`F${row}`);
