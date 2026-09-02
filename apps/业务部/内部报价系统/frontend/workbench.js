@@ -380,16 +380,21 @@ function hasFreeUsdPrice(row) {
   return row && row.unit_price_usd !== undefined && row.unit_price_usd !== null && row.unit_price_usd !== '';
 }
 function usesFreeUsdPrice(row) {
-  return hasFreeUsdPrice(row) && (row.source_currency === 'USD' || !hasFreeRmbPrice(row));
+  if (!row) return false;
+  if (row.source_currency === 'USD') return hasFreeUsdPrice(row) || hasFreeRmbPrice(row);
+  return hasFreeUsdPrice(row) && !hasFreeRmbPrice(row);
+}
+function freeUsdSourcePrice(row) {
+  return hasFreeUsdPrice(row) ? num(row.unit_price_usd) : num(row && row.unit_price_rmb);
 }
 function freeUnitRmb(row, fxRmbHkd, fxHkdUsd) {
   const fx = num(fxRmbHkd) || 0.85;
-  if (usesFreeUsdPrice(row)) return num(row.unit_price_usd) * (num(fxHkdUsd) || 7.8) * fx;
+  if (usesFreeUsdPrice(row)) return freeUsdSourcePrice(row) * (num(fxHkdUsd) || 7.8) * fx;
   return hasFreeRmbPrice(row) ? num(row.unit_price_rmb) : num(row.unit_price) * fx;
 }
 function freeUnitHkd(row, fxRmbHkd, fxHkdUsd) {
   const fx = num(fxRmbHkd) || 0.85;
-  if (usesFreeUsdPrice(row)) return num(row.unit_price_usd) * (num(fxHkdUsd) || 7.8);
+  if (usesFreeUsdPrice(row)) return freeUsdSourcePrice(row) * (num(fxHkdUsd) || 7.8);
   return hasFreeRmbPrice(row) ? num(row.unit_price_rmb) / fx : num(row.unit_price);
 }
 function freeAmountHkd(row, fxRmbHkd, fxHkdUsd) {
@@ -407,6 +412,15 @@ function ensureFreeRmbPrices(rows, fxRmbHkd) {
     if (!hasFreeRmbPrice(row) && !usesFreeUsdPrice(row) && row.unit_price !== undefined && row.unit_price !== null && row.unit_price !== '') {
       row.unit_price_rmb = +freeUnitRmb(row, fxRmbHkd).toFixed(6);
     }
+  });
+}
+function normalizeFreeCurrencyPrices(rows) {
+  (rows || []).forEach(row => {
+    if (!row || row.source_currency !== 'USD' || hasFreeUsdPrice(row) || !hasFreeRmbPrice(row)) return;
+    row.unit_price_usd = row.unit_price_rmb;
+    row.unit_price_usd_raw = row.unit_price_rmb_raw;
+    row.unit_price_rmb = null;
+    row.unit_price_rmb_raw = null;
   });
 }
 
@@ -3002,6 +3016,9 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
   const wrappedOnChange = () => { refreshes.forEach(f => f()); onChange(); };
 
   // 电子部分已移到 电子部 tab（renderElectronic）
+  normalizeFreeCurrencyPrices(payload.hardware);
+  normalizeFreeCurrencyPrices(payload.aux_materials);
+  normalizeFreeCurrencyPrices(payload.packaging_materials);
   ensureFreeRmbPrices(payload.hardware, fxRmbHkd);
   ensureFreeRmbPrices(payload.aux_materials, fxRmbHkd);
   ensureFreeRmbPrices(payload.packaging_materials, fxRmbHkd);
