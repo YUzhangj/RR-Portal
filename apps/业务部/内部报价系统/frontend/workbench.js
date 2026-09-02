@@ -2541,7 +2541,7 @@ function renderCartonCalc(host, c, canEdit, onChange) {
           <td><input data-bi="${i}" data-fj="${j}" data-k="name" type="text" value="${f.name || ''}" ${canEdit?'':'disabled'} style="width:90px"/></td>
           <td><input data-bi="${i}" data-fj="${j}" data-k="l" type="number" step="any" value="${f.l || ''}" placeholder="${b.cl || ''}" title="留空=纸箱长 ${b.cl || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
           <td><input data-bi="${i}" data-fj="${j}" data-k="w" type="number" step="any" value="${f.w || ''}" placeholder="${b.cw || ''}" title="留空=纸箱宽 ${b.cw || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
-          <td><input data-bi="${i}" data-fj="${j}" data-k="qty" type="number" step="any" min="0" value="${f.qty == null || f.qty === '' ? 1 : f.qty}" ${canEdit?'':'disabled'} style="width:64px"/></td>
+          <td><input data-bi="${i}" data-fj="${j}" data-k="qty" data-formula-flat-qty type="text" value="${escapeHtml(String(f.qty_raw != null && f.qty_raw !== '' ? f.qty_raw : (f.qty == null || f.qty === '' ? 1 : f.qty)))}" placeholder="如 1/2" title="可输入分数或公式：1/2、3*0.5、(2+1)/4" ${canEdit?'':'disabled'} style="width:72px"/></td>
           <td style="text-align:right;color:#0f766e;font-weight:600">${flatPriceOf(f, b).toFixed(2)}</td>
           ${canEdit ? `<td><button class="mini danger" data-del-f="${i}-${j}">×</button></td>` : ''}
         </tr>`).join('');
@@ -2628,7 +2628,14 @@ function renderCartonCalc(host, c, canEdit, onChange) {
     host.querySelectorAll('input[data-fj]').forEach(el => {
       el.oninput = () => {
         const i = +el.dataset.bi, j = +el.dataset.fj, k = el.dataset.k;
-        c.cartons[i].flat_cards[j][k] = el.type === 'number' ? (el.value === '' ? 0 : Number(el.value)) : el.value;
+        if (el.hasAttribute('data-formula-flat-qty')) {
+          const parsed = parseFormulaInput(el.value);
+          c.cartons[i].flat_cards[j][k] = parsed == null ? 0 : parsed;
+          c.cartons[i].flat_cards[j][`${k}_raw`] = el.value;
+          el.style.color = el.value.trim() !== '' && parsed == null ? '#b91c1c' : '';
+        } else {
+          c.cartons[i].flat_cards[j][k] = el.type === 'number' ? (el.value === '' ? 0 : Number(el.value)) : el.value;
+        }
         onChange();
       };
       el.onchange = () => render();

@@ -2278,7 +2278,8 @@ function renderCartonAndFreight(ws, row, eng, sales, refs) {
           ws.getCell(row, 2).value = fl;
           ws.getCell(row, 3).value = fw;
           const flatQty = f.qty == null || f.qty === '' ? 1 : num(f.qty);
-          ws.getCell(row, 4).value = flatQty;
+          const flatQtyFormula = toExcelFormulaInput(f.qty_raw);
+          ws.getCell(row, 4).value = flatQtyFormula ? { formula: flatQtyFormula, result: flatQty } : flatQty;
           ws.getCell(row, 6).value = { formula: `(B${row}+1)*(C${row}+1)*2/1000*D${row}`, result: (fl + 1) * (fw + 1) * 2 / 1000 * flatQty };
           ws.getCell(row, 6).numFmt = HKD;
           for (let cc = 1; cc <= 7; cc++) styleData(ws.getCell(row, cc));

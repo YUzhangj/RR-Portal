@@ -137,7 +137,7 @@ test('carton product dimensions are labeled in inches', async () => {
           pl: 9, pw: 5, ph: 12,
           cartons: [{
             name: '主纸箱', cl: 17, cw: 14, ch: 12, qty: 6,
-            flat_cards: [{ name: '主平卡', l: 15.95, w: 12, qty: 3 }],
+            flat_cards: [{ name: '主平卡', l: 15.95, w: 12, qty: 0.5, qty_raw: '=1/2' }],
           }, { name: '纸箱2', cl: 0, cw: 0, ch: 0, qty: 1, flat_cards: [] }],
         },
       }) },
@@ -161,10 +161,13 @@ test('carton product dimensions are labeled in inches', async () => {
   assert.equal(worksheet.getCell(titleRow + 3, 1).value, '主纸箱');
   assert.equal(worksheet.getCell(titleRow + 3, 5).numFmt, '0.00');
   assert.equal(worksheet.getCell(titleRow + 4, 1).value, '主平卡');
-  assert.equal(worksheet.getCell(titleRow + 4, 4).value, 3);
+  assert.deepEqual(worksheet.getCell(titleRow + 4, 4).value, { formula: '1/2', result: 0.5 });
   assert.ok(!labels.includes('纸箱2'));
   assert.match(worksheet.getCell(titleRow + 4, 6).value.formula, /^\(B\d+\+1\)\*\(C\d+\+1\)\*2\/1000\*D\d+$/);
-  assert.ok(Math.abs(worksheet.getCell(titleRow + 4, 6).value.result - (15.95 + 1) * (12 + 1) * 2 / 1000 * 3) < 1e-9);
+  assert.ok(Math.abs(worksheet.getCell(titleRow + 4, 6).value.result - (15.95 + 1) * (12 + 1) * 2 / 1000 * 0.5) < 1e-9);
+  const workbenchSource = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  assert.match(workbenchSource, /data-formula-flat-qty/);
+  assert.match(workbenchSource, /flat_cards\[j\]\[`\$\{k\}_raw`\] = el\.value/);
 });
 
 test('carton dimensions accept formulas and preserve them in Excel export', async () => {
