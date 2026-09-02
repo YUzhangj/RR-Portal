@@ -379,13 +379,18 @@ function hasFreeRmbPrice(row) {
 function hasFreeUsdPrice(row) {
   return row && row.unit_price_usd !== undefined && row.unit_price_usd !== null && row.unit_price_usd !== '';
 }
+function hasFreeUsdRawPrice(row) {
+  return row && row.unit_price_usd_raw !== undefined && row.unit_price_usd_raw !== null && row.unit_price_usd_raw !== '';
+}
 function usesFreeUsdPrice(row) {
   if (!row) return false;
-  if (row.source_currency === 'USD') return hasFreeUsdPrice(row) || hasFreeRmbPrice(row);
+  if (row.source_currency === 'USD') return true;
   return hasFreeUsdPrice(row) && !hasFreeRmbPrice(row);
 }
 function freeUsdSourcePrice(row) {
-  return hasFreeUsdPrice(row) ? num(row.unit_price_usd) : num(row && row.unit_price_rmb);
+  if (hasFreeUsdPrice(row)) return num(row.unit_price_usd);
+  if (hasFreeUsdRawPrice(row)) return num(parseFormulaInput(row.unit_price_usd_raw));
+  return num(row && row.unit_price_rmb);
 }
 function freeUnitRmb(row, fxRmbHkd, fxHkdUsd) {
   const fx = num(fxRmbHkd) || 0.85;
