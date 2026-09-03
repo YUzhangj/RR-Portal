@@ -2292,10 +2292,10 @@ function renderCartonAndFreight(ws, row, eng, sales, refs) {
         });
       }
       const flatSumFormula = cartonRef.flatCells.length ? `+${cartonRef.flatCells.join('+')}` : '';
-      const cartonFreight = (num(ws.getCell(cartonRef.boxRow, 6).value.result) + cartonRef.flatCells.reduce((total, address) => total + num(ws.getCell(address).value.result), 0))
-        / Math.max(num(b.qty), 1) * num(eng.indo_pct) / 100;
+      const cartonFreight = (num(ws.getCell(cartonRef.boxRow, 6).value.result) / Math.max(num(b.qty), 1)
+        + cartonRef.flatCells.reduce((total, address) => total + num(ws.getCell(address).value.result), 0)) * num(eng.indo_pct) / 100;
       ws.getCell(cartonRef.indoCell).value = {
-        formula: `(${cartonRef.boxCell}${flatSumFormula})/MAX(${cartonRef.qtyCell},1)*${num(eng.indo_pct)}/100`,
+        formula: `(${cartonRef.boxCell}/MAX(${cartonRef.qtyCell},1)${flatSumFormula})*${num(eng.indo_pct)}/100`,
         result: cartonFreight,
       };
       ws.getCell(cartonRef.indoCell).numFmt = HKD4;

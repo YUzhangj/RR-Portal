@@ -164,10 +164,10 @@ test('carton product dimensions are labeled in inches', async () => {
   assert.match(worksheet.getCell(titleRow + 4, 6).value.formula, /^\(B\d+\+1\)\*\(C\d+\+1\)\*2\/1000\*D\d+$/);
   assert.ok(Math.abs(worksheet.getCell(titleRow + 4, 6).value.result - (15.95 + 1) * (12 + 1) * 2 / 1000 * 0.5) < 1e-9);
   const cartonFreight = worksheet.getCell(titleRow + 3, 8).value;
-  assert.match(cartonFreight.formula, /^\(F\d+\+F\d+\)\/MAX\(G\d+,1\)\*10\/100$/);
+  assert.match(cartonFreight.formula, /^\(F\d+\/MAX\(G\d+,1\)\+F\d+\)\*10\/100$/);
   const expectedBox = (17 + 14 + 2) * (14 + 12 + 1) * 2 * 2.75 / 1000;
   const expectedFlat = (15.95 + 1) * (12 + 1) * 2 / 1000 * 0.5;
-  assert.ok(Math.abs(cartonFreight.result - (expectedBox + expectedFlat) / 6 * 0.1) < 1e-9);
+  assert.ok(Math.abs(cartonFreight.result - (expectedBox / 6 + expectedFlat) * 0.1) < 1e-9);
   const totalsRow = worksheet.getColumn(1).values.findIndex(value => value === '注塑+吹气') + 1;
   assert.match(worksheet.getCell(totalsRow, 9).value.formula, /\+[A-Z]+\d+/);
   const workbenchSource = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
