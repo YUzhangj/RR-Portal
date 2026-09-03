@@ -1,11 +1,23 @@
 name: Factory Review Diag
 
-# 只读诊断 factory-review 的 pb_data 数据状态（手动触发）。
-# 用于排查「货期管理入单记录消失」——确认 orders 表实际有多少行、pb_data 是否被重置。
-# 全程只读：count/ls/du/日志，绝不改动任何数据。
+# factory-review 的 pb_data 运维（手动触发）。
+#   mode=diag   —— 只读诊断：count/ls/du/日志，绝不改动任何数据。
+#   mode=backup —— 备份 pb_data：用 SQLite online backup 生成一致快照 data.db 副本，
+#                  再连其它文件一起 tar 到 /opt/rr-portal/backups/pb_data-时间戳.tar.gz。
+#                  不停容器、不改数据。
+#   mode=set-integration-key —— 把 GitHub Secret FACTORY_REVIEW_INTEGRATION_API_KEY 幂等写入
+#                  .env.cloud.production，然后 force-recreate factory-review 容器（几秒抖动），
+#                  最后用新 key 实测集成接口 health 返回 200。轮换 key 也走这里。
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "diag（只读诊断）/ backup（备份 pb_data）/ set-integration-key（注入集成 API 密钥并重建容器）"
+        type: choice
+        required: true
+        default: diag
+        options: [diag, backup, set-integration-key]
 
 permissions:
   contents: read
@@ -34,6 +46,8 @@ jobs:
       - name: Diagnose factory-review pb_data via SSH
         env:
           CLOUD_HOST_FINGERPRINT: ${{ secrets.CLOUD_HOST_FINGERPRINT }}
+          OPS_MODE: ${{ inputs.mode }}
+          INTEG_KEY: ${{ secrets.FACTORY_REVIEW_INTEGRATION_API_KEY }}
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
         with:
           host: ${{ secrets.CLOUD_HOST }}
@@ -41,11 +55,63 @@ jobs:
           key: ${{ secrets.CLOUD_SSH_KEY }}
           fingerprint: ${{ env.CLOUD_HOST_FINGERPRINT }}
           command_timeout: 8m
+          envs: OPS_MODE,INTEG_KEY
           script: |
             set -uo pipefail
             APP="/opt/rr-portal/apps/PMC跟仓管/加工厂月度评审管理制度"
             PBDATA="$APP/pb_data"
-            echo "=================== factory-review pb_data 诊断 ==================="
+            MODE="${OPS_MODE:-diag}"
+            echo "=================== factory-review pb_data $MODE ==================="
+
+            if [ "$MODE" = "set-integration-key" ]; then
+              [ -n "${INTEG_KEY:-}" ] || { echo "[FAIL] GitHub Secret FACTORY_REVIEW_INTEGRATION_API_KEY 未设置" >&2; exit 1; }
+              [ ${#INTEG_KEY} -ge 32 ] || { echo "[FAIL] key 需 >=32 字符" >&2; exit 1; }
+              ENV_FILE=/opt/rr-portal/.env.cloud.production
+              [ -f "$ENV_FILE" ] || { echo "[FAIL] 未找到 $ENV_FILE" >&2; exit 1; }
+              if grep -qE "^FACTORY_REVIEW_INTEGRATION_API_KEY=" "$ENV_FILE"; then
+                sed -i "s|^FACTORY_REVIEW_INTEGRATION_API_KEY=.*|FACTORY_REVIEW_INTEGRATION_API_KEY=$INTEG_KEY|" "$ENV_FILE"
+                echo "  已更新 .env.cloud.production 中的 FACTORY_REVIEW_INTEGRATION_API_KEY"
+              else
+                echo "FACTORY_REVIEW_INTEGRATION_API_KEY=$INTEG_KEY" >> "$ENV_FILE"
+                echo "  已追加 FACTORY_REVIEW_INTEGRATION_API_KEY 到 .env.cloud.production"
+              fi
+              echo "-- force-recreate factory-review 容器（几秒抖动） --"
+              cd /opt/rr-portal
+              docker compose -f docker-compose.cloud.yml --env-file "$ENV_FILE" up -d --force-recreate factory-review
+              sleep 8
+              echo "-- 实测：新 key 访问集成 health --"
+              CODE=$(docker exec rr-portal-factory-review-1 sh -c "curl -s -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer $INTEG_KEY\" http://127.0.0.1:8090/api/integration/v1/health" 2>/dev/null || echo "000")
+              echo "  容器内 health http=$CODE"
+              [ "$CODE" = "200" ] || { echo "[FAIL] key 注入后接口仍未返回 200" >&2; exit 1; }
+              echo "[OK] set-integration-key 完成（key 只保存在服务器 env 文件，不回显）"
+              exit 0
+            fi
+
+            if [ "$MODE" = "backup" ]; then
+              [ -f "$PBDATA/data.db" ] || { echo "[FAIL] $PBDATA/data.db 不存在" >&2; exit 1; }
+              BK_DIR=/opt/rr-portal/backups
+              mkdir -p "$BK_DIR"
+              TS="$(date +%Y%m%d-%H%M%S)"
+              SNAP="$BK_DIR/pb_data-snap-$TS.db"
+              echo "-- SQLite online backup（一致性快照，不停容器）--"
+              python3 - "$PBDATA/data.db" "$SNAP" <<'PY'
+            import sqlite3, sys
+            src = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=30)
+            dst = sqlite3.connect(sys.argv[2])
+            try:
+                src.backup(dst)
+            finally:
+                dst.close(); src.close()
+            print("snapshot ok:", sys.argv[2])
+            PY
+              [ -s "$SNAP" ] || { echo "[FAIL] 快照生成失败" >&2; exit 1; }
+              TARBALL="$BK_DIR/pb_data-$TS.tar.gz"
+              tar -czf "$TARBALL" -C "$BK_DIR" "pb_data-snap-$TS.db" \
+                && rm -f "$SNAP" \
+                && ls -lh "$TARBALL" \
+                && echo "[OK] backup 完成: $TARBALL"
+              exit 0
+            fi
 
             echo "== 容器状态 =="
             docker ps --filter name=factory-review --format '{{.Names}}\t{{.Status}}' || true
