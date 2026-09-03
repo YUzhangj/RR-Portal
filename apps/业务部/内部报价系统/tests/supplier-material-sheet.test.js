@@ -6,6 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const ExcelJS = require('exceljs');
 const { parseWorkbook } = require('../backend/services/parseHardwareSheet');
+const { rowsFromPage } = require('../backend/services/parseSupplierPdf');
 
 async function buildSupplierWorkbook() {
   const workbook = new ExcelJS.Workbook();
@@ -69,6 +70,34 @@ test('supplier import preview provides per-item MOQ and currency selectors', () 
   assert.match(source, /人民币含税/);
   assert.match(source, /美金不含税/);
   assert.match(source, /可逐项选择识别到的 MOQ 与币种/);
+  assert.match(source, /\.xls,\.xlsx,\.pdf,application\/pdf/);
+});
+
+test('PDF table rows retain separate MOQ and three price columns for preview selection', async () => {
+  const item = (text, x, y) => ({ text, x, y });
+  const pageItems = [
+    item('序号', 20, 500), item('产品编号&产品名称', 90, 500), item('规格描述', 220, 500),
+    item('材料&表面处理', 330, 500), item('单位', 450, 500), item('MOQ', 520, 500),
+    item('单价(元)不含税', 610, 500), item('单价(元)含税', 720, 500),
+    item('单价(USD)不含税', 830, 500), item('备注', 950, 500), item('交期(天)', 1040, 500),
+    item('1', 20, 450), item('ABS透明拉管料价', 90, 450), item('14.3x22x0.06', 220, 450),
+    item('ABS', 330, 450), item('个', 450, 450), item('5K', 520, 450), item('3', 610, 450),
+    item('3.39', 720, 450), item('0.42', 830, 450), item('报价A', 950, 450), item('15', 1040, 450),
+    item('2', 20, 410), item('ABS透明拉管料价', 90, 410), item('14.3x22x0.06', 220, 410),
+    item('ABS', 330, 410), item('个', 450, 410), item('30K', 520, 410), item('2', 610, 410),
+    item('2.26', 720, 410), item('0.30', 830, 410), item('报价B', 950, 410), item('20', 1040, 410),
+  ];
+  const rows = rowsFromPage(pageItems);
+  const result = await require('../backend/services/parseHardwareSheet').parseSheets(
+    [{ name: 'PDF 第 1 页', rows }], { targetQty: 30000, targetCurrency: 'USD' },
+  );
+  assert.equal(result.error, undefined);
+  assert.equal(result.items.length, 1);
+  assert.deepEqual(result.items[0].price_tiers.map(tier => tier.moq), ['5K', '30K']);
+  assert.equal(result.items[0].moq, '30K');
+  assert.equal(result.items[0].unit_price_usd, 0.3);
+  assert.equal(result.items[0].price_tiers[1].unit_price_rmb_untaxed, 2);
+  assert.equal(result.items[0].price_tiers[1].unit_price_rmb_taxed, 2.26);
 });
 
 test('numbered rows with the same product and spec merge into selectable MOQ tiers', async () => {

@@ -127,13 +127,7 @@ async function readSheets(buffer) {
   return workbook.SheetNames.map(name => ({ name, rows: sheetjsRows(workbook.Sheets[name]) }));
 }
 
-async function parseWorkbook(buffer, options = {}) {
-  let sheets;
-  try {
-    sheets = await readSheets(buffer);
-  } catch (error) {
-    return { error: '解析失败：' + error.message };
-  }
+async function parseSheets(sheets, options = {}) {
   if (!sheets.length) return { error: '工作簿为空' };
 
   let picked = null;
@@ -301,4 +295,12 @@ async function parseWorkbook(buffer, options = {}) {
   return { items, count: items.length, sheet_used: picked.name, header_row: headerRow + 1 };
 }
 
-module.exports = { parseWorkbook };
+async function parseWorkbook(buffer, options = {}) {
+  try {
+    return parseSheets(await readSheets(buffer), options);
+  } catch (error) {
+    return { error: '解析失败：' + error.message };
+  }
+}
+
+module.exports = { parseWorkbook, parseSheets };
