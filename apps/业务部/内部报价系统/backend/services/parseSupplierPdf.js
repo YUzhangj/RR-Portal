@@ -42,7 +42,7 @@ function rowsFromPage(pageItems) {
   if (!moqLine) return [];
 
   // PDF 从 Excel 导出时表头常被拆成 2–3 行，按横坐标合并回各列。
-  const headerItems = pageItems.filter(item => Math.abs(item.y - moqLine.y) <= 36);
+  const headerItems = pageItems.filter(item => Math.abs(item.y - moqLine.y) <= 8);
   const headers = clusterHeader(headerItems).filter(header => header.text);
   if (headers.length < 4) return [];
   const moqIndex = headers.findIndex(header => /MOQ/.test(normalize(header.text)));
@@ -55,7 +55,8 @@ function rowsFromPage(pageItems) {
   const columnForX = x => Math.max(0, Math.min(headers.length - 1,
     boundaries.findIndex((boundary, index) => index < boundaries.length - 1 && x >= boundary && x < boundaries[index + 1])));
 
-  const dataItems = pageItems.filter(item => item.y < moqLine.y - 16);
+  const headerBottom = Math.min(...headerItems.map(item => item.y));
+  const dataItems = pageItems.filter(item => item.y < headerBottom - 3);
   const dataLines = groupByY(dataItems);
   const moqLeft = boundaries[moqIndex];
   const moqRight = boundaries[moqIndex + 1];
@@ -63,6 +64,8 @@ function rowsFromPage(pageItems) {
     .filter(line => line.items.some(item => item.x >= moqLeft && item.x < moqRight && /\d/.test(item.text)))
     .map(line => line.y);
   if (!tierYs.length) return [];
+  const rowGaps = tierYs.slice(1).map((y, index) => tierYs[index] - y).filter(gap => gap > 0);
+  const typicalGap = rowGaps.length ? rowGaps.sort((a, b) => a - b)[Math.floor(rowGaps.length / 2)] : 16;
 
   const rows = [];
   const headerRow = [];
@@ -71,7 +74,7 @@ function rowsFromPage(pageItems) {
 
   tierYs.forEach((y, index) => {
     const upper = index === 0 ? moqLine.y - 15 : (tierYs[index - 1] + y) / 2;
-    const lower = index === tierYs.length - 1 ? -Infinity : (y + tierYs[index + 1]) / 2;
+    const lower = index === tierYs.length - 1 ? y - typicalGap / 2 : (y + tierYs[index + 1]) / 2;
     const cells = Array.from({ length: headers.length }, () => []);
     dataItems.filter(item => item.y < upper && item.y >= lower).forEach(item => {
       cells[columnForX(item.x)].push(item);
