@@ -1594,9 +1594,21 @@ function renderSummaryPane(host, sections, quote, me) {
 
   // 九、合计 数据
   const pricing = sales.pricing || {};
+  // 纸箱和配套平卡按每件成本计算，与工程其他材料使用同一印尼运费点数。
+  const cartonCalc = eng.carton_calc || {};
+  const cartonList = (cartonCalc.cartons && cartonCalc.cartons.length) ? cartonCalc.cartons : (cartonCalc.cl ? [{
+    cl: cartonCalc.cl, cw: cartonCalc.cw, ch: cartonCalc.ch, qty: cartonCalc.qty,
+    flat_cards: cartonCalc.flat_card ? [{ l: cartonCalc.cl, w: cartonCalc.cw, qty: 1 }] : [],
+  }] : []);
+  const cartonRate = cartonCalc.paper_rate == null || cartonCalc.paper_rate === '' ? 2.75 : num(cartonCalc.paper_rate);
+  const cartonHkd = cartonList.reduce((s, b) => {
+    const boxPrice = (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * cartonRate / 1000;
+    const flatSum = (b.flat_cards || []).reduce((a, f) => a + ((num(f.l) || num(b.cl)) + 1) * ((num(f.w) || num(b.cw)) + 1) * 2 / 1000 * (f.qty == null || f.qty === '' ? 1 : num(f.qty)), 0);
+    return s + (boxPrice + flatSum) / Math.max(num(b.qty), 1);
+  }, 0);
   // 各表按自己的点数自动汇总印尼运费（HKD）；车缝仅材料，喷油以总价30%为基数。
   const indoFreightHkd =
-      (hwRaw + auxRaw + pkmatRaw) * num(eng.indo_pct) / 100
+      (hwRaw + auxRaw + pkmatRaw + cartonHkd) * num(eng.indo_pct) / 100
     + elecIndoRaw * num(electronic.indo_pct) / 100
     + (injTotal + blowTotal) * num(mold.indo_pct) / 100
     + slushTotal * num(slush.indo_pct) / 100
@@ -1637,20 +1649,7 @@ function renderSummaryPane(host, sections, quote, me) {
   const sewingHairRmb = sum((sewing.sewing_groups || []).filter(g => g.category === '车发'), group => sewingGroupAmount(group) * sewGroupQty(group)) / sewTotalQty;
   const sewingClothRmb = sewingTotalRmb - sewingHairRmb;
   // 多纸箱 + 多平卡：Σ((箱价i + Σ平卡价i_j) / qty_i) × 汇率
-  const ccc = eng.carton_calc || {};
-  const cartonList = (ccc.cartons && ccc.cartons.length) ? ccc.cartons : (ccc.cl ? [{
-    cl: ccc.cl, cw: ccc.cw, ch: ccc.ch, qty: ccc.qty,
-    flat_cards: ccc.flat_card ? [{ l: ccc.cl, w: ccc.cw, qty: 1 }] : [],
-  }] : []);
-  const cartonRate = ccc.paper_rate == null || ccc.paper_rate === ''
-    ? 2.75
-    : num(ccc.paper_rate);
-  const cartonRmb = cartonList.reduce((s, b) => {
-    const boxPrice = (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * cartonRate / 1000;
-    const flatSum = (b.flat_cards || []).reduce((a, f) => a + ((num(f.l) || num(b.cl)) + 1) * ((num(f.w) || num(b.cw)) + 1) * 2 / 1000 * (f.qty == null || f.qty === '' ? 1 : num(f.qty)), 0);
-    const q = Math.max(num(b.qty), 1);
-    return s + (boxPrice + flatSum) / q;
-  }, 0) * fxRH;
+  const cartonRmb = cartonHkd * fxRH;
 
   // 附加税：用户手填，存到 sales.pricing_summary.surtax
   sales.pricing_summary = sales.pricing_summary || {};
@@ -2496,7 +2495,7 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
   render();
 }
 
-function renderCartonCalc(host, c, canEdit, onChange) {
+function renderCartonCalc(host, c, canEdit, onChange, getIndoPct = () => 0) {
   // 迁移：旧单纸箱 -> cartons[0]，每个纸箱内嵌 flat_cards[]
   if (!c.cartons) {
     c.cartons = [{
@@ -2524,6 +2523,7 @@ function renderCartonCalc(host, c, canEdit, onChange) {
   const boxPriceOf = (b) => (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * rate() / 1000;
   // 平卡 L/W 留空时对应所在纸箱的长/宽
   const flatPriceOf = (f, b) => ((num(f.l) || num((b||{}).cl)) + 1) * ((num(f.w) || num((b||{}).cw)) + 1) * 2 / 1000 * (f.qty == null || f.qty === '' ? 1 : num(f.qty));
+  const cartonUnitPriceOf = b => (boxPriceOf(b) + sum(b.flat_cards || [], f => flatPriceOf(f, b))) / Math.max(num(b.qty), 1);
 
   function render() {
     // 同步首个纸箱回旧字段（运费计算/出口表使用）
@@ -2561,6 +2561,7 @@ function renderCartonCalc(host, c, canEdit, onChange) {
             <span><b>CU.FT</b> <span style="color:#7c2d12;font-weight:700">${cuftOf(b).toFixed(2)}</span></span>
             <span><b>箱价</b> <span style="color:#7c2d12;font-weight:700">HK$ ${boxPriceOf(b).toFixed(2)}</span></span>
             <span><b>数量</b> <input data-bi="${i}" data-k="qty" type="number" step="1" value="${b.qty || ''}" ${canEdit?'':'disabled'} style="width:60px"/></span>
+            <span><b>印尼运费 ${num(getIndoPct())}%</b> <span style="color:#7c2d12;font-weight:700">HK$ ${(cartonUnitPriceOf(b) * num(getIndoPct()) / 100).toFixed(4)}</span></span>
           </div>
           <div style="margin-bottom:4px;color:#78716c;font-size:12px">📄 配的平卡 (inch)</div>
           <table class="wb-table" style="font-size:13px;margin-bottom:6px">
@@ -3069,7 +3070,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
     () => sum(payload.packaging_materials || [], r => freeAmountHkd(r, fxRmbHkd, fxHkdUsd)),
     () => 0, fxRmbHkd, 'HKD'));  // 不计损耗；包装材料为港币
   payload.carton_calc = payload.carton_calc || { pl: 0, pw: 0, ph: 0, cl: 0, cw: 0, ch: 0, box_price: 0, qty: 1, ka_label: 'K=A', flat_card: 0 };
-  renderCartonCalc(host.querySelector('#wb-carton-calc'), payload.carton_calc, canEdit, wrappedOnChange);
+  renderCartonCalc(host.querySelector('#wb-carton-calc'), payload.carton_calc, canEdit, wrappedOnChange, () => payload.indo_pct);
 
 }
 

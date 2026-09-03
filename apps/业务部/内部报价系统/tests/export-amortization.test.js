@@ -133,6 +133,7 @@ test('carton product dimensions are labeled in inches', async () => {
     quote: { quote_no: 'CARTON-INCH-LABEL', product_name: '纸箱英寸单位', qty: 1000 },
     sections: [
       { dept: 'engineering', payload_json: JSON.stringify({
+        indo_pct: 10,
         carton_calc: {
           pl: 9, pw: 5, ph: 12,
           cartons: [{
@@ -153,11 +154,8 @@ test('carton product dimensions are labeled in inches', async () => {
   assert.ok(!labels.includes('产品尺寸 CM'));
   const titleRow = worksheet.getColumn(1).values.findIndex(value => value === '📦 纸箱 / 运费 计算');
   assert.ok(titleRow > 0);
-  assert.deepEqual(worksheet.getRow(titleRow + 1).values.slice(1, 8), ['名称', 'L (inch)', 'W', 'H', '', '', '']);
-  assert.deepEqual(worksheet.getRow(titleRow + 2).values.slice(1, 8), ['产品尺寸（英寸）', 9, 5, 12, 'CU.FT', '箱价\n(HK$)', '数量']);
-  assert.equal(worksheet.getCell(titleRow, 8).value, null);
-  assert.equal(worksheet.getCell(titleRow + 1, 8).value, null);
-  assert.equal(worksheet.getCell(titleRow + 1, 8).fill && worksheet.getCell(titleRow + 1, 8).fill.type, undefined);
+  assert.deepEqual(worksheet.getRow(titleRow + 1).values.slice(1, 9), ['名称', 'L (inch)', 'W', 'H', '', '', '', '']);
+  assert.deepEqual(worksheet.getRow(titleRow + 2).values.slice(1, 9), ['产品尺寸（英寸）', 9, 5, 12, 'CU.FT', '箱价\n(HK$)', '数量', '印尼运费 10%\n(HK$)']);
   assert.equal(worksheet.getCell(titleRow + 3, 1).value, '主纸箱');
   assert.equal(worksheet.getCell(titleRow + 3, 5).numFmt, '0.00');
   assert.equal(worksheet.getCell(titleRow + 4, 1).value, '主平卡');
@@ -165,6 +163,13 @@ test('carton product dimensions are labeled in inches', async () => {
   assert.ok(!labels.includes('纸箱2'));
   assert.match(worksheet.getCell(titleRow + 4, 6).value.formula, /^\(B\d+\+1\)\*\(C\d+\+1\)\*2\/1000\*D\d+$/);
   assert.ok(Math.abs(worksheet.getCell(titleRow + 4, 6).value.result - (15.95 + 1) * (12 + 1) * 2 / 1000 * 0.5) < 1e-9);
+  const cartonFreight = worksheet.getCell(titleRow + 3, 8).value;
+  assert.match(cartonFreight.formula, /^\(F\d+\+F\d+\)\/MAX\(G\d+,1\)\*10\/100$/);
+  const expectedBox = (17 + 14 + 2) * (14 + 12 + 1) * 2 * 2.75 / 1000;
+  const expectedFlat = (15.95 + 1) * (12 + 1) * 2 / 1000 * 0.5;
+  assert.ok(Math.abs(cartonFreight.result - (expectedBox + expectedFlat) / 6 * 0.1) < 1e-9);
+  const totalsRow = worksheet.getColumn(1).values.findIndex(value => value === '注塑+吹气') + 1;
+  assert.match(worksheet.getCell(totalsRow, 9).value.formula, /\+[A-Z]+\d+/);
   const workbenchSource = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
   assert.match(workbenchSource, /data-formula-flat-qty/);
   assert.match(workbenchSource, /flat_cards\[j\]\[`\$\{k\}_raw`\] = el\.value/);
@@ -417,7 +422,7 @@ test('carton price can be manually adjusted to zero and exports as zero', async 
     path.join(__dirname, '..', 'frontend', 'workbench.js'),
     'utf8'
   );
-  assert.match(workbenchSource, /ccc\.paper_rate == null \|\| ccc\.paper_rate === ''/);
+  assert.match(workbenchSource, /cartonCalc\.paper_rate == null \|\| cartonCalc\.paper_rate === ''/);
   assert.match(workbenchSource, /c\.paper_rate == null \|\| c\.paper_rate === ''/);
 });
 

@@ -422,8 +422,9 @@ async function buildWorkbook({ quote, sections }) {
 
   const pricing = sales.pricing || {};
   const header = sales.header || {};
-  // 运输费 = 减税明细 印尼运费 (HKD)；× fxRH 当 RMB（后面 /fxRH 还原 HKD）
-  const shipping = num(sales.pricing_summary?.indo_freight) * fxRH;
+  // 运输费 = 统一成本表印尼运费 + 纸箱/平卡印尼运费。
+  const shippingHkd = num(subRefs.unifiedIndoValue) + num(subRefs.cartonIndoValue);
+  const shipping = shippingHkd * fxRH;
   // 注塑是 HKD，换算成 RMB
   const injSubtotalRmb = injSubtotal * fxRH;
   // 模具分摊：从工程"模具费用"表取 套产品分摊
@@ -489,7 +490,9 @@ async function buildWorkbook({ quote, sections }) {
     subRefs.packaging ? { formula: `${subRefs.packaging}`, result: pkSubtotal } : pkSubtotal,
     subRefs.aux ? { formula: `${subRefs.aux}`, result: auxSubtotal } : auxSubtotal,
     // I 运输费 (RMB → HKD)
-    shipping / fxRH,
+    (subRefs.unifiedIndoTotal || subRefs.cartonIndoFreight)
+      ? { formula: `(${[subRefs.unifiedIndoTotal, subRefs.cartonIndoFreight].filter(Boolean).join('+')})`, result: shippingHkd }
+      : shippingHkd,
     // J 搪胶 (本身就是 HKD)
     subRefs.slush ? { formula: subRefs.slush, result: slushTotalRmb / fxRH } : slushTotalRmb / fxRH,
     // K 车缝：统一成本表已拆为物料、裁床人工、车缝人工、手工人工四行（HKD）
@@ -1675,6 +1678,7 @@ function renderUnifiedCostTable(ws, row, data, refs) {
     refs.partRows = Object.assign(refs.partRows || {}, partRows);
     refs.unifiedCostTotal = `K${row}`;
     refs.unifiedIndoTotal = `L${row}`;
+    refs.unifiedIndoValue = indoTotal;
     if (data.sewingDetail && data.sewingDetail.totalCell) {
       refs.sewing = `'车缝明细'!${data.sewingDetail.totalCell}`;
       refs.sewHairRmb = data.sewingDetail.hairFormula;
@@ -2215,8 +2219,8 @@ function renderCartonAndFreight(ws, row, eng, sales, refs) {
   const c = eng.carton_calc || {};
   // 每个纸箱跟踪: { boxCell, flatCells: [...], qtyCell } 用于构造 九、合计 K 列公式
   const cartonRefs = [];
-  // 纸箱区为紧凑的 A:G 七列表，避免旧版 A:M 合并导致右侧残留样式/数值。
-  ws.mergeCells(row, 1, row, 7); styleSection(ws.getCell(row, 1));
+  // 纸箱区为紧凑的 A:H 八列表，H 列展示纸箱+平卡的印尼运费。
+  ws.mergeCells(row, 1, row, 8); styleSection(ws.getCell(row, 1));
   ws.getCell(row, 1).value = '📦 纸箱 / 运费 计算';
   row += 1;
 
@@ -2231,7 +2235,7 @@ function renderCartonAndFreight(ws, row, eng, sales, refs) {
 
   if (cartons.length) {
     // 纸箱统一表：产品尺寸、纸箱和平卡都在同一张 7 列表内。
-    const cartonHeader = ['名称', 'L (inch)', 'W', 'H', '', '', ''];
+    const cartonHeader = ['名称', 'L (inch)', 'W', 'H', '', '', '', ''];
     cartonHeader.forEach((v, i) => { ws.getCell(row, i + 1).value = v; styleHeader(ws.getCell(row, i + 1)); });
     row += 1;
 
@@ -2240,7 +2244,7 @@ function renderCartonAndFreight(ws, row, eng, sales, refs) {
     ws.getCell(row, 3).value = num(c.pw);
     ws.getCell(row, 4).value = num(c.ph);
     for (let cc = 1; cc <= 4; cc++) styleData(ws.getCell(row, cc));
-    ['CU.FT', '箱价\n(HK$)', '数量'].forEach((value, index) => {
+    ['CU.FT', '箱价\n(HK$)', '数量', `印尼运费 ${num(eng.indo_pct)}%\n(HK$)`].forEach((value, index) => {
       const cell = ws.getCell(row, index + 5);
       cell.value = value;
       styleHeader(cell);
@@ -2263,9 +2267,9 @@ function renderCartonAndFreight(ws, row, eng, sales, refs) {
                                    result: (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * cartonRate / 1000 };
       ws.getCell(row, 6).numFmt = HKD;
       ws.getCell(row, 7).value = num(b.qty);
-      for (let cc = 1; cc <= 7; cc++) styleData(ws.getCell(row, cc));
+      for (let cc = 1; cc <= 8; cc++) styleData(ws.getCell(row, cc));
       if (bi === 0) { cuftRow = row; qtyRow = row; } // 第一个纸箱供运费引用
-      const cartonRef = { boxCell: `F${row}`, qtyCell: `G${row}`, flatCells: [] };
+      const cartonRef = { boxCell: `F${row}`, qtyCell: `G${row}`, indoCell: `H${row}`, flatCells: [], boxRow: row };
       row += 1;
 
       // 平卡子表
@@ -2282,11 +2286,20 @@ function renderCartonAndFreight(ws, row, eng, sales, refs) {
           ws.getCell(row, 4).value = flatQtyFormula ? { formula: flatQtyFormula, result: flatQty } : flatQty;
           ws.getCell(row, 6).value = { formula: `(B${row}+1)*(C${row}+1)*2/1000*D${row}`, result: (fl + 1) * (fw + 1) * 2 / 1000 * flatQty };
           ws.getCell(row, 6).numFmt = HKD;
-          for (let cc = 1; cc <= 7; cc++) styleData(ws.getCell(row, cc));
+          for (let cc = 1; cc <= 8; cc++) styleData(ws.getCell(row, cc));
           cartonRef.flatCells.push(`F${row}`);
           row += 1;
         });
       }
+      const flatSumFormula = cartonRef.flatCells.length ? `+${cartonRef.flatCells.join('+')}` : '';
+      const cartonFreight = (num(ws.getCell(cartonRef.boxRow, 6).value.result) + cartonRef.flatCells.reduce((total, address) => total + num(ws.getCell(address).value.result), 0))
+        / Math.max(num(b.qty), 1) * num(eng.indo_pct) / 100;
+      ws.getCell(cartonRef.indoCell).value = {
+        formula: `(${cartonRef.boxCell}${flatSumFormula})/MAX(${cartonRef.qtyCell},1)*${num(eng.indo_pct)}/100`,
+        result: cartonFreight,
+      };
+      ws.getCell(cartonRef.indoCell).numFmt = HKD4;
+      styleData(ws.getCell(cartonRef.indoCell));
       cartonRefs.push(cartonRef);
     });
     row += 1;
@@ -2299,6 +2312,8 @@ function renderCartonAndFreight(ws, row, eng, sales, refs) {
       return `(${cr.boxCell}${flatSum})/MAX(${cr.qtyCell},1)`;
     });
     refs.cartonHkdPerPcs = parts.join('+');  // HK$/PCS （还没 × 汇率）
+    refs.cartonIndoFreight = cartonRefs.map(cr => cr.indoCell).join('+');
+    refs.cartonIndoValue = cartonRefs.reduce((total, cr) => total + num(ws.getCell(cr.indoCell).value.result), 0);
   }
   if (refs) {
     const firstCarton = cartons[0] || {};
