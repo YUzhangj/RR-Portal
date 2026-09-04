@@ -23,6 +23,10 @@ function norm(v) {
   return toStr(v).replace(/\s+/g, '').toUpperCase();
 }
 
+function identityNorm(v) {
+  return toStr(v).normalize('NFKC').replace(/\s+/g, '').replace(/[x×＊*]/gi, 'X').toUpperCase();
+}
+
 function isHeader(row) {
   const text = (row || []).map(norm).join('|');
   const legacy = /(零件名称|零件名稱|PARTNAME)/.test(text)
@@ -175,10 +179,11 @@ async function parseSheets(sheets, options = {}) {
 
       // 部分供应商会给同一物料的每个 MOQ 档都填独立序号；名称和规格相同的连续行
       // 仍应合并成一个物料的阶梯价，不能因序号不同拆成多个单选档。
-      const repeatsCurrentProduct = !!(current && rawName && rawName === current.name
-        && (!rawSpec || !current.spec || rawSpec === current.spec)
-        && (!rawMaterial || !current.material || rawMaterial === current.material));
-      const startsProduct = !repeatsCurrentProduct && !!(rawSerial || (rawName && rawName !== carried.name));
+      const repeatsCurrentProduct = !!(current && rawName
+        && identityNorm(rawName) === identityNorm(current.name)
+        && (!rawSpec || !current.spec || identityNorm(rawSpec) === identityNorm(current.spec)));
+      const startsProduct = !repeatsCurrentProduct
+        && !!(rawSerial || (rawName && identityNorm(rawName) !== identityNorm(carried.name)));
       if (startsProduct) {
         carried = {
           serial: rawSerial || carried.serial,

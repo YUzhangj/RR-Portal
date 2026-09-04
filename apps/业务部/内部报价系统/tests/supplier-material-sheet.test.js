@@ -119,6 +119,23 @@ test('numbered rows with the same product and spec merge into selectable MOQ tie
   assert.deepEqual(result.items[0].price_tiers.map(tier => tier.moq), ['5K', '30K', '50K']);
 });
 
+test('MOQ tiers merge by normalized product name and spec without using material as a split key', async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('供应商报价单');
+  sheet.addRow([
+    '序号', '产品编号&产品名称', '规格描述', '材料&表面处理', '单位', 'MOQ',
+    '单价(元)不含税', '单价(元)含税', '单价（USD）不含税', '备注', '交期(天)',
+  ]);
+  sheet.addRow([1, 'T钉', '2.5 X 43', '不锈钢', 'PCS', '5K', 0.1241]);
+  sheet.addRow([2, 'Ｔ 钉', '2.5×43', '镀镍', 'PCS', '10K', 0.1222]);
+  sheet.addRow([3, 'T　钉', '', '', 'PCS', '30K', 0.1222]);
+  sheet.addRow([4, 'T钉', '', '', 'PCS', '50K', 0.1203]);
+
+  const result = await parseWorkbook(await workbook.xlsx.writeBuffer(), { targetQty: 30000 });
+  assert.equal(result.items.length, 1);
+  assert.deepEqual(result.items[0].price_tiers.map(tier => tier.moq), ['5K', '10K', '30K', '50K']);
+});
+
 test('modified supplier template with separate product code and material name columns is supported', async () => {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('供应商报价单');
