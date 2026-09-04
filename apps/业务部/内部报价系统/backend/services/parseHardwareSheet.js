@@ -157,7 +157,6 @@ async function parseSheets(sheets, options = {}) {
   if (cols.supplierTemplate) {
     const groups = [];
     let current = null;
-    const pendingLeadingTiers = [];
     let carried = { serial: '', product_code: '', name: '', spec: '', material: '', unit: '' };
     for (let index = headerRow + 1; index < picked.rows.length; index += 1) {
       const row = picked.rows[index] || [];
@@ -190,10 +189,9 @@ async function parseSheets(sheets, options = {}) {
         source_row: index + 1,
       } : null;
 
-      // 有些供应商只在中间一个 MOQ 行填写物料名称；名称出现前的空白报价档
-      // 先暂存，待首个“名称＋规格”出现后一并归入。
+      // 只有名称已出现后的连续空白行才向上归入该物料；
+      // 名称出现前的空白行不向后猜测，防止将上一个物料的报价档误并。
       if (!current && !rawName) {
-        if (tierEntry) pendingLeadingTiers.push(tierEntry);
         continue;
       }
 
@@ -217,7 +215,7 @@ async function parseSheets(sheets, options = {}) {
           ...carried,
           note: cols.note == null ? '' : toStr(row[cols.note]),
           delivery_days: cols.delivery == null ? '' : toStr(row[cols.delivery]),
-          tiers: pendingLeadingTiers.splice(0),
+          tiers: [],
         };
         groups.push(current);
       } else {

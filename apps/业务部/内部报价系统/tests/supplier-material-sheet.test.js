@@ -136,7 +136,7 @@ test('MOQ tiers merge by normalized product name and spec without using material
   assert.deepEqual(result.items[0].price_tiers.map(tier => tier.moq), ['5K', '10K', '30K', '50K']);
 });
 
-test('blank product rows before and after the named row merge into the same MOQ group', async () => {
+test('only blank product rows after the named row merge into the same MOQ group', async () => {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('供应商报价单');
   sheet.addRow([
@@ -151,7 +151,7 @@ test('blank product rows before and after the named row merge into the same MOQ 
   assert.equal(result.items.length, 1);
   assert.equal(result.items[0].name, 'T钉');
   assert.equal(result.items[0].spec, '111；材料/表面处理：11');
-  assert.deepEqual(result.items[0].price_tiers.map(tier => tier.moq), ['5K', '30K', '50K']);
+  assert.deepEqual(result.items[0].price_tiers.map(tier => tier.moq), ['30K', '50K']);
 });
 
 test('modified supplier template with separate product code and material name columns is supported', async () => {
