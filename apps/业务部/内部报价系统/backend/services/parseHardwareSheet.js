@@ -157,6 +157,7 @@ async function parseSheets(sheets, options = {}) {
   if (cols.supplierTemplate) {
     const groups = [];
     let current = null;
+    const pendingLeadingTiers = [];
     let carried = { serial: '', product_code: '', name: '', spec: '', material: '', unit: '' };
     for (let index = headerRow + 1; index < picked.rows.length; index += 1) {
       const row = picked.rows[index] || [];
@@ -177,10 +178,29 @@ async function parseSheets(sheets, options = {}) {
         || untaxed != null || taxed != null || usd != null;
       if (!hasContent) continue;
 
+      const tierEntry = untaxed != null || taxed != null || usd != null ? {
+        moq: moqText,
+        moq_qty: parseMoq(moqText),
+        unit_price_rmb: untaxed ?? taxed,
+        unit_price_rmb_untaxed: untaxed,
+        unit_price_rmb_taxed: taxed,
+        unit_price_usd: usd,
+        rmb_tax_pct: taxed != null && untaxed == null ? 13 : 0,
+        rmb_price_source: untaxed != null ? '人民币不含税' : (taxed != null ? '人民币含税' : null),
+        source_row: index + 1,
+      } : null;
+
+      // 有些供应商只在中间一个 MOQ 行填写物料名称；名称出现前的空白报价档
+      // 先暂存，待首个“名称＋规格”出现后一并归入。
+      if (!current && !rawName) {
+        if (tierEntry) pendingLeadingTiers.push(tierEntry);
+        continue;
+      }
+
       // 部分供应商会给同一物料的每个 MOQ 档都填独立序号；名称和规格相同的连续行
       // 仍应合并成一个物料的阶梯价，不能因序号不同拆成多个单选档。
-      const repeatsCurrentProduct = !!(current && rawName
-        && identityNorm(rawName) === identityNorm(current.name)
+      const repeatsCurrentProduct = !!(current
+        && (!rawName || identityNorm(rawName) === identityNorm(current.name))
         && (!rawSpec || !current.spec || identityNorm(rawSpec) === identityNorm(current.spec)));
       const startsProduct = !repeatsCurrentProduct
         && !!(rawSerial || (rawName && identityNorm(rawName) !== identityNorm(carried.name)));
@@ -197,7 +217,7 @@ async function parseSheets(sheets, options = {}) {
           ...carried,
           note: cols.note == null ? '' : toStr(row[cols.note]),
           delivery_days: cols.delivery == null ? '' : toStr(row[cols.delivery]),
-          tiers: [],
+          tiers: pendingLeadingTiers.splice(0),
         };
         groups.push(current);
       } else {
@@ -223,19 +243,7 @@ async function parseSheets(sheets, options = {}) {
       if (rowNote) current.note = rowNote;
       if (rowDelivery) current.delivery_days = rowDelivery;
 
-      if (untaxed != null || taxed != null || usd != null) {
-        current.tiers.push({
-          moq: moqText,
-          moq_qty: parseMoq(moqText),
-          unit_price_rmb: untaxed ?? taxed,
-          unit_price_rmb_untaxed: untaxed,
-          unit_price_rmb_taxed: taxed,
-          unit_price_usd: usd,
-          rmb_tax_pct: taxed != null && untaxed == null ? 13 : 0,
-          rmb_price_source: untaxed != null ? '人民币不含税' : (taxed != null ? '人民币含税' : null),
-          source_row: index + 1,
-        });
-      }
+      if (tierEntry) current.tiers.push(tierEntry);
     }
 
     const items = groups.map(group => {
