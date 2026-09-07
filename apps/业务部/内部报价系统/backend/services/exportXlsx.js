@@ -817,7 +817,7 @@ function addElectronicDetailSheet(wb, electronic, quote) {
   ws.getCell(row, 1).value = '含税报价';
   ws.getCell(row, 1).alignment = { horizontal: 'right', vertical: 'middle' };
   const taxedVal = ex.taxed_price != null ? num(ex.taxed_price) : profitVal + num(ex.tax_diff) + num(ex.tax_payable);
-  ws.getCell(row, 5).value = taxedVal;
+  ws.getCell(row, 5).value = { formula: `E${row - 3}+E${row - 2}+E${row - 1}`, result: taxedVal };
   ws.getCell(row, 5).numFmt = '#,##0.0000';
   ws.getCell(row, 6).value = `${sourceCurrency} 含税价`;
   for (let column = 1; column <= 6; column++) {

@@ -72,6 +72,13 @@ test('electronic detail export preserves the original USD currency and formulas'
   assert.equal(sheet.views[0].state, 'frozen');
   assert.equal(sheet.views[0].ySplit, 5);
   assert.ok(values.includes('成本汇总'));
+  let taxedRow = 0;
+  sheet.eachRow(currentRow => {
+    if (currentRow.getCell(1).value === '含税报价') taxedRow = currentRow.number;
+  });
+  assert.ok(taxedRow > 0);
+  assert.equal(sheet.getCell(taxedRow, 5).value.formula, `E${taxedRow - 3}+E${taxedRow - 2}+E${taxedRow - 1}`);
+  assert.equal(sheet.getCell(taxedRow, 5).value.result, 0.25 * 1.12);
 });
 
 test('internal export writes product-ratio weighted injection formulas', async () => {
