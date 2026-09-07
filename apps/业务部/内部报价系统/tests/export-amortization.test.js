@@ -56,6 +56,7 @@ test('electronic detail export preserves the original USD currency and formulas'
   const sheet = workbook.getWorksheet('电子明细');
   assert.equal(sheet.getCell('D5').value, '单价USD');
   assert.equal(sheet.getCell('D6').value, 0.25);
+  assert.equal(sheet.getCell('C6').numFmt, '0');
   assert.equal(sheet.getCell('E6').value.formula, 'C6*D6');
   assert.equal(sheet.getCell('E6').value.result, 0.25);
   const values = [];

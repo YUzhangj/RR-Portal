@@ -686,7 +686,7 @@ function addElectronicDetailSheet(wb, electronic, quote) {
     ws.getCell(row, 3).value = num(p.qty);
     ws.getCell(row, 4).value = sourceUnit(p);
     ws.getCell(row, 5).value = { formula: `C${row}*D${row}`, result: num(p.qty) * sourceUnit(p) };
-    ws.getCell(row, 3).numFmt = '0.###';
+    ws.getCell(row, 3).numFmt = '0';
     ws.getCell(row, 4).numFmt = '#,##0.0000';
     ws.getCell(row, 5).numFmt = '#,##0.0000';
     ws.getCell(row, 6).value = p.note || '';
@@ -705,7 +705,7 @@ function addElectronicDetailSheet(wb, electronic, quote) {
       ws.getCell(row, 3).value = num(c.qty);
       ws.getCell(row, 4).value = sourceUnit(c);
       ws.getCell(row, 5).value = { formula: `C${row}*D${row}`, result: num(c.qty) * sourceUnit(c) };
-      ws.getCell(row, 3).numFmt = '0.###';
+      ws.getCell(row, 3).numFmt = '0';
       ws.getCell(row, 4).numFmt = '#,##0.0000';
       ws.getCell(row, 5).numFmt = '#,##0.0000';
       ws.getCell(row, 6).value = c.note || '';
