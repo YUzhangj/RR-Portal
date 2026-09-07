@@ -363,6 +363,7 @@ async function buildWorkbook({ quote, sections }) {
 
   // ---------- 二、注塑部分 ----------
   row = renderInjection(ws, row, mold, fxRH, subRefs);
+  addMoldingDetailSheet(wb, mold, fxRH);
   const injSubtotal = injectionSubtotal(mold);
 
   // ---------- 二·B、吹气 / 二·C、搪胶 ----------
@@ -1332,6 +1333,20 @@ function renderInjection(ws, row, payload, fxRH, refs) {
   }
   if (refs) { refs.impMatCells = impMatCells; refs.domMatCells = domMatCells; }
   return row;
+}
+
+function addMoldingDetailSheet(wb, payload, fxRH) {
+  const ws = wb.addWorksheet('啤机明细');
+  ws.columns = [12, 24, 14, 14, 14, 15, 16, 14, 16, 10, 14, 12, 12, 18]
+    .map(width => ({ width }));
+  ws.mergeCells(1, 1, 1, 14);
+  ws.getCell(1, 1).value = '啤机部·注塑明细';
+  ws.getCell(1, 1).font = { bold: true, size: 16, color: { argb: 'FFFFFFFF' }, name: 'Microsoft YaHei' };
+  ws.getCell(1, 1).alignment = { horizontal: 'center', vertical: 'middle' };
+  ws.getCell(1, 1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F3B64' } };
+  ws.getRow(1).height = 30;
+  renderInjection(ws, 3, payload, fxRH, {});
+  return ws;
 }
 function materialCost(r) {
   if (r.material_cost_manual != null && r.material_cost_manual !== '') return num(r.material_cost_manual);

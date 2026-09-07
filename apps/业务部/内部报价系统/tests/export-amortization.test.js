@@ -7,6 +7,31 @@ const test = require('node:test');
 
 const { buildWorkbook, adaptSurtaxForBase } = require('../backend/services/exportInternal');
 
+test('production departments each have a standalone export worksheet and UI action', async () => {
+  const depts = ['electronic', 'molding', 'painting', 'slush', 'sewing', 'assembly'];
+  const workbook = await buildWorkbook({
+    quote: { quote_no: 'DEPT-EXPORT', product_name: '部门导出', qty: 1000 },
+    sections: [
+      { dept: 'electronic', payload_json: JSON.stringify({ electronics_doc: { source_currency: 'RMB', parts: [{ name: 'IC', qty: 1, unit_price: 1 }] } }) },
+      { dept: 'molding', payload_json: JSON.stringify({ injection: [{ name: '注塑件', qty: 1 }] }) },
+      { dept: 'painting', payload_json: JSON.stringify({ painting_items: [{ name: '喷油件', spray_qty: 1, spray_unit: 1 }] }) },
+      { dept: 'slush', payload_json: JSON.stringify({ slush_items: [{ name: '搪胶件', qty: 1, unit_price_hkd: 1 }] }) },
+      { dept: 'sewing', payload_json: JSON.stringify({ sewing_groups: [{ name: '车缝件', items: [{ fabric: '布料', usage: 1, mat_price: 1 }] }] }) },
+      { dept: 'assembly', payload_json: JSON.stringify({ assembly_step_groups: [{ product: '装配件', qty: 1, steps: [{ name: '装配', count: 1 }] }] }) },
+      { dept: 'sales', payload_json: JSON.stringify({ header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.8 } }) },
+    ],
+  });
+  ['电子明细', '啤机明细', '喷油明细', '搪胶明细', '车缝明细', '装配明细']
+    .forEach(name => assert.ok(workbook.getWorksheet(name), `missing ${name}`));
+
+  const frontend = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'workbench.js'), 'utf8');
+  const route = fs.readFileSync(path.join(__dirname, '..', 'backend', 'routes', 'export.js'), 'utf8');
+  assert.match(frontend, /installDepartmentExport\(body, me\.dept\)/);
+  assert.match(frontend, /input\[type="file"\]\[accept\*="\.xls"\]/);
+  assert.match(route, /export-department\/\:dept/);
+  depts.forEach(dept => assert.match(route, new RegExp(`${dept}:`)));
+});
+
 test('electronic detail export preserves the original USD currency and formulas', async () => {
   const workbook = await buildWorkbook({
     quote: { quote_no: 'USD-ELECTRONIC', product_name: '美金电子报价', qty: 5000 },

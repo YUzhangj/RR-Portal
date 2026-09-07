@@ -48,6 +48,55 @@ router.get('/:id/export', async (req, res) => {
   }
 });
 
+const DEPARTMENT_SHEETS = {
+  electronic: '电子明细',
+  molding: '啤机明细',
+  painting: '喷油明细',
+  slush: '搪胶明细',
+  sewing: '车缝明细',
+  assembly: '装配明细',
+};
+
+// GET /api/quotes/:id/export-department/:dept — 导出单个生产部门的功能表格。
+router.get('/:id/export-department/:dept', async (req, res) => {
+  const id = Number(req.params.id);
+  const dept = String(req.params.dept || '');
+  const sheetName = DEPARTMENT_SHEETS[dept];
+  if (!sheetName) return res.status(400).json({ error: '该部门不支持单独导出' });
+
+  const quote = await db.prepare('SELECT * FROM quotes WHERE id = ?').get(id);
+  if (!quote) return res.status(404).json({ error: '不存在' });
+  const acc = await quoteAccess(req.user, id);
+  if (acc.status !== 200) {
+    return res.status(acc.status).json({ error: acc.status === 404 ? '不存在' : '无权导出该客户的报价单' });
+  }
+
+  const sections = await db.prepare(
+    `SELECT s.dept, d.name_cn, s.payload_json, s.reviewed_by, s.reviewed_at
+     FROM quote_sections s JOIN departments d ON d.code = s.dept
+     WHERE s.quote_id = ? ORDER BY d.sort_order`
+  ).all(id);
+
+  try {
+    const wb = await buildWorkbook({ quote, sections });
+    const selected = wb.getWorksheet(sheetName);
+    if (!selected) return res.status(404).json({ error: '未找到该部门的导出表格' });
+    wb.worksheets.slice().forEach(sheet => {
+      if (sheet.id !== selected.id) wb.removeWorksheet(sheet.id);
+    });
+    await db.prepare(`INSERT INTO audit_log (quote_id, actor, action, detail) VALUES (?, ?, 'export_department', ?)`)
+      .run(id, req.user.name, dept);
+    const buf = await wb.xlsx.writeBuffer();
+    const filename = encodeURIComponent(`${quote.quote_no || quote.id}_${sheetName}.xlsx`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${filename}`);
+    res.send(Buffer.from(buf));
+  } catch (e) {
+    console.error('[export-department]', e);
+    res.status(500).json({ error: '部门表格导出失败: ' + e.message });
+  }
+});
+
 // GET /api/quotes/:id/export-vq — 生成 TOMY / SPIN 客户报客表。
 router.get('/:id/export-vq', async (req, res) => {
   const id = Number(req.params.id);

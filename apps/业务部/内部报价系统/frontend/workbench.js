@@ -4739,6 +4739,61 @@ function renderAssembly(host, payload, canEdit, onChange, fxRmbHkd) {
   }
 }
 
+const DEPARTMENT_EXPORT_NAMES = {
+  electronic: '电子部',
+  molding: '啤机部',
+  painting: '喷油部',
+  slush: '搪胶',
+  sewing: '车缝',
+  assembly: '装配部',
+};
+
+function installDepartmentExport(host, dept) {
+  if (!host || !DEPARTMENT_EXPORT_NAMES[dept]) return;
+  const sanitize = () => {
+    host.querySelectorAll('button').forEach(button => {
+      if (/导入/.test(button.textContent || '') || /上传.*报价/.test(button.textContent || '')) button.remove();
+    });
+    host.querySelectorAll('input[type="file"][accept*=".xls"]').forEach(input => input.remove());
+    if (host.querySelector('[data-department-export]')) return;
+    const heading = host.querySelector('h3') || host;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'mini';
+    button.dataset.departmentExport = dept;
+    button.style.marginLeft = '10px';
+    button.textContent = `📤 导出${DEPARTMENT_EXPORT_NAMES[dept]}表格`;
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        const response = await fetch(`/api/quotes/${id}/export-department/${dept}`, { credentials: 'include' });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          throw new Error(body.error || '导出失败');
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/)?.[1];
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = encodedName ? decodeURIComponent(encodedName) : `${DEPARTMENT_EXPORT_NAMES[dept]}明细.xlsx`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+      } catch (error) {
+        alert(error.message);
+      } finally {
+        button.disabled = false;
+      }
+    };
+    heading.appendChild(button);
+  };
+  sanitize();
+  if (!host._departmentExportObserver) {
+    host._departmentExportObserver = new MutationObserver(sanitize);
+    host._departmentExportObserver.observe(host, { childList: true, subtree: true });
+  }
+}
+
 // 按产品分组的人工表（每产品独立子表 + 子小计 + 增加工序）
 function renderGroupedLabor(container, rows, onChange, canEdit) {
   container.innerHTML = '';
@@ -5567,6 +5622,7 @@ async function renderQuotePage() {
     else if (me.dept === 'slush') renderSlush(body, payload, canEditMine, onChange, fx);
     else if (me.dept === 'sewing') renderSewing(body, payload, canEditMine, onChange, fx);
     else if (me.dept === 'assembly') renderAssembly(body, payload, canEditMine, onChange, fx);
+    installDepartmentExport(body, me.dept);
   }
 
   // 其他部门 section 渲染（用户对哪些部门有 view 权限就渲染哪些）
@@ -5615,6 +5671,7 @@ async function renderQuotePage() {
         else if (s.dept === 'slush') renderSlush(body, sectionPayload, inEdit, onChangeOther, fxRate);
         else if (s.dept === 'sewing') renderSewing(body, sectionPayload, inEdit, onChangeOther, fxRate);
         else if (s.dept === 'assembly') renderAssembly(body, sectionPayload, inEdit, onChangeOther, fxRate);
+        installDepartmentExport(body, s.dept);
       };
       saveHandlers.set(s.dept, async () => {
         await putSection(s, sectionPayload, false);
