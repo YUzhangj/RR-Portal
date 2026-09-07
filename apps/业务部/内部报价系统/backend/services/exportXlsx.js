@@ -600,37 +600,85 @@ function addElectronicDetailSheet(wb, electronic, quote) {
   const sourceUnit = part => part.source_unit_price != null ? num(part.source_unit_price) : num(part.unit_price);
   const ws = wb.addWorksheet('电子明细');
   ws.columns = [
-    { width: 12 },  // A 零件名称
-    { width: 30 },  // B 规格
-    { width: 8 },   // C 用量
-    { width: 12 },  // D 原币单价
-    { width: 12 },  // E 原币合计
-    { width: 14 },  // F 备注
-    { width: 14 },  // G 汇总标签
-    { width: 12 },  // H 汇总值
-    { width: 12 },  // I 注
+    { width: 18 },  // A 零件名称
+    { width: 36 },  // B 规格
+    { width: 10 },  // C 用量
+    { width: 15 },  // D 原币单价
+    { width: 15 },  // E 原币合计
+    { width: 22 },  // F 备注 / 币种说明
   ];
+  const titleFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0B3A63' } };
+  const headerFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9EAF7' } };
+  const alternateFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF7FAFC' } };
+  const summaryFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEAF2F8' } };
+  const totalFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDDEBF7' } };
+  const electronicBorder = {
+    bottom: { style: 'thin', color: { argb: 'FFD6E2EC' } },
+  };
+  const styleElectronicHeader = cell => {
+    cell.font = { bold: true, color: { argb: 'FF17324D' }, size: 11, name: FONT };
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    cell.fill = headerFill;
+    cell.border = electronicBorder;
+  };
+  const styleElectronicRow = (cell, index) => {
+    cell.font = { color: { argb: 'FF334155' }, size: 11, name: FONT };
+    cell.alignment = {
+      horizontal: index === 1 || index === 2 || index === 6 ? 'left' : 'right',
+      vertical: 'middle',
+      wrapText: index === 2 || index === 6,
+    };
+    cell.border = electronicBorder;
+  };
   let row = 1;
   // 标题
-  ws.mergeCells(row, 1, row, 9);
-  ws.getCell(row, 1).value = `电子报价单（${sourceCurrency}）`;
-  ws.getCell(row, 1).font = { bold: true, size: 16, name: 'Microsoft YaHei' };
+  ws.mergeCells(row, 1, row, 6);
+  ws.getCell(row, 1).value = '电子部报价明细';
+  ws.getCell(row, 1).font = { bold: true, size: 16, color: { argb: 'FFFFFFFF' }, name: FONT };
   ws.getCell(row, 1).alignment = { horizontal: 'center', vertical: 'middle' };
-  ws.getRow(row).height = 28;
-  row += 2;
+  ws.getCell(row, 1).fill = titleFill;
+  ws.getRow(row).height = 32;
+  row += 1;
+  ws.mergeCells(row, 1, row, 6);
+  ws.getCell(row, 1).value = `电子报价单（${sourceCurrency}）`;
+  ws.getCell(row, 1).font = { italic: true, color: { argb: 'FF64748B' }, size: 10, name: FONT };
+  ws.getCell(row, 1).alignment = { horizontal: 'center', vertical: 'middle' };
+  ws.getRow(row).height = 20;
+  row += 1;
   // 元数据
   const meta = doc.meta || {};
-  ws.getCell(row, 1).value = '产品名称：' + (meta.product || (quote && quote.product_name) || '');
-  ws.getCell(row, 3).value = '产品编号：' + (meta.product_no || (quote && quote.quote_no) || '');
-  ws.getCell(row, 5).value = '客户：' + (meta.customer || (quote && quote.customer) || '');
-  ws.getCell(row, 7).value = '报价日期：' + (meta.date || doc.imported_at || '');
-  for (let c = 1; c <= 9; c++) ws.getCell(row, c).font = { name: 'Microsoft YaHei' };
-  row += 2;
+  const metaRows = [
+    [
+      `产品名称：${meta.product || (quote && quote.product_name) || ''}`,
+      `产品编号：${meta.product_no || (quote && quote.quote_no) || ''}`,
+      `客户：${meta.customer || (quote && quote.customer) || ''}`,
+    ],
+    [
+      `报价日期：${meta.date || doc.imported_at || ''}`,
+      `MOQ：${meta.moq || (quote && quote.qty) || ''}`,
+      `价格类型：${meta.tax_label || '未注明'}`,
+    ],
+  ];
+  metaRows.forEach(values => {
+    values.forEach((value, index) => {
+      const start = index * 2 + 1;
+      ws.mergeCells(row, start, row, start + 1);
+      const cell = ws.getCell(row, start);
+      cell.value = value;
+      cell.font = { color: { argb: 'FF475569' }, size: 10, name: FONT };
+      cell.alignment = { horizontal: 'left', vertical: 'middle' };
+      cell.fill = alternateFill;
+    });
+    ws.getRow(row).height = 22;
+    row += 1;
+  });
   // 表头
   const h = ['零件名称', '规格', '用量', `单价${sourceCurrency}`, `合计${sourceCurrency}`, '备注'];
-  h.forEach((v, i) => { ws.getCell(row, i + 1).value = v; styleHeader(ws.getCell(row, i + 1)); });
+  h.forEach((v, i) => { ws.getCell(row, i + 1).value = v; styleElectronicHeader(ws.getCell(row, i + 1)); });
+  ws.getRow(row).height = 28;
   row += 1;
   const dataStart = row;
+  let displayIndex = 0;
   doc.parts.forEach(p => {
     // 父行
     ws.getCell(row, 1).value = p.name || '';
@@ -638,10 +686,17 @@ function addElectronicDetailSheet(wb, electronic, quote) {
     ws.getCell(row, 3).value = num(p.qty);
     ws.getCell(row, 4).value = sourceUnit(p);
     ws.getCell(row, 5).value = { formula: `C${row}*D${row}`, result: num(p.qty) * sourceUnit(p) };
-    ws.getCell(row, 5).numFmt = '0.000';
+    ws.getCell(row, 3).numFmt = '0.###';
+    ws.getCell(row, 4).numFmt = '#,##0.0000';
+    ws.getCell(row, 5).numFmt = '#,##0.0000';
     ws.getCell(row, 6).value = p.note || '';
-    for (let c = 1; c <= 6; c++) styleData(ws.getCell(row, c));
-    if (p.name) ws.getCell(row, 1).font = { bold: true, name: 'Microsoft YaHei' };
+    displayIndex += 1;
+    for (let c = 1; c <= 6; c++) {
+      styleElectronicRow(ws.getCell(row, c), c);
+      if (displayIndex % 2 === 0) ws.getCell(row, c).fill = alternateFill;
+    }
+    if (p.name) ws.getCell(row, 1).font = { ...ws.getCell(row, 1).font, bold: true };
+    ws.getRow(row).height = 24;
     row += 1;
     // 子项行
     (p.children || []).forEach(c => {
@@ -650,14 +705,23 @@ function addElectronicDetailSheet(wb, electronic, quote) {
       ws.getCell(row, 3).value = num(c.qty);
       ws.getCell(row, 4).value = sourceUnit(c);
       ws.getCell(row, 5).value = { formula: `C${row}*D${row}`, result: num(c.qty) * sourceUnit(c) };
-      ws.getCell(row, 5).numFmt = '0.000';
+      ws.getCell(row, 3).numFmt = '0.###';
+      ws.getCell(row, 4).numFmt = '#,##0.0000';
+      ws.getCell(row, 5).numFmt = '#,##0.0000';
       ws.getCell(row, 6).value = c.note || '';
-      for (let k = 1; k <= 6; k++) styleData(ws.getCell(row, k));
+      displayIndex += 1;
+      for (let k = 1; k <= 6; k++) {
+        styleElectronicRow(ws.getCell(row, k), k);
+        if (displayIndex % 2 === 0) ws.getCell(row, k).fill = alternateFill;
+      }
+      ws.getRow(row).height = 24;
       row += 1;
     });
   });
   const dataEnd = row - 1;
-  row += 1;
+  ws.autoFilter = { from: `A${dataStart - 1}`, to: `F${dataEnd}` };
+  ws.views = [{ state: 'frozen', ySplit: dataStart - 1, activeCell: `A${dataStart}`, showGridLines: false }];
+  row += 2;
   // 成本汇总
   const ex = sourceExtras;
   const partsCost = sum(doc.parts, p => num(p.qty) * sourceUnit(p)
@@ -670,80 +734,121 @@ function addElectronicDetailSheet(wb, electronic, quote) {
     ['测试费用', num(ex.test_repair), null],
     ['包装运输', num(ex.packing_shipping), null],
   ];
+  ws.mergeCells(row, 1, row, 6);
+  ws.getCell(row, 1).value = '成本汇总';
+  ws.getCell(row, 1).font = { bold: true, color: { argb: 'FF17324D' }, size: 12, name: FONT };
+  ws.getCell(row, 1).fill = headerFill;
+  ws.getCell(row, 1).alignment = { horizontal: 'left', vertical: 'middle' };
+  ws.getRow(row).height = 26;
+  row += 1;
   const summaryStart = row;
   labels.forEach(([lab, val, fml]) => {
-    ws.getCell(row, 7).value = lab + '：';
-    ws.getCell(row, 7).alignment = { horizontal: 'right' };
-    ws.getCell(row, 8).value = fml ? { formula: fml, result: val } : val;
-    ws.getCell(row, 8).numFmt = '0.000';
-    styleData(ws.getCell(row, 7));
-    styleData(ws.getCell(row, 8));
+    ws.mergeCells(row, 1, row, 4);
+    ws.getCell(row, 1).value = lab;
+    ws.getCell(row, 1).alignment = { horizontal: 'right', vertical: 'middle' };
+    ws.getCell(row, 5).value = fml ? { formula: fml, result: val } : val;
+    ws.getCell(row, 5).numFmt = '#,##0.0000';
+    ws.getCell(row, 6).value = sourceCurrency;
+    for (let column = 1; column <= 6; column++) {
+      const cell = ws.getCell(row, column);
+      cell.fill = summaryFill;
+      cell.border = electronicBorder;
+      cell.font = { color: { argb: 'FF334155' }, size: 11, name: FONT };
+    }
+    ws.getCell(row, 5).alignment = { horizontal: 'right', vertical: 'middle' };
+    ws.getCell(row, 6).alignment = { horizontal: 'center', vertical: 'middle' };
     row += 1;
   });
   // 合计成本
-  ws.getCell(row, 7).value = '合计成本：';
-  ws.getCell(row, 7).alignment = { horizontal: 'right' };
-  ws.getCell(row, 7).font = { bold: true, name: 'Microsoft YaHei' };
+  ws.mergeCells(row, 1, row, 4);
+  ws.getCell(row, 1).value = '合计成本';
+  ws.getCell(row, 1).alignment = { horizontal: 'right', vertical: 'middle' };
   const totalCost = partsCost + num(ex.bonding_cost) + num(ex.smt_cost) + num(ex.labor_cost)
     + num(ex.test_repair) + num(ex.packing_shipping);
-  ws.getCell(row, 8).value = { formula: `SUM(H${summaryStart}:H${row - 1})`, result: totalCost };
-  ws.getCell(row, 8).numFmt = '0.000';
-  styleSubtotal(ws.getCell(row, 8), 'sub');
+  ws.getCell(row, 5).value = { formula: `SUM(E${summaryStart}:E${row - 1})`, result: totalCost };
+  ws.getCell(row, 5).numFmt = '#,##0.0000';
+  ws.getCell(row, 6).value = sourceCurrency;
+  for (let column = 1; column <= 6; column++) {
+    ws.getCell(row, column).fill = totalFill;
+    ws.getCell(row, column).border = electronicBorder;
+    ws.getCell(row, column).font = { bold: true, color: { argb: 'FF17324D' }, size: 11, name: FONT };
+  }
+  ws.getCell(row, 5).alignment = { horizontal: 'right', vertical: 'middle' };
+  ws.getCell(row, 6).alignment = { horizontal: 'center', vertical: 'middle' };
   const totalCostRow = row;
   row += 1;
   // 含利润价
   const profitPct = num(ex.profit_pct);
-  ws.getCell(row, 7).value = `含 ${profitPct}% 利润价：`;
-  ws.getCell(row, 7).alignment = { horizontal: 'right' };
-  ws.getCell(row, 7).font = { bold: true, name: 'Microsoft YaHei' };
+  ws.mergeCells(row, 1, row, 4);
+  ws.getCell(row, 1).value = `含 ${profitPct}% 利润价`;
+  ws.getCell(row, 1).alignment = { horizontal: 'right', vertical: 'middle' };
   const profitVal = ex.profit_price != null ? num(ex.profit_price) : totalCost * (1 + profitPct / 100);
-  ws.getCell(row, 8).value = { formula: `H${totalCostRow}*(1+${profitPct}/100)`, result: profitVal };
-  ws.getCell(row, 8).numFmt = '0.000';
-  ws.getCell(row, 9).value = `${sourceCurrency} 不含税价`;
-  styleSubtotal(ws.getCell(row, 8), 'sub');
+  ws.getCell(row, 5).value = { formula: `E${totalCostRow}*(1+${profitPct}/100)`, result: profitVal };
+  ws.getCell(row, 5).numFmt = '#,##0.0000';
+  ws.getCell(row, 6).value = `${sourceCurrency} 不含税价`;
+  for (let column = 1; column <= 6; column++) {
+    ws.getCell(row, column).fill = summaryFill;
+    ws.getCell(row, column).border = electronicBorder;
+    ws.getCell(row, column).font = { bold: true, color: { argb: 'FF17324D' }, size: 11, name: FONT };
+  }
+  ws.getCell(row, 5).alignment = { horizontal: 'right', vertical: 'middle' };
+  ws.getCell(row, 6).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
   row += 1;
   // 抵税差额
-  ws.getCell(row, 7).value = '抵税差额：';
-  ws.getCell(row, 7).alignment = { horizontal: 'right' };
-  ws.getCell(row, 8).value = num(ex.tax_diff);
-  ws.getCell(row, 8).numFmt = '0.000';
-  styleData(ws.getCell(row, 8));
+  ws.mergeCells(row, 1, row, 4);
+  ws.getCell(row, 1).value = '抵税差额';
+  ws.getCell(row, 5).value = num(ex.tax_diff);
+  ws.getCell(row, 5).numFmt = '#,##0.0000';
+  ws.getCell(row, 6).value = sourceCurrency;
+  for (let column = 1; column <= 6; column++) styleElectronicRow(ws.getCell(row, column), column);
+  ws.getCell(row, 1).alignment = { horizontal: 'right', vertical: 'middle' };
   row += 1;
   // 应交税负
-  ws.getCell(row, 7).value = '应交税负：';
-  ws.getCell(row, 7).alignment = { horizontal: 'right' };
-  ws.getCell(row, 8).value = num(ex.tax_payable);
-  ws.getCell(row, 8).numFmt = '0.000';
-  styleData(ws.getCell(row, 8));
+  ws.mergeCells(row, 1, row, 4);
+  ws.getCell(row, 1).value = '应交税负';
+  ws.getCell(row, 5).value = num(ex.tax_payable);
+  ws.getCell(row, 5).numFmt = '#,##0.0000';
+  ws.getCell(row, 6).value = sourceCurrency;
+  for (let column = 1; column <= 6; column++) styleElectronicRow(ws.getCell(row, column), column);
+  ws.getCell(row, 1).alignment = { horizontal: 'right', vertical: 'middle' };
   row += 1;
   // 含税报价
-  ws.getCell(row, 7).value = '含税报价：';
-  ws.getCell(row, 7).alignment = { horizontal: 'right' };
-  ws.getCell(row, 7).font = { bold: true, name: 'Microsoft YaHei' };
+  ws.mergeCells(row, 1, row, 4);
+  ws.getCell(row, 1).value = '含税报价';
+  ws.getCell(row, 1).alignment = { horizontal: 'right', vertical: 'middle' };
   const taxedVal = ex.taxed_price != null ? num(ex.taxed_price) : profitVal + num(ex.tax_diff) + num(ex.tax_payable);
-  ws.getCell(row, 8).value = taxedVal;
-  ws.getCell(row, 8).numFmt = '0.000';
-  ws.getCell(row, 9).value = `${sourceCurrency} 含税价`;
-  styleSubtotal(ws.getCell(row, 8), 'hkd');
+  ws.getCell(row, 5).value = taxedVal;
+  ws.getCell(row, 5).numFmt = '#,##0.0000';
+  ws.getCell(row, 6).value = `${sourceCurrency} 含税价`;
+  for (let column = 1; column <= 6; column++) {
+    ws.getCell(row, column).fill = totalFill;
+    ws.getCell(row, column).border = electronicBorder;
+    ws.getCell(row, column).font = { bold: true, color: { argb: 'FF0B3A63' }, size: 11, name: FONT };
+  }
+  ws.getCell(row, 5).alignment = { horizontal: 'right', vertical: 'middle' };
+  ws.getCell(row, 6).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
 
   const moldFees = ex.mold_fees || [];
   if (moldFees.length) {
     row += 2;
     ws.getCell(row, 1).value = '模具费用（单独记录，不自动摊入单价）';
     ws.mergeCells(row, 1, row, 6);
-    styleSection(ws.getCell(row, 1));
+    ws.getCell(row, 1).font = { bold: true, color: { argb: 'FF17324D' }, size: 12, name: FONT };
+    ws.getCell(row, 1).fill = headerFill;
+    ws.getCell(row, 1).alignment = { horizontal: 'left', vertical: 'middle' };
     row += 1;
     ['费用名称', '金额', '币种', '备注'].forEach((value, index) => {
       ws.getCell(row, index + 1).value = value;
-      styleHeader(ws.getCell(row, index + 1));
+      styleElectronicHeader(ws.getCell(row, index + 1));
     });
     row += 1;
     moldFees.forEach(fee => {
       ws.getCell(row, 1).value = fee.name || '模费';
       ws.getCell(row, 2).value = num(fee.amount);
+      ws.getCell(row, 2).numFmt = '#,##0.00';
       ws.getCell(row, 3).value = fee.currency || sourceCurrency;
       ws.getCell(row, 4).value = fee.note || '';
-      for (let column = 1; column <= 4; column++) styleData(ws.getCell(row, column));
+      for (let column = 1; column <= 4; column++) styleElectronicRow(ws.getCell(row, column), column);
       row += 1;
     });
   }
@@ -753,11 +858,13 @@ function addElectronicDetailSheet(wb, electronic, quote) {
     row += 2;
     ws.getCell(row, 1).value = '其它费用（总额，不计入单套电子成本）';
     ws.mergeCells(row, 1, row, 6);
-    styleSection(ws.getCell(row, 1));
+    ws.getCell(row, 1).font = { bold: true, color: { argb: 'FF17324D' }, size: 12, name: FONT };
+    ws.getCell(row, 1).fill = headerFill;
+    ws.getCell(row, 1).alignment = { horizontal: 'left', vertical: 'middle' };
     row += 1;
     ['费用名称', '数量', '单价 RMB', '合计 RMB', '备注'].forEach((value, index) => {
       ws.getCell(row, index + 1).value = value;
-      styleHeader(ws.getCell(row, index + 1));
+      styleElectronicHeader(ws.getCell(row, index + 1));
     });
     row += 1;
     const feeStart = row;
@@ -768,14 +875,17 @@ function addElectronicDetailSheet(wb, electronic, quote) {
       ws.getCell(row, 3).value = num(fee.unit_price);
       ws.getCell(row, 4).value = amount;
       ws.getCell(row, 5).value = fee.note || '';
-      for (let column = 1; column <= 5; column++) styleData(ws.getCell(row, column));
+      for (let column = 1; column <= 5; column++) styleElectronicRow(ws.getCell(row, column), column);
       [3, 4].forEach(column => { ws.getCell(row, column).numFmt = '0.00'; });
       row += 1;
     });
     ws.getCell(row, 1).value = '其它费用合计';
     ws.getCell(row, 4).value = { formula: `SUM(D${feeStart}:D${row - 1})`, result: sum(sourceFees, fee => num(fee.amount) || num(fee.qty) * num(fee.unit_price)) };
-    styleSubtotal(ws.getCell(row, 1), 'sub');
-    styleSubtotal(ws.getCell(row, 4), 'sub');
+    for (let column = 1; column <= 5; column++) {
+      ws.getCell(row, column).fill = totalFill;
+      ws.getCell(row, column).border = electronicBorder;
+      ws.getCell(row, column).font = { bold: true, color: { argb: 'FF17324D' }, size: 11, name: FONT };
+    }
     ws.getCell(row, 4).numFmt = '0.00';
   }
 }

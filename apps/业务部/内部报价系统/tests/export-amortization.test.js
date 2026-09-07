@@ -63,6 +63,14 @@ test('electronic detail export preserves the original USD currency and formulas'
   assert.ok(values.includes('电子报价单（USD）'));
   assert.ok(values.includes('PCB模费'));
   assert.ok(values.includes(354));
+  assert.equal(sheet.getCell('A1').value, '电子部报价明细');
+  assert.equal(sheet.getCell('A1').fill.fgColor.argb, 'FF0B3A63');
+  assert.equal(sheet.getCell('A1').font.color.argb, 'FFFFFFFF');
+  assert.equal(sheet.pageSetup.printArea, `A1:F${sheet.rowCount}`);
+  assert.equal(sheet.pageSetup.printTitlesRow, '5:5');
+  assert.equal(sheet.views[0].state, 'frozen');
+  assert.equal(sheet.views[0].ySplit, 5);
+  assert.ok(values.includes('成本汇总'));
 });
 
 test('internal export writes product-ratio weighted injection formulas', async () => {
@@ -114,7 +122,7 @@ test('internal quotation workbook uses print-friendly layouts on every sheet', a
     assert.equal(worksheet.pageSetup.orientation, 'portrait');
     assert.equal(worksheet.pageSetup.fitToPage, true);
     assert.equal(worksheet.pageSetup.fitToWidth, 1);
-    assert.equal(worksheet.pageSetup.fitToHeight, 0);
+    assert.equal(worksheet.pageSetup.fitToHeight, worksheet.name === '电子明细' ? 1 : 0);
     assert.match(worksheet.pageSetup.printArea, /^A1:[A-Z]+\d+$/);
     assert.equal(worksheet.views[0].showGridLines, false);
     assert.match(worksheet.headerFooter.oddFooter, /第 &P 页/);
@@ -129,7 +137,7 @@ test('internal quotation workbook uses print-friendly layouts on every sheet', a
   assert.equal(mainSheet.getCell(1, 1).font.size, 18);
   assert.ok(mainSheet.getCell(2, 1).font.size >= 12);
   assert.ok(mainSheet.getColumn(7).width >= 20);
-  assert.equal(workbook.getWorksheet('电子明细').pageSetup.printTitlesRow, '1:1');
+  assert.equal(workbook.getWorksheet('电子明细').pageSetup.printTitlesRow, '5:5');
 });
 
 test('legacy ultrasonic mold fee is displayed as fixture mold fee', async () => {

@@ -141,7 +141,7 @@ function applyPrintLayout(workbook) {
       orientation: 'portrait',
       fitToPage: true,
       fitToWidth: 1,
-      fitToHeight: 0,
+      fitToHeight: worksheet.name === '电子明细' && lastRow <= 60 ? 1 : 0,
       horizontalCentered: true,
       verticalCentered: false,
       pageOrder: 'overThenDown',
@@ -154,7 +154,7 @@ function applyPrintLayout(workbook) {
         footer: 0.2,
       },
       printArea: `A1:${colLetter(lastColumn)}${lastRow}`,
-      printTitlesRow: isMain ? '1:2' : '1:1',
+      printTitlesRow: isMain ? '1:2' : (worksheet.name === '电子明细' ? '5:5' : '1:1'),
     };
     worksheet.headerFooter = {
       oddHeader: isMain ? '&C&B内部报价明细' : `&C&B${worksheet.name}`,
