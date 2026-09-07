@@ -26,7 +26,8 @@ test('production departments each have a standalone export worksheet and UI acti
 
   const frontend = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'workbench.js'), 'utf8');
   const route = fs.readFileSync(path.join(__dirname, '..', 'backend', 'routes', 'export.js'), 'utf8');
-  assert.match(frontend, /installDepartmentExport\(body, me\.dept\)/);
+  assert.match(frontend, /installDepartmentExport\(body, me\.dept, id\)/);
+  assert.match(frontend, /api\/quotes\/\$\{quoteId\}\/export-department/);
   assert.match(frontend, /input\[type="file"\]\[accept\*="\.xls"\]/);
   assert.match(route, /export-department\/\:dept/);
   depts.forEach(dept => assert.match(route, new RegExp(`${dept}:`)));

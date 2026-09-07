@@ -4748,7 +4748,7 @@ const DEPARTMENT_EXPORT_NAMES = {
   assembly: '装配部',
 };
 
-function installDepartmentExport(host, dept) {
+function installDepartmentExport(host, dept, quoteId) {
   if (!host || !DEPARTMENT_EXPORT_NAMES[dept]) return;
   const sanitize = () => {
     host.querySelectorAll('button').forEach(button => {
@@ -4766,7 +4766,7 @@ function installDepartmentExport(host, dept) {
     button.onclick = async () => {
       button.disabled = true;
       try {
-        const response = await fetch(`/api/quotes/${id}/export-department/${dept}`, { credentials: 'include' });
+        const response = await fetch(`/api/quotes/${quoteId}/export-department/${dept}`, { credentials: 'include' });
         if (!response.ok) {
           const body = await response.json().catch(() => ({}));
           throw new Error(body.error || '导出失败');
@@ -5622,7 +5622,7 @@ async function renderQuotePage() {
     else if (me.dept === 'slush') renderSlush(body, payload, canEditMine, onChange, fx);
     else if (me.dept === 'sewing') renderSewing(body, payload, canEditMine, onChange, fx);
     else if (me.dept === 'assembly') renderAssembly(body, payload, canEditMine, onChange, fx);
-    installDepartmentExport(body, me.dept);
+    installDepartmentExport(body, me.dept, id);
   }
 
   // 其他部门 section 渲染（用户对哪些部门有 view 权限就渲染哪些）
@@ -5671,7 +5671,7 @@ async function renderQuotePage() {
         else if (s.dept === 'slush') renderSlush(body, sectionPayload, inEdit, onChangeOther, fxRate);
         else if (s.dept === 'sewing') renderSewing(body, sectionPayload, inEdit, onChangeOther, fxRate);
         else if (s.dept === 'assembly') renderAssembly(body, sectionPayload, inEdit, onChangeOther, fxRate);
-        installDepartmentExport(body, s.dept);
+        installDepartmentExport(body, s.dept, id);
       };
       saveHandlers.set(s.dept, async () => {
         await putSection(s, sectionPayload, false);
