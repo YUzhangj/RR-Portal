@@ -45,7 +45,7 @@ test('electronic detail export preserves the original USD currency and formulas'
             parts_cost: 0.25, total_cost: 0.25, profit_pct: 12, profit_price: 0.28,
             mold_fees: [{ name: 'PCB模费', amount: 354, currency: 'USD' }],
           },
-          meta: { tax_label: '不含税', moq: 5000 },
+          meta: { product_no: '客户：错误客户', customer: '正确客户', tax_label: '不含税', moq: 5000 },
           parts: [{ name: 'PCB', spec: '40*35', qty: 1, unit_price: 1.6575, source_unit_price: 0.25, note: '' }],
         },
         electronics_extra: { parts_cost: 1.6575, profit_pct: 12 },
@@ -64,6 +64,8 @@ test('electronic detail export preserves the original USD currency and formulas'
   assert.ok(values.includes('PCB模费：USD 354.00'));
   assert.equal(sheet.getCell('A1').value, '东莞市登信电子有限公司');
   assert.equal(sheet.getCell('A4').value, '电子报价单');
+  assert.match(sheet.getCell('A5').value, /产品编号：USD-ELECTRONIC/);
+  assert.match(sheet.getCell('A5').value, /客户：正确客户/);
   assert.equal(sheet.pageSetup.printArea, `A1:F${sheet.rowCount}`);
   assert.equal(sheet.pageSetup.printTitlesRow, '6:6');
   assert.equal(sheet.views[0].state, 'frozen');

@@ -13,6 +13,11 @@ const BORDER = {
 const num = value => Number(value) || 0;
 const sum = (rows, getter) => (rows || []).reduce((total, item) => total + num(getter(item)), 0);
 
+function cleanMetaValue(value, label) {
+  const text = String(value || '').replace(new RegExp(`^${label}[：:]\\s*`), '').trim();
+  return /^(产品名称|产品编号|客户|报价日期)[：:]/.test(text) ? '' : text;
+}
+
 function sourceUnit(part) {
   return part && part.source_unit_price != null ? num(part.source_unit_price) : num(part && part.unit_price);
 }
@@ -71,12 +76,16 @@ function addElectronicTemplateSheet(workbook, electronic, quote) {
   ws.getRow(4).height = 24;
 
   styleRow(ws, 5);
-  const quoteDate = String(meta.date || doc.imported_at || '').slice(0, 10).replaceAll('-', '.');
+  const product = cleanMetaValue(meta.product, '产品名称') || (quote && quote.product_name) || '';
+  const productNo = cleanMetaValue(meta.product_no, '产品编号') || (quote && quote.quote_no) || '';
+  const customer = cleanMetaValue(meta.customer, '客户') || (quote && quote.customer) || '';
+  const quoteDate = cleanMetaValue(meta.date, '报价日期')
+    || String(doc.imported_at || '').slice(0, 10).replaceAll('-', '.');
   ws.mergeCells(5, 1, 5, 6);
   ws.getCell(5, 1).value = [
-    `产品名称：${meta.product || (quote && quote.product_name) || ''}`,
-    `产品编号：${meta.product_no || (quote && quote.quote_no) || ''}`,
-    `客户：${meta.customer || (quote && quote.customer) || ''}`,
+    `产品名称：${product}`,
+    `产品编号：${productNo}`,
+    `客户：${customer}`,
     `报价日期：${quoteDate}`,
   ].join('          ');
   ws.getCell(5, 1).alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
