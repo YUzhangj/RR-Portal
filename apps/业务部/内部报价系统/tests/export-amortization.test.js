@@ -8,12 +8,15 @@ const test = require('node:test');
 const { buildWorkbook, adaptSurtaxForBase } = require('../backend/services/exportInternal');
 
 test('production departments each have a standalone export worksheet and UI action', async () => {
-  const depts = ['electronic', 'molding', 'painting', 'slush', 'sewing', 'assembly'];
+  const depts = ['electronic', 'molding', 'blow', 'painting', 'slush', 'sewing', 'assembly'];
   const workbook = await buildWorkbook({
     quote: { quote_no: 'DEPT-EXPORT', product_name: '部门导出', qty: 1000 },
     sections: [
       { dept: 'electronic', payload_json: JSON.stringify({ electronics_doc: { source_currency: 'RMB', parts: [{ name: 'IC', qty: 1, unit_price: 1 }] } }) },
-      { dept: 'molding', payload_json: JSON.stringify({ injection: [{ name: '注塑件', qty: 1 }] }) },
+      { dept: 'molding', payload_json: JSON.stringify({
+        injection: [{ name: '注塑件', qty: 1 }],
+        blow_items: [{ name: '吹气件', weight_g: 10, material_price_lb: 2, blow_labor: 1, flash: 0.5, profit_x: 1.2, usage: 2 }],
+      }) },
       { dept: 'painting', payload_json: JSON.stringify({ painting_items: [{ name: '喷油件', spray_qty: 1, spray_unit: 1 }] }) },
       { dept: 'slush', payload_json: JSON.stringify({ slush_items: [{ name: '搪胶件', qty: 1, unit_price_hkd: 1 }] }) },
       { dept: 'sewing', payload_json: JSON.stringify({ sewing_groups: [{ name: '车缝件', items: [{ fabric: '布料', usage: 1, mat_price: 1 }] }] }) },
@@ -21,13 +24,19 @@ test('production departments each have a standalone export worksheet and UI acti
       { dept: 'sales', payload_json: JSON.stringify({ header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.8 } }) },
     ],
   });
-  ['电子明细', '啤机明细', '喷油明细', '搪胶明细', '车缝明细', '装配明细']
+  ['电子明细', '啤机明细', '吹气明细', '喷油明细', '搪胶明细', '车缝明细', '装配明细']
     .forEach(name => assert.ok(workbook.getWorksheet(name), `missing ${name}`));
+
+  const blowSheet = workbook.getWorksheet('吹气明细');
+  assert.equal(blowSheet.getCell('A1').value, '啤机部·吹气明细');
+  assert.equal(blowSheet.getCell('A3').value, '二·B、吹气部分 (HKD)');
+  assert.equal(blowSheet.getCell('L5').value.formula, 'I5*J5*K5');
 
   const frontend = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'workbench.js'), 'utf8');
   const route = fs.readFileSync(path.join(__dirname, '..', 'backend', 'routes', 'export.js'), 'utf8');
   assert.match(frontend, /installDepartmentExport\(body, me\.dept, id\)/);
   assert.match(frontend, /api\/quotes\/\$\{quoteId\}\/export-department/);
+  assert.match(frontend, /data-department-export="blow"/);
   assert.match(frontend, /input\[type="file"\]\[accept\*="\.xls"\]/);
   assert.match(route, /export-department\/\:dept/);
   assert.match(route, /if \(dept === 'sewing'\) \{\s*wb = await buildSewingTemplateWorkbook/);

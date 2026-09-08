@@ -3641,7 +3641,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     <div id="wb-inj"></div>
     <div id="wb-inj-summary"></div>
 
-    <h3>二·B、吹气部分 <small class="muted">(单价含港币)</small>
+    <h3 id="blow-heading">二·B、吹气部分 <small class="muted">(单价含港币)</small>
       ${canEdit ? `<button class="mini" id="blow-import" type="button" style="margin-left:10px">📄 导入吹气报价</button>
       <input id="blow-file" type="file" accept=".xls,.xlsx" style="display:none"/>` : ''}
     </h3>
@@ -4767,11 +4767,44 @@ function renderAssembly(host, payload, canEdit, onChange, fxRmbHkd) {
 const DEPARTMENT_EXPORT_NAMES = {
   electronic: '电子部',
   molding: '啤机部',
+  blow: '吹气',
   painting: '喷油部',
   slush: '搪胶',
   sewing: '车缝',
   assembly: '装配部',
 };
+
+function createDepartmentExportButton(dept, quoteId) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'mini';
+  button.dataset.departmentExport = dept;
+  button.style.marginLeft = '10px';
+  button.textContent = `📤 导出${DEPARTMENT_EXPORT_NAMES[dept]}表格`;
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const response = await fetch(`/api/quotes/${quoteId}/export-department/${dept}`, { credentials: 'include' });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || '导出失败');
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/)?.[1];
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = encodedName ? decodeURIComponent(encodedName) : `${DEPARTMENT_EXPORT_NAMES[dept]}明细.xlsx`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  };
+  return button;
+}
 
 function installDepartmentExport(host, dept, quoteId) {
   if (!host || !DEPARTMENT_EXPORT_NAMES[dept]) return;
@@ -4780,37 +4813,14 @@ function installDepartmentExport(host, dept, quoteId) {
       if (/导入/.test(button.textContent || '') || /上传.*报价/.test(button.textContent || '')) button.remove();
     });
     host.querySelectorAll('input[type="file"][accept*=".xls"]').forEach(input => input.remove());
-    if (host.querySelector('[data-department-export]')) return;
-    const heading = host.querySelector('h3') || host;
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'mini';
-    button.dataset.departmentExport = dept;
-    button.style.marginLeft = '10px';
-    button.textContent = `📤 导出${DEPARTMENT_EXPORT_NAMES[dept]}表格`;
-    button.onclick = async () => {
-      button.disabled = true;
-      try {
-        const response = await fetch(`/api/quotes/${quoteId}/export-department/${dept}`, { credentials: 'include' });
-        if (!response.ok) {
-          const body = await response.json().catch(() => ({}));
-          throw new Error(body.error || '导出失败');
-        }
-        const blob = await response.blob();
-        const disposition = response.headers.get('Content-Disposition') || '';
-        const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/)?.[1];
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = encodedName ? decodeURIComponent(encodedName) : `${DEPARTMENT_EXPORT_NAMES[dept]}明细.xlsx`;
-        link.click();
-        URL.revokeObjectURL(link.href);
-      } catch (error) {
-        alert(error.message);
-      } finally {
-        button.disabled = false;
-      }
-    };
-    heading.appendChild(button);
+    if (!host.querySelector(`[data-department-export="${dept}"]`)) {
+      const heading = host.querySelector('h3') || host;
+      heading.appendChild(createDepartmentExportButton(dept, quoteId));
+    }
+    if (dept === 'molding' && !host.querySelector('[data-department-export="blow"]')) {
+      const blowHeading = host.querySelector('#blow-heading');
+      if (blowHeading) blowHeading.appendChild(createDepartmentExportButton('blow', quoteId));
+    }
   };
   sanitize();
   if (!host._departmentExportObserver) {

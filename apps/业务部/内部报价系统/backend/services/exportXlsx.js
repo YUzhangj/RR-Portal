@@ -369,6 +369,7 @@ async function buildWorkbook({ quote, sections }) {
 
   // ---------- 二·B、吹气 / 二·C、搪胶 ----------
   row = renderBlowBlock(ws, row, mold, subRefs);
+  addBlowDetailSheet(wb, mold);
   const slushDetail = addSlushDetailSheet(wb, slush, fxRH);
   row = renderDetailSummary(ws, row, '二·C、搪胶部分（汇总）', slushDetail, subRefs, 'slush');
 
@@ -1464,6 +1465,21 @@ function addMoldingDetailSheet(wb, payload, fxRH) {
   renderInjection(ws, 3, payload, fxRH, {});
   return ws;
 }
+
+function addBlowDetailSheet(wb, payload) {
+  const ws = wb.addWorksheet('吹气明细');
+  ws.columns = [24, 16, 18, 16, 16, 16, 14, 14, 14, 12, 12, 16, 12, 18]
+    .map(width => ({ width }));
+  ws.mergeCells(1, 1, 1, 14);
+  ws.getCell(1, 1).value = '啤机部·吹气明细';
+  ws.getCell(1, 1).font = { bold: true, size: 16, color: { argb: 'FFFFFFFF' }, name: 'Microsoft YaHei' };
+  ws.getCell(1, 1).alignment = { horizontal: 'center', vertical: 'middle' };
+  ws.getCell(1, 1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F3B64' } };
+  ws.getRow(1).height = 30;
+  renderBlowBlock(ws, 3, payload, {});
+  return ws;
+}
+
 function materialCost(r) {
   if (r.material_cost_manual != null && r.material_cost_manual !== '') return num(r.material_cost_manual);
   return num(r.weight_g) / 1000 * num(r.material_unit_price);

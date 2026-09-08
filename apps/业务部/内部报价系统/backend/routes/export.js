@@ -52,6 +52,7 @@ router.get('/:id/export', async (req, res) => {
 const DEPARTMENT_SHEETS = {
   electronic: '电子明细',
   molding: '啤机明细',
+  blow: '吹气明细',
   painting: '喷油明细',
   slush: '搪胶明细',
   sewing: '车缝明细',
