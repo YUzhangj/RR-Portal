@@ -3944,7 +3944,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       <div class="ls-row"><span class="ls-label">原料单价 ${hasMultipleProducts ? '加权平均' : '总'}</span><span class="ls-val">${formatNum(rawSum)}</span></div>
       <div class="ls-row"><span class="ls-label">啤价 ${hasMultipleProducts ? '加权平均' : '总'}</span><span class="ls-val">${formatNum(shotSum)}</span></div>
       <div class="ls-row hi"><span class="ls-label">成品金额 ${hasMultipleProducts ? `加权平均（总配比 ${formatNum(totalRatio)}）` : '总'} HK$</span><span class="ls-val">${formatNum(finishedSum)}</span></div>
-      <div class="ls-row hi"><span class="ls-label">合计 RMB</span><span class="ls-val">${formatNum(finishedSum / fxv)} <small class="muted">(汇率 ${fxv})</small></span></div>
+      <div class="ls-row hi"><span class="ls-label">合计 RMB</span><span class="ls-val">${formatNum(finishedSum * fxv)} <small class="muted">(汇率 ${fxv})</small></span></div>
     `;
     injCard.querySelectorAll('.product-mix-ratio').forEach(input => {
       input.onchange = () => {
