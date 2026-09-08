@@ -100,6 +100,12 @@ test('molding defaults automatically fill missing material and shot prices witho
   assert.match(source, /applyInjectionReferencePrices\(payload, \{ overwrite: true, material: false \}\)/);
 });
 
+test('molding summary converts HKD to RMB by multiplying the RMB/HKD rate', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  assert.match(source, /formatNum\(finishedSum \* fxv\)/);
+  assert.doesNotMatch(source, /formatNum\(finishedSum \/ fxv\)/);
+});
+
 test('electronic IC rows are excluded only from Indonesian freight', () => {
   const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
   assert.match(source, /function isIcElectronicRow\(row\)/);

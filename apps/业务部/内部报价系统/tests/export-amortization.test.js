@@ -7,9 +7,48 @@ const test = require('node:test');
 
 const { buildWorkbook, adaptSurtaxForBase } = require('../backend/services/exportInternal');
 
+test('production departments each have a standalone export worksheet and UI action', async () => {
+  const depts = ['electronic', 'molding', 'blow', 'painting', 'slush', 'sewing', 'assembly'];
+  const workbook = await buildWorkbook({
+    quote: { quote_no: 'DEPT-EXPORT', product_name: '部门导出', qty: 1000 },
+    sections: [
+      { dept: 'electronic', payload_json: JSON.stringify({ electronics_doc: { source_currency: 'RMB', parts: [{ name: 'IC', qty: 1, unit_price: 1 }] } }) },
+      { dept: 'molding', payload_json: JSON.stringify({
+        injection: [{ name: '注塑件', qty: 1 }],
+        blow_items: [{ name: '吹气件', weight_g: 10, material_price_lb: 2, blow_labor: 1, flash: 0.5, profit_x: 1.2, usage: 2 }],
+      }) },
+      { dept: 'painting', payload_json: JSON.stringify({ painting_items: [{ name: '喷油件', spray_qty: 1, spray_unit: 1 }] }) },
+      { dept: 'slush', payload_json: JSON.stringify({ slush_items: [{ name: '搪胶件', qty: 1, unit_price_hkd: 1 }] }) },
+      { dept: 'sewing', payload_json: JSON.stringify({ sewing_groups: [{ name: '车缝件', items: [{ fabric: '布料', usage: 1, mat_price: 1 }] }] }) },
+      { dept: 'assembly', payload_json: JSON.stringify({ assembly_step_groups: [{ product: '装配件', qty: 1, steps: [{ name: '装配', count: 1 }] }] }) },
+      { dept: 'sales', payload_json: JSON.stringify({ header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.8 } }) },
+    ],
+  });
+  ['电子明细', '啤机明细', '吹气明细', '喷油明细', '搪胶明细', '车缝明细', '装配明细']
+    .forEach(name => assert.ok(workbook.getWorksheet(name), `missing ${name}`));
+
+  const blowSheet = workbook.getWorksheet('吹气明细');
+  assert.equal(blowSheet.getCell('A1').value, '啤机部·吹气明细');
+  assert.equal(blowSheet.getCell('A3').value, '二·B、吹气部分 (HKD)');
+  assert.equal(blowSheet.getCell('L5').value.formula, 'I5*J5*K5');
+
+  const frontend = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'workbench.js'), 'utf8');
+  const route = fs.readFileSync(path.join(__dirname, '..', 'backend', 'routes', 'export.js'), 'utf8');
+  assert.match(frontend, /installDepartmentExport\(body, me\.dept, id\)/);
+  assert.match(frontend, /api\/quotes\/\$\{quoteId\}\/export-department/);
+  assert.match(frontend, /data-department-export="blow"/);
+  assert.match(frontend, /input\[type="file"\]\[accept\*="\.xls"\]/);
+  assert.match(route, /export-department\/\:dept/);
+  assert.match(route, /if \(dept === 'sewing'\) \{\s*wb = await buildSewingTemplateWorkbook/);
+  depts.forEach(dept => assert.match(route, new RegExp(`${dept}:`)));
+});
+
 test('electronic detail export preserves the original USD currency and formulas', async () => {
   const workbook = await buildWorkbook({
-    quote: { quote_no: 'USD-ELECTRONIC', product_name: '美金电子报价', qty: 5000 },
+    quote: {
+      quote_no: 'USD-ELECTRONIC', product_name: '美金电子报价', qty: 5000,
+      created_at: '2026-08-31 08:01:39',
+    },
     sections: [
       { dept: 'electronic', payload_json: JSON.stringify({
         electronics: [],
@@ -19,7 +58,10 @@ test('electronic detail export preserves the original USD currency and formulas'
             parts_cost: 0.25, total_cost: 0.25, profit_pct: 12, profit_price: 0.28,
             mold_fees: [{ name: 'PCB模费', amount: 354, currency: 'USD' }],
           },
-          meta: { tax_label: '不含税', moq: 5000 },
+          meta: {
+            product_no: '客户：错误客户', customer: '正确客户', date: '2025.11.27',
+            tax_label: '不含税', moq: 5000,
+          },
           parts: [{ name: 'PCB', spec: '40*35', qty: 1, unit_price: 1.6575, source_unit_price: 0.25, note: '' }],
         },
         electronics_extra: { parts_cost: 1.6575, profit_pct: 12 },
@@ -28,15 +70,39 @@ test('electronic detail export preserves the original USD currency and formulas'
     ],
   });
   const sheet = workbook.getWorksheet('电子明细');
-  assert.equal(sheet.getCell('D5').value, '单价USD');
-  assert.equal(sheet.getCell('D6').value, 0.25);
-  assert.equal(sheet.getCell('E6').value.formula, 'C6*D6');
-  assert.equal(sheet.getCell('E6').value.result, 0.25);
+  assert.equal(sheet.getCell('D6').value, '单价USD');
+  assert.equal(sheet.getCell('D7').value, 0.25);
+  assert.equal(sheet.getCell('C7').numFmt, '0');
+  assert.equal(sheet.getCell('E7').value.formula, 'C7*D7');
+  assert.equal(sheet.getCell('E7').value.result, 0.25);
   const values = [];
   sheet.eachRow(row => row.eachCell(cell => values.push(cell.value)));
-  assert.ok(values.includes('电子报价单（USD）'));
-  assert.ok(values.includes('PCB模费'));
-  assert.ok(values.includes(354));
+  assert.ok(values.includes('PCB模费：USD 354.00'));
+  assert.equal(sheet.getCell('A1').value, '东莞市登信电子有限公司');
+  assert.equal(sheet.getCell('A4').value, '电子报价单');
+  assert.match(sheet.getCell('A5').value, /产品编号：USD-ELECTRONIC/);
+  assert.match(sheet.getCell('A5').value, /客户：正确客户/);
+  const dateParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const datePart = (type) => dateParts.find((part) => part.type === type).value;
+  const expectedExportDate = `${datePart('year')}.${datePart('month')}.${datePart('day')}`;
+  assert.match(sheet.getCell('A5').value, new RegExp(`报价日期：${expectedExportDate.replaceAll('.', '\\.')}`));
+  assert.doesNotMatch(sheet.getCell('A5').value, /2026\.08\.31|2025\.11\.27/);
+  assert.equal(sheet.pageSetup.printArea, `A1:F${sheet.rowCount}`);
+  assert.equal(sheet.pageSetup.printTitlesRow, '6:6');
+  assert.equal(sheet.views[0].state, 'frozen');
+  assert.equal(sheet.views[0].ySplit, 6);
+  let taxedRow = 0;
+  sheet.eachRow(currentRow => {
+    if (currentRow.getCell(4).value === '含税报价') taxedRow = currentRow.number;
+  });
+  assert.ok(taxedRow > 0);
+  assert.equal(sheet.getCell(taxedRow, 5).value.formula, `E${taxedRow - 3}+E${taxedRow - 2}+E${taxedRow - 1}`);
+  assert.equal(sheet.getCell(taxedRow, 5).value.result, 0.25 * 1.12);
 });
 
 test('internal export writes product-ratio weighted injection formulas', async () => {
@@ -88,7 +154,7 @@ test('internal quotation workbook uses print-friendly layouts on every sheet', a
     assert.equal(worksheet.pageSetup.orientation, 'portrait');
     assert.equal(worksheet.pageSetup.fitToPage, true);
     assert.equal(worksheet.pageSetup.fitToWidth, 1);
-    assert.equal(worksheet.pageSetup.fitToHeight, 0);
+    assert.equal(worksheet.pageSetup.fitToHeight, worksheet.name === '电子明细' ? 1 : 0);
     assert.match(worksheet.pageSetup.printArea, /^A1:[A-Z]+\d+$/);
     assert.equal(worksheet.views[0].showGridLines, false);
     assert.match(worksheet.headerFooter.oddFooter, /第 &P 页/);
@@ -103,7 +169,7 @@ test('internal quotation workbook uses print-friendly layouts on every sheet', a
   assert.equal(mainSheet.getCell(1, 1).font.size, 18);
   assert.ok(mainSheet.getCell(2, 1).font.size >= 12);
   assert.ok(mainSheet.getColumn(7).width >= 20);
-  assert.equal(workbook.getWorksheet('电子明细').pageSetup.printTitlesRow, '1:1');
+  assert.equal(workbook.getWorksheet('电子明细').pageSetup.printTitlesRow, '6:6');
 });
 
 test('legacy ultrasonic mold fee is displayed as fixture mold fee', async () => {
@@ -168,6 +234,9 @@ test('carton product dimensions are labeled in inches', async () => {
   const workbenchSource = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
   assert.match(workbenchSource, /data-formula-flat-qty/);
   assert.match(workbenchSource, /flat_cards\[j\]\[`\$\{k\}_raw`\] = el\.value/);
+  assert.match(workbenchSource, /产品尺寸（mm 自动换算为英寸）/);
+  assert.match(workbenchSource, /id="cc-pl-mm"/);
+  assert.match(workbenchSource, /c\[k\] = mm \/ 25\.4/);
 });
 
 test('carton dimensions accept formulas and preserve them in Excel export', async () => {

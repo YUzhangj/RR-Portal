@@ -2520,6 +2520,7 @@ function renderCartonCalc(host, c, canEdit, onChange) {
   const cartonDimInput = (b, key) => b[`${key}_raw`] != null && b[`${key}_raw`] !== ''
     ? b[`${key}_raw`]
     : (b[key] || '');
+  const productMmInput = key => c[`${key}_mm`] || (c[`${key}_cm`] ? num(c[`${key}_cm`]) * 10 : '');
   const cuftOf = (b) => num(b.cl) * num(b.cw) * num(b.ch) / 1728;
   const boxPriceOf = (b) => (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * rate() / 1000;
   // 平卡 L/W 留空时对应所在纸箱的长/宽
@@ -2581,14 +2582,23 @@ function renderCartonCalc(host, c, canEdit, onChange) {
           </span>
         </div>
 
-        <div style="margin-bottom:6px;color:#78716c;font-size:13px">产品尺寸（英寸）</div>
-        <table class="wb-table" style="font-size:13px;margin-bottom:14px;max-width:340px">
-          <thead><tr><th style="width:80px">L</th><th style="width:80px">W</th><th style="width:80px">H</th></tr></thead>
-          <tbody><tr>
-            <td><input id="cc-pl" type="number" step="any" value="${c.pl || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
-            <td><input id="cc-pw" type="number" step="any" value="${c.pw || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
-            <td><input id="cc-ph" type="number" step="any" value="${c.ph || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
-          </tr></tbody>
+        <div style="margin-bottom:6px;color:#78716c;font-size:13px">产品尺寸（mm 自动换算为英寸）</div>
+        <table class="wb-table" style="font-size:13px;margin-bottom:14px;max-width:430px">
+          <thead><tr><th style="width:70px">单位</th><th style="width:80px">L</th><th style="width:80px">W</th><th style="width:80px">H</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="muted">mm</td>
+              <td><input id="cc-pl-mm" type="number" step="any" value="${productMmInput('pl')}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td><input id="cc-pw-mm" type="number" step="any" value="${productMmInput('pw')}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td><input id="cc-ph-mm" type="number" step="any" value="${productMmInput('ph')}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+            </tr>
+            <tr>
+              <td class="muted">inch</td>
+              <td><input id="cc-pl" type="number" step="any" value="${c.pl || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td><input id="cc-pw" type="number" step="any" value="${c.pw || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td><input id="cc-ph" type="number" step="any" value="${c.ph || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+            </tr>
+          </tbody>
         </table>
 
         ${cartonsHtml}
@@ -2602,10 +2612,25 @@ function renderCartonCalc(host, c, canEdit, onChange) {
       rateEl.oninput = () => { c.paper_rate = rateEl.value === '' ? 2.75 : Number(rateEl.value); onChange(); };
       rateEl.onchange = () => render();
     }
-    // 产品尺寸
+    // 产品尺寸：mm 输入按 mm ÷ 25.4 写入英寸字段；保存和导出继续只读取英寸字段。
     ['pl','pw','ph'].forEach(k => {
       const el = host.querySelector('#cc-' + k);
-      el.oninput = () => { c[k] = Number(el.value) || 0; onChange(); };
+      const mmEl = host.querySelector('#cc-' + k + '-mm');
+      el.oninput = () => {
+        c[k] = Number(el.value) || 0;
+        c[`${k}_mm`] = 0;
+        c[`${k}_cm`] = 0;
+        mmEl.value = '';
+        onChange();
+      };
+      mmEl.oninput = () => {
+        const mm = Number(mmEl.value) || 0;
+        c[`${k}_mm`] = mm;
+        c[`${k}_cm`] = 0;
+        c[k] = mm / 25.4;
+        el.value = mmEl.value === '' ? '' : String(+c[k].toFixed(4));
+        onChange();
+      };
     });
     // 纸箱字段：输入时只更新数据(不 render，否则每敲一下就重建输入框→丢焦点只能输一位)，
     // 失焦(onchange)时再 render 刷新 CU.FT/箱价
@@ -3616,7 +3641,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     <div id="wb-inj"></div>
     <div id="wb-inj-summary"></div>
 
-    <h3>二·B、吹气部分 <small class="muted">(单价含港币)</small>
+    <h3 id="blow-heading">二·B、吹气部分 <small class="muted">(单价含港币)</small>
       ${canEdit ? `<button class="mini" id="blow-import" type="button" style="margin-left:10px">📄 导入吹气报价</button>
       <input id="blow-file" type="file" accept=".xls,.xlsx" style="display:none"/>` : ''}
     </h3>
@@ -3922,7 +3947,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       <div class="ls-row"><span class="ls-label">原料单价 ${hasMultipleProducts ? '加权平均' : '总'}</span><span class="ls-val">${formatNum(rawSum)}</span></div>
       <div class="ls-row"><span class="ls-label">啤价 ${hasMultipleProducts ? '加权平均' : '总'}</span><span class="ls-val">${formatNum(shotSum)}</span></div>
       <div class="ls-row hi"><span class="ls-label">成品金额 ${hasMultipleProducts ? `加权平均（总配比 ${formatNum(totalRatio)}）` : '总'} HK$</span><span class="ls-val">${formatNum(finishedSum)}</span></div>
-      <div class="ls-row hi"><span class="ls-label">合计 RMB</span><span class="ls-val">${formatNum(finishedSum / fxv)} <small class="muted">(汇率 ${fxv})</small></span></div>
+      <div class="ls-row hi"><span class="ls-label">合计 RMB</span><span class="ls-val">${formatNum(finishedSum * fxv)} <small class="muted">(汇率 ${fxv})</small></span></div>
     `;
     injCard.querySelectorAll('.product-mix-ratio').forEach(input => {
       input.onchange = () => {
@@ -4736,6 +4761,71 @@ function renderAssembly(host, payload, canEdit, onChange, fxRmbHkd) {
         impPreview.innerHTML = `<div class="card" style="background:#fef2f2;border:1px solid #fecaca;margin-top:10px">解析失败：${err.message}</div>`;
       }
     };
+  }
+}
+
+const DEPARTMENT_EXPORT_NAMES = {
+  electronic: '电子部',
+  molding: '啤机部',
+  blow: '吹气',
+  painting: '喷油部',
+  slush: '搪胶',
+  sewing: '车缝',
+  assembly: '装配部',
+};
+
+function createDepartmentExportButton(dept, quoteId) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'mini';
+  button.dataset.departmentExport = dept;
+  button.style.marginLeft = '10px';
+  button.textContent = `📤 导出${DEPARTMENT_EXPORT_NAMES[dept]}表格`;
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const response = await fetch(`/api/quotes/${quoteId}/export-department/${dept}`, { credentials: 'include' });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || '导出失败');
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/)?.[1];
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = encodedName ? decodeURIComponent(encodedName) : `${DEPARTMENT_EXPORT_NAMES[dept]}明细.xlsx`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  };
+  return button;
+}
+
+function installDepartmentExport(host, dept, quoteId) {
+  if (!host || !DEPARTMENT_EXPORT_NAMES[dept]) return;
+  const sanitize = () => {
+    host.querySelectorAll('button').forEach(button => {
+      if (/导入/.test(button.textContent || '') || /上传.*报价/.test(button.textContent || '')) button.remove();
+    });
+    host.querySelectorAll('input[type="file"][accept*=".xls"]').forEach(input => input.remove());
+    if (!host.querySelector(`[data-department-export="${dept}"]`)) {
+      const heading = host.querySelector('h3') || host;
+      heading.appendChild(createDepartmentExportButton(dept, quoteId));
+    }
+    if (dept === 'molding' && !host.querySelector('[data-department-export="blow"]')) {
+      const blowHeading = host.querySelector('#blow-heading');
+      if (blowHeading) blowHeading.appendChild(createDepartmentExportButton('blow', quoteId));
+    }
+  };
+  sanitize();
+  if (!host._departmentExportObserver) {
+    host._departmentExportObserver = new MutationObserver(sanitize);
+    host._departmentExportObserver.observe(host, { childList: true, subtree: true });
   }
 }
 
@@ -5567,6 +5657,7 @@ async function renderQuotePage() {
     else if (me.dept === 'slush') renderSlush(body, payload, canEditMine, onChange, fx);
     else if (me.dept === 'sewing') renderSewing(body, payload, canEditMine, onChange, fx);
     else if (me.dept === 'assembly') renderAssembly(body, payload, canEditMine, onChange, fx);
+    installDepartmentExport(body, me.dept, id);
   }
 
   // 其他部门 section 渲染（用户对哪些部门有 view 权限就渲染哪些）
@@ -5615,6 +5706,7 @@ async function renderQuotePage() {
         else if (s.dept === 'slush') renderSlush(body, sectionPayload, inEdit, onChangeOther, fxRate);
         else if (s.dept === 'sewing') renderSewing(body, sectionPayload, inEdit, onChangeOther, fxRate);
         else if (s.dept === 'assembly') renderAssembly(body, sectionPayload, inEdit, onChangeOther, fxRate);
+        installDepartmentExport(body, s.dept, id);
       };
       saveHandlers.set(s.dept, async () => {
         await putSection(s, sectionPayload, false);
