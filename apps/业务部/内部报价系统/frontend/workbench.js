@@ -2581,14 +2581,23 @@ function renderCartonCalc(host, c, canEdit, onChange) {
           </span>
         </div>
 
-        <div style="margin-bottom:6px;color:#78716c;font-size:13px">产品尺寸（英寸）</div>
-        <table class="wb-table" style="font-size:13px;margin-bottom:14px;max-width:340px">
-          <thead><tr><th style="width:80px">L</th><th style="width:80px">W</th><th style="width:80px">H</th></tr></thead>
-          <tbody><tr>
-            <td><input id="cc-pl" type="number" step="any" value="${c.pl || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
-            <td><input id="cc-pw" type="number" step="any" value="${c.pw || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
-            <td><input id="cc-ph" type="number" step="any" value="${c.ph || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
-          </tr></tbody>
+        <div style="margin-bottom:6px;color:#78716c;font-size:13px">产品尺寸（cm 自动换算为英寸）</div>
+        <table class="wb-table" style="font-size:13px;margin-bottom:14px;max-width:430px">
+          <thead><tr><th style="width:70px">单位</th><th style="width:80px">L</th><th style="width:80px">W</th><th style="width:80px">H</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="muted">cm</td>
+              <td><input id="cc-pl-cm" type="number" step="any" value="${c.pl_cm || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td><input id="cc-pw-cm" type="number" step="any" value="${c.pw_cm || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td><input id="cc-ph-cm" type="number" step="any" value="${c.ph_cm || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+            </tr>
+            <tr>
+              <td class="muted">inch</td>
+              <td><input id="cc-pl" type="number" step="any" value="${c.pl || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td><input id="cc-pw" type="number" step="any" value="${c.pw || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td><input id="cc-ph" type="number" step="any" value="${c.ph || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+            </tr>
+          </tbody>
         </table>
 
         ${cartonsHtml}
@@ -2602,10 +2611,23 @@ function renderCartonCalc(host, c, canEdit, onChange) {
       rateEl.oninput = () => { c.paper_rate = rateEl.value === '' ? 2.75 : Number(rateEl.value); onChange(); };
       rateEl.onchange = () => render();
     }
-    // 产品尺寸
+    // 产品尺寸：cm 输入按 cm ÷ 2.54 写入英寸字段；保存和导出继续只读取英寸字段。
     ['pl','pw','ph'].forEach(k => {
       const el = host.querySelector('#cc-' + k);
-      el.oninput = () => { c[k] = Number(el.value) || 0; onChange(); };
+      const cmEl = host.querySelector('#cc-' + k + '-cm');
+      el.oninput = () => {
+        c[k] = Number(el.value) || 0;
+        c[`${k}_cm`] = 0;
+        cmEl.value = '';
+        onChange();
+      };
+      cmEl.oninput = () => {
+        const cm = Number(cmEl.value) || 0;
+        c[`${k}_cm`] = cm;
+        c[k] = cm / 2.54;
+        el.value = cmEl.value === '' ? '' : String(+c[k].toFixed(4));
+        onChange();
+      };
     });
     // 纸箱字段：输入时只更新数据(不 render，否则每敲一下就重建输入框→丢焦点只能输一位)，
     // 失焦(onchange)时再 render 刷新 CU.FT/箱价

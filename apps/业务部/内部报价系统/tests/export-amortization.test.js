@@ -224,6 +224,9 @@ test('carton product dimensions are labeled in inches', async () => {
   const workbenchSource = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
   assert.match(workbenchSource, /data-formula-flat-qty/);
   assert.match(workbenchSource, /flat_cards\[j\]\[`\$\{k\}_raw`\] = el\.value/);
+  assert.match(workbenchSource, /产品尺寸（cm 自动换算为英寸）/);
+  assert.match(workbenchSource, /id="cc-pl-cm"/);
+  assert.match(workbenchSource, /c\[k\] = cm \/ 2\.54/);
 });
 
 test('carton dimensions accept formulas and preserve them in Excel export', async () => {
