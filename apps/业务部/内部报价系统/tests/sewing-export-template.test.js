@@ -24,21 +24,23 @@ test('sewing department export follows the two-sheet ZURU quotation template', a
     }],
   });
 
-  assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), ['报价单', '明细表']);
-  const quoteSheet = workbook.getWorksheet('报价单');
-  const detailSheet = workbook.getWorksheet('明细表');
+  assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), ['报价单7-24', '明细表7-24']);
+  const quoteSheet = workbook.getWorksheet('报价单7-24');
+  const detailSheet = workbook.getWorksheet('明细表7-24');
   assert.equal(quoteSheet.getCell('A1').value, '东莞市华信兴服装有限公司');
   assert.equal(quoteSheet.getCell('A6').value, '报价单');
   assert.equal(quoteSheet.getCell('B10').value, '9577');
-  assert.equal(quoteSheet.getCell('D10').value.formula, "'明细表'!I7");
+  assert.equal(quoteSheet.getCell('D10').value.formula, "'明细表7-24'!I8");
   assert.equal(quoteSheet.getCell('E10').value.formula, 'D10*1.1');
+  assert.equal(quoteSheet.getCell('D11').value, '以下空白！');
   assert.equal(detailSheet.getCell('A1').value, '摇摆水豚鼠-明细表');
   assert.equal(detailSheet.getCell('A3').value, '图片');
   assert.equal(detailSheet.getCell('J3').value, '布料');
   assert.equal(detailSheet.getCell('J4').value, 'MOQ');
-  assert.equal(detailSheet.getCell('G5').value.formula, 'E5*F5');
-  assert.equal(detailSheet.getCell('I5').value.formula, 'G5*H5');
-  assert.equal(detailSheet.getCell('I7').value.formula, 'SUM(I5:I6)');
+  assert.equal(detailSheet.getCell('B5').value, '摇摆水豚鼠');
+  assert.equal(detailSheet.getCell('G6').value.formula, 'E6*F6');
+  assert.equal(detailSheet.getCell('I6').value.formula, 'G6*H6');
+  assert.equal(detailSheet.getCell('I8').value.formula, 'SUM(I6:I7)');
   assert.equal(detailSheet.pageSetup.printTitlesRow, '3:4');
-  assert.equal(detailSheet.pageSetup.printArea, 'A1:K7');
+  assert.equal(detailSheet.pageSetup.printArea, 'A1:K8');
 });

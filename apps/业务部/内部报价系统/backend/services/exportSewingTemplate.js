@@ -34,6 +34,11 @@ function dateText(value) {
   return date || '';
 }
 
+function dateSuffix(value) {
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(String(value || ''));
+  return match ? `${Number(match[2])}-${Number(match[3])}` : '';
+}
+
 function styleCell(cell, options = {}) {
   cell.font = {
     name: FONT,
@@ -69,8 +74,9 @@ function addImage(workbook, sheet, image, startRow, endRow) {
   });
 }
 
-function buildDetailSheet(workbook, quote, sewing) {
-  const sheet = workbook.addWorksheet('明细表');
+function buildDetailSheet(workbook, quote, sewing, suffix) {
+  const sheetName = suffix ? `明细表${suffix}` : '明细表';
+  const sheet = workbook.addWorksheet(sheetName);
   sheet.columns = [
     { width: 14 }, { width: 29 }, { width: 40 }, { width: 19 },
     { width: 14 }, { width: 13 }, { width: 13 }, { width: 10 },
@@ -106,23 +112,23 @@ function buildDetailSheet(workbook, quote, sewing) {
   const totals = [];
   for (const group of sewing.sewing_groups || []) {
     const items = group.items || [];
+    const productRow = row;
+    styleRange(sheet, productRow, 1, 11, { size: 12 });
+    sheet.getCell(productRow, 2).value = group.name || '';
+    sheet.getCell(productRow, 2).fill = PRODUCT_FILL;
+    sheet.getCell(productRow, 10).value = group.fabric_moq || sewing.fabric_moq || '';
+    sheet.getRow(productRow).height = 37;
+    row += 1;
     const start = row;
     let previousFabric = '';
     const groupResult = sum(items, item => num(item.usage) * num(item.mat_price) * (num(item.markup) || 1))
       + laborToAdd(group);
 
     if (!items.length) {
-      styleRange(sheet, row, 1, 11, { size: 12 });
-      sheet.getCell(row, 2).value = group.name || '';
-      row += 1;
+      previousFabric = '';
     } else {
-      items.forEach((item, index) => {
+      items.forEach((item) => {
         styleRange(sheet, row, 1, 11, { size: 12 });
-        if (index === 0) {
-          sheet.getCell(row, 2).value = group.name || '';
-          sheet.getCell(row, 2).fill = PRODUCT_FILL;
-          sheet.getCell(row, 10).value = group.fabric_moq || sewing.fabric_moq || '';
-        }
         const fabric = item.fabric || item.name || '';
         sheet.getCell(row, 3).value = fabric === previousFabric ? '' : fabric;
         sheet.getCell(row, 4).value = item.part || '';
@@ -164,7 +170,7 @@ function buildDetailSheet(workbook, quote, sewing) {
     sheet.getCell(row, 9).numFmt = '0.00';
     sheet.getRow(row).height = 30;
     totals.push({ row, result: groupResult, qty: groupQty(group), name: group.name || '' });
-    addImage(workbook, sheet, group.product_image || group.image, start, Math.min(end, start + 3));
+    addImage(workbook, sheet, group.product_image || group.image, productRow, Math.max(productRow, Math.min(end, productRow + 4)));
     row += 2;
   }
 
@@ -188,10 +194,10 @@ function buildDetailSheet(workbook, quote, sewing) {
     printArea: `A1:K${sheet.rowCount}`,
     printTitlesRow: '3:4',
   };
-  return totals;
+  return { totals, sheetName };
 }
 
-function buildQuoteSheet(sheet, quote, section, totals) {
+function buildQuoteSheet(workbook, sheet, quote, section, sewing, detailSheetName, totals) {
   sheet.columns = [
     { width: 15 }, { width: 15 }, { width: 18 }, { width: 16 },
     { width: 16 }, { width: 46 }, { width: 45 },
@@ -216,7 +222,7 @@ function buildQuoteSheet(sheet, quote, section, totals) {
   styleRange(sheet, 8, 1, 7, { size: 12 });
   sheet.mergeCells('A8:C8');
   sheet.getCell('A8').value = `客人：${quote.customer || ''}`;
-  sheet.getCell('F8').value = '车缝系列';
+  sheet.getCell('F8').value = '机芯系列';
   sheet.getCell('G8').value = `DATE:${dateText(quote.created_at)}`;
 
   const headers = ['图片', '货号', '货品', '人民币报价', '10%含税', '内容', '备注'];
@@ -241,15 +247,20 @@ function buildQuoteSheet(sheet, quote, section, totals) {
     if (total) {
       sheet.getCell(row, 2).value = quote.quote_no || '';
       sheet.getCell(row, 3).value = total.name || quote.product_name || '';
-      sheet.getCell(row, 4).value = { formula: `'明细表'!I${total.row}`, result: total.result };
+      sheet.getCell(row, 4).value = { formula: `'${detailSheetName}'!I${total.row}`, result: total.result };
       sheet.getCell(row, 5).value = { formula: `D${row}*1.1`, result: total.result * 1.1 };
       sheet.getCell(row, 4).numFmt = '"￥"#,##0.00';
       sheet.getCell(row, 5).numFmt = '"￥"#,##0.00';
+      const group = (sewing.sewing_groups || [])[index] || {};
+      sheet.getCell(row, 6).value = group.quote_content || group.content || '';
+      addImage(workbook, sheet, group.product_image || group.image, row, row);
     }
     sheet.getCell(row, 7).value = remarks[index] || '';
     sheet.getCell(row, 7).alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
     sheet.getRow(row).height = index === 0 ? 72 : 56;
   }
+  const blankRow = quoteStart + totals.length;
+  if (blankRow < quoteStart + bodyRows) sheet.getCell(blankRow, 4).value = '以下空白！';
   const footerRow = quoteStart + bodyRows + 1;
   styleRange(sheet, footerRow, 1, 7, { size: 12 });
   sheet.getCell(footerRow, 1).value = `报价：${section.reviewed_by || ''}`;
@@ -276,9 +287,10 @@ async function buildSewingTemplateWorkbook({ quote, sections }) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = '内部报价系统';
   workbook.calcProperties.fullCalcOnLoad = true;
-  const quoteSheet = workbook.addWorksheet('报价单');
-  const totals = buildDetailSheet(workbook, quote, sewing);
-  buildQuoteSheet(quoteSheet, quote, section, totals);
+  const suffix = dateSuffix(quote.created_at);
+  const quoteSheet = workbook.addWorksheet(suffix ? `报价单${suffix}` : '报价单');
+  const detail = buildDetailSheet(workbook, quote, sewing, suffix);
+  buildQuoteSheet(workbook, quoteSheet, quote, section, sewing, detail.sheetName, detail.totals);
   return workbook;
 }
 

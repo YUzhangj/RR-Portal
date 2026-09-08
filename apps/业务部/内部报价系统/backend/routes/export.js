@@ -37,16 +37,6 @@ router.get('/:id/export', async (req, res) => {
     .run(id, req.user.name);
 
   try {
-    if (dept === 'sewing') {
-      const wb = await buildSewingTemplateWorkbook({ quote, sections });
-      const buf = await wb.xlsx.writeBuffer();
-      const filename = encodeURIComponent(`${quote.quote_no || quote.id}_车缝报价单.xlsx`);
-      await db.prepare(`INSERT INTO audit_log (quote_id, actor, action, detail) VALUES (?, ?, 'export_department', ?)`)
-        .run(id, req.user.name, dept);
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${filename}`);
-      return res.send(Buffer.from(buf));
-    }
     const wb = await buildWorkbook({ quote, sections });
     const buf = await wb.xlsx.writeBuffer();
     const filename = encodeURIComponent(`${quote.quote_no || quote.id}_内部报价明细.xlsx`);
@@ -89,16 +79,23 @@ router.get('/:id/export-department/:dept', async (req, res) => {
   ).all(id);
 
   try {
-    const wb = await buildWorkbook({ quote, sections });
-    const selected = wb.getWorksheet(sheetName);
-    if (!selected) return res.status(404).json({ error: '未找到该部门的导出表格' });
-    wb.worksheets.slice().forEach(sheet => {
-      if (sheet.id !== selected.id) wb.removeWorksheet(sheet.id);
-    });
+    let wb;
+    if (dept === 'sewing') {
+      wb = await buildSewingTemplateWorkbook({ quote, sections });
+    } else {
+      wb = await buildWorkbook({ quote, sections });
+      const selected = wb.getWorksheet(sheetName);
+      if (!selected) return res.status(404).json({ error: '未找到该部门的导出表格' });
+      wb.worksheets.slice().forEach(sheet => {
+        if (sheet.id !== selected.id) wb.removeWorksheet(sheet.id);
+      });
+    }
     await db.prepare(`INSERT INTO audit_log (quote_id, actor, action, detail) VALUES (?, ?, 'export_department', ?)`)
       .run(id, req.user.name, dept);
     const buf = await wb.xlsx.writeBuffer();
-    const filename = encodeURIComponent(`${quote.quote_no || quote.id}_${sheetName}.xlsx`);
+    const filename = encodeURIComponent(dept === 'sewing'
+      ? `${quote.quote_no || quote.id}_车缝报价单.xlsx`
+      : `${quote.quote_no || quote.id}_${sheetName}.xlsx`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${filename}`);
     res.send(Buffer.from(buf));

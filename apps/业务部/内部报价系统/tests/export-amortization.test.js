@@ -30,6 +30,7 @@ test('production departments each have a standalone export worksheet and UI acti
   assert.match(frontend, /api\/quotes\/\$\{quoteId\}\/export-department/);
   assert.match(frontend, /input\[type="file"\]\[accept\*="\.xls"\]/);
   assert.match(route, /export-department\/\:dept/);
+  assert.match(route, /if \(dept === 'sewing'\) \{\s*wb = await buildSewingTemplateWorkbook/);
   depts.forEach(dept => assert.match(route, new RegExp(`${dept}:`)));
 });
 
