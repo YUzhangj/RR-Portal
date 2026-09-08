@@ -2,6 +2,7 @@ const express = require('express');
 const db = require('../db');
 const { requireAuth, quoteAccess } = require('../middleware/auth');
 const { buildWorkbook } = require('../services/exportInternal');
+const { buildSewingTemplateWorkbook } = require('../services/exportSewingTemplate');
 const { exportVQ } = require('../services/exportVQ');
 const { translateSectionsForVq } = require('../services/vqTranslate');
 const { vqCustomerProfile } = require('../services/customerProfiles');
@@ -36,6 +37,16 @@ router.get('/:id/export', async (req, res) => {
     .run(id, req.user.name);
 
   try {
+    if (dept === 'sewing') {
+      const wb = await buildSewingTemplateWorkbook({ quote, sections });
+      const buf = await wb.xlsx.writeBuffer();
+      const filename = encodeURIComponent(`${quote.quote_no || quote.id}_车缝报价单.xlsx`);
+      await db.prepare(`INSERT INTO audit_log (quote_id, actor, action, detail) VALUES (?, ?, 'export_department', ?)`)
+        .run(id, req.user.name, dept);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${filename}`);
+      return res.send(Buffer.from(buf));
+    }
     const wb = await buildWorkbook({ quote, sections });
     const buf = await wb.xlsx.writeBuffer();
     const filename = encodeURIComponent(`${quote.quote_no || quote.id}_内部报价明细.xlsx`);
