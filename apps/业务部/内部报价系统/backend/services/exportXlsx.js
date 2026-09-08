@@ -11,6 +11,7 @@ const {
   weightedInjectionSum,
   weightedColumnFormula,
 } = require('./productMix');
+const { addElectronicTemplateSheet } = require('./exportElectronicTemplate');
 
 const RMB = '￥#,##0.00';
 const HKD = '"HK$"#,##0.00';
@@ -593,6 +594,11 @@ function beautifyFonts(wb, name = FONT) {
 
 // 电子明细 — 独立 sheet（按导入的"电子报价单"格式还原）
 function addElectronicDetailSheet(wb, electronic, quote) {
+  return addElectronicTemplateSheet(wb, electronic, quote);
+}
+
+// 保留旧版布局，便于历史文件回退比对。
+function addElectronicDetailSheetLegacy(wb, electronic, quote) {
   const doc = electronic && electronic.electronics_doc;
   if (!doc || !doc.parts || !doc.parts.length) return;
   const sourceCurrency = doc.source_currency || 'RMB';

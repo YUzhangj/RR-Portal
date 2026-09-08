@@ -54,27 +54,23 @@ test('electronic detail export preserves the original USD currency and formulas'
     ],
   });
   const sheet = workbook.getWorksheet('电子明细');
-  assert.equal(sheet.getCell('D5').value, '单价USD');
-  assert.equal(sheet.getCell('D6').value, 0.25);
-  assert.equal(sheet.getCell('C6').numFmt, '0');
-  assert.equal(sheet.getCell('E6').value.formula, 'C6*D6');
-  assert.equal(sheet.getCell('E6').value.result, 0.25);
+  assert.equal(sheet.getCell('D6').value, '单价USD');
+  assert.equal(sheet.getCell('D7').value, 0.25);
+  assert.equal(sheet.getCell('C7').numFmt, '0');
+  assert.equal(sheet.getCell('E7').value.formula, 'C7*D7');
+  assert.equal(sheet.getCell('E7').value.result, 0.25);
   const values = [];
   sheet.eachRow(row => row.eachCell(cell => values.push(cell.value)));
-  assert.ok(values.includes('电子报价单（USD）'));
-  assert.ok(values.includes('PCB模费'));
-  assert.ok(values.includes(354));
-  assert.equal(sheet.getCell('A1').value, '电子部报价明细');
-  assert.equal(sheet.getCell('A1').fill.fgColor.argb, 'FF0B3A63');
-  assert.equal(sheet.getCell('A1').font.color.argb, 'FFFFFFFF');
+  assert.ok(values.includes('PCB模费：USD 354.00'));
+  assert.equal(sheet.getCell('A1').value, '东莞市登信电子有限公司');
+  assert.equal(sheet.getCell('A4').value, '电子报价单');
   assert.equal(sheet.pageSetup.printArea, `A1:F${sheet.rowCount}`);
-  assert.equal(sheet.pageSetup.printTitlesRow, '5:5');
+  assert.equal(sheet.pageSetup.printTitlesRow, '6:6');
   assert.equal(sheet.views[0].state, 'frozen');
-  assert.equal(sheet.views[0].ySplit, 5);
-  assert.ok(values.includes('成本汇总'));
+  assert.equal(sheet.views[0].ySplit, 6);
   let taxedRow = 0;
   sheet.eachRow(currentRow => {
-    if (currentRow.getCell(1).value === '含税报价') taxedRow = currentRow.number;
+    if (currentRow.getCell(4).value === '含税报价') taxedRow = currentRow.number;
   });
   assert.ok(taxedRow > 0);
   assert.equal(sheet.getCell(taxedRow, 5).value.formula, `E${taxedRow - 3}+E${taxedRow - 2}+E${taxedRow - 1}`);
@@ -145,7 +141,7 @@ test('internal quotation workbook uses print-friendly layouts on every sheet', a
   assert.equal(mainSheet.getCell(1, 1).font.size, 18);
   assert.ok(mainSheet.getCell(2, 1).font.size >= 12);
   assert.ok(mainSheet.getColumn(7).width >= 20);
-  assert.equal(workbook.getWorksheet('电子明细').pageSetup.printTitlesRow, '5:5');
+  assert.equal(workbook.getWorksheet('电子明细').pageSetup.printTitlesRow, '6:6');
 });
 
 test('legacy ultrasonic mold fee is displayed as fixture mold fee', async () => {
