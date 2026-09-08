@@ -18,6 +18,17 @@ function cleanMetaValue(value, label) {
   return /^(产品名称|产品编号|客户|报价日期)[：:]/.test(text) ? '' : text;
 }
 
+function getExportDateText(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const valueOf = (type) => parts.find((part) => part.type === type)?.value || '';
+  return `${valueOf('year')}.${valueOf('month')}.${valueOf('day')}`;
+}
+
 function sourceUnit(part) {
   return part && part.source_unit_price != null ? num(part.source_unit_price) : num(part && part.unit_price);
 }
@@ -79,9 +90,7 @@ function addElectronicTemplateSheet(workbook, electronic, quote) {
   const product = cleanMetaValue(meta.product, '产品名称') || (quote && quote.product_name) || '';
   const productNo = cleanMetaValue(meta.product_no, '产品编号') || (quote && quote.quote_no) || '';
   const customer = cleanMetaValue(meta.customer, '客户') || (quote && quote.customer) || '';
-  const quoteDate = String((quote && quote.created_at) || '').slice(0, 10).replaceAll('-', '.')
-    || cleanMetaValue(meta.date, '报价日期')
-    || String(doc.imported_at || '').slice(0, 10).replaceAll('-', '.');
+  const quoteDate = getExportDateText();
   ws.mergeCells(5, 1, 5, 6);
   ws.getCell(5, 1).value = [
     `产品名称：${product}`,

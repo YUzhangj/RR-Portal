@@ -72,7 +72,16 @@ test('electronic detail export preserves the original USD currency and formulas'
   assert.equal(sheet.getCell('A4').value, '电子报价单');
   assert.match(sheet.getCell('A5').value, /产品编号：USD-ELECTRONIC/);
   assert.match(sheet.getCell('A5').value, /客户：正确客户/);
-  assert.match(sheet.getCell('A5').value, /报价日期：2026\.08\.31/);
+  const dateParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const datePart = (type) => dateParts.find((part) => part.type === type).value;
+  const expectedExportDate = `${datePart('year')}.${datePart('month')}.${datePart('day')}`;
+  assert.match(sheet.getCell('A5').value, new RegExp(`报价日期：${expectedExportDate.replaceAll('.', '\\.')}`));
+  assert.doesNotMatch(sheet.getCell('A5').value, /2026\.08\.31|2025\.11\.27/);
   assert.equal(sheet.pageSetup.printArea, `A1:F${sheet.rowCount}`);
   assert.equal(sheet.pageSetup.printTitlesRow, '6:6');
   assert.equal(sheet.views[0].state, 'frozen');
