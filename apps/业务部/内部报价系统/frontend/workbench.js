@@ -1636,7 +1636,7 @@ function renderSummaryPane(host, sections, quote, me) {
   // 车发使用同一总用量分母，保证车衣 = 配套合计 − 车发。
   const sewingHairRmb = sum((sewing.sewing_groups || []).filter(g => g.category === '车发'), group => sewingGroupAmount(group) * sewGroupQty(group)) / sewTotalQty;
   const sewingClothRmb = sewingTotalRmb - sewingHairRmb;
-  // 多纸箱 + 多平卡：Σ((箱价i + Σ平卡价i_j) / qty_i) × 汇率
+  // 多纸箱 + 多平卡：Σ(箱价i / qty_i + Σ平卡价i_j) × 汇率
   const ccc = eng.carton_calc || {};
   const cartonList = (ccc.cartons && ccc.cartons.length) ? ccc.cartons : (ccc.cl ? [{
     cl: ccc.cl, cw: ccc.cw, ch: ccc.ch, qty: ccc.qty,
@@ -1649,7 +1649,7 @@ function renderSummaryPane(host, sections, quote, me) {
     const boxPrice = (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * cartonRate / 1000;
     const flatSum = (b.flat_cards || []).reduce((a, f) => a + ((num(f.l) || num(b.cl)) + 1) * ((num(f.w) || num(b.cw)) + 1) * 2 / 1000 * (f.qty == null || f.qty === '' ? 1 : num(f.qty)), 0);
     const q = Math.max(num(b.qty), 1);
-    return s + (boxPrice + flatSum) / q;
+    return s + boxPrice / q + flatSum;
   }, 0) * fxRH;
 
   // 附加税：用户手填，存到 sales.pricing_summary.surtax
@@ -1773,15 +1773,15 @@ function renderSummaryPane(host, sections, quote, me) {
     markupInp.disabled = true;
   }
   const taxHost = host.querySelector('#tax-deduction-block');
-  // 注塑料按材质分进/国内料：POM / PVC = 国内料；其他 = 进口料 — 全部 HKD
+  // 注塑料按材质分进/国内料：PVC / TPR / TPE = 国内料；其他 = 进口料 — 全部 HKD
   const injLossM = 1 + num(mold.injection_loss_pct ?? 3) / 100;  // 注塑料损耗（默认3%）
   const domesticMatHkd = weightedInjectionSum(mold, r => {
     const mat = String(r.material || '').toUpperCase().trim();
-    return /^(POM|PVC|C[- ]?PVC)/i.test(mat) ? num(r.weight_g) * injLossM * num(r.material_unit_price) : 0;
+    return /^(PVC|TPR|TPE)\b/i.test(mat) ? num(r.weight_g) * injLossM * num(r.material_unit_price) : 0;
   });
   const importMatHkd = weightedInjectionSum(mold, r => {
     const mat = String(r.material || '').toUpperCase().trim();
-    return mat && !/^(POM|PVC|C[- ]?PVC)/i.test(mat) ? num(r.weight_g) * injLossM * num(r.material_unit_price) : 0;
+    return mat && !/^(PVC|TPR|TPE)\b/i.test(mat) ? num(r.weight_g) * injLossM * num(r.material_unit_price) : 0;
   });
 
   // 分类关键字（用于无显式类别时兜底）
@@ -1790,14 +1790,13 @@ function renderSummaryPane(host, sections, quote, me) {
   const _isColorBoxLib = (r) => /彩盒|彩卡|内咭|内卡|背卡|包装|package|box/i.test(String((r.name || '') + ' ' + (r.spec || '')));
   const _isPlate = (s) => /电镀|plating/i.test(String(s || ''));
   const _isCarton = (s) => /纸箱|carton/i.test(String(s || ''));
-  // 马达：电子/五金里含 "马达" / "motor" 的行（电子/五金表不设类别下拉，仍按关键字）
+  // 马达只从五金明细识别；电子中的「马达驱动 IC」等仍属于电子。
   const isMotor = (s) => /马达|motor/i.test(String(s || ''));
   const isBlister = (s) => /吸塑|blister/i.test(String(s || ''));
   const isGlueBag = (s) => /胶袋|胶代|poly\s?bag|pe\s?bag|opp\s?bag/i.test(String(s || ''));
   const _sumByMatch = (rows, matchFn) => sum(rows || [], r =>
     (matchFn(r.name) || matchFn(r.spec)) ? freeAmountHkd(r, fxRH, fxHU) : 0);
-  // 马达：电子部分用 elecSrc（电子部优先），与导出同源
-  const motorRmb = _sumByMatch(elecSrc, isMotor) + _sumByMatch(eng.hardware, isMotor);
+  const motorRmb = _sumByMatch(eng.hardware, isMotor);
 
   // 二、包装/外购：按行的显式「类别」统计，无类别时按关键字兜底
   const pkmatRows = eng.packaging_materials || [];
@@ -1861,7 +1860,7 @@ function renderSummaryPane(host, sections, quote, me) {
     misc: num(sales.pricing_summary?.indo_freight) + surtaxHkd,
     surtax_hkd: surtaxHkd,  // 供减税明细里印尼运费输入框重算 misc 用（避免丢附加税）
     hardware: (hwRaw - _sumByMatch(eng.hardware, isMotor)),  // 五金 HKD（剔除马达项；五金表已 HKD）
-    electronic: (elecRaw - _sumByMatch(elecSrc, isMotor)),  // 电子 HKD（剔除马达项；电子表已 HKD）
+    electronic: elecRaw,                                  // 电子 HKD（不识别/剔除马达）
     injection_labor: weightedInjectionSum(mold, r => num(r.shot_price)),  // 啤工按各产品配比加权
     painting_labor: ppTotal * 0.7,    // 喷油工 = 喷油总额 70%（喷油已 HKD，不除汇率）
     paint_material: ppTotal * 0.3,    // 油漆 = 喷油总额 30%（喷油已 HKD）
@@ -1875,15 +1874,13 @@ function renderSummaryPane(host, sections, quote, me) {
 
 // ============== 汇总 · 减税明细 4 表 ==============
 function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
-  const canEdit = me && (me.dept === 'sales' || me.dept === 'engineering');
   salesPayload.pricing_summary = salesPayload.pricing_summary || {};
   const ps = salesPayload.pricing_summary;
   autoFill = autoFill || {};
-  // 自动同步前面部门的金额（每次进汇总都覆盖；用户后续可手填覆盖项放 ps.overrides）
+  // 减税明细只读：每次均以各部门实时金额覆盖历史手工值。
   ps.overrides = ps.overrides || {};
   const applyAuto = (tbl, key, val) => {
     if (val == null) return;                    // 仅未计算(undefined/null)时跳过；0 要写回以清掉旧残留值
-    if (ps.overrides[tbl + '.' + key]) return;  // 用户已手动改过
     ps[tbl] = ps[tbl] || {};
     ps[tbl][key] = +val.toFixed(4);
   };
@@ -1943,10 +1940,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
   ps.t4 = ps.t4 || {};
   Object.keys(RATE_DEFAULTS).forEach(k => {
     ps.t4[k] = ps.t4[k] || { amt: 0, rate: RATE_DEFAULTS[k] };
-    // 若 rate 还是旧默认值（13/1/9 等），且用户没手动覆盖过，更新为新默认
-    if (!ps.overrides || !ps.overrides['t4r.' + k]) {
-      ps.t4[k].rate = RATE_DEFAULTS[k];
-    }
+    ps.t4[k].rate = RATE_DEFAULTS[k];
   });
 
   const t1Cols = [
@@ -1964,17 +1958,11 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     ['suction6', '吸塑类6%'], ['freight9', '运费类9%'], ['tax13b', '含税13%类'],
   ];
   // 参考列：只显示成本金额，无税率、不参与减税（避免与明细列重复）
-  const T4_NO_RATE = new Set(['rmb_buy', 'tax13', 'labor13']);
-
-  const ro = canEdit ? '' : 'readonly';
-  const cls = canEdit ? 'tk-edit' : 'tk-edit tk-ro';
+  const T4_NO_RATE = new Set(['rmb_buy', 'tax13']);
 
   function buildTable(title, cols, dataKey) {
     const headRow = cols.map(([k, lbl]) => `<th>${lbl}</th>`).join('');
-    const valRow = cols.map(([k, lbl]) => {
-      const synced = dataKey === 't2' && k === 'code_before';
-      return `<td><input class="${synced ? 'tk-ro' : cls}" type="number" step="0.0001" data-tbl="${dataKey}" data-key="${k}" value="${num(ps[dataKey][k]) || ''}" ${synced ? 'readonly' : ro}/></td>`;
-    }).join('');
+    const valRow = cols.map(([k]) => `<td><span class="tk-readout" data-tbl="${dataKey}" data-key="${k}">${formatNum(num(ps[dataKey][k]))}</span></td>`).join('');
     return `<div class="tk-block"><div class="tk-title">${title}</div>
       <div class="tk-scroll"><table class="tk-table"><thead><tr>${headRow}</tr></thead><tbody><tr>${valRow}</tr></tbody></table></div></div>`;
   }
@@ -1983,10 +1971,10 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     const headRow = t4Cols.map(([k, lbl]) => `<th>${lbl}</th>`).join('')
       + '<th class="tk-sum">合计减税</th>'
       + '<th class="tk-sum" style="background:#dcfce7">减税后成本</th>';
-    const amtRow = t4Cols.map(([k]) => `<td><input class="${cls}" type="number" step="0.0001" data-tbl="t4a" data-key="${k}" value="${num(ps.t4[k].amt) || ''}" ${ro} title="金额"/></td>`).join('')
+    const amtRow = t4Cols.map(([k]) => `<td><span class="tk-readout" data-tbl="t4a" data-key="${k}" title="金额">${formatNum(num(ps.t4[k].amt))}</span></td>`).join('')
       + '<td></td><td></td>';
     const rateRow = t4Cols.map(([k]) => T4_NO_RATE.has(k) ? '<td></td>'
-      : `<td><input class="${cls}" type="number" step="0.01" data-tbl="t4r" data-key="${k}" value="${num(ps.t4[k].rate) || ''}" ${ro} title="税率%"/>%</td>`).join('')
+      : `<td><span class="tk-readout" data-tbl="t4r" data-key="${k}" title="税率%">${num(ps.t4[k].rate)}</span>%</td>`).join('')
       + '<td></td><td></td>';
     const dedRow = t4Cols.map(([k]) => T4_NO_RATE.has(k) ? '<td class="tk-calc">—</td>'
       : `<td class="tk-calc" id="tk-ded-${k}" title="减税额=金额×税率">0.0000</td>`).join('')
@@ -2009,10 +1997,10 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
           <th>人工比例</th><th>毛利</th><th>毛利率</th><th>利润</th><th>利润率</th><th>总成本</th>
         </tr></thead>
         <tbody><tr>
-          <td><input class="${cls}" type="number" step="0.0001" data-tbl="t3" data-key="injection_labor" value="${num(ps.t3.injection_labor) || ''}" ${ro}/></td>
-          <td><input class="${cls}" type="number" step="0.0001" data-tbl="t3" data-key="painting_labor" value="${num(ps.t3.painting_labor) || ''}" ${ro}/></td>
-          <td><input class="${cls}" type="number" step="0.0001" data-tbl="t3" data-key="paint_material" value="${num(ps.t3.paint_material) || ''}" ${ro}/></td>
-          <td><input class="${cls}" type="number" step="0.0001" data-tbl="t3" data-key="assembly_labor" value="${num(ps.t3.assembly_labor) || ''}" ${ro}/></td>
+          <td><span class="tk-readout" data-tbl="t3" data-key="injection_labor">${formatNum(num(ps.t3.injection_labor))}</span></td>
+          <td><span class="tk-readout" data-tbl="t3" data-key="painting_labor">${formatNum(num(ps.t3.painting_labor))}</span></td>
+          <td><span class="tk-readout" data-tbl="t3" data-key="paint_material">${formatNum(num(ps.t3.paint_material))}</span></td>
+          <td><span class="tk-readout" data-tbl="t3" data-key="assembly_labor">${formatNum(num(ps.t3.assembly_labor))}</span></td>
           <td class="tk-calc" id="tk-no-labor" style="background:#fef3c7;font-weight:600">0.0000</td>
           <td class="tk-calc" id="tk-labor-pct">0.0%</td>
           <td class="tk-calc" id="tk-gross">0.0000</td>
@@ -2034,9 +2022,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
       .tk-table{border-collapse:collapse;width:100%;font-size:12px}
       .tk-table th,.tk-table td{border:1px solid #e7e5e4;padding:4px 6px;text-align:center;white-space:nowrap}
       .tk-table th{background:#f5f5f4;color:#44403c;font-weight:600}
-      .tk-table td input.tk-edit{width:90px;text-align:right;border:1px solid transparent;background:transparent;padding:2px 4px}
-      .tk-table td input.tk-edit:hover,.tk-table td input.tk-edit:focus{border-color:#a8a29e;background:#fff}
-      .tk-table td input.tk-ro{background:#fafaf9}
+      .tk-readout{display:inline-block;min-width:82px;text-align:right;color:#334155;font-variant-numeric:tabular-nums}
       .tk-calc{background:#fef3c7;font-weight:600;color:#92400e}
       .tk-sum{background:#dcfce7;font-weight:700;color:#166534}
       .tk-save{margin-top:14px}
@@ -2044,15 +2030,15 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     ${buildTable('一、出厂货价核', t1Cols, 't1')}
     ${buildTable('二、包装 / 外购', t2Cols, 't2')}
     ${buildT3()}
-    ${buildT4()}
-    ${canEdit ? `<div class="tk-save"><button id="tk-btn-save">💾 保存减税明细</button> <span id="tk-msg" class="muted"></span></div>` : ''}`;
+    ${buildT4()}`;
 
   function recalc() {
     const sum = (obj) => Object.values(obj).reduce((s, v) => s + num(v), 0);
-    // 不含人工成本 = 表1（除货价）+ 表2（除码数）+ 啤工（包含 进口料/吹气/搪胶/吸塑/运费/吊柜费 等）
+    // 与导出一致：不含人工成本 = 表1（除货价）+ 表2（除码数）+ 啤工 + 喷油工 + 油漆。
     const t1NoBase = { ...ps.t1 }; delete t1NoBase.base_price;
     const t2Cost = { ...ps.t2 }; delete t2Cost.code_before; delete t2Cost.code_after;
-    const noLaborCost = sum(t1NoBase) + sum(t2Cost) + num(ps.t3.injection_labor);
+    const noLaborCost = sum(t1NoBase) + sum(t2Cost)
+      + num(ps.t3.injection_labor) + num(ps.t3.painting_labor) + num(ps.t3.paint_material);
     // 人民币外购件成本 = 国内料+车发+车衣+五金+电子+马达 + 彩盒/内咭+电池+利宝+电镀+其他外购+纸箱+杂项 + 油漆
     const rmbBuyCost =
       num(ps.t1.dom_mat) + num(ps.t1.sewing_hair) + num(ps.t1.sewing_cloth)
@@ -2061,13 +2047,13 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
       + num(ps.t2.plating) + num(ps.t2.other_buy) + num(ps.t2.carton) + num(ps.t2.misc)
       + num(ps.t1.glue_bag)
       + num(ps.t3.paint_material);
-    const laborCost = num(ps.t3.painting_labor) + num(ps.t3.paint_material) + num(ps.t3.assembly_labor);
+    const laborCost = num(ps.t3.assembly_labor);
     const totalCost = noLaborCost + laborCost;
     const basePrice = num(ps.t1.base_price);
     const codeBefore = totalCost > 0 ? basePrice / totalCost : 0;
     ps.t2.code_before = +codeBefore.toFixed(4);
-    const codeBeforeInp = host.querySelector('input[data-tbl="t2"][data-key="code_before"]');
-    if (codeBeforeInp && document.activeElement !== codeBeforeInp) codeBeforeInp.value = ps.t2.code_before || '';
+    const codeBeforeInp = host.querySelector('[data-tbl="t2"][data-key="code_before"]');
+    if (codeBeforeInp) codeBeforeInp.textContent = formatNum(ps.t2.code_before);
     const gross = basePrice - noLaborCost;
     const profit = basePrice - totalCost;
     const grossPct = basePrice ? gross / basePrice : 0;
@@ -2075,10 +2061,9 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     const laborPct = basePrice ? laborCost / basePrice : 0;
     // 四、减税明细 各列自动填
     const setT4Amt = (key, val) => {
-      if (ps.overrides['t4a.' + key]) return;
       ps.t4[key].amt = +num(val).toFixed(4);
-      const inp = host.querySelector(`input[data-tbl="t4a"][data-key="${key}"]`);
-      if (inp && document.activeElement !== inp) inp.value = ps.t4[key].amt || '';
+      const inp = host.querySelector(`[data-tbl="t4a"][data-key="${key}"]`);
+      if (inp) inp.textContent = formatNum(ps.t4[key].amt);
     };
     setT4Amt('rmb_buy', rmbBuyCost);                                           // 人民币外购件成本
     // 含税13%类成本 = 国内料 + 五金 + 马达 + 彩盒/内咭 + 电池 + 利宝 + 其他外购 + 油漆 + 胶袋
@@ -2097,7 +2082,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     setT4Amt('tax13b', tax13Cost);                                             // 含税13%类 = 同含税13%类成本
     // 表4：每行 减税额 = 金额 × 税率%；参考列(无税率)不计；填入减税额行 + 合计
     const totalDed = t4Cols.reduce((s, [k]) => {
-      if (T4_NO_RATE.has(k)) return s;  // 人民币外购件成本/含税13%类成本：参考列，不参与减税
+      if (T4_NO_RATE.has(k)) return s;  // 含税13%类成本为参考列，不重复参与减税
       const ded = num(ps.t4[k].amt) * num(ps.t4[k].rate) / 100;
       const cell = host.querySelector('#tk-ded-' + k);
       if (cell) cell.textContent = formatNum(ded);
@@ -2118,35 +2103,11 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     // 减税后码数 = 货价 / 减税后成本 → 写回 t2.code_after 输入框
     const codeAfter = afterDed > 0 ? basePrice / afterDed : 0;
     ps.t2.code_after = +codeAfter.toFixed(4);
-    const codeAfterInp = host.querySelector('input[data-tbl="t2"][data-key="code_after"]');
-    if (codeAfterInp && document.activeElement !== codeAfterInp) codeAfterInp.value = ps.t2.code_after || '';
+    const codeAfterInp = host.querySelector('[data-tbl="t2"][data-key="code_after"]');
+    if (codeAfterInp) codeAfterInp.textContent = formatNum(ps.t2.code_after);
   }
   recalc();
 
-  if (canEdit) {
-    host.querySelectorAll('input.tk-edit').forEach(inp => {
-      inp.oninput = () => {
-        const tbl = inp.dataset.tbl, key = inp.dataset.key;
-        const v = parseFloat(inp.value) || 0;
-        if (tbl === 't1' || tbl === 't2' || tbl === 't3') {
-          ps[tbl][key] = v;
-          ps.overrides[tbl + '.' + key] = true;
-        }
-        else if (tbl === 't4a') { ps.t4[key].amt = v; ps.overrides['t4a.' + key] = true; }
-        else if (tbl === 't4r') { ps.t4[key].rate = v; ps.overrides['t4r.' + key] = true; }
-        recalc();
-      };
-    });
-    host.querySelector('#tk-btn-save').onclick = async () => {
-      const msg = host.querySelector('#tk-msg');
-      msg.textContent = '保存中...';
-      try {
-        await putSection(salesSec, salesPayload, false);
-        if (salesSec) salesSec.payload_json = JSON.stringify(salesPayload);  // 同步本地缓存
-        msg.textContent = '✓ 已保存 ' + new Date().toLocaleTimeString();
-      } catch (e) { msg.textContent = '✗ ' + e.message; }
-    };
-  }
 }
 
 function hasSlushCostingInputs(row) {

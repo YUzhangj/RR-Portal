@@ -1,0 +1,137 @@
+const $ = id => document.getElementById(id);
+const state = { rows: [], workshops: [], components: [], canEdit: false };
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+}
+
+function num(value) { const n = Number(value); return Number.isFinite(n) ? n : 0; }
+function money(value) { return num(value).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 4 }); }
+function dateOnly(value) {
+  if (!value) return '—';
+  const date = new Date(String(value).includes('T') ? value : `${String(value).replace(' ', 'T')}Z`);
+  return Number.isNaN(date.getTime()) ? esc(value) : date.toLocaleDateString('zh-CN');
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(`/api${path}`, { credentials: 'include', headers: { 'Content-Type': 'application/json' }, ...options });
+  if (response.status === 401) { location.href = './index.html'; throw new Error('请先登录'); }
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || response.statusText);
+  return response.json();
+}
+
+function filteredRows() {
+  const customer = $('summary-customer').value;
+  const status = $('summary-status').value;
+  return state.rows.filter(row => (!customer || row.customer === customer) && (!status || row.confirmation.status === status));
+}
+
+function renderStats(rows) {
+  const confirmed = rows.filter(row => row.confirmation.status === 'confirmed');
+  const customers = new Set(rows.map(row => row.customer).filter(Boolean));
+  const pending = rows.length - confirmed.length;
+  const confirmationRate = rows.length ? confirmed.length / rows.length * 100 : 0;
+  $('summary-stats').innerHTML = `
+    <div><span>客户数</span><strong>${customers.size}</strong></div>
+    <div><span>报价总数</span><strong>${rows.length} 份</strong></div>
+    <div class="stat-confirmed"><span>客户已确认</span><strong>${confirmed.length} 份</strong></div>
+    <div class="stat-pending"><span>待确认</span><strong>${pending} 份</strong></div>
+    <div class="stat-rate"><span>客户确认率</span><strong>${confirmationRate.toFixed(1)}%</strong><span class="summary-rate-track" role="progressbar" aria-valuenow="${confirmationRate.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${confirmationRate}%"></i></span></div>`;
+}
+
+function totalColumns() { return 6 + state.components.length * 3 + 4; }
+
+function renderHead() {
+  const fixed = ['客名', '货号', '货品名称', '报价日期', '实际接单数量', '货价 (HK$)'];
+  const workflow = ['客价确认', '实际生产车间', '备注', ''];
+  $('summary-head').innerHTML = `<tr>
+    ${fixed.map(label => `<th>${label}</th>`).join('')}
+    ${state.components.map((item, index) => `<th class="component-unit group-${index % 2}">${esc(item.name)}</th><th class="component-sub group-${index % 2}">${esc(item.name)}金额</th><th class="component-sub group-${index % 2}">${esc(item.name)}占比</th>`).join('')}
+    ${workflow.map(label => `<th class="workflow-head">${label}</th>`).join('')}
+  </tr>`;
+}
+
+function rowHtml(row) {
+  const confirmation = row.confirmation || { status: 'pending', workshops: [] };
+  const selectedWorkshop = (confirmation.workshops || [])[0] || '';
+  const disabled = state.canEdit ? '' : 'disabled';
+  const workshopHtml = `<select class="summary-workshop" ${disabled}>
+    <option value="">请选择车间</option>
+    ${state.workshops.map(item => `<option value="${esc(item.code)}" ${selectedWorkshop === item.code ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}
+  </select>`;
+  const price = confirmation.confirmed_price ?? row.quoted_price;
+  const qty = confirmation.confirmed_qty ?? row.qty;
+  const componentHtml = state.components.map(item => {
+    const unitPrice = num(row.components?.[item.code]);
+    const amount = unitPrice * num(qty);
+    const share = num(price) ? unitPrice / num(price) : 0;
+    return `<td class="component-value">${money(unitPrice)}</td><td class="component-amount">${money(amount)}</td><td class="component-share">${(share * 100).toFixed(2)}%</td>`;
+  }).join('');
+  return `<tr data-id="${row.id}">
+    <td><b>${esc(row.customer || '未填写')}</b></td>
+    <td><a href="./quote.html?id=${row.id}"><b>${esc(row.quote_no)}</b></a></td>
+    <td><b>${esc(row.product_name)}</b>${row.version ? `<small>${esc(row.version)}</small>` : ''}</td>
+    <td>${dateOnly(row.created_at)}</td>
+    <td><input class="summary-qty" type="number" min="0" step="1" value="${esc(qty ?? '')}" ${disabled}></td>
+    <td><input class="summary-price" type="number" min="0" step="any" value="${esc(price ?? '')}" ${disabled}></td>
+    ${componentHtml}
+    <td><select class="summary-confirm" ${disabled}><option value="pending" ${confirmation.status !== 'confirmed' ? 'selected' : ''}>待确认</option><option value="confirmed" ${confirmation.status === 'confirmed' ? 'selected' : ''}>已确认</option></select></td>
+    <td>${workshopHtml}</td>
+    <td><input class="summary-note" value="${esc(confirmation.note || '')}" placeholder="选填" ${disabled}></td>
+    <td>${state.canEdit ? '<button class="save-summary">保存</button>' : ''}</td>
+  </tr>`;
+}
+
+function render() {
+  const rows = filteredRows();
+  renderStats(rows);
+  $('summary-body').innerHTML = rows.length ? rows.map(rowHtml).join('') : `<tr><td colspan="${totalColumns()}" class="summary-empty">暂无匹配报价</td></tr>`;
+  document.querySelectorAll('.save-summary').forEach(button => { button.onclick = () => saveRow(button.closest('tr')); });
+}
+
+async function saveRow(tr) {
+  const button = tr.querySelector('.save-summary');
+  button.disabled = true;
+  const status = tr.querySelector('.summary-confirm').value;
+  const workshop = tr.querySelector('.summary-workshop').value;
+  if (status === 'confirmed' && !workshop) {
+    alert('客价确认后请选择实际生产车间'); button.disabled = false; return;
+  }
+  try {
+    await api(`/quote-summary/${tr.dataset.id}/confirmation`, {
+      method: 'PUT', body: JSON.stringify({
+        status, workshop,
+        confirmed_price: tr.querySelector('.summary-price').value,
+        confirmed_qty: tr.querySelector('.summary-qty').value,
+        note: tr.querySelector('.summary-note').value,
+      }),
+    });
+    button.textContent = '已保存';
+    setTimeout(() => { button.textContent = '保存'; button.disabled = false; }, 900);
+    await load(false);
+  } catch (error) { alert(error.message); button.disabled = false; }
+}
+
+async function load(showLoading = true) {
+  if (showLoading) $('summary-body').innerHTML = `<tr><td colspan="${totalColumns()}" class="summary-empty">正在读取…</td></tr>`;
+  const data = await api('/quote-summary');
+  state.rows = data.rows || []; state.workshops = data.workshops || []; state.components = data.components || []; state.canEdit = Boolean(data.can_edit);
+  renderHead();
+  const selected = $('summary-customer').value;
+  const customers = [...new Set(state.rows.map(row => row.customer).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  $('summary-customer').innerHTML = '<option value="">全部客户</option>' + customers.map(customer => `<option value="${esc(customer)}">${esc(customer)}</option>`).join('');
+  $('summary-customer').value = customers.includes(selected) ? selected : '';
+  render();
+}
+
+$('summary-customer').onchange = render;
+$('summary-status').onchange = render;
+$('summary-year').textContent = `${new Date().getFullYear()}年`;
+$('summary-export').onclick = () => {
+  const params = new URLSearchParams();
+  if ($('summary-customer').value) params.set('customer', $('summary-customer').value);
+  if ($('summary-status').value) params.set('status', $('summary-status').value);
+  const base = location.pathname.replace(/\/[^/]*$/, '');
+  location.href = `${base}/api/quote-summary/export/xlsx?${params}`;
+};
+load().catch(error => { $('summary-body').innerHTML = `<tr><td colspan="${totalColumns()}" class="summary-empty summary-negative">${esc(error.message)}</td></tr>`; });

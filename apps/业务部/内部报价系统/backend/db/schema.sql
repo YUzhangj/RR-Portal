@@ -54,6 +54,19 @@ CREATE TABLE IF NOT EXISTS quote_sections (
 CREATE INDEX IF NOT EXISTS idx_sections_quote ON quote_sections(quote_id);
 CREATE INDEX IF NOT EXISTS idx_sections_dept_status ON quote_sections(dept, status);
 
+-- 客价确认与生产车间分派；一张报价单只保留一份最新确认结果。
+CREATE TABLE IF NOT EXISTS quote_customer_confirmations (
+  quote_id         INTEGER PRIMARY KEY REFERENCES quotes(id) ON DELETE CASCADE,
+  status           TEXT NOT NULL DEFAULT 'pending', -- pending / confirmed
+  workshops_json   TEXT NOT NULL DEFAULT '[]',
+  confirmed_price  REAL,
+  confirmed_qty    INTEGER,
+  note             TEXT,
+  confirmed_by     TEXT,
+  confirmed_at     TEXT,
+  updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   quote_id  INTEGER,

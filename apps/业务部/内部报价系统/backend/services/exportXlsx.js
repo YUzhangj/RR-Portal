@@ -456,7 +456,7 @@ async function buildWorkbook({ quote, sections }) {
   const sewingWeightedSum = sum(sewing.sewing_groups || [], group =>
     (sum(group.items || [], item => num(item.usage) * num(item.mat_price) * (num(item.markup) || 1)) + sewLaborToAdd(group)) * sewGroupQty(group));
   const sewingTotalRmb = sewingWeightedSum / sewTotalQty(sewing);
-  // 多纸箱 + 多平卡：Σ((箱价i + Σ平卡i_j) / qty_i) × 汇率
+  // 多纸箱 + 多平卡：Σ(箱价i / qty_i + Σ平卡i_j) × 汇率
   const ccx = eng.carton_calc || {};
   const cartonListX = (ccx.cartons && ccx.cartons.length) ? ccx.cartons : (ccx.cl ? [{
     cl: ccx.cl, cw: ccx.cw, ch: ccx.ch, qty: ccx.qty,
@@ -467,7 +467,7 @@ async function buildWorkbook({ quote, sections }) {
     const boxPrice = (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * cartonRateX / 1000;
     const flatSum = (b.flat_cards || []).reduce((a, f) => a + ((num(f.l) || num(b.cl)) + 1) * ((num(f.w) || num(b.cw)) + 1) * 2 / 1000 * (f.qty == null || f.qty === '' ? 1 : num(f.qty)), 0);
     const q = Math.max(num(b.qty), 1);
-    return s + (boxPrice + flatSum) / q;
+    return s + boxPrice / q + flatSum;
   }, 0) * fxRH;
   // cost 包含 吹气/搪胶/车缝/纸箱
   const blowRmb = sum(mold.blow_items || [], r => {
@@ -1415,9 +1415,9 @@ function renderInjection(ws, row, payload, fxRH, refs) {
     ws.getCell(row, 14).value = { formula: `G${row}+I${row}`, result: finished };
     ws.getCell(row, 14).numFmt = '0.0000';
     for (let c = 1; c <= h.length; c++) styleData(ws.getCell(row, c));
-    // 按材质分进口料/国内料（与前端 workbench.js 同逻辑）：POM/PVC/C-PVC = 国内料；其余非空 = 进口料
+    // 按材质分进口料/国内料（与前端 workbench.js 同逻辑）：PVC/TPR/TPE = 国内料；其余非空 = 进口料
     const _mat = String(r.material || '').toUpperCase().trim();
-    if (/^(POM|PVC|C[- ]?PVC)/.test(_mat)) domMatCells.push(`G${row}`);
+    if (/^(PVC|TPR|TPE)\b/.test(_mat)) domMatCells.push(`G${row}`);
     else if (_mat) impMatCells.push(`G${row}`);
     row += 1;
   });
@@ -2457,11 +2457,11 @@ function renderCartonAndFreight(ws, row, eng, sales, refs) {
     row += 1;
   }
 
-  // 构造 九、合计 K 列纸箱成本公式：Σ((box_i + Σflat_i_j) / qty_i)
+  // 构造九、合计纸箱成本公式：Σ(box_i / qty_i + Σflat_i_j)
   if (refs && cartonRefs.length) {
     const parts = cartonRefs.map(cr => {
       const flatSum = cr.flatCells.length ? `+${cr.flatCells.join('+')}` : '';
-      return `(${cr.boxCell}${flatSum})/MAX(${cr.qtyCell},1)`;
+      return `${cr.boxCell}/MAX(${cr.qtyCell},1)${flatSum}`;
     });
     refs.cartonHkdPerPcs = parts.join('+');  // HK$/PCS （还没 × 汇率）
   }
@@ -2535,7 +2535,6 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   const { subRefs = {}, fxRH: fxR = 0.85 } = extra;
   // 表1 部分单元格可关联到上方各部门 / 九、合计 HKD 小计
   const sumR = extra.summaryRow;
-  const ov = ps.overrides || {};  // 用户手填覆盖的项 → 不写公式，保持静态值
 
   // ---- 关键字分类，把减税明细做成引用上方明细的公式 ----
   // ⚠️ 必须与前端 workbench.js 的 autoFill 分类逻辑（_catOf：显式类别优先 + 关键字兜底 及各项来源表）保持一致，
@@ -2569,8 +2568,8 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
     ...(pr.packaging || []).filter(r => _catOf(r, 'packaging') === cat).map(r => r.cell),
     ...(pr.aux       || []).filter(r => _catOf(r, 'aux')       === cat).map(r => r.cell),
   ];
-  // 马达 = 电子 + 五金 行（按关键字，电子/五金表无类别下拉）
-  const motorCells   = [..._pick('electronic', _isMotor), ..._pick('hardware', _isMotor)];
+  // 马达只会在五金明细中出现；电子中的「马达驱动 IC」等仍属于电子。
+  const motorCells = _pick('hardware', _isMotor);
   // 吸塑 = 辅助/包装按类别 + 电子/五金里关键字命中的吸塑行
   const blisterCells = [...byCat('吸塑'), ..._pick('electronic', _isBlister), ..._pick('hardware', _isBlister)];
   const glueBagCells  = byCat('胶袋');
@@ -2579,13 +2578,13 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   const platingCells  = byCat('电镀');
   const colorBoxCells = byCat('彩盒/内咭');
   const otherBuyCells = byCat('其他外购');
-  // 五金/电子 均剔除马达（与前端一致，避免与「马达」列双算）
-  const hwNonMotorCells   = _pickNot('hardware',   r => _row(_isMotor, r));
-  const elecNonMotorCells = _pickNot('electronic', r => _row(_isMotor, r));
+  // 五金剔除已归入马达的行；电子全部保留。
+  const hwNonMotorCells = _pickNot('hardware', r => _row(_isMotor, r));
+  const electronicCells = (pr.electronic || []).map(r => r.cell);
 
-  // cells → 公式 ref（fx=true 表示 RMB→HKD 除以汇率）；被手填覆盖或无来源则返回 null（回退静态值）
+  // cells → 公式 ref（fx=true 表示 RMB→HKD 除以汇率）；无来源时才回退静态值。
   const auto = (tbl, key, cells, fx) => {
-    if (ov[`${tbl}.${key}`] || !cells || !cells.length) return null;
+    if (!cells || !cells.length) return null;
     const body = cells.join('+');
     return { ref: fx ? `(${body})/${fxR}` : body };
   };
@@ -2595,8 +2594,8 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   const lPct = num(sales.shipping?.lifting_pct ?? 52);
   const ytRateCell = (subRefs.freightCells || {})['YT 40柜'];
 
-  // 直接引用单元格的项（非关键字累加）：被手填覆盖或无来源则回退静态值
-  const refLink = (tbl, key, ref) => (ref && !ov[`${tbl}.${key}`]) ? { ref } : null;
+  // 直接引用单元格的项（非关键字累加）：无来源时才回退静态值。
+  const refLink = (tbl, key, ref) => ref ? { ref } : null;
 
   const markupValue = sales.shipping?.markup_x;
   const _mk = markupValue == null || markupValue === '' ? 1.2 : num(markupValue);
@@ -2614,12 +2613,14 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
     base_price: refLink('t1', 'base_price', basePriceFormulaRef),
     blow:     subRefs.blow      ? { ref: subRefs.blow }   : null,  // 吹气 本身就是 HKD
     slush:    subRefs.slush     ? { ref: subRefs.slush }  : null,  // 搪胶 本身就是 HKD
-    electronic: auto('t1', 'electronic', elecNonMotorCells, false),  // 电子已是 HKD（剔除马达）
+    electronic: auto('t1', 'electronic', electronicCells, false),  // 电子已是 HKD，不识别马达
     // 注塑料按材质分（I列原料单价已是 HKD，不除汇率）
     imp_mat: auto('t1', 'imp_mat', subRefs.impMatCells, false),
     dom_mat: auto('t1', 'dom_mat', subRefs.domMatCells, false),
-    sewing_hair:  (subRefs.sewHairRmb && !ov['t1.sewing_hair']) ? { ref: `(${subRefs.sewHairRmb})/${fxR}` } : null,
-    sewing_cloth: (subRefs.sewClothRmb && !ov['t1.sewing_cloth']) ? { ref: `(${subRefs.sewClothRmb})/${fxR}` } : null,
+    sewing_hair:  subRefs.sewHairRmb ? { ref: `(${subRefs.sewHairRmb})/${fxR}` } : null,
+    // 车衣 = 统一成本表全部车缝行 - 车发。这样表 1 直接与上方统一成本表勾稽，
+    // 同时仍保留车发/车衣的分类口径。t1 数据行确定后再回填具体单元格引用。
+    sewing_cloth: subRefs.sewClothRmb ? { ref: `(${subRefs.sewClothRmb})/${fxR}` } : null,
     motor:    auto('t1', 'motor',    motorCells,      false),  // 电子+五金 已 HKD
     suction:  auto('t1', 'suction',  blisterCells,    false),  // 包装+电子+五金 已 HKD
     glue_bag: auto('t1', 'glue_bag', glueBagCells,    false),  // 胶袋：辅助+包装 已 HKD
@@ -2650,11 +2651,14 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
     if (!/^[-+*/().\d\s]+$/.test(expr)) return fallback;  // 只允许纯算术，安全兜底
     try { const r = Function(`return (${expr})`)(); return Number.isFinite(r) ? r : fallback; } catch { return fallback; }
   };
-  // 写一行减税明细：有 link 写公式(result 实时重算)，否则写静态值
+  // 写一行减税明细：有 link 写引用公式；无对应明细时写明确的 =0，
+  // 避免无来源项沿用历史快照或看起来像手工固定值。
   const writeDataRow = (cols, data, dataRow) => cols.forEach((c, i) => {
     const cell = ws.getCell(dataRow, i + 1);
     const link = linkMap[c[1]];
-    cell.value = link ? { formula: link.ref, result: liveResult(link.ref, num(data[c[1]])) } : num(data[c[1]]);
+    cell.value = link
+      ? { formula: link.ref, result: liveResult(link.ref, num(data[c[1]])) }
+      : { formula: '0', result: 0 };
     styleData(cell);
     cell.numFmt = '0.0000';
   });
@@ -2674,6 +2678,10 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   t1Cols.forEach((c, i) => { ws.getCell(row, i + 1).value = c[0]; styleHeader(ws.getCell(row, i + 1)); });
   row += 1;
   const t1DataRow = row;
+  if (subRefs.sewingHkd) {
+    // 截图上方统一成本表的车缝行合计 - 本行「车发」 = 「车衣」。
+    linkMap.sewing_cloth = { ref: `(${subRefs.sewingHkd})-F${t1DataRow}` };
+  }
   writeDataRow(t1Cols, t1, t1DataRow);
   row += 2;
   // 单元格地址
@@ -2707,14 +2715,10 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   const t3 = ps.t3 || {};
   const asmRef = (subRefs.asmLabor && subRefs.pkgLabor) ? `${subRefs.asmLabor}+${subRefs.pkgLabor}`
                 : (subRefs.asmLabor || subRefs.pkgLabor || null);
-  const injectionLabor = ov['t3.injection_labor'] ? num(t3.injection_labor)
-    : liveResult(subRefs.injShotSum, num(t3.injection_labor));
-  const paintingLabor = ov['t3.painting_labor'] ? num(t3.painting_labor)
-    : liveResult(subRefs.secondProc ? `${subRefs.secondProc}*0.7` : null, num(t3.painting_labor));
-  const paintMaterial = ov['t3.paint_material'] ? num(t3.paint_material)
-    : liveResult(subRefs.secondProc ? `${subRefs.secondProc}*0.3` : null, num(t3.paint_material));
-  const assemblyLabor = ov['t3.assembly_labor'] ? num(t3.assembly_labor)
-    : liveResult(asmRef, num(t3.assembly_labor));
+  const injectionLabor = liveResult(subRefs.injShotSum, num(t3.injection_labor));
+  const paintingLabor = liveResult(subRefs.secondProc ? `${subRefs.secondProc}*0.7` : null, num(t3.painting_labor));
+  const paintMaterial = liveResult(subRefs.secondProc ? `${subRefs.secondProc}*0.3` : null, num(t3.paint_material));
+  const assemblyLabor = liveResult(asmRef, num(t3.assembly_labor));
   // result 用实时单元格值（不用过期 ps 快照），与 表1/表2 口径一致
   const basePrice = cellVal(t1Addr.base_price);
   const noLaborCost = noLaborRefs.reduce((s, ref) => s + cellVal(ref), 0)
@@ -2733,9 +2737,9 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   row += 1;
   const t3Row = row;
   const basePriceRef = t1Addr.base_price;  // 货价
-  // A 啤工 B 喷油工 C 油漆 D 装配工 — 套公式引用来源；被手填覆盖(ov)则保持静态值
+  // A 啤工 B 喷油工 C 油漆 D 装配工 — 有来源时始终套公式引用。
   //   啤工=注塑Σ啤价(K)；喷油工=二次加工合计×0.7；油漆=×0.3；装配工=组装人工+包装人工
-  const t3cell = (key, formula, result) => (ov[`t3.${key}`] || !formula) ? result : { formula, result };
+  const t3cell = (key, formula, result) => formula ? { formula, result } : result;
   ws.getCell(row, 1).value = t3cell('injection_labor', subRefs.injShotSum || null, injectionLabor); ws.getCell(row, 1).numFmt = '0.0000';
   ws.getCell(row, 2).value = t3cell('painting_labor', subRefs.secondProc ? `${subRefs.secondProc}*0.7` : null, paintingLabor); ws.getCell(row, 2).numFmt = '0.0000';
   ws.getCell(row, 3).value = t3cell('paint_material', subRefs.secondProc ? `${subRefs.secondProc}*0.3` : null, paintMaterial); ws.getCell(row, 3).numFmt = '0.0000';
@@ -2774,7 +2778,18 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   const t4Cols = [['含税13%类成本', 'tax13'], ['人工类13%', 'labor13'], ['纸箱类', 'carton'],
     ['含税1%', 'tax1'], ['搪胶类3%', 'slush3'], ['车发类13%', 'sewhair13'], ['车衣类13%', 'sewcloth13'],
     ['吸塑类6%', 'suction6'], ['运费类9%', 'freight9'], ['含税13%类', 'tax13b']];
-  const T4_NO_RATE = new Set(['rmb_buy', 'tax13', 'labor13']);  // 参考列：无税率、不参与减税
+  const T4_NO_RATE = new Set(['rmb_buy', 'tax13']);  // 含税13%类成本为参考列，不重复参与减税
+  const T4_RATE_DEFAULTS = {
+    labor13: 11.5,
+    carton: 10,
+    tax1: 0.99,
+    slush3: 3,
+    sewhair13: 11.5,
+    sewcloth13: 11.5,
+    suction6: 6,
+    freight9: 8.26,
+    tax13b: 11.5,
+  };
   const sumCol = t4Cols.length + 1;      // 合计减税列 = 紧跟最后一个减税列（随列数自适应）
   const sumColL = colL(sumCol);
   ws.getCell(row, 1).value = '四、减税明细';
@@ -2808,6 +2823,7 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   };
   t4Cols.forEach((c, i) => {
     const e = t4[c[1]] || { amt: 0, rate: 0 };
+    const rate = T4_RATE_DEFAULTS[c[1]] ?? num(e.rate);
     const fml = T4_FORMULA[c[1]];
     // result 实时重算（引用 表1/表2 实时单元格），不用过期 ps
     const amtLive = fml ? liveResult(fml, num(e.amt)) : num(e.amt);
@@ -2815,14 +2831,14 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
     ws.getCell(row, i + 1).value = fml ? { formula: fml, result: amtLive } : amtLive;
     styleData(ws.getCell(row, i + 1));
     ws.getCell(row, i + 1).numFmt = '0.0000';
-    if (!T4_NO_RATE.has(c[1])) totalDed += amtLive * num(e.rate) / 100;  // 参考列不计减税
+    if (!T4_NO_RATE.has(c[1])) totalDed += amtLive * rate / 100;  // 参考列不计减税
   });
   row += 1;
   const t4RateRow = row;
   t4Cols.forEach((c, i) => {
     const e = t4[c[1]] || { amt: 0, rate: 0 };
     if (T4_NO_RATE.has(c[1])) { styleData(ws.getCell(row, i + 1)); return; }  // 参考列无税率
-    ws.getCell(row, i + 1).value = num(e.rate) / 100;
+    ws.getCell(row, i + 1).value = (T4_RATE_DEFAULTS[c[1]] ?? num(e.rate)) / 100;
     ws.getCell(row, i + 1).numFmt = '0.00%';
     styleData(ws.getCell(row, i + 1));
   });
@@ -2836,7 +2852,8 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
     const e = t4[c[1]] || { amt: 0, rate: 0 };
     if (T4_NO_RATE.has(c[1])) { ws.getCell(row, i + 1).value = '—'; styleData(ws.getCell(row, i + 1)); return; }  // 参考列无减税额
     const col = colL(i + 1);
-    ws.getCell(row, i + 1).value = { formula: `${col}${t4AmtRow}*${col}${t4RateRow}`, result: num(t4AmtVals[i]) * num(e.rate) / 100 };
+    const rate = T4_RATE_DEFAULTS[c[1]] ?? num(e.rate);
+    ws.getCell(row, i + 1).value = { formula: `${col}${t4AmtRow}*${col}${t4RateRow}`, result: num(t4AmtVals[i]) * rate / 100 };
     ws.getCell(row, i + 1).numFmt = '0.0000';
     styleData(ws.getCell(row, i + 1));
   });
@@ -2878,7 +2895,7 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
 
   // 减税后码数(表2) = 货价 / 减税后成本（前向引用：减税后成本 此处才渲染完，回填公式）
   const codeAfterIdx = t2Cols.findIndex(c => c[1] === 'code_after') + 1;
-  if (afterCostRow && codeAfterIdx && !ov['t2.code_after']) {
+  if (afterCostRow && codeAfterIdx) {
     const afterCostRef = `${summaryValueColL}${afterCostRow}`;
     const baseLive = cellVal(basePriceRef), afterLive = cellVal(afterCostRef);
     const cell = ws.getCell(t2DataRow, codeAfterIdx);
