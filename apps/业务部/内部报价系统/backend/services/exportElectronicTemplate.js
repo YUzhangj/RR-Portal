@@ -79,7 +79,8 @@ function addElectronicTemplateSheet(workbook, electronic, quote) {
   const product = cleanMetaValue(meta.product, '产品名称') || (quote && quote.product_name) || '';
   const productNo = cleanMetaValue(meta.product_no, '产品编号') || (quote && quote.quote_no) || '';
   const customer = cleanMetaValue(meta.customer, '客户') || (quote && quote.customer) || '';
-  const quoteDate = cleanMetaValue(meta.date, '报价日期')
+  const quoteDate = String((quote && quote.created_at) || '').slice(0, 10).replaceAll('-', '.')
+    || cleanMetaValue(meta.date, '报价日期')
     || String(doc.imported_at || '').slice(0, 10).replaceAll('-', '.');
   ws.mergeCells(5, 1, 5, 6);
   ws.getCell(5, 1).value = [

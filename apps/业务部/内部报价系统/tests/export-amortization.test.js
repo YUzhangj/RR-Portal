@@ -35,7 +35,10 @@ test('production departments each have a standalone export worksheet and UI acti
 
 test('electronic detail export preserves the original USD currency and formulas', async () => {
   const workbook = await buildWorkbook({
-    quote: { quote_no: 'USD-ELECTRONIC', product_name: '美金电子报价', qty: 5000 },
+    quote: {
+      quote_no: 'USD-ELECTRONIC', product_name: '美金电子报价', qty: 5000,
+      created_at: '2026-08-31 08:01:39',
+    },
     sections: [
       { dept: 'electronic', payload_json: JSON.stringify({
         electronics: [],
@@ -45,7 +48,10 @@ test('electronic detail export preserves the original USD currency and formulas'
             parts_cost: 0.25, total_cost: 0.25, profit_pct: 12, profit_price: 0.28,
             mold_fees: [{ name: 'PCB模费', amount: 354, currency: 'USD' }],
           },
-          meta: { product_no: '客户：错误客户', customer: '正确客户', tax_label: '不含税', moq: 5000 },
+          meta: {
+            product_no: '客户：错误客户', customer: '正确客户', date: '2025.11.27',
+            tax_label: '不含税', moq: 5000,
+          },
           parts: [{ name: 'PCB', spec: '40*35', qty: 1, unit_price: 1.6575, source_unit_price: 0.25, note: '' }],
         },
         electronics_extra: { parts_cost: 1.6575, profit_pct: 12 },
@@ -66,6 +72,7 @@ test('electronic detail export preserves the original USD currency and formulas'
   assert.equal(sheet.getCell('A4').value, '电子报价单');
   assert.match(sheet.getCell('A5').value, /产品编号：USD-ELECTRONIC/);
   assert.match(sheet.getCell('A5').value, /客户：正确客户/);
+  assert.match(sheet.getCell('A5').value, /报价日期：2026\.08\.31/);
   assert.equal(sheet.pageSetup.printArea, `A1:F${sheet.rowCount}`);
   assert.equal(sheet.pageSetup.printTitlesRow, '6:6');
   assert.equal(sheet.views[0].state, 'frozen');
