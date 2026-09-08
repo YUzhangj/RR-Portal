@@ -2520,6 +2520,7 @@ function renderCartonCalc(host, c, canEdit, onChange) {
   const cartonDimInput = (b, key) => b[`${key}_raw`] != null && b[`${key}_raw`] !== ''
     ? b[`${key}_raw`]
     : (b[key] || '');
+  const productMmInput = key => c[`${key}_mm`] || (c[`${key}_cm`] ? num(c[`${key}_cm`]) * 10 : '');
   const cuftOf = (b) => num(b.cl) * num(b.cw) * num(b.ch) / 1728;
   const boxPriceOf = (b) => (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * rate() / 1000;
   // 平卡 L/W 留空时对应所在纸箱的长/宽
@@ -2581,15 +2582,15 @@ function renderCartonCalc(host, c, canEdit, onChange) {
           </span>
         </div>
 
-        <div style="margin-bottom:6px;color:#78716c;font-size:13px">产品尺寸（cm 自动换算为英寸）</div>
+        <div style="margin-bottom:6px;color:#78716c;font-size:13px">产品尺寸（mm 自动换算为英寸）</div>
         <table class="wb-table" style="font-size:13px;margin-bottom:14px;max-width:430px">
           <thead><tr><th style="width:70px">单位</th><th style="width:80px">L</th><th style="width:80px">W</th><th style="width:80px">H</th></tr></thead>
           <tbody>
             <tr>
-              <td class="muted">cm</td>
-              <td><input id="cc-pl-cm" type="number" step="any" value="${c.pl_cm || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
-              <td><input id="cc-pw-cm" type="number" step="any" value="${c.pw_cm || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
-              <td><input id="cc-ph-cm" type="number" step="any" value="${c.ph_cm || ''}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td class="muted">mm</td>
+              <td><input id="cc-pl-mm" type="number" step="any" value="${productMmInput('pl')}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td><input id="cc-pw-mm" type="number" step="any" value="${productMmInput('pw')}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td><input id="cc-ph-mm" type="number" step="any" value="${productMmInput('ph')}" ${canEdit?'':'disabled'} style="width:80px"/></td>
             </tr>
             <tr>
               <td class="muted">inch</td>
@@ -2611,21 +2612,23 @@ function renderCartonCalc(host, c, canEdit, onChange) {
       rateEl.oninput = () => { c.paper_rate = rateEl.value === '' ? 2.75 : Number(rateEl.value); onChange(); };
       rateEl.onchange = () => render();
     }
-    // 产品尺寸：cm 输入按 cm ÷ 2.54 写入英寸字段；保存和导出继续只读取英寸字段。
+    // 产品尺寸：mm 输入按 mm ÷ 25.4 写入英寸字段；保存和导出继续只读取英寸字段。
     ['pl','pw','ph'].forEach(k => {
       const el = host.querySelector('#cc-' + k);
-      const cmEl = host.querySelector('#cc-' + k + '-cm');
+      const mmEl = host.querySelector('#cc-' + k + '-mm');
       el.oninput = () => {
         c[k] = Number(el.value) || 0;
+        c[`${k}_mm`] = 0;
         c[`${k}_cm`] = 0;
-        cmEl.value = '';
+        mmEl.value = '';
         onChange();
       };
-      cmEl.oninput = () => {
-        const cm = Number(cmEl.value) || 0;
-        c[`${k}_cm`] = cm;
-        c[k] = cm / 2.54;
-        el.value = cmEl.value === '' ? '' : String(+c[k].toFixed(4));
+      mmEl.oninput = () => {
+        const mm = Number(mmEl.value) || 0;
+        c[`${k}_mm`] = mm;
+        c[`${k}_cm`] = 0;
+        c[k] = mm / 25.4;
+        el.value = mmEl.value === '' ? '' : String(+c[k].toFixed(4));
         onChange();
       };
     });
