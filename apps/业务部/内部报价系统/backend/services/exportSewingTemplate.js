@@ -29,14 +29,15 @@ function laborToAdd(group) {
   return laborInItems > 0 ? 0 : num(group && group.labor_amount);
 }
 
-function dateText(value) {
-  const date = String(value || '').slice(0, 10).replaceAll('-', '/');
-  return date || '';
-}
-
-function dateSuffix(value) {
-  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(String(value || ''));
-  return match ? `${Number(match[2])}-${Number(match[3])}` : '';
+function exportDateParts(value = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(value);
+  const get = type => parts.find(part => part.type === type)?.value || '';
+  return { year: get('year'), month: get('month'), day: get('day') };
 }
 
 function styleCell(cell, options = {}) {
@@ -74,7 +75,7 @@ function addImage(workbook, sheet, image, startRow, endRow) {
   });
 }
 
-function buildDetailSheet(workbook, quote, sewing, suffix) {
+function buildDetailSheet(workbook, quote, sewing, suffix, exportDateText) {
   const sheetName = suffix ? `明细表${suffix}` : '明细表';
   const sheet = workbook.addWorksheet(sheetName);
   sheet.columns = [
@@ -89,7 +90,7 @@ function buildDetailSheet(workbook, quote, sewing, suffix) {
   sheet.getRow(1).height = 38;
 
   styleRange(sheet, 2, 1, 11, { size: 12 });
-  sheet.getCell('K2').value = `DATE:${dateText(quote.created_at)}`;
+  sheet.getCell('K2').value = `DATE:${exportDateText}`;
   sheet.getCell('K2').fill = DATE_YELLOW;
   sheet.getRow(2).height = 30;
 
@@ -197,7 +198,7 @@ function buildDetailSheet(workbook, quote, sewing, suffix) {
   return { totals, sheetName };
 }
 
-function buildQuoteSheet(workbook, sheet, quote, section, sewing, detailSheetName, totals) {
+function buildQuoteSheet(workbook, sheet, quote, section, sewing, detailSheetName, totals, exportDateText) {
   sheet.columns = [
     { width: 15 }, { width: 15 }, { width: 18 }, { width: 16 },
     { width: 16 }, { width: 46 }, { width: 45 },
@@ -223,7 +224,7 @@ function buildQuoteSheet(workbook, sheet, quote, section, sewing, detailSheetNam
   sheet.mergeCells('A8:C8');
   sheet.getCell('A8').value = `客人：${quote.customer || ''}`;
   sheet.getCell('F8').value = '机芯系列';
-  sheet.getCell('G8').value = `DATE:${dateText(quote.created_at)}`;
+  sheet.getCell('G8').value = `DATE:${exportDateText}`;
 
   const headers = ['图片', '货号', '货品', '人民币报价', '10%含税', '内容', '备注'];
   styleRange(sheet, 9, 1, 7, { size: 12 });
@@ -276,7 +277,7 @@ function buildQuoteSheet(workbook, sheet, quote, section, sewing, detailSheetNam
   };
 }
 
-async function buildSewingTemplateWorkbook({ quote, sections }) {
+async function buildSewingTemplateWorkbook({ quote, sections, exportDate = new Date() }) {
   const section = (sections || []).find(item => item.dept === 'sewing') || {};
   let sewing = {};
   try { sewing = JSON.parse(section.payload_json || '{}'); } catch {}
@@ -287,10 +288,12 @@ async function buildSewingTemplateWorkbook({ quote, sections }) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = '内部报价系统';
   workbook.calcProperties.fullCalcOnLoad = true;
-  const suffix = dateSuffix(quote.created_at);
+  const { year, month, day } = exportDateParts(exportDate);
+  const exportDateText = `${year}/${month}/${day}`;
+  const suffix = `${Number(month)}-${Number(day)}`;
   const quoteSheet = workbook.addWorksheet(suffix ? `报价单${suffix}` : '报价单');
-  const detail = buildDetailSheet(workbook, quote, sewing, suffix);
-  buildQuoteSheet(workbook, quoteSheet, quote, section, sewing, detail.sheetName, detail.totals);
+  const detail = buildDetailSheet(workbook, quote, sewing, suffix, exportDateText);
+  buildQuoteSheet(workbook, quoteSheet, quote, section, sewing, detail.sheetName, detail.totals, exportDateText);
   return workbook;
 }
 
