@@ -95,6 +95,7 @@ const migrationTables = [
   'factories', 'departments', 'users', 'quotes', 'quote_sections', 'audit_log',
   'ref_tables', 'app_migrations', 'factory_ref_tables', 'user_factories',
   'user_customers', 'user_perms', 'factory_material_price_control', 'factory_material_price_managers',
+  'quote_customer_confirmations',
 ];
 
 async function migrateLegacySqlite() {
