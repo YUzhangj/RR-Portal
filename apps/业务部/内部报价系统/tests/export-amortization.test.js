@@ -168,6 +168,7 @@ test('internal quotation workbook uses print-friendly layouts on every sheet', a
   assert.notEqual(mainSheet.getCell('R1').master.address, 'A1');
   assert.equal(mainSheet.getCell(1, 1).font.size, 18);
   assert.ok(mainSheet.getCell(2, 1).font.size >= 12);
+  assert.ok(mainSheet.getColumn(6).width >= 18);
   assert.ok(mainSheet.getColumn(7).width >= 20);
   assert.equal(workbook.getWorksheet('电子明细').pageSetup.printTitlesRow, '6:6');
 });
@@ -940,6 +941,34 @@ test('tax summary links sewing clothing to unified cost rows and uses formulas f
   assert.match(clothing.formula, /^\(K\d+(?:\+K\d+){3}\)-F\d+$/);
   assert.equal(worksheet.getCell(dataRow, 11).value.formula, '0');
   assert.equal(worksheet.getCell(dataRow, 12).value.formula, '0');
+});
+
+test('tax summary keeps labor out of no-labor cost and adds all labor into total cost', async () => {
+  const workbook = await buildWorkbook({
+    quote: { quote_no: 'LABOR-COST-SPLIT', product_name: '人工口径', qty: 1000, factory_code: 'qingxi' },
+    sections: [{ dept: 'sales', payload_json: JSON.stringify({
+      header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.8 },
+      shipping: { scenarios: [] },
+      pricing_summary: { t1: {}, t2: {}, t3: {}, t4: {} },
+    }) }],
+  });
+
+  const worksheet = workbook.getWorksheet('报价明细');
+  let titleRow = 0;
+  worksheet.eachRow(row => {
+    if (row.getCell(1).value === '三、人工 & 成本汇总') titleRow = row.number;
+  });
+  assert.ok(titleRow);
+  const dataRow = titleRow + 2;
+  const noLaborFormula = worksheet.getCell(dataRow, 5).value.formula;
+  assert.match(noLaborFormula, new RegExp(`\\+C${dataRow}$`));
+  assert.doesNotMatch(noLaborFormula, new RegExp(`\\+A${dataRow}|\\+B${dataRow}`));
+  assert.match(worksheet.getCell(dataRow, 6).value.formula, new RegExp(`^IFERROR\\(\\(A${dataRow}\\+B${dataRow}\\+D${dataRow}\\)\\/A\\d+,0\\)$`));
+  assert.equal(worksheet.getCell(dataRow, 11).value.formula, `E${dataRow}+A${dataRow}+B${dataRow}+D${dataRow}`);
+
+  const workbenchSource = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  assert.match(workbenchSource, /const noLaborCost = sum\(t1NoBase\) \+ sum\(t2Cost\) \+ num\(ps\.t3\.paint_material\)/);
+  assert.match(workbenchSource, /const laborCost = num\(ps\.t3\.injection_labor\) \+ num\(ps\.t3\.painting_labor\) \+ num\(ps\.t3\.assembly_labor\)/);
 });
 
 test('motor is recognized only from hardware and motor-driver IC remains electronic', async () => {

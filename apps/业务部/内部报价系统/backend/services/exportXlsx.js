@@ -191,7 +191,7 @@ async function buildWorkbook({ quote, sections }) {
     { width: 18 },  // C 模号 / 规格
     { width: 16 },  // D 模胚类型
     { width: 14 },  // E 模具结构
-    { width: 12 },  // F 材质
+    { width: 18 },  // F 材质 / 合计表金额，避免 HK$ 数值显示为 #######
     { width: 12 },  // G 出模数
     { width: 15 },  // H 套数 / 印尼运费
     { width: 16 },  // I 模具尺寸
@@ -2721,9 +2721,10 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   const assemblyLabor = liveResult(asmRef, num(t3.assembly_labor));
   // result 用实时单元格值（不用过期 ps 快照），与 表1/表2 口径一致
   const basePrice = cellVal(t1Addr.base_price);
-  const noLaborCost = noLaborRefs.reduce((s, ref) => s + cellVal(ref), 0)
-                    + injectionLabor + paintingLabor + paintMaterial;
-  const totalCost = noLaborCost + assemblyLabor;
+  // 不含人工成本只含材料/外购项及油漆；啤工、喷油工、装配工在总成本中另行加入。
+  const noLaborCost = noLaborRefs.reduce((s, ref) => s + cellVal(ref), 0) + paintMaterial;
+  const laborCost = injectionLabor + paintingLabor + assemblyLabor;
+  const totalCost = noLaborCost + laborCost;
   const gross = basePrice - noLaborCost;
   const profit = basePrice - totalCost;
 
@@ -2744,11 +2745,11 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   ws.getCell(row, 2).value = t3cell('painting_labor', subRefs.secondProc ? `${subRefs.secondProc}*0.7` : null, paintingLabor); ws.getCell(row, 2).numFmt = '0.0000';
   ws.getCell(row, 3).value = t3cell('paint_material', subRefs.secondProc ? `${subRefs.secondProc}*0.3` : null, paintMaterial); ws.getCell(row, 3).numFmt = '0.0000';
   ws.getCell(row, 4).value = t3cell('assembly_labor', asmRef, assemblyLabor); ws.getCell(row, 4).numFmt = '0.0000';
-  // E 不含人工成本 = 表1(无货价)+表2(成本) + 啤工+喷油工+油漆
-  const noLaborFormula = `${noLaborRefs.join('+')}+A${row}+B${row}+C${row}`;
+  // E 不含人工成本 = 表1(无货价)+表2(成本)+油漆
+  const noLaborFormula = `${noLaborRefs.join('+')}+C${row}`;
   ws.getCell(row, 5).value = { formula: noLaborFormula, result: noLaborCost }; ws.getCell(row, 5).numFmt = '0.0000';
-  // F 人工比例 = 装配工/货价
-  ws.getCell(row, 6).value = { formula: `IFERROR(D${row}/${basePriceRef},0)`, result: basePrice ? assemblyLabor/basePrice : 0 }; ws.getCell(row, 6).numFmt = '0.00%';
+  // F 人工比例 = (啤工+喷油工+装配工)/货价
+  ws.getCell(row, 6).value = { formula: `IFERROR((A${row}+B${row}+D${row})/${basePriceRef},0)`, result: basePrice ? laborCost/basePrice : 0 }; ws.getCell(row, 6).numFmt = '0.00%';
   // G 毛利 = 货价 - 不含人工成本
   ws.getCell(row, 7).value = { formula: `${basePriceRef}-E${row}`, result: gross }; ws.getCell(row, 7).numFmt = '0.0000';
   // H 毛利率
@@ -2757,8 +2758,8 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   ws.getCell(row, 9).value = { formula: `${basePriceRef}-K${row}`, result: profit }; ws.getCell(row, 9).numFmt = '0.0000';
   // J 利润率
   ws.getCell(row, 10).value = { formula: `IFERROR(I${row}/${basePriceRef},0)`, result: basePrice ? profit/basePrice : 0 }; ws.getCell(row, 10).numFmt = '0.00%';
-  // K 总成本 = 不含人工成本 + 装配工
-  const totalCostFormula = `E${row}+D${row}`;
+  // K 总成本 = 不含人工成本 + 啤工 + 喷油工 + 装配工
+  const totalCostFormula = `E${row}+A${row}+B${row}+D${row}`;
   ws.getCell(row, 11).value = { formula: totalCostFormula, result: totalCost }; ws.getCell(row, 11).numFmt = '0.0000';
   // 未减税前码数(表2) = 货价 / 总成本（总成本到这里才生成，回填前向引用公式）。
   const codeBeforeIdx = t2Cols.findIndex(c => c[1] === 'code_before') + 1;
@@ -2870,15 +2871,15 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   const totalCostRefExpanded = `K${t3Row}`;  // 表3 总成本 单元格
   const afterCost = totalCost - totalDed;
   const afterGross = basePrice - (noLaborCost - totalDed);
-  const afterProfit = afterGross - assemblyLabor;
+  const afterProfit = afterGross - laborCost;
 
   const summaryRows = [
     ['合计减税', { formula: totalDedRef, result: totalDed }, '0.0000'],
     ['减税后成本', { formula: `(${totalCostRefExpanded})-${totalDedRef}`, result: afterCost }, '0.0000'],
     ['减税后毛利', { formula: `${basePriceRef}-((${noLaborRefExpanded})-${totalDedRef})`, result: afterGross }, '0.0000'],
     ['减税后毛利率', { formula: `IFERROR((${basePriceRef}-((${noLaborRefExpanded})-${totalDedRef}))/${basePriceRef},0)`, result: basePrice ? afterGross/basePrice : 0 }, '0.00%'],
-    ['减税后利润', { formula: `(${basePriceRef}-((${noLaborRefExpanded})-${totalDedRef}))-D${t3Row}`, result: afterProfit }, '0.0000'],
-    ['减税后利润率', { formula: `IFERROR(((${basePriceRef}-((${noLaborRefExpanded})-${totalDedRef}))-D${t3Row})/${basePriceRef},0)`, result: basePrice ? afterProfit/basePrice : 0 }, '0.00%'],
+    ['减税后利润', { formula: `(${basePriceRef}-((${noLaborRefExpanded})-${totalDedRef}))-A${t3Row}-B${t3Row}-D${t3Row}`, result: afterProfit }, '0.0000'],
+    ['减税后利润率', { formula: `IFERROR(((${basePriceRef}-((${noLaborRefExpanded})-${totalDedRef}))-A${t3Row}-B${t3Row}-D${t3Row})/${basePriceRef},0)`, result: basePrice ? afterProfit/basePrice : 0 }, '0.00%'],
   ];
   let afterCostRow = null;
   const summaryValueCol = 7;
