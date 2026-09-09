@@ -39,7 +39,7 @@ function renderStats(rows) {
     <div class="stat-rate"><span>客户确认率</span><strong>${confirmationRate.toFixed(1)}%</strong><span class="summary-rate-track" role="progressbar" aria-valuenow="${confirmationRate.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${confirmationRate}%"></i></span></div>`;
 }
 
-function totalColumns() { return 8 + state.components.length * 4 + 3; }
+function totalColumns() { return 8 + state.components.length * 4 + 1 + 3; }
 
 function groupedRows(rows) {
   const groups = new Map();
@@ -60,12 +60,14 @@ function renderHead() {
   const workflow = ['客价确认', '备注', ''];
   const widths = [58, 150, 125, 110, 170, 100, 112, 126];
   state.components.forEach(() => widths.push(92, 92, 96, 78));
+  widths.push(96);
   widths.push(110, 135, 60);
   $('summary-cols').innerHTML = widths.map(width => `<col style="width:${width}px">`).join('');
   $('summary-head').closest('table').style.width = `${widths.reduce((sum, width) => sum + width, 0)}px`;
   $('summary-head').innerHTML = `<tr>
     ${fixed.map(label => `<th>${label}</th>`).join('')}
     ${state.components.map((item, index) => `<th class="component-unit group-${index % 2}">${esc(item.name)}</th><th class="component-sub group-${index % 2}">退税后${esc(item.name)}</th><th class="component-sub group-${index % 2}">${esc(item.name)}金额</th><th class="component-sub group-${index % 2}">${esc(item.name)}占比</th>`).join('')}
+    <th class="component-sub component-share-total">各金额<br>占比求和</th>
     ${workflow.map(label => `<th class="workflow-head">${label}</th>`).join('')}
   </tr>`;
 }
@@ -87,6 +89,9 @@ function rowHtml(row, serial) {
     const share = num(price) ? afterTax / num(price) : 0;
     return `<td class="component-value">${money(beforeTax)}</td><td class="component-value">${money(afterTax)}</td><td class="component-amount">${money(amount)}</td><td class="component-share">${(share * 100).toFixed(2)}%</td>`;
   }).join('');
+  const shareTotal = state.components.reduce((sum, item) => (
+    sum + (num(price) ? num(row.components?.[item.code]) / num(price) : 0)
+  ), 0);
   return `<tr data-id="${row.id}">
     <td class="summary-customer-no">${serial}</td>
     <td><b>${esc(row.customer || '未填写')}</b></td>
@@ -97,6 +102,7 @@ function rowHtml(row, serial) {
     <td><input class="summary-qty" type="number" min="0" step="1" value="${esc(qty ?? '')}" ${disabled}></td>
     <td><input class="summary-price" type="number" min="0" step="any" value="${esc(price ?? '')}" ${disabled}></td>
     ${componentHtml}
+    <td class="component-share component-share-total">${(shareTotal * 100).toFixed(2)}%</td>
     <td><select class="summary-confirm" ${disabled}><option value="pending" ${confirmation.status !== 'confirmed' ? 'selected' : ''}>待确认</option><option value="confirmed" ${confirmation.status === 'confirmed' ? 'selected' : ''}>已确认</option></select></td>
     <td><input class="summary-note" value="${esc(confirmation.note || '')}" placeholder="选填" ${disabled}></td>
     <td>${state.canEdit ? '<button class="save-summary">保存</button>' : ''}</td>
@@ -118,9 +124,16 @@ function subtotalHtml(customer, rows) {
     const share = quotedAmount ? amount / quotedAmount : 0;
     return `<td></td><td></td><td class="component-amount">${money(amount)}</td><td class="component-share">${(share * 100).toFixed(2)}%</td>`;
   }).join('');
+  const shareTotal = state.components.reduce((sum, item) => {
+    const amount = rows.reduce((amountSum, row) => {
+      const qty = num(row.confirmation?.confirmed_qty ?? row.qty);
+      return amountSum + num(row.components?.[item.code]) * qty;
+    }, 0);
+    return sum + (quotedAmount ? amount / quotedAmount : 0);
+  }, 0);
   return `<tr class="summary-customer-total">
     <td></td><td>${esc(customer)}</td><td></td><td colspan="2">客户总计</td><td></td>
-    <td>${money(qtyTotal)}</td><td></td>${componentHtml}<td colspan="3"></td>
+    <td>${money(qtyTotal)}</td><td></td>${componentHtml}<td class="component-share component-share-total">${(shareTotal * 100).toFixed(2)}%</td><td colspan="3"></td>
   </tr>`;
 }
 

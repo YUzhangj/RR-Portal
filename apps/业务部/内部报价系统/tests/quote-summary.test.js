@@ -92,7 +92,8 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   };
   const workbook = buildSummaryWorkbook([row], { customer: 'Sky Castle' });
   const sheet = workbook.getWorksheet('各客报价汇总');
-  const workflowStart = 9 + QUOTE_COMPONENTS.length * 4;
+  const totalShareColumn = 9 + QUOTE_COMPONENTS.length * 4;
+  const workflowStart = totalShareColumn + 1;
   assert.equal(sheet.getCell(4, 1).value, '序号');
   assert.equal(sheet.getCell(5, 1).value, 1);
   assert.equal(sheet.getCell(5, 2).value, 'Sky Castle');
@@ -110,12 +111,17 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   assert.ok(Math.abs(sheet.getCell(5, 12).value.result - 0.15) < 1e-12);
   assert.equal(sheet.getCell(5, 30).value.formula, 'AC5*(1-11.5%)');
   assert.equal(sheet.getCell(5, 31).value.formula, 'AD5*$G5');
+  assert.equal(sheet.getCell(4, totalShareColumn).value, '各金额占比求和');
+  assert.match(sheet.getCell(5, totalShareColumn).value.formula, /^SUM\(L5,/);
+  assert.ok(Math.abs(sheet.getCell(5, totalShareColumn).value.result - 0.327) < 1e-12);
   assert.equal(sheet.getCell(5, workflowStart).value, '已确认');
   assert.equal(sheet.getCell(5, 8).value, 10);
   assert.equal(sheet.getCell(6, 4).value, '客户总计');
   assert.equal(sheet.getCell(6, 7).value.formula, 'SUM(G5:G5)');
   assert.equal(sheet.getCell(6, 11).value.formula, 'SUM(K5:K5)');
   assert.equal(sheet.getCell(6, 12).value.formula, 'IF(SUMPRODUCT(G5:G5,H5:H5)=0,0,K6/SUMPRODUCT(G5:G5,H5:H5))');
+  assert.match(sheet.getCell(6, totalShareColumn).value.formula, /^SUM\(L6,/);
+  assert.ok(Math.abs(sheet.getCell(6, totalShareColumn).value.result - 0.327) < 1e-12);
   const buffer = await workbook.xlsx.writeBuffer();
   assert.ok(buffer.byteLength > 1000);
   const reopened = new (require('exceljs').Workbook)();
@@ -123,6 +129,7 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   assert.equal(reopened.getWorksheet('各客报价汇总').getCell('J5').value.formula, 'I5');
   assert.equal(reopened.getWorksheet('各客报价汇总').getCell('K5').value.formula, 'J5*$G5');
   assert.equal(reopened.getWorksheet('各客报价汇总').getCell('L5').value.formula, 'IF($H5=0,0,J5/$H5)');
+  assert.match(reopened.getWorksheet('各客报价汇总').getCell(5, totalShareColumn).value.formula, /^SUM\(L5,/);
 });
 
 test('报价汇总按客户排序分组，序号由每个客户组内重新开始', () => {
@@ -169,5 +176,7 @@ test('网页汇总的原价和退税后单价列保持等宽', () => {
   assert.match(styles, /th\.component-unit,.summary-table td\.component-value\{[^}]*width:92px[^}]*max-width:92px/);
   assert.match(styles, /summary-table\{table-layout:fixed\}/);
   assert.match(source, /state\.components\.forEach\(\(\) => widths\.push\(92, 92, 96, 78\)\)/);
+  assert.match(source, /各金额<br>占比求和/);
+  assert.match(source, /class="component-share component-share-total"/);
   assert.match(html, /<colgroup id="summary-cols"><\/colgroup>/);
 });
