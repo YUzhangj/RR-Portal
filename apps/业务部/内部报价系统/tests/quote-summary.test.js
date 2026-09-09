@@ -82,6 +82,17 @@ test('报价汇总按减税明细口径计算各项减税后单价', () => {
   assert.equal(result.components.misc, 10);
 });
 
+test('报价汇总项目按参考表顺序排列，系统新增项目插入同类位置', () => {
+  assert.deepEqual(QUOTE_COMPONENTS.map(([key]) => key), [
+    'injection_labor', 'assembly_labor', 'painting_labor',
+    'imp_mat', 'dom_mat', 'blow',
+    'color_box', 'glue_bag', 'suction', 'carton', 'plating',
+    'electronic', 'motor', 'battery', 'libao', 'hardware',
+    'slush', 'sewing_hair', 'sewing_cloth', 'paint_material',
+    'other_buy', 'misc', 'freight', 'cabinet',
+  ]);
+});
+
 test('导出表横向展开报价项目并保留客户确认和实际生产车间', async () => {
   const row = {
     id: 1, customer: 'Sky Castle', quote_no: 'SC-1', product_name: '产品', version: 'V1', qty: 100,
@@ -109,8 +120,8 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   assert.deepEqual(sheet.getCell(5, 11).value, { formula: 'J5*$G5', result: 150 });
   assert.equal(sheet.getCell(5, 12).value.formula, 'IF($H5=0,0,J5/$H5)');
   assert.ok(Math.abs(sheet.getCell(5, 12).value.result - 0.15) < 1e-12);
-  assert.equal(sheet.getCell(5, 30).value.formula, 'AC5*(1-11.5%)');
-  assert.equal(sheet.getCell(5, 31).value.formula, 'AD5*$G5');
+  assert.equal(sheet.getCell(5, 26).value.formula, 'Y5*(1-11.5%)');
+  assert.equal(sheet.getCell(5, 27).value.formula, 'Z5*$G5');
   assert.equal(sheet.getCell(4, totalShareColumn).value, '各金额占比求和');
   assert.match(sheet.getCell(5, totalShareColumn).value.formula, /^SUM\(L5,/);
   assert.ok(Math.abs(sheet.getCell(5, totalShareColumn).value.result - 0.327) < 1e-12);
