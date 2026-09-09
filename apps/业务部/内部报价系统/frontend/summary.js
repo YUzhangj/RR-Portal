@@ -58,6 +58,11 @@ function groupedRows(rows) {
 function renderHead() {
   const fixed = ['序号', '客名', '货号', '货品名称', '报价日期', '实际接单数量', '货价 (HK$)'];
   const workflow = ['客价确认', '实际生产车间', '备注', ''];
+  const widths = [58, 150, 110, 170, 100, 112, 126];
+  state.components.forEach(() => widths.push(92, 92, 96, 78));
+  widths.push(110, 125, 135, 60);
+  $('summary-cols').innerHTML = widths.map(width => `<col style="width:${width}px">`).join('');
+  $('summary-head').closest('table').style.width = `${widths.reduce((sum, width) => sum + width, 0)}px`;
   $('summary-head').innerHTML = `<tr>
     ${fixed.map(label => `<th>${label}</th>`).join('')}
     ${state.components.map((item, index) => `<th class="component-unit group-${index % 2}">${esc(item.name)}</th><th class="component-sub group-${index % 2}">退税后${esc(item.name)}</th><th class="component-sub group-${index % 2}">${esc(item.name)}金额</th><th class="component-sub group-${index % 2}">${esc(item.name)}占比</th>`).join('')}

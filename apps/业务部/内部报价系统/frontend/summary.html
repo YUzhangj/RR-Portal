@@ -7,7 +7,7 @@
   <script>
     if (location.protocol === 'file:') location.replace('http://localhost:3211/summary.html');
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260909-summary-equal-unit-columns-v6" />
+  <link rel="stylesheet" href="./styles.css?v=20260909-summary-fixed-columns-v7" />
 </head>
 <body>
   <div class="topbar">
@@ -30,6 +30,7 @@
     <section class="card summary-table-card">
       <div class="summary-table-wrap">
         <table class="wb-table summary-table">
+          <colgroup id="summary-cols"></colgroup>
           <thead id="summary-head"></thead>
           <tbody id="summary-body"><tr><td class="summary-empty">正在读取…</td></tr></tbody>
         </table>
@@ -47,6 +48,6 @@
       };
     })();
   </script>
-  <script src="./summary.js?v=20260909-customer-item-sequence-v4"></script>
+  <script src="./summary.js?v=20260909-summary-fixed-columns-v7"></script>
 </body>
 </html>

@@ -162,5 +162,10 @@ test('网页汇总的接单数量和货价列使用紧凑宽度', () => {
 
 test('网页汇总的原价和退税后单价列保持等宽', () => {
   const styles = fs.readFileSync(path.join(__dirname, '../frontend/styles.css'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/summary.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '../frontend/summary.html'), 'utf8');
   assert.match(styles, /th\.component-unit,.summary-table td\.component-value\{[^}]*width:92px[^}]*max-width:92px/);
+  assert.match(styles, /summary-table\{table-layout:fixed\}/);
+  assert.match(source, /state\.components\.forEach\(\(\) => widths\.push\(92, 92, 96, 78\)\)/);
+  assert.match(html, /<colgroup id="summary-cols"><\/colgroup>/);
 });
