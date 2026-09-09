@@ -1,4 +1,5 @@
 const ExcelJS = require('exceljs');
+const { calculateQuoteCosts } = require('./quoteCostSummary');
 
 const WORKSHOPS = [
   ['xingxin_a', '兴信A'],
@@ -47,7 +48,11 @@ function buildQuoteSummary(quote, sections) {
   const salesSection = (sections || []).find(section => section.dept === 'sales');
   const sales = parseJson(salesSection && salesSection.payload_json);
   const pricing = sales?.pricing_summary || {};
-  const components = Object.fromEntries(QUOTE_COMPONENTS.map(([key, , table]) => [key, num(pricing[table]?.[key])]));
+  const calculated = calculateQuoteCosts(quote, sections);
+  const components = Object.fromEntries(QUOTE_COMPONENTS.map(([key, , table]) => {
+    const liveValue = calculated.components[key];
+    return [key, calculated.hasSourceData ? num(liveValue) : num(pricing[table]?.[key])];
+  }));
   return {
     id: quote.id,
     quote_no: quote.quote_no,
@@ -57,7 +62,7 @@ function buildQuoteSummary(quote, sections) {
     version: quote.version || '',
     created_at: quote.created_at,
     quote_status: quote.status,
-    quoted_price: num(pricing.t1?.base_price),
+    quoted_price: calculated.hasSourceData ? num(calculated.quotedPrice) : num(pricing.t1?.base_price),
     components,
   };
 }
