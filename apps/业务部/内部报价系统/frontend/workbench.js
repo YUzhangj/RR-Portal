@@ -2034,11 +2034,11 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
 
   function recalc() {
     const sum = (obj) => Object.values(obj).reduce((s, v) => s + num(v), 0);
-    // 与导出一致：不含人工成本 = 表1（除货价）+ 表2（除码数）+ 啤工 + 喷油工 + 油漆。
+    // 与参考格式及导出一致：不含人工成本 = 表1（除货价）+ 表2（除码数）+ 油漆。
+    // 啤工、喷油工、装配工属于人工，在计算总成本时再加入。
     const t1NoBase = { ...ps.t1 }; delete t1NoBase.base_price;
     const t2Cost = { ...ps.t2 }; delete t2Cost.code_before; delete t2Cost.code_after;
-    const noLaborCost = sum(t1NoBase) + sum(t2Cost)
-      + num(ps.t3.injection_labor) + num(ps.t3.painting_labor) + num(ps.t3.paint_material);
+    const noLaborCost = sum(t1NoBase) + sum(t2Cost) + num(ps.t3.paint_material);
     // 人民币外购件成本 = 国内料+车发+车衣+五金+电子+马达 + 彩盒/内咭+电池+利宝+电镀+其他外购+纸箱+杂项 + 油漆
     const rmbBuyCost =
       num(ps.t1.dom_mat) + num(ps.t1.sewing_hair) + num(ps.t1.sewing_cloth)
@@ -2047,7 +2047,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
       + num(ps.t2.plating) + num(ps.t2.other_buy) + num(ps.t2.carton) + num(ps.t2.misc)
       + num(ps.t1.glue_bag)
       + num(ps.t3.paint_material);
-    const laborCost = num(ps.t3.assembly_labor);
+    const laborCost = num(ps.t3.injection_labor) + num(ps.t3.painting_labor) + num(ps.t3.assembly_labor);
     const totalCost = noLaborCost + laborCost;
     const basePrice = num(ps.t1.base_price);
     const codeBefore = totalCost > 0 ? basePrice / totalCost : 0;
