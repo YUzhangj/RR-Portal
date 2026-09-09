@@ -970,7 +970,6 @@ test('tax summary keeps labor out of no-labor cost and adds all labor into total
   assert.match(workbenchSource, /const noLaborCost = sum\(t1NoBase\) \+ sum\(t2Cost\) \+ num\(ps\.t3\.paint_material\)/);
   assert.match(workbenchSource, /const laborCost = num\(ps\.t3\.injection_labor\) \+ num\(ps\.t3\.painting_labor\) \+ num\(ps\.t3\.assembly_labor\)/);
 });
-
 test('motor is recognized only from hardware and motor-driver IC remains electronic', async () => {
   const workbook = await buildWorkbook({
     quote: { quote_no: 'MOTOR-SOURCE', product_name: '马达分类', qty: 1000, factory_code: 'qingxi' },
