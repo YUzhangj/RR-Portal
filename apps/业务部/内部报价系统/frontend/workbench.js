@@ -5520,13 +5520,18 @@ async function renderQuotePage() {
   const canSeeSummary = hasPerm(me, '汇总分析', 'view');
   const showTabs = visibleDepts.length > 1 || canSeeSummary;
   const canSeeAll = visibleDepts.length === sections.length;  // 保留旧变量给后续判断用
+  let summaryPane = null;
   if (showTabs) {
     const tabBar = document.createElement('div'); tabBar.className = 'dept-tabs';
     const tabKey = 'activeTab:' + quote.id;
     const savedTab = sessionStorage.getItem(tabKey) || me.dept;
     const switchTab = async targetDept => {
       const activeDept = host.querySelector('.dept-tab.active')?.dataset.dept;
-      if (!activeDept || activeDept === targetDept) return;
+      if (!activeDept) return;
+      if (activeDept === targetDept) {
+        if (targetDept === '__summary__' && summaryPane) renderSummaryPane(summaryPane, sections, quote, me);
+        return;
+      }
       if (dirtyByDept.get(activeDept)) {
         const activeSection = sections.find(section => section.dept === activeDept);
         const action = await requestUnsavedAction(activeSection?.dept_name || DEPT_MENU[activeDept] || activeDept);
@@ -5538,6 +5543,8 @@ async function renderQuotePage() {
           catch (error) { alert(error.message); return; }
         }
       }
+      // 汇总不缓存：每次进入都按当前 sections 中已保存的最新数据重新计算。
+      if (targetDept === '__summary__' && summaryPane) renderSummaryPane(summaryPane, sections, quote, me);
       activateTab(tabKey, targetDept);
     };
     visibleDepts.forEach(s => {
@@ -5560,11 +5567,11 @@ async function renderQuotePage() {
     host.appendChild(tabBar);
 
     if (canSeeSummary) {
-      const sumPane = document.createElement('div'); sumPane.className = 'card section-pane';
-      sumPane.dataset.dept = '__summary__';
-      sumPane.style.display = 'none';
-      renderSummaryPane(sumPane, sections, quote, me);
-      host.appendChild(sumPane);
+      summaryPane = document.createElement('div'); summaryPane.className = 'card section-pane';
+      summaryPane.dataset.dept = '__summary__';
+      summaryPane.style.display = 'none';
+      renderSummaryPane(summaryPane, sections, quote, me);
+      host.appendChild(summaryPane);
     }
   }
 

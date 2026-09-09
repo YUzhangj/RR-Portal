@@ -137,3 +137,10 @@ test('department tabs require save or cancel before leaving dirty edits', () => 
   assert.match(source, /dirtyByDept\.get\(activeDept\)/);
   assert.match(source, /await save\(\)/);
 });
+
+test('summary tab recalculates whenever it is opened or clicked again', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  assert.match(source, /targetDept === '__summary__' && summaryPane/);
+  assert.match(source, /renderSummaryPane\(summaryPane, sections, quote, me\)/);
+  assert.match(source, /汇总不缓存/);
+});
