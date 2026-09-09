@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  QUOTE_COMPONENTS, TAX_DEDUCTION_RATES, buildQuoteSummary, buildSummaryWorkbook,
+  QUOTE_COMPONENTS, TAX_DEDUCTION_RATES, groupSummaryRows, buildQuoteSummary, buildSummaryWorkbook,
 } = require('../backend/services/quoteSummary');
 
 test('报价汇总读取报价基本资料和客价', () => {
@@ -90,27 +90,45 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   };
   const workbook = buildSummaryWorkbook([row], { customer: 'Sky Castle' });
   const sheet = workbook.getWorksheet('各客报价汇总');
-  const workflowStart = 7 + QUOTE_COMPONENTS.length * 4;
-  assert.equal(sheet.getCell(5, 1).value, 'Sky Castle');
-  assert.equal(sheet.getCell(4, 7).value, '啤工');
-  assert.equal(sheet.getCell(4, 8).value, '退税后啤工');
-  assert.equal(sheet.getCell(4, 9).value, '啤工金额');
-  assert.equal(sheet.getCell(4, 10).value, '啤工占比');
-  assert.equal(sheet.getCell(5, 7).value, 1.5);
-  assert.deepEqual(sheet.getCell(5, 8).value, { formula: 'G5', result: 1.5 });
-  assert.deepEqual(sheet.getCell(5, 9).value, { formula: 'H5*$E5', result: 150 });
-  assert.equal(sheet.getCell(5, 10).value.formula, 'IF($F5=0,0,H5/$F5)');
-  assert.ok(Math.abs(sheet.getCell(5, 10).value.result - 0.15) < 1e-12);
-  assert.equal(sheet.getCell(5, 28).value.formula, 'AA5*(1-11.5%)');
-  assert.equal(sheet.getCell(5, 29).value.formula, 'AB5*$E5');
+  const workflowStart = 8 + QUOTE_COMPONENTS.length * 4;
+  assert.equal(sheet.getCell(4, 1).value, '序号');
+  assert.equal(sheet.getCell(5, 1).value, 1);
+  assert.equal(sheet.getCell(5, 2).value, 'Sky Castle');
+  assert.equal(sheet.getCell(4, 8).value, '啤工');
+  assert.equal(sheet.getCell(4, 9).value, '退税后啤工');
+  assert.equal(sheet.getCell(4, 10).value, '啤工金额');
+  assert.equal(sheet.getCell(4, 11).value, '啤工占比');
+  assert.equal(sheet.getCell(5, 8).value, 1.5);
+  assert.deepEqual(sheet.getCell(5, 9).value, { formula: 'H5', result: 1.5 });
+  assert.deepEqual(sheet.getCell(5, 10).value, { formula: 'I5*$F5', result: 150 });
+  assert.equal(sheet.getCell(5, 11).value.formula, 'IF($G5=0,0,I5/$G5)');
+  assert.ok(Math.abs(sheet.getCell(5, 11).value.result - 0.15) < 1e-12);
+  assert.equal(sheet.getCell(5, 29).value.formula, 'AB5*(1-11.5%)');
+  assert.equal(sheet.getCell(5, 30).value.formula, 'AC5*$F5');
   assert.equal(sheet.getCell(5, workflowStart).value, '已确认');
   assert.equal(sheet.getCell(5, workflowStart + 1).value, '兴信A');
-  assert.equal(sheet.getCell(5, 6).value, 10);
+  assert.equal(sheet.getCell(5, 7).value, 10);
+  assert.equal(sheet.getCell(6, 3).value, '客户总计');
+  assert.equal(sheet.getCell(6, 6).value.formula, 'SUM(F5:F5)');
+  assert.equal(sheet.getCell(6, 10).value.formula, 'SUM(J5:J5)');
+  assert.equal(sheet.getCell(6, 11).value.formula, 'IF(SUMPRODUCT(F5:F5,G5:G5)=0,0,J6/SUMPRODUCT(F5:F5,G5:G5))');
   const buffer = await workbook.xlsx.writeBuffer();
   assert.ok(buffer.byteLength > 1000);
   const reopened = new (require('exceljs').Workbook)();
   await reopened.xlsx.load(buffer);
-  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('H5').value.formula, 'G5');
-  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('I5').value.formula, 'H5*$E5');
-  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('J5').value.formula, 'IF($F5=0,0,H5/$F5)');
+  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('I5').value.formula, 'H5');
+  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('J5').value.formula, 'I5*$F5');
+  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('K5').value.formula, 'IF($G5=0,0,I5/$G5)');
+});
+
+test('报价汇总按客户排序分组并分配客户序号', () => {
+  const groups = groupSummaryRows([
+    { id: 1, customer: 'TOMY', created_at: '2026-09-01' },
+    { id: 2, customer: 'SpinMaster', created_at: '2026-09-03' },
+    { id: 3, customer: 'TOMY', created_at: '2026-09-05' },
+  ]);
+  assert.deepEqual(groups.map(group => [group.serial, group.customer, group.rows.map(row => row.id)]), [
+    [1, 'SpinMaster', [2]],
+    [2, 'TOMY', [3, 1]],
+  ]);
 });

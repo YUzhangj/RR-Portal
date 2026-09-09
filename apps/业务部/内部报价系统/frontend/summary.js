@@ -39,10 +39,24 @@ function renderStats(rows) {
     <div class="stat-rate"><span>客户确认率</span><strong>${confirmationRate.toFixed(1)}%</strong><span class="summary-rate-track" role="progressbar" aria-valuenow="${confirmationRate.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${confirmationRate}%"></i></span></div>`;
 }
 
-function totalColumns() { return 6 + state.components.length * 4 + 4; }
+function totalColumns() { return 7 + state.components.length * 4 + 4; }
+
+function groupedRows(rows) {
+  const groups = new Map();
+  [...rows].sort((a, b) => {
+    const byCustomer = String(a.customer || '').localeCompare(String(b.customer || ''), 'zh-CN');
+    if (byCustomer) return byCustomer;
+    return String(b.created_at || '').localeCompare(String(a.created_at || ''));
+  }).forEach(row => {
+    const customer = row.customer || '未填写';
+    if (!groups.has(customer)) groups.set(customer, []);
+    groups.get(customer).push(row);
+  });
+  return [...groups.entries()].map(([customer, customerRows], index) => ({ customer, rows: customerRows, serial: index + 1 }));
+}
 
 function renderHead() {
-  const fixed = ['客名', '货号', '货品名称', '报价日期', '实际接单数量', '货价 (HK$)'];
+  const fixed = ['序号', '客名', '货号', '货品名称', '报价日期', '实际接单数量', '货价 (HK$)'];
   const workflow = ['客价确认', '实际生产车间', '备注', ''];
   $('summary-head').innerHTML = `<tr>
     ${fixed.map(label => `<th>${label}</th>`).join('')}
@@ -51,7 +65,7 @@ function renderHead() {
   </tr>`;
 }
 
-function rowHtml(row) {
+function rowHtml(row, serial) {
   const confirmation = row.confirmation || { status: 'pending', workshops: [] };
   const selectedWorkshop = (confirmation.workshops || [])[0] || '';
   const disabled = state.canEdit ? '' : 'disabled';
@@ -69,6 +83,7 @@ function rowHtml(row) {
     return `<td class="component-value">${money(beforeTax)}</td><td class="component-value">${money(afterTax)}</td><td class="component-amount">${money(amount)}</td><td class="component-share">${(share * 100).toFixed(2)}%</td>`;
   }).join('');
   return `<tr data-id="${row.id}">
+    <td class="summary-customer-no">${serial}</td>
     <td><b>${esc(row.customer || '未填写')}</b></td>
     <td><a href="./quote.html?id=${row.id}"><b>${esc(row.quote_no)}</b></a></td>
     <td><b>${esc(row.product_name)}</b>${row.version ? `<small>${esc(row.version)}</small>` : ''}</td>
@@ -83,10 +98,34 @@ function rowHtml(row) {
   </tr>`;
 }
 
+function subtotalHtml(customer, rows, serial) {
+  const qtyTotal = rows.reduce((sum, row) => sum + num(row.confirmation?.confirmed_qty ?? row.qty), 0);
+  const quotedAmount = rows.reduce((sum, row) => {
+    const qty = num(row.confirmation?.confirmed_qty ?? row.qty);
+    const price = num(row.confirmation?.confirmed_price ?? row.quoted_price);
+    return sum + qty * price;
+  }, 0);
+  const componentHtml = state.components.map(item => {
+    const amount = rows.reduce((sum, row) => {
+      const qty = num(row.confirmation?.confirmed_qty ?? row.qty);
+      return sum + num(row.components?.[item.code]) * qty;
+    }, 0);
+    const share = quotedAmount ? amount / quotedAmount : 0;
+    return `<td></td><td></td><td class="component-amount">${money(amount)}</td><td class="component-share">${(share * 100).toFixed(2)}%</td>`;
+  }).join('');
+  return `<tr class="summary-customer-total">
+    <td>${serial}</td><td>${esc(customer)}</td><td colspan="2">客户总计</td><td></td>
+    <td>${money(qtyTotal)}</td><td></td>${componentHtml}<td colspan="4"></td>
+  </tr>`;
+}
+
 function render() {
   const rows = filteredRows();
   renderStats(rows);
-  $('summary-body').innerHTML = rows.length ? rows.map(rowHtml).join('') : `<tr><td colspan="${totalColumns()}" class="summary-empty">暂无匹配报价</td></tr>`;
+  const groups = groupedRows(rows);
+  $('summary-body').innerHTML = groups.length
+    ? groups.map(group => group.rows.map(row => rowHtml(row, group.serial)).join('') + subtotalHtml(group.customer, group.rows, group.serial)).join('')
+    : `<tr><td colspan="${totalColumns()}" class="summary-empty">暂无匹配报价</td></tr>`;
   document.querySelectorAll('.save-summary').forEach(button => { button.onclick = () => saveRow(button.closest('tr')); });
 }
 

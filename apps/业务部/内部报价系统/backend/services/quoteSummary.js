@@ -72,6 +72,22 @@ function afterTaxComponents(components) {
   }));
 }
 
+function groupSummaryRows(rows) {
+  const groups = new Map();
+  [...rows].sort((a, b) => {
+    const byCustomer = String(a.customer || '').localeCompare(String(b.customer || ''), 'zh-CN');
+    if (byCustomer) return byCustomer;
+    return String(b.created_at || '').localeCompare(String(a.created_at || ''));
+  }).forEach(row => {
+    const customer = row.customer || '未填写';
+    if (!groups.has(customer)) groups.set(customer, []);
+    groups.get(customer).push(row);
+  });
+  return [...groups.entries()].map(([customer, customerRows], index) => ({
+    customer, rows: customerRows, serial: index + 1,
+  }));
+}
+
 function buildQuoteSummary(quote, sections) {
   const salesSection = (sections || []).find(section => section.dept === 'sales');
   const sales = parseJson(salesSection && salesSection.payload_json);
@@ -116,7 +132,7 @@ function buildSummaryWorkbook(rows, filters = {}) {
     oddHeader: '&C&B各客报价汇总',
     oddFooter: '&L内部报价系统&C第 &P 页 / 共 &N 页&R&D',
   };
-  const baseHeaders = ['客名', '货号', '货品名称', '报价日期', '实际接单数量', '货价 (HK$)'];
+  const baseHeaders = ['序号', '客名', '货号', '货品名称', '报价日期', '实际接单数量', '货价 (HK$)'];
   const workflowHeaders = ['客价确认', '实际生产车间', '确认人', '确认时间', '备注'];
   const totalColumns = baseHeaders.length + QUOTE_COMPONENTS.length * 4 + workflowHeaders.length;
   ws.getCell(1, 1).value = `${new Date().getFullYear()}年`;
@@ -160,8 +176,12 @@ function buildSummaryWorkbook(rows, filters = {}) {
     column += 1;
   });
   ws.getRow(4).height = 42;
-  rows.forEach((row, index) => {
-    const targetRow = index + 5;
+  let targetRow = 5;
+  groupSummaryRows(rows).forEach(group => {
+    const groupStartRow = targetRow;
+    let quotedAmountTotal = 0;
+    const componentAmountTotals = Object.fromEntries(QUOTE_COMPONENTS.map(([key]) => [key, 0]));
+    group.rows.forEach((row, index) => {
     const confirmation = row.confirmation || {};
     const workshopNames = (confirmation.workshops || []).map(code => {
       const match = WORKSHOPS.find(item => item[0] === code);
@@ -169,13 +189,15 @@ function buildSummaryWorkbook(rows, filters = {}) {
     }).join('、');
     const qty = confirmation.confirmed_qty ?? row.qty;
     const price = confirmation.confirmed_price ?? row.quoted_price;
+    quotedAmountTotal += num(qty) * num(price);
     const componentValues = QUOTE_COMPONENTS.flatMap(([key]) => {
       const beforeTax = num(row.components_before_tax?.[key]);
       const afterTax = num(row.components?.[key]);
+      componentAmountTotals[key] += afterTax * num(qty);
       return [beforeTax, afterTax, afterTax * num(qty), price ? afterTax / price : 0];
     });
     const values = [
-      row.customer, row.quote_no, row.product_name,
+      group.serial, row.customer, row.quote_no, row.product_name,
       row.created_at ? new Date(row.created_at) : '',
       qty, price,
       ...componentValues,
@@ -192,11 +214,11 @@ function buildSummaryWorkbook(rows, filters = {}) {
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: index % 2 ? 'FFF7FAFC' : 'FFFFFFFF' } };
       cell.border = { bottom: { style: 'thin', color: { argb: 'FFD8E2EA' } } };
     });
-    ws.getCell(targetRow, 4).numFmt = 'yyyy-mm-dd';
-    ws.getCell(targetRow, 5).numFmt = '#,##0';
-    ws.getCell(targetRow, 6).numFmt = '#,##0.0000';
+    ws.getCell(targetRow, 5).numFmt = 'yyyy-mm-dd';
+    ws.getCell(targetRow, 6).numFmt = '#,##0';
+    ws.getCell(targetRow, 7).numFmt = '#,##0.0000';
     QUOTE_COMPONENTS.forEach((_, componentIndex) => {
-      const startColumn = 7 + componentIndex * 4;
+      const startColumn = 8 + componentIndex * 4;
       const beforeTaxCell = ws.getCell(targetRow, startColumn);
       const afterTaxCell = ws.getCell(targetRow, startColumn + 1);
       const amountCell = ws.getCell(targetRow, startColumn + 2);
@@ -212,32 +234,69 @@ function buildSummaryWorkbook(rows, filters = {}) {
       };
       afterTaxCell.numFmt = '#,##0.0000';
       amountCell.value = {
-        formula: `${afterTaxCell.address}*$E${targetRow}`,
+        formula: `${afterTaxCell.address}*$F${targetRow}`,
         result: afterTax * num(qty),
       };
       amountCell.numFmt = '#,##0.00';
       shareCell.value = {
-        formula: `IF($F${targetRow}=0,0,${afterTaxCell.address}/$F${targetRow})`,
+        formula: `IF($G${targetRow}=0,0,${afterTaxCell.address}/$G${targetRow})`,
         result: price ? afterTax / price : 0,
       };
       shareCell.numFmt = '0.00%';
     });
     ws.getCell(targetRow, totalColumns - 1).numFmt = 'yyyy-mm-dd hh:mm';
+    targetRow += 1;
+    });
+
+    const groupEndRow = targetRow - 1;
+    const subtotalRow = targetRow;
+    const subtotalValues = [group.serial, group.customer, '客户总计', '', '', '', ''];
+    subtotalValues.forEach((value, columnIndex) => { ws.getCell(subtotalRow, columnIndex + 1).value = value; });
+    ws.mergeCells(subtotalRow, 3, subtotalRow, 4);
+    ws.getCell(subtotalRow, 6).value = {
+      formula: `SUM(F${groupStartRow}:F${groupEndRow})`,
+      result: group.rows.reduce((sum, row) => sum + num(row.confirmation?.confirmed_qty ?? row.qty), 0),
+    };
+    ws.getCell(subtotalRow, 6).numFmt = '#,##0';
+    QUOTE_COMPONENTS.forEach(([key], componentIndex) => {
+      const startColumn = 8 + componentIndex * 4;
+      const amountCell = ws.getCell(subtotalRow, startColumn + 2);
+      const shareCell = ws.getCell(subtotalRow, startColumn + 3);
+      const detailAmountColumn = ws.getColumn(startColumn + 2).letter;
+      amountCell.value = {
+        formula: `SUM(${detailAmountColumn}${groupStartRow}:${detailAmountColumn}${groupEndRow})`,
+        result: componentAmountTotals[key],
+      };
+      amountCell.numFmt = '#,##0.00';
+      shareCell.value = {
+        formula: `IF(SUMPRODUCT(F${groupStartRow}:F${groupEndRow},G${groupStartRow}:G${groupEndRow})=0,0,${amountCell.address}/SUMPRODUCT(F${groupStartRow}:F${groupEndRow},G${groupStartRow}:G${groupEndRow}))`,
+        result: quotedAmountTotal ? componentAmountTotals[key] / quotedAmountTotal : 0,
+      };
+      shareCell.numFmt = '0.00%';
+    });
+    for (let columnIndex = 1; columnIndex <= totalColumns; columnIndex += 1) {
+      const cell = ws.getCell(subtotalRow, columnIndex);
+      cell.font = { name: 'Microsoft YaHei', size: 10, bold: true, color: { argb: 'FF0B4369' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDDEBFA' } };
+      cell.border = { top: { style: 'medium', color: { argb: 'FF3B82F6' } }, bottom: { style: 'thin', color: { argb: 'FF94A3B8' } } };
+      cell.alignment = { vertical: 'middle', horizontal: columnIndex <= 7 ? 'center' : 'right' };
+    }
+    targetRow += 1;
   });
-  ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: Math.max(4, rows.length + 4), column: totalColumns } };
-  [18, 16, 24, 14, 18, 15].forEach((width, index) => { ws.getColumn(index + 1).width = width; });
+  ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: Math.max(4, targetRow - 1), column: totalColumns } };
+  [8, 18, 16, 24, 14, 18, 15].forEach((width, index) => { ws.getColumn(index + 1).width = width; });
   QUOTE_COMPONENTS.forEach((_, componentIndex) => {
-    const startColumn = 7 + componentIndex * 4;
+    const startColumn = 8 + componentIndex * 4;
     ws.getColumn(startColumn).width = 11;
     ws.getColumn(startColumn + 1).width = 12;
     ws.getColumn(startColumn + 2).width = 14;
     ws.getColumn(startColumn + 3).width = 11;
   });
-  [13, 18, 14, 19, 26].forEach((width, index) => { ws.getColumn(7 + QUOTE_COMPONENTS.length * 4 + index).width = width; });
+  [13, 18, 14, 19, 26].forEach((width, index) => { ws.getColumn(8 + QUOTE_COMPONENTS.length * 4 + index).width = width; });
   return wb;
 }
 
 module.exports = {
   WORKSHOPS, QUOTE_COMPONENTS, TAX_DEDUCTION_RATES,
-  afterTaxComponents, buildQuoteSummary, buildSummaryWorkbook, parseJson,
+  afterTaxComponents, groupSummaryRows, buildQuoteSummary, buildSummaryWorkbook, parseJson,
 };
