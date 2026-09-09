@@ -39,14 +39,14 @@ function renderStats(rows) {
     <div class="stat-rate"><span>客户确认率</span><strong>${confirmationRate.toFixed(1)}%</strong><span class="summary-rate-track" role="progressbar" aria-valuenow="${confirmationRate.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${confirmationRate}%"></i></span></div>`;
 }
 
-function totalColumns() { return 6 + state.components.length * 3 + 4; }
+function totalColumns() { return 6 + state.components.length * 4 + 4; }
 
 function renderHead() {
   const fixed = ['客名', '货号', '货品名称', '报价日期', '实际接单数量', '货价 (HK$)'];
   const workflow = ['客价确认', '实际生产车间', '备注', ''];
   $('summary-head').innerHTML = `<tr>
     ${fixed.map(label => `<th>${label}</th>`).join('')}
-    ${state.components.map((item, index) => `<th class="component-unit group-${index % 2}">${esc(item.name)}<br>减税后单价</th><th class="component-sub group-${index % 2}">${esc(item.name)}<br>减税后金额</th><th class="component-sub group-${index % 2}">${esc(item.name)}<br>占货价</th>`).join('')}
+    ${state.components.map((item, index) => `<th class="component-unit group-${index % 2}">${esc(item.name)}</th><th class="component-sub group-${index % 2}">退税后${esc(item.name)}</th><th class="component-sub group-${index % 2}">${esc(item.name)}金额</th><th class="component-sub group-${index % 2}">${esc(item.name)}占比</th>`).join('')}
     ${workflow.map(label => `<th class="workflow-head">${label}</th>`).join('')}
   </tr>`;
 }
@@ -62,10 +62,11 @@ function rowHtml(row) {
   const price = confirmation.confirmed_price ?? row.quoted_price;
   const qty = confirmation.confirmed_qty ?? row.qty;
   const componentHtml = state.components.map(item => {
-    const unitPrice = num(row.components?.[item.code]);
-    const amount = unitPrice * num(qty);
-    const share = num(price) ? unitPrice / num(price) : 0;
-    return `<td class="component-value">${money(unitPrice)}</td><td class="component-amount">${money(amount)}</td><td class="component-share">${(share * 100).toFixed(2)}%</td>`;
+    const beforeTax = num(row.components_before_tax?.[item.code]);
+    const afterTax = num(row.components?.[item.code]);
+    const amount = afterTax * num(qty);
+    const share = num(price) ? afterTax / num(price) : 0;
+    return `<td class="component-value">${money(beforeTax)}</td><td class="component-value">${money(afterTax)}</td><td class="component-amount">${money(amount)}</td><td class="component-share">${(share * 100).toFixed(2)}%</td>`;
   }).join('');
   return `<tr data-id="${row.id}">
     <td><b>${esc(row.customer || '未填写')}</b></td>

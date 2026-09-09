@@ -92,6 +92,7 @@ function buildQuoteSummary(quote, sections) {
     created_at: quote.created_at,
     quote_status: quote.status,
     quoted_price: calculated.hasSourceData ? num(calculated.quotedPrice) : num(pricing.t1?.base_price),
+    components_before_tax: beforeTaxComponents,
     components,
     component_basis: 'after_tax',
   };
@@ -117,7 +118,7 @@ function buildSummaryWorkbook(rows, filters = {}) {
   };
   const baseHeaders = ['客名', '货号', '货品名称', '报价日期', '实际接单数量', '货价 (HK$)'];
   const workflowHeaders = ['客价确认', '实际生产车间', '确认人', '确认时间', '备注'];
-  const totalColumns = baseHeaders.length + QUOTE_COMPONENTS.length * 3 + workflowHeaders.length;
+  const totalColumns = baseHeaders.length + QUOTE_COMPONENTS.length * 4 + workflowHeaders.length;
   ws.getCell(1, 1).value = `${new Date().getFullYear()}年`;
   ws.getCell(1, 1).font = { bold: true, size: 14, name: 'Microsoft YaHei' };
   ws.getCell(1, 1).alignment = { horizontal: 'center', vertical: 'middle' };
@@ -147,11 +148,11 @@ function buildSummaryWorkbook(rows, filters = {}) {
   });
   QUOTE_COMPONENTS.forEach(([, label], componentIndex) => {
     const fill = componentIndex % 2 ? 'FFEAF0F8' : 'FFD9E2F3';
-    [`${label}减税后单价`, `${label}减税后金额`, `${label}占货价`].forEach((header, offset) => {
+    [label, `退税后${label}`, `${label}金额`, `${label}占比`].forEach((header, offset) => {
       ws.getCell(4, column + offset).value = header;
       headerStyle(ws.getCell(4, column + offset), offset ? fill : 'FFFFFFFF');
     });
-    column += 3;
+    column += 4;
   });
   workflowHeaders.forEach(header => {
     ws.getCell(4, column).value = header;
@@ -169,8 +170,9 @@ function buildSummaryWorkbook(rows, filters = {}) {
     const qty = confirmation.confirmed_qty ?? row.qty;
     const price = confirmation.confirmed_price ?? row.quoted_price;
     const componentValues = QUOTE_COMPONENTS.flatMap(([key]) => {
-      const unitPrice = num(row.components?.[key]);
-      return [unitPrice, unitPrice * num(qty), price ? unitPrice / price : 0];
+      const beforeTax = num(row.components_before_tax?.[key]);
+      const afterTax = num(row.components?.[key]);
+      return [beforeTax, afterTax, afterTax * num(qty), price ? afterTax / price : 0];
     });
     const values = [
       row.customer, row.quote_no, row.product_name,
@@ -194,20 +196,29 @@ function buildSummaryWorkbook(rows, filters = {}) {
     ws.getCell(targetRow, 5).numFmt = '#,##0';
     ws.getCell(targetRow, 6).numFmt = '#,##0.0000';
     QUOTE_COMPONENTS.forEach((_, componentIndex) => {
-      const startColumn = 7 + componentIndex * 3;
-      const unitCell = ws.getCell(targetRow, startColumn);
-      const amountCell = ws.getCell(targetRow, startColumn + 1);
-      const shareCell = ws.getCell(targetRow, startColumn + 2);
-      const unitPrice = num(row.components?.[QUOTE_COMPONENTS[componentIndex][0]]);
-      unitCell.numFmt = '#,##0.0000';
+      const startColumn = 7 + componentIndex * 4;
+      const beforeTaxCell = ws.getCell(targetRow, startColumn);
+      const afterTaxCell = ws.getCell(targetRow, startColumn + 1);
+      const amountCell = ws.getCell(targetRow, startColumn + 2);
+      const shareCell = ws.getCell(targetRow, startColumn + 3);
+      const key = QUOTE_COMPONENTS[componentIndex][0];
+      const beforeTax = num(row.components_before_tax?.[key]);
+      const afterTax = num(row.components?.[key]);
+      const rate = num(TAX_DEDUCTION_RATES[key]);
+      beforeTaxCell.numFmt = '#,##0.0000';
+      afterTaxCell.value = {
+        formula: rate ? `${beforeTaxCell.address}*(1-${rate}%)` : beforeTaxCell.address,
+        result: afterTax,
+      };
+      afterTaxCell.numFmt = '#,##0.0000';
       amountCell.value = {
-        formula: `${unitCell.address}*$E${targetRow}`,
-        result: unitPrice * num(qty),
+        formula: `${afterTaxCell.address}*$E${targetRow}`,
+        result: afterTax * num(qty),
       };
       amountCell.numFmt = '#,##0.00';
       shareCell.value = {
-        formula: `IF($F${targetRow}=0,0,${unitCell.address}/$F${targetRow})`,
-        result: price ? unitPrice / price : 0,
+        formula: `IF($F${targetRow}=0,0,${afterTaxCell.address}/$F${targetRow})`,
+        result: price ? afterTax / price : 0,
       };
       shareCell.numFmt = '0.00%';
     });
@@ -216,12 +227,13 @@ function buildSummaryWorkbook(rows, filters = {}) {
   ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: Math.max(4, rows.length + 4), column: totalColumns } };
   [18, 16, 24, 14, 18, 15].forEach((width, index) => { ws.getColumn(index + 1).width = width; });
   QUOTE_COMPONENTS.forEach((_, componentIndex) => {
-    const startColumn = 7 + componentIndex * 3;
+    const startColumn = 7 + componentIndex * 4;
     ws.getColumn(startColumn).width = 11;
-    ws.getColumn(startColumn + 1).width = 14;
-    ws.getColumn(startColumn + 2).width = 11;
+    ws.getColumn(startColumn + 1).width = 12;
+    ws.getColumn(startColumn + 2).width = 14;
+    ws.getColumn(startColumn + 3).width = 11;
   });
-  [13, 18, 14, 19, 26].forEach((width, index) => { ws.getColumn(7 + QUOTE_COMPONENTS.length * 3 + index).width = width; });
+  [13, 18, 14, 19, 26].forEach((width, index) => { ws.getColumn(7 + QUOTE_COMPONENTS.length * 4 + index).width = width; });
   return wb;
 }
 
