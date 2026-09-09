@@ -239,6 +239,23 @@ test('网页汇总使用后端完整栏目清单并保持固定表格布局', ()
   assert.match(html, /<colgroup id="summary-cols"><\/colgroup>/);
 });
 
+test('汇总导出在当前页面内下载并按业务分区显示不同颜色', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/summary.js'), 'utf8');
+  assert.match(source, /fetch\(`\$\{base\}\/api\/quote-summary\/export\/xlsx/);
+  assert.match(source, /URL\.createObjectURL\(blob\)/);
+
+  const workbook = buildSummaryWorkbook([{
+    id: 1, customer: 'TOMY', quote_no: 'COLOR-1', product_name: '配色测试', qty: 1,
+    quoted_price: 10, created_at: '2026-09-09', components_before_tax: {}, components: {},
+    confirmation: { status: 'confirmed', workshops: [] },
+  }]);
+  const sheet = workbook.getWorksheet('各客报价汇总');
+  const headerColumn = label => sheet.getRow(4).values.findIndex(value => value === label);
+  assert.notEqual(sheet.getCell(4, headerColumn('啤工')).fill.fgColor.argb, sheet.getCell(4, headerColumn('彩盒')).fill.fgColor.argb);
+  assert.notEqual(sheet.getCell(4, headerColumn('彩盒')).fill.fgColor.argb, sheet.getCell(4, headerColumn('电子')).fill.fgColor.argb);
+  assert.equal(sheet.getCell(5, headerColumn('客价确认')).fill.fgColor.argb, 'FFC6EFCE');
+});
+
 test('完整汇总栏目严格按参考表顺序', () => {
   const labels = SUMMARY_COLUMNS.map(([, label]) => label);
   assert.deepEqual(labels.slice(0, 12), ['啤工','退税后啤工','啤工金额','啤工占比','装工','退税后装工','装工金额','装工占比','喷印工','退税后喷印工','喷印工金额','喷印工占比']);

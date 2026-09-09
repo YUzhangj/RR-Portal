@@ -503,6 +503,18 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
   const workflow = [['confirmation_status','客价确认'], ['confirmed_by','确认人'], ['confirmed_at','确认时间'], ['note','备注']];
   const columns = [...BASE_SUMMARY_COLUMNS, ...SUMMARY_COLUMNS, ...workflow];
   const columnByKey = Object.fromEntries(columns.map(([key], index) => [key, index + 1]));
+  const headerFillFor = (key, index) => {
+    if (index < BASE_SUMMARY_COLUMNS.length) return 'FFFFFFFF';
+    if (workflow.some(([workflowKey]) => workflowKey === key)) return 'FFFFE699';
+    if (/^(injection_labor|assembly_labor|painting_labor)/.test(key)) return 'FFD9EAF7';
+    if (/^(imp_mat|dom_mat|raw_material|abs_material|total_purchase_price)/.test(key)) return 'FFE2F0D9';
+    if (/^(color_box|libao|suction|carton)/.test(key)) return 'FFFFF2CC';
+    if (/^(plating|electronic|battery|hardware)/.test(key)) return 'FFE4DFEC';
+    if (/^(slush|sewing_hair|sewing_cloth|paint_material)/.test(key)) return 'FFFCE4D6';
+    if (/^(other_buy|misc|freight|cabinet|surtax|rmb_purchase)/.test(key)) return 'FFDDEBF7';
+    if (/^(production_|total_)/.test(key)) return 'FFD9EAD3';
+    return 'FFF4CCCC';
+  };
   const ref = (key, row) => `${ws.getColumn(columnByKey[key]).letter}${row}`;
   const rawKeys = ['injection_labor','assembly_labor','painting_labor','imp_mat','dom_mat','color_box','libao','suction','carton','plating','electronic','battery','hardware','slush','sewing_hair','sewing_cloth','paint_material','other_buy','misc','freight','cabinet'];
   const formulaFor = (key, row, source) => {
@@ -564,7 +576,7 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
   ws.getCell(1,2).value='各客产品报价汇总表'; ws.getCell(1,2).font={bold:true,size:16,name:'Microsoft YaHei'};
   ws.mergeCells(2,1,2,columns.length); ws.getCell(2,1).value=`客户：${filters.customer||'全部'}    导出日期：${new Date().toLocaleDateString('zh-CN')}`;
   const border = { top:{style:'thin',color:{argb:'FF94A3B8'}}, left:{style:'thin',color:{argb:'FF94A3B8'}}, bottom:{style:'thin',color:{argb:'FF94A3B8'}}, right:{style:'thin',color:{argb:'FF94A3B8'}} };
-  columns.forEach(([,label],i)=>{ const c=ws.getCell(4,i+1); c.value=label; c.font={bold:true,color:{argb:'FF153A5B'},name:'Microsoft YaHei'}; c.alignment={horizontal:'center',vertical:'middle',wrapText:true}; c.border=border; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:i<8?'FFFFFFFF':(i%2?'FFEAF0F8':'FFD9E2F3')}}; });
+  columns.forEach(([key,label],i)=>{ const c=ws.getCell(4,i+1); c.value=label; c.font={bold:true,color:{argb:'FF153A5B'},name:'Microsoft YaHei'}; c.alignment={horizontal:'center',vertical:'middle',wrapText:true}; c.border=border; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:headerFillFor(key,i)}}; });
   ws.getRow(4).height=52;
   let rowNo=5;
   groupSummaryRows(rows).forEach(group=>{
@@ -585,6 +597,9 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
         c.fill={type:'pattern',pattern:'solid',fgColor:{argb:index%2?'FFF7FAFC':'FFFFFFFF'}};
         if(type==='percent') c.numFmt='0.00%'; else if(['unit','price','number'].includes(type)) c.numFmt='#,##0.0000'; else if(['amount','qty'].includes(type)) c.numFmt='#,##0.00'; else if(type==='date') c.numFmt='yyyy-mm-dd';
       });
+      const statusCell=ws.getCell(rowNo,columnByKey.confirmation_status);
+      statusCell.fill={type:'pattern',pattern:'solid',fgColor:{argb:confirmation.status==='confirmed'?'FFC6EFCE':'FFFFEB9C'}};
+      statusCell.font={name:'Microsoft YaHei',size:9,bold:true,color:{argb:confirmation.status==='confirmed'?'FF006100':'FF9C6500'}};
       ws.getRow(rowNo).height=Math.max(24,wrappedLineCount(row.customer,18)*15,wrappedLineCount(row.product_name,22)*15); rowNo++;
     });
     const end=rowNo-1, subtotal=rowNo;

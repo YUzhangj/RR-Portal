@@ -164,11 +164,39 @@ async function load(showLoading = true) {
 $('summary-customer').onchange = render;
 $('summary-status').onchange = render;
 $('summary-year').textContent = `${new Date().getFullYear()}年`;
-$('summary-export').onclick = () => {
+$('summary-export').onclick = async () => {
+  const button = $('summary-export');
   const params = new URLSearchParams();
   if ($('summary-customer').value) params.set('customer', $('summary-customer').value);
   if ($('summary-status').value) params.set('status', $('summary-status').value);
   const base = location.pathname.replace(/\/[^/]*$/, '');
-  location.href = `${base}/api/quote-summary/export/xlsx?${params}`;
+  button.disabled = true;
+  button.textContent = '正在导出…';
+  try {
+    const response = await fetch(`${base}/api/quote-summary/export/xlsx?${params}`, { credentials: 'include' });
+    if (response.status === 401) {
+      location.href = './index.html';
+      throw new Error('请先登录');
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `导出失败（${response.status}）`);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/)?.[1];
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = encodedName ? decodeURIComponent(encodedName) : '各客报价汇总.xlsx';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+  } catch (error) {
+    alert(error.message || '导出失败，请稍后重试');
+  } finally {
+    button.disabled = false;
+    button.textContent = '⬇️ 导出报价汇总';
+  }
 };
 load().catch(error => { $('summary-body').innerHTML = `<tr><td colspan="${totalColumns()}" class="summary-empty summary-negative">${esc(error.message)}</td></tr>`; });
