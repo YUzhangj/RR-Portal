@@ -126,9 +126,9 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   assert.equal(sheet.getCell(4, 11).value, '啤工金额');
   assert.equal(sheet.getCell(4, 12).value, '啤工占比');
   assert.equal(sheet.getCell(5, 9).value, 1.5);
-  assert.deepEqual(sheet.getCell(5, 10).value, { formula: 'ROUND(1.5,8)', result: 1.5 });
-  assert.deepEqual(sheet.getCell(5, 11).value, { formula: 'ROUND(150,8)', result: 150 });
-  assert.equal(sheet.getCell(5, 12).value.formula, 'ROUND(0.15,8)');
+  assert.deepEqual(sheet.getCell(5, 10).value, { formula: 'I5', result: 1.5 });
+  assert.deepEqual(sheet.getCell(5, 11).value, { formula: 'J5*G5', result: 150 });
+  assert.equal(sheet.getCell(5, 12).value.formula, 'IF(H5=0,0,J5/H5)');
   assert.ok(Math.abs(sheet.getCell(5, 12).value.result - 0.15) < 1e-12);
   assert.equal(sheet.getCell(4, 23).value, '退税后原料');
   assert.equal(sheet.getCell(4, 28).value, '总采购价');
@@ -154,8 +154,8 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   assert.ok(buffer.byteLength > 1000);
   const reopened = new (require('exceljs').Workbook)();
   await reopened.xlsx.load(buffer);
-  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('J5').value.formula, 'ROUND(1.5,8)');
-  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('K5').value.formula, 'ROUND(150,8)');
+  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('J5').value.formula, 'I5');
+  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('K5').value.formula, 'J5*G5');
 });
 
 test('报价汇总按客户排序分组，序号由每个客户组内重新开始', () => {
