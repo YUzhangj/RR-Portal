@@ -46,7 +46,7 @@ function renderHead() {
   const workflow = ['客价确认', '实际生产车间', '备注', ''];
   $('summary-head').innerHTML = `<tr>
     ${fixed.map(label => `<th>${label}</th>`).join('')}
-    ${state.components.map((item, index) => `<th class="component-unit group-${index % 2}">${esc(item.name)}</th><th class="component-sub group-${index % 2}">${esc(item.name)}金额</th><th class="component-sub group-${index % 2}">${esc(item.name)}占比</th>`).join('')}
+    ${state.components.map((item, index) => `<th class="component-unit group-${index % 2}">${esc(item.name)}<br>减税后单价</th><th class="component-sub group-${index % 2}">${esc(item.name)}<br>减税后金额</th><th class="component-sub group-${index % 2}">${esc(item.name)}<br>占货价</th>`).join('')}
     ${workflow.map(label => `<th class="workflow-head">${label}</th>`).join('')}
   </tr>`;
 }

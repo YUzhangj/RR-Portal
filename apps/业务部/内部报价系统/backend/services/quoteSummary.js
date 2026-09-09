@@ -35,6 +35,27 @@ const QUOTE_COMPONENTS = [
   ['misc', '杂项', 't2'],
 ];
 
+// 与报价单“减税明细”保持同一口径。汇总页和汇总导出均展示减税后单价。
+// 未列出的项目（人工、进口料、吹气、电子、吊柜费、杂项）不减税。
+const TAX_DEDUCTION_RATES = Object.freeze({
+  paint_material: 11.5,
+  dom_mat: 11.5,
+  slush: 3,
+  sewing_hair: 11.5,
+  sewing_cloth: 11.5,
+  hardware: 11.5,
+  motor: 11.5,
+  suction: 6,
+  glue_bag: 11.5,
+  color_box: 11.5,
+  battery: 11.5,
+  libao: 11.5,
+  plating: 0.99,
+  other_buy: 11.5,
+  carton: 11.5,
+  freight: 8.26,
+});
+
 function num(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
@@ -44,15 +65,23 @@ function parseJson(raw, fallback = {}) {
   try { return JSON.parse(raw || '') || fallback; } catch { return fallback; }
 }
 
+function afterTaxComponents(components) {
+  return Object.fromEntries(QUOTE_COMPONENTS.map(([key]) => {
+    const rate = num(TAX_DEDUCTION_RATES[key]);
+    return [key, +(num(components?.[key]) * (1 - rate / 100)).toFixed(6)];
+  }));
+}
+
 function buildQuoteSummary(quote, sections) {
   const salesSection = (sections || []).find(section => section.dept === 'sales');
   const sales = parseJson(salesSection && salesSection.payload_json);
   const pricing = sales?.pricing_summary || {};
   const calculated = calculateQuoteCosts(quote, sections);
-  const components = Object.fromEntries(QUOTE_COMPONENTS.map(([key, , table]) => {
+  const beforeTaxComponents = Object.fromEntries(QUOTE_COMPONENTS.map(([key, , table]) => {
     const liveValue = calculated.components[key];
     return [key, calculated.hasSourceData ? num(liveValue) : num(pricing[table]?.[key])];
   }));
+  const components = afterTaxComponents(beforeTaxComponents);
   return {
     id: quote.id,
     quote_no: quote.quote_no,
@@ -64,6 +93,7 @@ function buildQuoteSummary(quote, sections) {
     quote_status: quote.status,
     quoted_price: calculated.hasSourceData ? num(calculated.quotedPrice) : num(pricing.t1?.base_price),
     components,
+    component_basis: 'after_tax',
   };
 }
 
@@ -117,7 +147,7 @@ function buildSummaryWorkbook(rows, filters = {}) {
   });
   QUOTE_COMPONENTS.forEach(([, label], componentIndex) => {
     const fill = componentIndex % 2 ? 'FFEAF0F8' : 'FFD9E2F3';
-    [label, `${label}金额`, `${label}占比`].forEach((header, offset) => {
+    [`${label}减税后单价`, `${label}减税后金额`, `${label}占货价`].forEach((header, offset) => {
       ws.getCell(4, column + offset).value = header;
       headerStyle(ws.getCell(4, column + offset), offset ? fill : 'FFFFFFFF');
     });
@@ -195,4 +225,7 @@ function buildSummaryWorkbook(rows, filters = {}) {
   return wb;
 }
 
-module.exports = { WORKSHOPS, QUOTE_COMPONENTS, buildQuoteSummary, buildSummaryWorkbook, parseJson };
+module.exports = {
+  WORKSHOPS, QUOTE_COMPONENTS, TAX_DEDUCTION_RATES,
+  afterTaxComponents, buildQuoteSummary, buildSummaryWorkbook, parseJson,
+};
