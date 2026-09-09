@@ -159,3 +159,8 @@ test('网页汇总的接单数量和货价列使用紧凑宽度', () => {
   assert.match(styles, /th:nth-child\(7\).*width:126px/);
   assert.match(styles, /td:nth-child\(6\) input.*width:100%/);
 });
+
+test('网页汇总的原价和退税后单价列保持等宽', () => {
+  const styles = fs.readFileSync(path.join(__dirname, '../frontend/styles.css'), 'utf8');
+  assert.match(styles, /th\.component-unit,.summary-table td\.component-value\{[^}]*width:92px[^}]*max-width:92px/);
+});
