@@ -753,3 +753,4 @@ h3 .upload-mold-sheet button:hover { background: #334155; }
 .summary-table th.component-unit,.summary-table td.component-value{box-sizing:border-box;min-width:92px;width:92px;max-width:92px}
 .summary-table .component-share-total{background:#dbeafe!important;color:#0b4369;font-weight:800}
 .summary-table{table-layout:fixed}.summary-table th,.summary-table td{box-sizing:border-box;overflow:hidden}
+.summary-table tbody tr{height:auto}.summary-table td:nth-child(2),.summary-table td:nth-child(4),.summary-table td:nth-child(5){white-space:normal;overflow-wrap:anywhere;word-break:break-word;line-height:1.35}

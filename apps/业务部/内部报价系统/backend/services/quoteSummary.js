@@ -61,6 +61,13 @@ function num(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function wrappedLineCount(value, width) {
+  return String(value ?? '').split(/\r?\n/).reduce((total, line) => {
+    const displayWidth = [...line].reduce((sum, char) => sum + (/[^\u0000-\u00ff]/.test(char) ? 2 : 1), 0);
+    return total + Math.max(1, Math.ceil(displayWidth / width));
+  }, 0);
+}
+
 function parseJson(raw, fallback = {}) {
   try { return JSON.parse(raw || '') || fallback; } catch { return fallback; }
 }
@@ -270,6 +277,15 @@ function buildSummaryWorkbook(rows, filters = {}) {
     };
     ws.getCell(targetRow, totalShareColumn).numFmt = '0.00%';
     ws.getCell(targetRow, totalColumns - 1).numFmt = 'yyyy-mm-dd hh:mm';
+    const detailLineCount = Math.max(
+      wrappedLineCount(row.customer, 18),
+      wrappedLineCount(workshopNames, 16),
+      wrappedLineCount(row.quote_no, 16),
+      wrappedLineCount(row.product_name, 24),
+      wrappedLineCount(confirmation.confirmed_by, 14),
+      wrappedLineCount(confirmation.note, 26),
+    );
+    ws.getRow(targetRow).height = Math.max(22, detailLineCount * 15);
     targetRow += 1;
     });
 
@@ -328,6 +344,7 @@ function buildSummaryWorkbook(rows, filters = {}) {
       result: subtotalShareTotal,
     };
     ws.getCell(subtotalRow, totalShareColumn).numFmt = '0.00%';
+    ws.getRow(subtotalRow).height = Math.max(22, wrappedLineCount(group.customer, 18) * 15);
     for (let columnIndex = 1; columnIndex <= totalColumns; columnIndex += 1) {
       const cell = ws.getCell(subtotalRow, columnIndex);
       cell.font = { name: 'Microsoft YaHei', size: 10, bold: true, color: { argb: 'FF0B4369' } };

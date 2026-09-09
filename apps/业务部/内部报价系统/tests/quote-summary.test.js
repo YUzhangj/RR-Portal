@@ -204,6 +204,20 @@ test('客户总计逐列汇总货价、单价和占比，即使接单数量为�
   assert.equal(sheet.getCell(7, totalShareColumn).value.result, 0.2);
 });
 
+test('导出表长内容自动换行并增加行高', () => {
+  const customer = 'SpinMaster-毛绒（印度尼西亚）长客户名称';
+  const workbook = buildSummaryWorkbook([{
+    id: 1, customer, quote_no: 'LONG-QUOTE-NUMBER-2026', product_name: '名称较长需要自动换行显示的产品',
+    qty: 1, quoted_price: 10, created_at: '2026-09-09',
+    components_before_tax: {}, components: {},
+    confirmation: { note: '这是一段较长的备注内容，需要在导出的单元格中自动换行显示完整' },
+  }]);
+  const sheet = workbook.getWorksheet('各客报价汇总');
+  assert.equal(sheet.getCell('B5').alignment.wrapText, true);
+  assert.ok(sheet.getRow(5).height > 22);
+  assert.ok(sheet.getRow(6).height > 22);
+});
+
 test('网页汇总的接单数量和货价列使用紧凑宽度', () => {
   const styles = fs.readFileSync(path.join(__dirname, '../frontend/styles.css'), 'utf8');
   assert.match(styles, /th:nth-child\(7\).*width:112px/);
@@ -217,6 +231,7 @@ test('网页汇总的原价和退税后单价列保持等宽', () => {
   const html = fs.readFileSync(path.join(__dirname, '../frontend/summary.html'), 'utf8');
   assert.match(styles, /th\.component-unit,.summary-table td\.component-value\{[^}]*width:92px[^}]*max-width:92px/);
   assert.match(styles, /summary-table\{table-layout:fixed\}/);
+  assert.match(styles, /td:nth-child\(2\).*white-space:normal.*overflow-wrap:anywhere.*word-break:break-word/);
   assert.match(source, /state\.components\.forEach\(\(\) => widths\.push\(92, 92, 96, 78\)\)/);
   assert.match(source, /各金额<br>占比求和/);
   assert.match(source, /class="component-share component-share-total"/);
