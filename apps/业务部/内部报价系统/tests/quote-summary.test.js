@@ -232,6 +232,7 @@ test('网页汇总使用后端完整栏目清单并保持固定表格布局', ()
   const html = fs.readFileSync(path.join(__dirname, '../frontend/summary.html'), 'utf8');
   assert.match(styles, /th\.component-unit,.summary-table td\.component-value\{[^}]*width:92px[^}]*max-width:92px/);
   assert.match(styles, /summary-table\{table-layout:fixed\}/);
+  assert.match(styles, /summary-table thead th\{height:auto;min-height:52px;white-space:normal;overflow-wrap:anywhere;word-break:break-word/);
   assert.match(styles, /td:nth-child\(2\).*white-space:normal.*overflow-wrap:anywhere.*word-break:break-word/);
   assert.match(source, /state\.summaryColumns\.forEach/);
   assert.match(source, /data\.summary_columns/);
