@@ -128,7 +128,15 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   assert.equal(sheet.getCell(4, workflowStart).value, '客价确认');
   assert.equal(sheet.getCell(5, workflowStart).value, '已确认');
   assert.equal(sheet.getCell(5, 8).value, 10);
+  ['top', 'left', 'bottom', 'right'].forEach(edge => {
+    assert.equal(sheet.getCell(5, 1).border[edge].style, 'thin');
+    assert.equal(sheet.getCell(5, totalShareColumn).border[edge].style, 'thin');
+  });
   assert.equal(sheet.getCell(6, 4).value, '客户总计');
+  assert.equal(sheet.getCell(6, 2).border.top.style, 'medium');
+  assert.equal(sheet.getCell(6, 2).border.left.style, 'thin');
+  assert.equal(sheet.getCell(6, 2).border.bottom.style, 'thin');
+  assert.equal(sheet.getCell(6, 2).border.right.style, 'thin');
   assert.equal(sheet.getCell(6, 7).value.formula, 'SUM(G5:G5)');
   assert.equal(sheet.getCell(6, 8).value.formula, 'SUM(H5:H5)');
   assert.equal(sheet.getCell(6, 9).value.formula, 'SUM(I5:I5)');

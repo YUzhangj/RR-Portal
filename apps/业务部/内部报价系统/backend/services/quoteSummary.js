@@ -224,7 +224,12 @@ function buildSummaryWorkbook(rows, filters = {}) {
       cell.font = { name: 'Microsoft YaHei', size: 10 };
       cell.alignment = { vertical: 'middle', wrapText: true };
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: index % 2 ? 'FFF7FAFC' : 'FFFFFFFF' } };
-      cell.border = { bottom: { style: 'thin', color: { argb: 'FFD8E2EA' } } };
+      cell.border = {
+        top: { style: 'thin', color: { argb: 'FF94A3B8' } },
+        left: { style: 'thin', color: { argb: 'FF94A3B8' } },
+        bottom: { style: 'thin', color: { argb: 'FF94A3B8' } },
+        right: { style: 'thin', color: { argb: 'FF94A3B8' } },
+      };
     });
     ws.getCell(targetRow, 6).numFmt = 'yyyy-mm-dd';
     ws.getCell(targetRow, 7).numFmt = '#,##0';
@@ -327,7 +332,12 @@ function buildSummaryWorkbook(rows, filters = {}) {
       const cell = ws.getCell(subtotalRow, columnIndex);
       cell.font = { name: 'Microsoft YaHei', size: 10, bold: true, color: { argb: 'FF0B4369' } };
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDDEBFA' } };
-      cell.border = { top: { style: 'medium', color: { argb: 'FF3B82F6' } }, bottom: { style: 'thin', color: { argb: 'FF94A3B8' } } };
+      cell.border = {
+        top: { style: 'medium', color: { argb: 'FF3B82F6' } },
+        left: { style: 'thin', color: { argb: 'FF94A3B8' } },
+        bottom: { style: 'thin', color: { argb: 'FF94A3B8' } },
+        right: { style: 'thin', color: { argb: 'FF94A3B8' } },
+      };
       cell.alignment = { vertical: 'middle', horizontal: columnIndex <= 8 ? 'center' : 'right' };
     }
     targetRow += 1;
