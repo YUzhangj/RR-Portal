@@ -133,7 +133,7 @@ function buildSummaryWorkbook(rows, filters = {}) {
     oddFooter: '&L内部报价系统&C第 &P 页 / 共 &N 页&R&D',
   };
   const baseHeaders = ['序号', '客名', '实际生产车间', '货号', '货品名称', '报价日期', '实际接单数量', '货价 (HK$)'];
-  const workflowHeaders = ['客价确认', '备注'];
+  const workflowHeaders = ['客价确认', '确认人', '确认时间', '备注'];
   const totalShareColumn = baseHeaders.length + QUOTE_COMPONENTS.length * 4 + 1;
   const totalColumns = totalShareColumn + workflowHeaders.length;
   ws.getCell(1, 1).value = `${new Date().getFullYear()}年`;
@@ -214,6 +214,8 @@ function buildSummaryWorkbook(rows, filters = {}) {
       ...componentValues,
       shareTotal,
       confirmation.status === 'confirmed' ? '已确认' : '待确认',
+      confirmation.confirmed_by || '',
+      confirmation.confirmed_at ? new Date(confirmation.confirmed_at) : '',
       confirmation.note || '',
     ];
     values.forEach((value, columnIndex) => {
@@ -262,6 +264,7 @@ function buildSummaryWorkbook(rows, filters = {}) {
       result: shareTotal,
     };
     ws.getCell(targetRow, totalShareColumn).numFmt = '0.00%';
+    ws.getCell(targetRow, totalColumns - 1).numFmt = 'yyyy-mm-dd hh:mm';
     targetRow += 1;
     });
 
@@ -339,7 +342,7 @@ function buildSummaryWorkbook(rows, filters = {}) {
     ws.getColumn(startColumn + 3).width = 11;
   });
   ws.getColumn(totalShareColumn).width = 14;
-  [13, 26].forEach((width, index) => { ws.getColumn(totalShareColumn + 1 + index).width = width; });
+  [13, 14, 19, 26].forEach((width, index) => { ws.getColumn(totalShareColumn + 1 + index).width = width; });
   return wb;
 }
 
