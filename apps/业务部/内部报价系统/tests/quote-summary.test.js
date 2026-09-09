@@ -118,8 +118,11 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   assert.equal(sheet.getCell(5, 8).value, 10);
   assert.equal(sheet.getCell(6, 4).value, '客户总计');
   assert.equal(sheet.getCell(6, 7).value.formula, 'SUM(G5:G5)');
+  assert.equal(sheet.getCell(6, 8).value.formula, 'SUM(H5:H5)');
+  assert.equal(sheet.getCell(6, 9).value.formula, 'SUM(I5:I5)');
+  assert.equal(sheet.getCell(6, 10).value.formula, 'SUM(J5:J5)');
   assert.equal(sheet.getCell(6, 11).value.formula, 'SUM(K5:K5)');
-  assert.equal(sheet.getCell(6, 12).value.formula, 'IF(SUMPRODUCT(G5:G5,H5:H5)=0,0,K6/SUMPRODUCT(G5:G5,H5:H5))');
+  assert.equal(sheet.getCell(6, 12).value.formula, 'SUM(L5:L5)');
   assert.match(sheet.getCell(6, totalShareColumn).value.formula, /^SUM\(L6,/);
   assert.ok(Math.abs(sheet.getCell(6, totalShareColumn).value.result - 0.327) < 1e-12);
   const buffer = await workbook.xlsx.writeBuffer();
@@ -160,6 +163,25 @@ test('导出表按客户组内逐条编号并在总计行留空', () => {
   assert.equal(sheet.getCell('A7').value, '');
   assert.equal(sheet.getCell('A8').value, 1);
   assert.equal(sheet.getCell('A9').value, '');
+});
+
+test('客户总计逐列汇总货价、单价和占比，即使接单数量为零', () => {
+  const base = {
+    customer: 'TOMY', product_name: '产品', qty: 0,
+    components_before_tax: {}, confirmation: { confirmed_qty: 0 },
+  };
+  const workbook = buildSummaryWorkbook([
+    { ...base, id: 1, quote_no: 'T-1', quoted_price: 10, components_before_tax: { injection_labor: 1 }, components: { injection_labor: 1 } },
+    { ...base, id: 2, quote_no: 'T-2', quoted_price: 20, components_before_tax: { injection_labor: 2 }, components: { injection_labor: 2 } },
+  ]);
+  const sheet = workbook.getWorksheet('各客报价汇总');
+  const totalShareColumn = 9 + QUOTE_COMPONENTS.length * 4;
+  assert.deepEqual(sheet.getCell('H7').value, { formula: 'SUM(H5:H6)', result: 30 });
+  assert.deepEqual(sheet.getCell('I7').value, { formula: 'SUM(I5:I6)', result: 3 });
+  assert.deepEqual(sheet.getCell('J7').value, { formula: 'SUM(J5:J6)', result: 3 });
+  assert.equal(sheet.getCell('K7').value.formula, 'SUM(K5:K6)');
+  assert.deepEqual(sheet.getCell('L7').value, { formula: 'SUM(L5:L6)', result: 0.2 });
+  assert.equal(sheet.getCell(7, totalShareColumn).value.result, 0.2);
 });
 
 test('网页汇总的接单数量和货价列使用紧凑宽度', () => {

@@ -183,8 +183,10 @@ function buildSummaryWorkbook(rows, filters = {}) {
   let targetRow = 5;
   groupSummaryRows(rows).forEach(group => {
     const groupStartRow = targetRow;
-    let quotedAmountTotal = 0;
+    const componentBeforeTaxTotals = Object.fromEntries(QUOTE_COMPONENTS.map(([key]) => [key, 0]));
+    const componentAfterTaxTotals = Object.fromEntries(QUOTE_COMPONENTS.map(([key]) => [key, 0]));
     const componentAmountTotals = Object.fromEntries(QUOTE_COMPONENTS.map(([key]) => [key, 0]));
+    const componentShareTotals = Object.fromEntries(QUOTE_COMPONENTS.map(([key]) => [key, 0]));
     group.rows.forEach((row, index) => {
     const confirmation = row.confirmation || {};
     const workshopNames = (confirmation.workshops || []).map(code => {
@@ -193,11 +195,13 @@ function buildSummaryWorkbook(rows, filters = {}) {
     }).join('、');
     const qty = confirmation.confirmed_qty ?? row.qty;
     const price = confirmation.confirmed_price ?? row.quoted_price;
-    quotedAmountTotal += num(qty) * num(price);
     const componentValues = QUOTE_COMPONENTS.flatMap(([key]) => {
       const beforeTax = num(row.components_before_tax?.[key]);
       const afterTax = num(row.components?.[key]);
+      componentBeforeTaxTotals[key] += beforeTax;
+      componentAfterTaxTotals[key] += afterTax;
       componentAmountTotals[key] += afterTax * num(qty);
+      componentShareTotals[key] += price ? afterTax / num(price) : 0;
       return [beforeTax, afterTax, afterTax * num(qty), price ? afterTax / price : 0];
     });
     const shareTotal = QUOTE_COMPONENTS.reduce((sum, [key]) => (
@@ -274,28 +278,46 @@ function buildSummaryWorkbook(rows, filters = {}) {
       result: group.rows.reduce((sum, row) => sum + num(row.confirmation?.confirmed_qty ?? row.qty), 0),
     };
     ws.getCell(subtotalRow, 7).numFmt = '#,##0';
+    ws.getCell(subtotalRow, 8).value = {
+      formula: `SUM(H${groupStartRow}:H${groupEndRow})`,
+      result: group.rows.reduce((sum, row) => sum + num(row.confirmation?.confirmed_price ?? row.quoted_price), 0),
+    };
+    ws.getCell(subtotalRow, 8).numFmt = '#,##0.0000';
     QUOTE_COMPONENTS.forEach(([key], componentIndex) => {
       const startColumn = 9 + componentIndex * 4;
+      const beforeTaxCell = ws.getCell(subtotalRow, startColumn);
+      const afterTaxCell = ws.getCell(subtotalRow, startColumn + 1);
       const amountCell = ws.getCell(subtotalRow, startColumn + 2);
       const shareCell = ws.getCell(subtotalRow, startColumn + 3);
+      const detailBeforeTaxColumn = ws.getColumn(startColumn).letter;
+      const detailAfterTaxColumn = ws.getColumn(startColumn + 1).letter;
       const detailAmountColumn = ws.getColumn(startColumn + 2).letter;
+      const detailShareColumn = ws.getColumn(startColumn + 3).letter;
+      beforeTaxCell.value = {
+        formula: `SUM(${detailBeforeTaxColumn}${groupStartRow}:${detailBeforeTaxColumn}${groupEndRow})`,
+        result: componentBeforeTaxTotals[key],
+      };
+      beforeTaxCell.numFmt = '#,##0.0000';
+      afterTaxCell.value = {
+        formula: `SUM(${detailAfterTaxColumn}${groupStartRow}:${detailAfterTaxColumn}${groupEndRow})`,
+        result: componentAfterTaxTotals[key],
+      };
+      afterTaxCell.numFmt = '#,##0.0000';
       amountCell.value = {
         formula: `SUM(${detailAmountColumn}${groupStartRow}:${detailAmountColumn}${groupEndRow})`,
         result: componentAmountTotals[key],
       };
       amountCell.numFmt = '#,##0.00';
       shareCell.value = {
-        formula: `IF(SUMPRODUCT(G${groupStartRow}:G${groupEndRow},H${groupStartRow}:H${groupEndRow})=0,0,${amountCell.address}/SUMPRODUCT(G${groupStartRow}:G${groupEndRow},H${groupStartRow}:H${groupEndRow}))`,
-        result: quotedAmountTotal ? componentAmountTotals[key] / quotedAmountTotal : 0,
+        formula: `SUM(${detailShareColumn}${groupStartRow}:${detailShareColumn}${groupEndRow})`,
+        result: componentShareTotals[key],
       };
       shareCell.numFmt = '0.00%';
     });
     const subtotalShareCells = QUOTE_COMPONENTS.map((_, componentIndex) => (
       ws.getCell(subtotalRow, 12 + componentIndex * 4).address
     ));
-    const subtotalShareTotal = quotedAmountTotal
-      ? Object.values(componentAmountTotals).reduce((sum, amount) => sum + amount, 0) / quotedAmountTotal
-      : 0;
+    const subtotalShareTotal = Object.values(componentShareTotals).reduce((sum, share) => sum + share, 0);
     ws.getCell(subtotalRow, totalShareColumn).value = {
       formula: `SUM(${subtotalShareCells.join(',')})`,
       result: subtotalShareTotal,

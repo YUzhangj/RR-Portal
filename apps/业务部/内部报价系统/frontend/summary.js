@@ -111,29 +111,30 @@ function rowHtml(row, serial) {
 
 function subtotalHtml(customer, rows) {
   const qtyTotal = rows.reduce((sum, row) => sum + num(row.confirmation?.confirmed_qty ?? row.qty), 0);
-  const quotedAmount = rows.reduce((sum, row) => {
-    const qty = num(row.confirmation?.confirmed_qty ?? row.qty);
-    const price = num(row.confirmation?.confirmed_price ?? row.quoted_price);
-    return sum + qty * price;
-  }, 0);
+  const priceTotal = rows.reduce((sum, row) => sum + num(row.confirmation?.confirmed_price ?? row.quoted_price), 0);
   const componentHtml = state.components.map(item => {
+    const beforeTax = rows.reduce((sum, row) => sum + num(row.components_before_tax?.[item.code]), 0);
+    const afterTax = rows.reduce((sum, row) => sum + num(row.components?.[item.code]), 0);
     const amount = rows.reduce((sum, row) => {
       const qty = num(row.confirmation?.confirmed_qty ?? row.qty);
       return sum + num(row.components?.[item.code]) * qty;
     }, 0);
-    const share = quotedAmount ? amount / quotedAmount : 0;
-    return `<td></td><td></td><td class="component-amount">${money(amount)}</td><td class="component-share">${(share * 100).toFixed(2)}%</td>`;
+    const share = rows.reduce((sum, row) => {
+      const price = num(row.confirmation?.confirmed_price ?? row.quoted_price);
+      return sum + (price ? num(row.components?.[item.code]) / price : 0);
+    }, 0);
+    return `<td class="component-value">${money(beforeTax)}</td><td class="component-value">${money(afterTax)}</td><td class="component-amount">${money(amount)}</td><td class="component-share">${(share * 100).toFixed(2)}%</td>`;
   }).join('');
   const shareTotal = state.components.reduce((sum, item) => {
-    const amount = rows.reduce((amountSum, row) => {
-      const qty = num(row.confirmation?.confirmed_qty ?? row.qty);
-      return amountSum + num(row.components?.[item.code]) * qty;
+    const share = rows.reduce((shareSum, row) => {
+      const price = num(row.confirmation?.confirmed_price ?? row.quoted_price);
+      return shareSum + (price ? num(row.components?.[item.code]) / price : 0);
     }, 0);
-    return sum + (quotedAmount ? amount / quotedAmount : 0);
+    return sum + share;
   }, 0);
   return `<tr class="summary-customer-total">
     <td></td><td>${esc(customer)}</td><td></td><td colspan="2">客户总计</td><td></td>
-    <td>${money(qtyTotal)}</td><td></td>${componentHtml}<td class="component-share component-share-total">${(shareTotal * 100).toFixed(2)}%</td><td colspan="3"></td>
+    <td>${money(qtyTotal)}</td><td>${money(priceTotal)}</td>${componentHtml}<td class="component-share component-share-total">${(shareTotal * 100).toFixed(2)}%</td><td colspan="3"></td>
   </tr>`;
 }
 
