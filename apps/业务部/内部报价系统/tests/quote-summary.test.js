@@ -121,14 +121,32 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   assert.equal(reopened.getWorksheet('各客报价汇总').getCell('K5').value.formula, 'IF($G5=0,0,I5/$G5)');
 });
 
-test('报价汇总按客户排序分组并分配客户序号', () => {
+test('报价汇总按客户排序分组，序号由每个客户组内重新开始', () => {
   const groups = groupSummaryRows([
     { id: 1, customer: 'TOMY', created_at: '2026-09-01' },
     { id: 2, customer: 'SpinMaster', created_at: '2026-09-03' },
     { id: 3, customer: 'TOMY', created_at: '2026-09-05' },
   ]);
-  assert.deepEqual(groups.map(group => [group.serial, group.customer, group.rows.map(row => row.id)]), [
-    [1, 'SpinMaster', [2]],
-    [2, 'TOMY', [3, 1]],
+  assert.deepEqual(groups.map(group => [group.customer, group.rows.map(row => row.id)]), [
+    ['SpinMaster', [2]],
+    ['TOMY', [3, 1]],
   ]);
+});
+
+test('导出表按客户组内逐条编号并在总计行留空', () => {
+  const base = {
+    product_name: '产品', qty: 1, quoted_price: 10,
+    components_before_tax: {}, components: {}, confirmation: {},
+  };
+  const workbook = buildSummaryWorkbook([
+    { ...base, id: 1, customer: 'TOMY', quote_no: 'T-1', created_at: '2026-09-01' },
+    { ...base, id: 2, customer: 'TOMY', quote_no: 'T-2', created_at: '2026-09-02' },
+    { ...base, id: 3, customer: 'ZURU', quote_no: 'Z-1', created_at: '2026-09-03' },
+  ]);
+  const sheet = workbook.getWorksheet('各客报价汇总');
+  assert.equal(sheet.getCell('A5').value, 1);
+  assert.equal(sheet.getCell('A6').value, 2);
+  assert.equal(sheet.getCell('A7').value, '');
+  assert.equal(sheet.getCell('A8').value, 1);
+  assert.equal(sheet.getCell('A9').value, '');
 });

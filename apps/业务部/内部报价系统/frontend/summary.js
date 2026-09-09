@@ -52,7 +52,7 @@ function groupedRows(rows) {
     if (!groups.has(customer)) groups.set(customer, []);
     groups.get(customer).push(row);
   });
-  return [...groups.entries()].map(([customer, customerRows], index) => ({ customer, rows: customerRows, serial: index + 1 }));
+  return [...groups.entries()].map(([customer, customerRows]) => ({ customer, rows: customerRows }));
 }
 
 function renderHead() {
@@ -98,7 +98,7 @@ function rowHtml(row, serial) {
   </tr>`;
 }
 
-function subtotalHtml(customer, rows, serial) {
+function subtotalHtml(customer, rows) {
   const qtyTotal = rows.reduce((sum, row) => sum + num(row.confirmation?.confirmed_qty ?? row.qty), 0);
   const quotedAmount = rows.reduce((sum, row) => {
     const qty = num(row.confirmation?.confirmed_qty ?? row.qty);
@@ -114,7 +114,7 @@ function subtotalHtml(customer, rows, serial) {
     return `<td></td><td></td><td class="component-amount">${money(amount)}</td><td class="component-share">${(share * 100).toFixed(2)}%</td>`;
   }).join('');
   return `<tr class="summary-customer-total">
-    <td>${serial}</td><td>${esc(customer)}</td><td colspan="2">客户总计</td><td></td>
+    <td></td><td>${esc(customer)}</td><td colspan="2">客户总计</td><td></td>
     <td>${money(qtyTotal)}</td><td></td>${componentHtml}<td colspan="4"></td>
   </tr>`;
 }
@@ -124,7 +124,7 @@ function render() {
   renderStats(rows);
   const groups = groupedRows(rows);
   $('summary-body').innerHTML = groups.length
-    ? groups.map(group => group.rows.map(row => rowHtml(row, group.serial)).join('') + subtotalHtml(group.customer, group.rows, group.serial)).join('')
+    ? groups.map(group => group.rows.map((row, index) => rowHtml(row, index + 1)).join('') + subtotalHtml(group.customer, group.rows)).join('')
     : `<tr><td colspan="${totalColumns()}" class="summary-empty">暂无匹配报价</td></tr>`;
   document.querySelectorAll('.save-summary').forEach(button => { button.onclick = () => saveRow(button.closest('tr')); });
 }

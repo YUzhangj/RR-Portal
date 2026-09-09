@@ -83,8 +83,8 @@ function groupSummaryRows(rows) {
     if (!groups.has(customer)) groups.set(customer, []);
     groups.get(customer).push(row);
   });
-  return [...groups.entries()].map(([customer, customerRows], index) => ({
-    customer, rows: customerRows, serial: index + 1,
+  return [...groups.entries()].map(([customer, customerRows]) => ({
+    customer, rows: customerRows,
   }));
 }
 
@@ -197,7 +197,7 @@ function buildSummaryWorkbook(rows, filters = {}) {
       return [beforeTax, afterTax, afterTax * num(qty), price ? afterTax / price : 0];
     });
     const values = [
-      group.serial, row.customer, row.quote_no, row.product_name,
+      index + 1, row.customer, row.quote_no, row.product_name,
       row.created_at ? new Date(row.created_at) : '',
       qty, price,
       ...componentValues,
@@ -250,7 +250,7 @@ function buildSummaryWorkbook(rows, filters = {}) {
 
     const groupEndRow = targetRow - 1;
     const subtotalRow = targetRow;
-    const subtotalValues = [group.serial, group.customer, '客户总计', '', '', '', ''];
+    const subtotalValues = ['', group.customer, '客户总计', '', '', '', ''];
     subtotalValues.forEach((value, columnIndex) => { ws.getCell(subtotalRow, columnIndex + 1).value = value; });
     ws.mergeCells(subtotalRow, 3, subtotalRow, 4);
     ws.getCell(subtotalRow, 6).value = {
