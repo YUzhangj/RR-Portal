@@ -23,6 +23,31 @@ test('报价汇总读取报价基本资料和客价', () => {
   assert.equal(result.components.injection_labor, 1);
 });
 
+test('报价汇总直接统计各部门明细，不依赖业务部历史快照', () => {
+  const quote = { id: 10, quote_no: 'LIVE-100', product_name: '历史报价', customer: 'TOMY', qty: 5000, factory_code: 'qingxi' };
+  const sections = [
+    { dept: 'sales', payload_json: JSON.stringify({
+      header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.8 },
+      shipping: { markup_x: 1.2, freight_pct: 48, lifting_pct: 52, scenarios: [{ name: '盐田40柜', _freight_rate: 10 }] },
+    }) },
+    { dept: 'molding', payload_json: JSON.stringify({
+      injection: [{ material: 'PVC', weight_g: 2, material_unit_price: 1, shot_price: 3 }],
+      injection_loss_pct: 0,
+    }) },
+    { dept: 'electronic', payload_json: JSON.stringify({ electronics: [{ name: '主控IC', qty: 1, unit_price_rmb: 0.85 }] }) },
+    { dept: 'engineering', payload_json: JSON.stringify({ hardware: [{ name: '马达', qty: 1, unit_price_rmb: 1.7 }] }) },
+  ];
+  const result = buildQuoteSummary(quote, sections);
+  assert.equal(result.components.dom_mat, 2);
+  assert.equal(result.components.injection_labor, 3);
+  assert.equal(result.components.electronic, 1);
+  assert.equal(result.components.motor, 2);
+  assert.equal(result.components.hardware, 0);
+  assert.equal(result.components.freight, 4.8);
+  assert.equal(result.components.cabinet, 5.2);
+  assert.equal(result.quoted_price, 21.6);
+});
+
 test('导出表横向展开报价项目并保留客户确认和实际生产车间', async () => {
   const row = {
     id: 1, customer: 'Sky Castle', quote_no: 'SC-1', product_name: '产品', version: 'V1', qty: 100,
