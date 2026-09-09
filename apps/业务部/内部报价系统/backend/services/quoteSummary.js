@@ -119,7 +119,7 @@ SUMMARY_COLUMNS.push(['freight', '运费', 'unit'], ['cabinet', '吊柜费', 'un
   ['total_raw_after_tax', '总退税后料成本', 'amount'], ['total_raw_after_tax_share', '总未退税前料成本占比', 'percent'],
   ['total_labor_after_tax', '总退税后人工成本', 'amount'], ['total_labor_after_tax_share', '总退税后人工成本占比', 'percent']);
 
-function calculateSummaryValues(before, after, qty, price) {
+function calculateSummaryValues(before, after, qty, price, absMaterialCost = 0) {
   const values = {};
   const setComponent = key => {
     values[key] = num(before[key]); values[`${key}_after_tax`] = num(after[key]);
@@ -134,7 +134,7 @@ function calculateSummaryValues(before, after, qty, price) {
   values.raw_material_after_tax = num(after.imp_mat) + num(after.dom_mat);
   values.raw_material_amount = values.raw_material_after_tax * qty;
   values.raw_material_share = price ? values.raw_material_after_tax / price : 0;
-  values.abs_material_cost = 0; values.abs_material_share = 0;
+  values.abs_material_cost = num(absMaterialCost); values.abs_material_share = price ? values.abs_material_cost / price : 0;
   values.total_purchase_price = ['color_box','libao','suction','carton','plating','electronic','battery','hardware','slush','sewing_hair','sewing_cloth','paint_material','other_buy','misc'].reduce((s,k)=>s+num(before[k]),0);
   values.freight_after_tax = num(after.freight) + num(after.cabinet);
   values.freight_amount = values.freight_after_tax * qty;
@@ -238,7 +238,8 @@ function buildQuoteSummary(quote, sections) {
     components_before_tax: beforeTaxComponents,
     components,
     component_basis: 'after_tax',
-    summary_values: calculateSummaryValues(beforeTaxComponents, components, qty, quotedPrice),
+    abs_material_cost: num(calculated.components.abs_material),
+    summary_values: calculateSummaryValues(beforeTaxComponents, components, qty, quotedPrice, calculated.components.abs_material),
   };
 }
 
@@ -518,7 +519,7 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
       const workshop=(confirmation.workshops||[]).map(code=>(WORKSHOPS.find(x=>x[0]===code)||[,code])[1]).join('、');
       const base={serial:index+1,customer:row.customer,workshop,quote_no:row.quote_no,product_name:row.product_name,created_at:row.created_at?new Date(row.created_at):'',qty,quoted_price:price,
         confirmation_status:confirmation.status==='confirmed'?'已确认':'待确认',confirmed_by:confirmation.confirmed_by||'',confirmed_at:confirmation.confirmed_at?new Date(confirmation.confirmed_at):'',note:confirmation.note||''};
-      const values=calculateSummaryValues(row.components_before_tax,row.components,qty,price);
+      const values=calculateSummaryValues(row.components_before_tax,row.components,qty,price,row.abs_material_cost);
       row.summary_values = values;
       columns.forEach(([key,,type],i)=>{
         const c=ws.getCell(rowNo,i+1); const value=Object.hasOwn(base,key)?base[key]:values[key];

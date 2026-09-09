@@ -37,7 +37,7 @@ async function loadRows(user) {
     } : { status: 'pending', workshops: [] };
     const qty = summary.confirmation.confirmed_qty ?? summary.qty;
     const price = summary.confirmation.confirmed_price ?? summary.quoted_price;
-    summary.summary_values = calculateSummaryValues(summary.components_before_tax, summary.components, Number(qty)||0, Number(price)||0);
+    summary.summary_values = calculateSummaryValues(summary.components_before_tax, summary.components, Number(qty)||0, Number(price)||0, summary.abs_material_cost);
     result.push(summary);
   }
   return result;

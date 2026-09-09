@@ -50,9 +50,20 @@ test('报价汇总直接统计各部门明细，不依赖业务部历史快照',
   assert.equal(result.components.electronic, 1);
   assert.equal(result.components.motor, 1.77);
   assert.equal(result.components.hardware, 0);
+  assert.equal(result.abs_material_cost, 0);
   assert.equal(result.components.freight, 4.40352);
   assert.equal(result.components.cabinet, 5.2);
   assert.equal(result.quoted_price, 21.6);
+});
+
+test('ABS料价成本从注塑材料单独识别且不重复计入原料', () => {
+  const result = buildQuoteSummary({ id: 12, quote_no: 'ABS-1', product_name: 'ABS产品', customer: 'TOMY', qty: 10 }, [
+    { dept: 'sales', payload_json: JSON.stringify({ header: { fx_rmb_hkd: 0.85 } }) },
+    { dept: 'molding', payload_json: JSON.stringify({ injection_loss_pct: 0, injection: [{ material: 'ABS', weight_g: 2, material_unit_price: 3, shot_price: 0 }] }) },
+  ]);
+  assert.equal(result.abs_material_cost, 6);
+  assert.equal(result.summary_values.abs_material_cost, 6);
+  assert.equal(result.summary_values.raw_material_after_tax, 6);
 });
 
 test('报价汇总按减税明细口径计算各项减税后单价', () => {
