@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const {
   QUOTE_COMPONENTS, TAX_DEDUCTION_RATES, groupSummaryRows, buildQuoteSummary, buildSummaryWorkbook,
 } = require('../backend/services/quoteSummary');
@@ -149,4 +151,11 @@ test('导出表按客户组内逐条编号并在总计行留空', () => {
   assert.equal(sheet.getCell('A7').value, '');
   assert.equal(sheet.getCell('A8').value, 1);
   assert.equal(sheet.getCell('A9').value, '');
+});
+
+test('网页汇总的接单数量和货价列使用紧凑宽度', () => {
+  const styles = fs.readFileSync(path.join(__dirname, '../frontend/styles.css'), 'utf8');
+  assert.match(styles, /th:nth-child\(6\).*width:112px/);
+  assert.match(styles, /th:nth-child\(7\).*width:126px/);
+  assert.match(styles, /td:nth-child\(6\) input.*width:100%/);
 });
