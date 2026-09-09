@@ -39,7 +39,7 @@ function renderStats(rows) {
     <div class="stat-rate"><span>客户确认率</span><strong>${confirmationRate.toFixed(1)}%</strong><span class="summary-rate-track" role="progressbar" aria-valuenow="${confirmationRate.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><i style="width:${confirmationRate}%"></i></span></div>`;
 }
 
-function totalColumns() { return 7 + state.components.length * 4 + 4; }
+function totalColumns() { return 8 + state.components.length * 4 + 3; }
 
 function groupedRows(rows) {
   const groups = new Map();
@@ -56,11 +56,11 @@ function groupedRows(rows) {
 }
 
 function renderHead() {
-  const fixed = ['序号', '客名', '货号', '货品名称', '报价日期', '实际接单数量', '货价 (HK$)'];
-  const workflow = ['客价确认', '实际生产车间', '备注', ''];
-  const widths = [58, 150, 110, 170, 100, 112, 126];
+  const fixed = ['序号', '客名', '实际生产车间', '货号', '货品名称', '报价日期', '实际接单数量', '货价 (HK$)'];
+  const workflow = ['客价确认', '备注', ''];
+  const widths = [58, 150, 125, 110, 170, 100, 112, 126];
   state.components.forEach(() => widths.push(92, 92, 96, 78));
-  widths.push(110, 125, 135, 60);
+  widths.push(110, 135, 60);
   $('summary-cols').innerHTML = widths.map(width => `<col style="width:${width}px">`).join('');
   $('summary-head').closest('table').style.width = `${widths.reduce((sum, width) => sum + width, 0)}px`;
   $('summary-head').innerHTML = `<tr>
@@ -90,6 +90,7 @@ function rowHtml(row, serial) {
   return `<tr data-id="${row.id}">
     <td class="summary-customer-no">${serial}</td>
     <td><b>${esc(row.customer || '未填写')}</b></td>
+    <td>${workshopHtml}</td>
     <td><a href="./quote.html?id=${row.id}"><b>${esc(row.quote_no)}</b></a></td>
     <td><b>${esc(row.product_name)}</b>${row.version ? `<small>${esc(row.version)}</small>` : ''}</td>
     <td>${dateOnly(row.created_at)}</td>
@@ -97,7 +98,6 @@ function rowHtml(row, serial) {
     <td><input class="summary-price" type="number" min="0" step="any" value="${esc(price ?? '')}" ${disabled}></td>
     ${componentHtml}
     <td><select class="summary-confirm" ${disabled}><option value="pending" ${confirmation.status !== 'confirmed' ? 'selected' : ''}>待确认</option><option value="confirmed" ${confirmation.status === 'confirmed' ? 'selected' : ''}>已确认</option></select></td>
-    <td>${workshopHtml}</td>
     <td><input class="summary-note" value="${esc(confirmation.note || '')}" placeholder="选填" ${disabled}></td>
     <td>${state.canEdit ? '<button class="save-summary">保存</button>' : ''}</td>
   </tr>`;
@@ -119,8 +119,8 @@ function subtotalHtml(customer, rows) {
     return `<td></td><td></td><td class="component-amount">${money(amount)}</td><td class="component-share">${(share * 100).toFixed(2)}%</td>`;
   }).join('');
   return `<tr class="summary-customer-total">
-    <td></td><td>${esc(customer)}</td><td colspan="2">客户总计</td><td></td>
-    <td>${money(qtyTotal)}</td><td></td>${componentHtml}<td colspan="4"></td>
+    <td></td><td>${esc(customer)}</td><td></td><td colspan="2">客户总计</td><td></td>
+    <td>${money(qtyTotal)}</td><td></td>${componentHtml}<td colspan="3"></td>
   </tr>`;
 }
 

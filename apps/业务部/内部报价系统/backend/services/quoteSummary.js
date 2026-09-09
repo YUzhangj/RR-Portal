@@ -132,8 +132,8 @@ function buildSummaryWorkbook(rows, filters = {}) {
     oddHeader: '&C&B各客报价汇总',
     oddFooter: '&L内部报价系统&C第 &P 页 / 共 &N 页&R&D',
   };
-  const baseHeaders = ['序号', '客名', '货号', '货品名称', '报价日期', '实际接单数量', '货价 (HK$)'];
-  const workflowHeaders = ['客价确认', '实际生产车间', '确认人', '确认时间', '备注'];
+  const baseHeaders = ['序号', '客名', '实际生产车间', '货号', '货品名称', '报价日期', '实际接单数量', '货价 (HK$)'];
+  const workflowHeaders = ['客价确认', '确认人', '确认时间', '备注'];
   const totalColumns = baseHeaders.length + QUOTE_COMPONENTS.length * 4 + workflowHeaders.length;
   ws.getCell(1, 1).value = `${new Date().getFullYear()}年`;
   ws.getCell(1, 1).font = { bold: true, size: 14, name: 'Microsoft YaHei' };
@@ -197,12 +197,12 @@ function buildSummaryWorkbook(rows, filters = {}) {
       return [beforeTax, afterTax, afterTax * num(qty), price ? afterTax / price : 0];
     });
     const values = [
-      index + 1, row.customer, row.quote_no, row.product_name,
+      index + 1, row.customer, workshopNames, row.quote_no, row.product_name,
       row.created_at ? new Date(row.created_at) : '',
       qty, price,
       ...componentValues,
       confirmation.status === 'confirmed' ? '已确认' : '待确认',
-      workshopNames, confirmation.confirmed_by || '',
+      confirmation.confirmed_by || '',
       confirmation.confirmed_at ? new Date(confirmation.confirmed_at) : '',
       confirmation.note || '',
     ];
@@ -214,11 +214,11 @@ function buildSummaryWorkbook(rows, filters = {}) {
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: index % 2 ? 'FFF7FAFC' : 'FFFFFFFF' } };
       cell.border = { bottom: { style: 'thin', color: { argb: 'FFD8E2EA' } } };
     });
-    ws.getCell(targetRow, 5).numFmt = 'yyyy-mm-dd';
-    ws.getCell(targetRow, 6).numFmt = '#,##0';
-    ws.getCell(targetRow, 7).numFmt = '#,##0.0000';
+    ws.getCell(targetRow, 6).numFmt = 'yyyy-mm-dd';
+    ws.getCell(targetRow, 7).numFmt = '#,##0';
+    ws.getCell(targetRow, 8).numFmt = '#,##0.0000';
     QUOTE_COMPONENTS.forEach((_, componentIndex) => {
-      const startColumn = 8 + componentIndex * 4;
+      const startColumn = 9 + componentIndex * 4;
       const beforeTaxCell = ws.getCell(targetRow, startColumn);
       const afterTaxCell = ws.getCell(targetRow, startColumn + 1);
       const amountCell = ws.getCell(targetRow, startColumn + 2);
@@ -234,12 +234,12 @@ function buildSummaryWorkbook(rows, filters = {}) {
       };
       afterTaxCell.numFmt = '#,##0.0000';
       amountCell.value = {
-        formula: `${afterTaxCell.address}*$F${targetRow}`,
+        formula: `${afterTaxCell.address}*$G${targetRow}`,
         result: afterTax * num(qty),
       };
       amountCell.numFmt = '#,##0.00';
       shareCell.value = {
-        formula: `IF($G${targetRow}=0,0,${afterTaxCell.address}/$G${targetRow})`,
+        formula: `IF($H${targetRow}=0,0,${afterTaxCell.address}/$H${targetRow})`,
         result: price ? afterTax / price : 0,
       };
       shareCell.numFmt = '0.00%';
@@ -250,16 +250,16 @@ function buildSummaryWorkbook(rows, filters = {}) {
 
     const groupEndRow = targetRow - 1;
     const subtotalRow = targetRow;
-    const subtotalValues = ['', group.customer, '客户总计', '', '', '', ''];
+    const subtotalValues = ['', group.customer, '', '客户总计', '', '', '', ''];
     subtotalValues.forEach((value, columnIndex) => { ws.getCell(subtotalRow, columnIndex + 1).value = value; });
-    ws.mergeCells(subtotalRow, 3, subtotalRow, 4);
-    ws.getCell(subtotalRow, 6).value = {
-      formula: `SUM(F${groupStartRow}:F${groupEndRow})`,
+    ws.mergeCells(subtotalRow, 4, subtotalRow, 5);
+    ws.getCell(subtotalRow, 7).value = {
+      formula: `SUM(G${groupStartRow}:G${groupEndRow})`,
       result: group.rows.reduce((sum, row) => sum + num(row.confirmation?.confirmed_qty ?? row.qty), 0),
     };
-    ws.getCell(subtotalRow, 6).numFmt = '#,##0';
+    ws.getCell(subtotalRow, 7).numFmt = '#,##0';
     QUOTE_COMPONENTS.forEach(([key], componentIndex) => {
-      const startColumn = 8 + componentIndex * 4;
+      const startColumn = 9 + componentIndex * 4;
       const amountCell = ws.getCell(subtotalRow, startColumn + 2);
       const shareCell = ws.getCell(subtotalRow, startColumn + 3);
       const detailAmountColumn = ws.getColumn(startColumn + 2).letter;
@@ -269,7 +269,7 @@ function buildSummaryWorkbook(rows, filters = {}) {
       };
       amountCell.numFmt = '#,##0.00';
       shareCell.value = {
-        formula: `IF(SUMPRODUCT(F${groupStartRow}:F${groupEndRow},G${groupStartRow}:G${groupEndRow})=0,0,${amountCell.address}/SUMPRODUCT(F${groupStartRow}:F${groupEndRow},G${groupStartRow}:G${groupEndRow}))`,
+        formula: `IF(SUMPRODUCT(G${groupStartRow}:G${groupEndRow},H${groupStartRow}:H${groupEndRow})=0,0,${amountCell.address}/SUMPRODUCT(G${groupStartRow}:G${groupEndRow},H${groupStartRow}:H${groupEndRow}))`,
         result: quotedAmountTotal ? componentAmountTotals[key] / quotedAmountTotal : 0,
       };
       shareCell.numFmt = '0.00%';
@@ -279,20 +279,20 @@ function buildSummaryWorkbook(rows, filters = {}) {
       cell.font = { name: 'Microsoft YaHei', size: 10, bold: true, color: { argb: 'FF0B4369' } };
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDDEBFA' } };
       cell.border = { top: { style: 'medium', color: { argb: 'FF3B82F6' } }, bottom: { style: 'thin', color: { argb: 'FF94A3B8' } } };
-      cell.alignment = { vertical: 'middle', horizontal: columnIndex <= 7 ? 'center' : 'right' };
+      cell.alignment = { vertical: 'middle', horizontal: columnIndex <= 8 ? 'center' : 'right' };
     }
     targetRow += 1;
   });
   ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: Math.max(4, targetRow - 1), column: totalColumns } };
-  [8, 18, 16, 24, 14, 18, 15].forEach((width, index) => { ws.getColumn(index + 1).width = width; });
+  [8, 18, 18, 16, 24, 14, 18, 15].forEach((width, index) => { ws.getColumn(index + 1).width = width; });
   QUOTE_COMPONENTS.forEach((_, componentIndex) => {
-    const startColumn = 8 + componentIndex * 4;
+    const startColumn = 9 + componentIndex * 4;
     ws.getColumn(startColumn).width = 11;
     ws.getColumn(startColumn + 1).width = 12;
     ws.getColumn(startColumn + 2).width = 14;
     ws.getColumn(startColumn + 3).width = 11;
   });
-  [13, 18, 14, 19, 26].forEach((width, index) => { ws.getColumn(8 + QUOTE_COMPONENTS.length * 4 + index).width = width; });
+  [13, 14, 19, 26].forEach((width, index) => { ws.getColumn(9 + QUOTE_COMPONENTS.length * 4 + index).width = width; });
   return wb;
 }
 

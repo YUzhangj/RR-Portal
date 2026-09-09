@@ -92,35 +92,37 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   };
   const workbook = buildSummaryWorkbook([row], { customer: 'Sky Castle' });
   const sheet = workbook.getWorksheet('各客报价汇总');
-  const workflowStart = 8 + QUOTE_COMPONENTS.length * 4;
+  const workflowStart = 9 + QUOTE_COMPONENTS.length * 4;
   assert.equal(sheet.getCell(4, 1).value, '序号');
   assert.equal(sheet.getCell(5, 1).value, 1);
   assert.equal(sheet.getCell(5, 2).value, 'Sky Castle');
-  assert.equal(sheet.getCell(4, 8).value, '啤工');
-  assert.equal(sheet.getCell(4, 9).value, '退税后啤工');
-  assert.equal(sheet.getCell(4, 10).value, '啤工金额');
-  assert.equal(sheet.getCell(4, 11).value, '啤工占比');
-  assert.equal(sheet.getCell(5, 8).value, 1.5);
-  assert.deepEqual(sheet.getCell(5, 9).value, { formula: 'H5', result: 1.5 });
-  assert.deepEqual(sheet.getCell(5, 10).value, { formula: 'I5*$F5', result: 150 });
-  assert.equal(sheet.getCell(5, 11).value.formula, 'IF($G5=0,0,I5/$G5)');
-  assert.ok(Math.abs(sheet.getCell(5, 11).value.result - 0.15) < 1e-12);
-  assert.equal(sheet.getCell(5, 29).value.formula, 'AB5*(1-11.5%)');
-  assert.equal(sheet.getCell(5, 30).value.formula, 'AC5*$F5');
+  assert.equal(sheet.getCell(4, 3).value, '实际生产车间');
+  assert.equal(sheet.getCell(5, 3).value, '兴信A');
+  assert.equal(sheet.getCell(4, 4).value, '货号');
+  assert.equal(sheet.getCell(4, 9).value, '啤工');
+  assert.equal(sheet.getCell(4, 10).value, '退税后啤工');
+  assert.equal(sheet.getCell(4, 11).value, '啤工金额');
+  assert.equal(sheet.getCell(4, 12).value, '啤工占比');
+  assert.equal(sheet.getCell(5, 9).value, 1.5);
+  assert.deepEqual(sheet.getCell(5, 10).value, { formula: 'I5', result: 1.5 });
+  assert.deepEqual(sheet.getCell(5, 11).value, { formula: 'J5*$G5', result: 150 });
+  assert.equal(sheet.getCell(5, 12).value.formula, 'IF($H5=0,0,J5/$H5)');
+  assert.ok(Math.abs(sheet.getCell(5, 12).value.result - 0.15) < 1e-12);
+  assert.equal(sheet.getCell(5, 30).value.formula, 'AC5*(1-11.5%)');
+  assert.equal(sheet.getCell(5, 31).value.formula, 'AD5*$G5');
   assert.equal(sheet.getCell(5, workflowStart).value, '已确认');
-  assert.equal(sheet.getCell(5, workflowStart + 1).value, '兴信A');
-  assert.equal(sheet.getCell(5, 7).value, 10);
-  assert.equal(sheet.getCell(6, 3).value, '客户总计');
-  assert.equal(sheet.getCell(6, 6).value.formula, 'SUM(F5:F5)');
-  assert.equal(sheet.getCell(6, 10).value.formula, 'SUM(J5:J5)');
-  assert.equal(sheet.getCell(6, 11).value.formula, 'IF(SUMPRODUCT(F5:F5,G5:G5)=0,0,J6/SUMPRODUCT(F5:F5,G5:G5))');
+  assert.equal(sheet.getCell(5, 8).value, 10);
+  assert.equal(sheet.getCell(6, 4).value, '客户总计');
+  assert.equal(sheet.getCell(6, 7).value.formula, 'SUM(G5:G5)');
+  assert.equal(sheet.getCell(6, 11).value.formula, 'SUM(K5:K5)');
+  assert.equal(sheet.getCell(6, 12).value.formula, 'IF(SUMPRODUCT(G5:G5,H5:H5)=0,0,K6/SUMPRODUCT(G5:G5,H5:H5))');
   const buffer = await workbook.xlsx.writeBuffer();
   assert.ok(buffer.byteLength > 1000);
   const reopened = new (require('exceljs').Workbook)();
   await reopened.xlsx.load(buffer);
-  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('I5').value.formula, 'H5');
-  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('J5').value.formula, 'I5*$F5');
-  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('K5').value.formula, 'IF($G5=0,0,I5/$G5)');
+  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('J5').value.formula, 'I5');
+  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('K5').value.formula, 'J5*$G5');
+  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('L5').value.formula, 'IF($H5=0,0,J5/$H5)');
 });
 
 test('报价汇总按客户排序分组，序号由每个客户组内重新开始', () => {
@@ -155,9 +157,9 @@ test('导出表按客户组内逐条编号并在总计行留空', () => {
 
 test('网页汇总的接单数量和货价列使用紧凑宽度', () => {
   const styles = fs.readFileSync(path.join(__dirname, '../frontend/styles.css'), 'utf8');
-  assert.match(styles, /th:nth-child\(6\).*width:112px/);
-  assert.match(styles, /th:nth-child\(7\).*width:126px/);
-  assert.match(styles, /td:nth-child\(6\) input.*width:100%/);
+  assert.match(styles, /th:nth-child\(7\).*width:112px/);
+  assert.match(styles, /th:nth-child\(8\).*width:126px/);
+  assert.match(styles, /td:nth-child\(7\) input.*width:100%/);
 });
 
 test('网页汇总的原价和退税后单价列保持等宽', () => {
