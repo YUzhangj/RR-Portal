@@ -125,7 +125,11 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   assert.equal(sheet.getCell(4, totalShareColumn).value, '各金额占比求和');
   assert.match(sheet.getCell(5, totalShareColumn).value.formula, /^SUM\(L5,/);
   assert.ok(Math.abs(sheet.getCell(5, totalShareColumn).value.result - 0.327) < 1e-12);
+  assert.equal(sheet.getCell(4, workflowStart).value, '客价确认');
   assert.equal(sheet.getCell(5, workflowStart).value, '已确认');
+  assert.equal(sheet.getCell(4, workflowStart + 1).value, '备注');
+  assert.equal(sheet.getCell(5, workflowStart + 1).value, '已确认');
+  assert.equal(sheet.getCell(4, workflowStart + 2).value, null);
   assert.equal(sheet.getCell(5, 8).value, 10);
   assert.equal(sheet.getCell(6, 4).value, '客户总计');
   assert.equal(sheet.getCell(6, 7).value.formula, 'SUM(G5:G5)');
