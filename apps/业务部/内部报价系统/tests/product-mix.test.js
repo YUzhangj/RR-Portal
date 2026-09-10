@@ -159,7 +159,9 @@ test('page subtotal hides electronic and sewing while shipping keeps their separ
   assert.ok(subtotalBlock);
   assert.doesNotMatch(subtotalBlock[1], /\['电子'/);
   assert.doesNotMatch(subtotalBlock[1], /\['车缝'/);
-  assert.match(source, /\['小计HKD', priceHkdMarked, 'hkd'\]/);
+  assert.match(source, /\['小计HKD', factoryHkdSum, 'hkd'\]/);
+  assert.doesNotMatch(source, /\['附加税0\.4%', surtaxManual, 'input'\]/);
+  assert.doesNotMatch(source, /id="tot-surtax"/);
   assert.match(source, /const elecHkdCol = num\(electronicTotal\)/);
   assert.match(source, /const sewHkdCol = toHkd\(sewingTotalRmb\)/);
   assert.match(source, /\{ sewing: sewHkdCol, electronic: elecHkdCol \}/);

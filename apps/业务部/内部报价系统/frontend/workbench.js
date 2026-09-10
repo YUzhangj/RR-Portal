@@ -1654,7 +1654,7 @@ function renderSummaryPane(host, sections, quote, me) {
   sales.pricing_summary = sales.pricing_summary || {};
   const surtaxManual = num(sales.pricing_summary.surtax);
 
-  // cost 包含搪胶/车缝/纸箱；附加税 + 模具分摊 在 markup 外面单独加
+  // cost 包含搪胶/车缝/纸箱；附加税 + 模具分摊在下方出货价算价中单独处理
   const blowRmb = blowTotal * fxRH;
   // 电子/五金/辅助/包装 四表均为港币(HKD)，换算回 RMB 加入成本：×汇率
   // 电子/五金/辅助/包装/二次加工(喷油) 均为港币(HKD)，换算回 RMB：×汇率
@@ -1662,9 +1662,6 @@ function renderSummaryPane(host, sections, quote, me) {
   // 出厂价底价：cost × markups（不含附加税 + 模具分摊）
   const factoryRmb = cost;
   // 注：出厂价(HKD) 改为「成本各列求和」factoryHkdSum（见下方 costCols），不再用 factoryRmb/fxRH 以免舍入差
-  // 出货底价：含附加税 + 模具分摊（盐田40柜/5吨车的底价）
-  const priceRmb = factoryRmb + moldShare + surtaxManual;
-  const priceHkd = priceRmb / fxRH;
   // 九、合计 整行换成 HKD（RMB ÷ 汇率）
   const fxH = fxRH || 0.85;
   const toHkd = (rmb) => num(rmb) / fxH;
@@ -1681,13 +1678,9 @@ function renderSummaryPane(host, sections, quote, me) {
   const elecHkdCol = num(electronicTotal);
   const sewHkdCol = toHkd(sewingTotalRmb);
   const factoryHkdSum = costCols.reduce((total, column) => total + num(column[1]), 0);
-  const afterMarkupHkd = factoryHkdSum * markupX;
-  // 出货底价 = 出厂价（HKD）+ 附加税；码点(×markup)不在此处，移到下方「出货价算价」乘一次；模具分摊也在算价处理
-  const priceHkdMarked = factoryHkdSum + toHkd(surtaxManual);
   const totalsCols = [
     ...costCols,
-    ['附加税0.4%', surtaxManual, 'input'],
-    ['小计HKD', priceHkdMarked, 'hkd'],
+    ['小计HKD', factoryHkdSum, 'hkd'],
   ];
 
   host.innerHTML = `
@@ -1696,9 +1689,6 @@ function renderSummaryPane(host, sections, quote, me) {
       <table class="wb-table" style="font-size:12px">
         <thead><tr>${totalsCols.map(([h]) => `<th style="background:#F0DBA1;color:#1F2937;font-weight:600;padding:6px 8px;white-space:nowrap">${h}</th>`).join('')}</tr></thead>
         <tbody><tr>${totalsCols.map(([_, v, level]) => {
-          if (level === 'input') {
-            return `<td style="background:#FDF8E7;padding:4px;text-align:right;white-space:nowrap"><input id="tot-surtax" type="number" step="any" value="${v ?? ''}" style="width:80px;text-align:right;border:1px solid #d1c89f;background:#fff;padding:2px 4px;font-weight:600"/></td>`;
-          }
           const palette = {
             sub:      '#FEF9C3',   // 出厂价 RMB
             'sub-hkd':'#FEF3C7',   // 出厂价 HKD
@@ -1755,13 +1745,6 @@ function renderSummaryPane(host, sections, quote, me) {
       prototype: prototypeShareUsd,
       testing: testingShareUsd,
     }, { sewing: sewHkdCol, electronic: elecHkdCol });
-  const surtaxInp = host.querySelector('#tot-surtax');
-  if (surtaxInp && canEditShip) {
-    surtaxInp.oninput = () => { sales.pricing_summary.surtax = surtaxInp.value === '' ? null : Number(surtaxInp.value); };
-    surtaxInp.onchange = () => { saveSales(); renderSummaryPane(host, sections, quote, me); };  // 失焦持久化 + 刷新显示
-  } else if (surtaxInp) {
-    surtaxInp.disabled = true;
-  }
   // 码点 可编辑（业务/工程）
   const markupInp = host.querySelector('#tot-markup');
   if (markupInp && canEditShip) {
