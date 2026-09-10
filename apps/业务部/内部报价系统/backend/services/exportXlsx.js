@@ -398,6 +398,8 @@ async function buildWorkbook({ quote, sections }) {
   const pkSubtotal = freeSubtotal(eng.packaging_materials || [], fxRH, fxHU);
   const auxSubtotal = freeSubtotal(eng.aux_materials || [], fxRH, fxHU);
 
+  // 搪胶汇总与统一成本明细之间额外留两行，避免两个区块视觉上贴得太近。
+  row += 2;
   row = renderUnifiedCostTable(ws, row, {
     asm,
     asmDetail,

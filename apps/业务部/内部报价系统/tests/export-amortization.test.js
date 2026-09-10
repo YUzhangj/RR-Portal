@@ -1329,11 +1329,14 @@ test('internal export keeps slush and painting details on separate sheets and on
   assert.ok(!mainValues.includes('喷油件'));
   let unifiedHeader = 0;
   let paintingRow = 0;
+  let slushSummaryRow = 0;
   main.eachRow(row => {
     if (row.getCell(1).value === '序号' && row.getCell(2).value === '类别') unifiedHeader = row.number;
     if (row.getCell(2).value === '印喷') paintingRow = row.number;
+    if (row.getCell(1).value === '二·C、搪胶部分（汇总）') slushSummaryRow = row.number;
   });
   assert.ok(unifiedHeader);
+  assert.equal(unifiedHeader, slushSummaryRow + 5);
   assert.ok(paintingRow > unifiedHeader);
   const sheetIncludes = (sheet, expected) => {
     let found = false;
