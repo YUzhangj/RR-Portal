@@ -247,14 +247,13 @@ async function buildWorkbook({ quote, sections }) {
   const fxHU = num(sales.header?.fx_hkd_usd) || 7.8;
 
   // ---------- 一、模具部分 ----------
-  // A序号 B名称 C模号 D模胚类型 E模具结构 F材质 G出模数 H套数 I净重(g)
-  // J周期(秒) K模具尺寸 L-M图片(合并) N价格RMB O价格USD P模价HKD Q备注
+  // 导出不显示净重和备注：A-H 基本资料，I周期，J尺寸，K-L图片，M-O价格。
   ws.mergeCells(row, 1, row, 17); styleSection(ws.getCell(row, 1));
   ws.getCell(row, 1).value = '一、模具部分';
   row += 1;
-  const moldHeader = ['序号', '模具名称', '模号', '模胚类型', '模具结构', '材质', '出模数', '套数', '净重(g)', '周期(秒)', '模具尺寸', '图   片', '', '模具价格（RMB）', '模具价格（USD）', '模价 HKD', '备   注'];
+  const moldHeader = ['序号', '模具名称', '模号', '模胚类型', '模具结构', '材质', '出模数', '套数', '周期(秒)', '模具尺寸', '图   片', '', '模具价格（RMB）', '模具价格（USD）', '模价 HKD'];
   moldHeader.forEach((h, i) => { ws.getCell(row, i + 1).value = h; styleHeader(ws.getCell(row, i + 1)); });
-  ws.mergeCells(row, 12, row, 13); // 图片列合并(L:M)
+  ws.mergeCells(row, 11, row, 12); // 图片列合并(K:L)
   row += 1;
 
   const molds = eng.molds || [];
@@ -273,19 +272,17 @@ async function buildWorkbook({ quote, sections }) {
     ws.getCell(r, 6).value = m.material || '';
     ws.getCell(r, 7).value = m.cavity || '';
     ws.getCell(r, 8).value = m.sets ?? 1;
-    ws.getCell(r, 9).value = m.weight_g == null || m.weight_g === '' ? '' : num(m.weight_g);
-    ws.getCell(r, 10).value = m.cycle_sec == null || m.cycle_sec === '' ? '' : num(m.cycle_sec);
-    ws.getCell(r, 11).value = (m.detail && m.detail.mold_size) || '';
-    ws.mergeCells(r, 12, r, 13);
-    ws.getCell(r, 14).value = num(m.price_rmb);
-    ws.getCell(r, 14).numFmt = '"¥"#,##0';
-    ws.getCell(r, 15).value = num(m.price_usd);
-    ws.getCell(r, 15).numFmt = '"$"#,##0';
-    ws.getCell(r, 16).value = { formula: `N${r}/${fxRH}+O${r}*${MOLD_USD_HKD}`,
+    ws.getCell(r, 9).value = m.cycle_sec == null || m.cycle_sec === '' ? '' : num(m.cycle_sec);
+    ws.getCell(r, 10).value = (m.detail && m.detail.mold_size) || '';
+    ws.mergeCells(r, 11, r, 12);
+    ws.getCell(r, 13).value = num(m.price_rmb);
+    ws.getCell(r, 13).numFmt = '"¥"#,##0';
+    ws.getCell(r, 14).value = num(m.price_usd);
+    ws.getCell(r, 14).numFmt = '"$"#,##0';
+    ws.getCell(r, 15).value = { formula: `M${r}/${fxRH}+N${r}*${MOLD_USD_HKD}`,
       result: num(m.price_rmb) / fxRH + num(m.price_usd) * MOLD_USD_HKD };
-    ws.getCell(r, 16).numFmt = '"HK$"#,##0';
-    ws.getCell(r, 17).value = m.note || '';
-    for (let c = 1; c <= 17; c++) styleData(ws.getCell(r, c));
+    ws.getCell(r, 15).numFmt = '"HK$"#,##0';
+    for (let c = 1; c <= 15; c++) styleData(ws.getCell(r, c));
 
     // 嵌入所有图片：2 列 × N 行 网格布局
     const imgs = (m.images || []).filter(Boolean);
@@ -306,10 +303,10 @@ async function buildWorkbook({ quote, sections }) {
           const id = wb.addImage({ filename: abs, extension: ext === 'jpg' ? 'jpeg' : ext });
           const xi = i % perRow;
           const yi = Math.floor(i / perRow);
-          // tl.col: 第一张 → col 12 起始 (idx 11)，第二张 → col 13 起始 (idx 12)
+          // tl.col: 第一张 → K 列起始 (idx 10)，第二张 → L 列起始 (idx 11)
           // tl.row 用 yi/gridRows 把图均分行高
           ws.addImage(id, {
-            tl: { col: 11 + xi, row: r - 1 + (yi / gridRows) },
+            tl: { col: 10 + xi, row: r - 1 + (yi / gridRows) },
             ext: { width: imgW, height: imgH },
           });
         } catch (e) { /* skip bad image */ }
@@ -320,40 +317,40 @@ async function buildWorkbook({ quote, sections }) {
   // 小计 RMB - SUM 公式（只在数值格上色）
   const moldDataEnd = row - 1;
   const whiteFill = (r) => {
-    for (let c = 1; c <= 17; c++) {
+    for (let c = 1; c <= 15; c++) {
       const cell = ws.getCell(r, c);
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
       cell.border = thinBorder();
       cell.alignment = cell.alignment || { horizontal: 'center', vertical: 'middle' };
     }
   };
-  // 小计：同一行 价格RMB(N) + 价格USD(O) + 模价HKD(P)
-  ws.mergeCells(row, 1, row, 13);
+  // 小计：同一行 价格RMB(M) + 价格USD(N) + 模价HKD(O)
+  ws.mergeCells(row, 1, row, 12);
   ws.getCell(row, 1).value = `小计 (汇率 RMB ${fxRH} · USD ${MOLD_USD_HKD})`;
   ws.getCell(row, 1).alignment = { horizontal: 'right', vertical: 'middle' };
   const moldSubtotal = sum(molds, m => num(m.price_rmb));
   const moldSubtotalUsd = sum(molds, m => num(m.price_usd));
   const moldSubtotalRow = row;
+  ws.getCell(row, 13).value = molds.length
+    ? { formula: `SUM(M${moldDataStart}:M${moldDataEnd})`, result: moldSubtotal }
+    : 0;
+  ws.getCell(row, 13).numFmt = '"¥"#,##0';
   ws.getCell(row, 14).value = molds.length
-    ? { formula: `SUM(N${moldDataStart}:N${moldDataEnd})`, result: moldSubtotal }
+    ? { formula: `SUM(N${moldDataStart}:N${moldDataEnd})`, result: moldSubtotalUsd }
     : 0;
-  ws.getCell(row, 14).numFmt = '"¥"#,##0';
+  ws.getCell(row, 14).numFmt = '"$"#,##0';
   ws.getCell(row, 15).value = molds.length
-    ? { formula: `SUM(O${moldDataStart}:O${moldDataEnd})`, result: moldSubtotalUsd }
+    ? { formula: `SUM(O${moldDataStart}:O${moldDataEnd})`, result: moldSubtotal / fxRH + moldSubtotalUsd * MOLD_USD_HKD }
     : 0;
-  ws.getCell(row, 15).numFmt = '"$"#,##0';
-  ws.getCell(row, 16).value = molds.length
-    ? { formula: `SUM(P${moldDataStart}:P${moldDataEnd})`, result: moldSubtotal / fxRH + moldSubtotalUsd * MOLD_USD_HKD }
-    : 0;
-  ws.getCell(row, 16).numFmt = '"HK$"#,##0';
+  ws.getCell(row, 15).numFmt = '"HK$"#,##0';
   whiteFill(row);
-  styleSubtotal(ws.getCell(row, 14), 'sub');
+  styleSubtotal(ws.getCell(row, 13), 'sub');
+  styleSubtotal(ws.getCell(row, 14), 'total');
   styleSubtotal(ws.getCell(row, 15), 'total');
-  styleSubtotal(ws.getCell(row, 16), 'total');
   ws.getCell(row, 1).font = { bold: true, color: { argb: 'FF1F2937' }, name: 'Microsoft YaHei' };
+  ws.getCell(row, 13).font = { bold: true, color: { argb: 'FF1F2937' }, name: 'Microsoft YaHei' };
   ws.getCell(row, 14).font = { bold: true, color: { argb: 'FF1F2937' }, name: 'Microsoft YaHei' };
   ws.getCell(row, 15).font = { bold: true, color: { argb: 'FF1F2937' }, name: 'Microsoft YaHei' };
-  ws.getCell(row, 16).font = { bold: true, color: { argb: 'FF1F2937' }, name: 'Microsoft YaHei' };
   row += 2;
 
   // 收集各 section 的"合计"单元格地址，供九、合计行用公式引用

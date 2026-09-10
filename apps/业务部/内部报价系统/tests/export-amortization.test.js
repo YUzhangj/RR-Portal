@@ -1234,7 +1234,7 @@ test('export combines mold RMB and USD display prices and converts production mo
   worksheet.eachRow(row => row.eachCell(cell => {
     if (cell.value === '测试模具') {
       moldRow = row.number;
-      moldDisplayHkd = worksheet.getCell(row.number, 16).value;
+      moldDisplayHkd = worksheet.getCell(row.number, 15).value;
     }
     if (cell.value === '生产模具' && !productionMoldUsd) {
       const usdCell = worksheet.getCell(row.number, cell.col + 4);
@@ -1245,12 +1245,14 @@ test('export combines mold RMB and USD display prices and converts production mo
 
   const moldHeaders = worksheet.getRow(moldRow - 1).values.slice(1);
   assert.ok(!moldHeaders.includes('颜色'));
+  assert.ok(!moldHeaders.includes('净重(g)'));
+  assert.ok(!moldHeaders.includes('备   注'));
   assert.equal(worksheet.getRow(moldRow).height, 32);
-  assert.equal(worksheet.getCell(moldRow, 14).numFmt, '"¥"#,##0');
-  assert.equal(worksheet.getCell(moldRow, 15).numFmt, '"$"#,##0');
-  assert.equal(worksheet.getCell(moldRow, 16).numFmt, '"HK$"#,##0');
+  assert.equal(worksheet.getCell(moldRow, 13).numFmt, '"¥"#,##0');
+  assert.equal(worksheet.getCell(moldRow, 14).numFmt, '"$"#,##0');
+  assert.equal(worksheet.getCell(moldRow, 15).numFmt, '"HK$"#,##0');
   assert.equal(moldDisplayHkd.result, 10780);
-  assert.match(moldDisplayHkd.formula, /N\d+\/0\.85\+O\d+\*7\.8/);
+  assert.match(moldDisplayHkd.formula, /M\d+\/0\.85\+N\d+\*7\.8/);
   assert.equal(Number(productionMoldUsd.result.toFixed(2)), 15.18);
   assert.equal(productionMoldUsdFmt, '"$"#,##0.00');
   assert.match(productionMoldUsd.formula, /I\d+\/0\.85\/7\.75/);
