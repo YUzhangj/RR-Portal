@@ -90,6 +90,14 @@ test('molding UI visually separates multiple product groups', () => {
   assert.match(styles, /tbody td\.molding-machine-key input/);
 });
 
+test('mold table hides the unused mold structure column', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  const renderMolds = source.match(/function renderMolds\([\s\S]*?\n}\n/);
+  assert.ok(renderMolds);
+  assert.doesNotMatch(renderMolds[0], />模具结构</);
+  assert.doesNotMatch(renderMolds[0], /\['structure', 'text'\]/);
+});
+
 test('molding defaults automatically fill missing material and shot prices without overwriting manual prices', () => {
   const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
   assert.match(source, /function applyInjectionReferencePrices\(payload/);

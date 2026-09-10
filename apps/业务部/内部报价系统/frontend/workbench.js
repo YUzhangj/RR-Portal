@@ -540,7 +540,6 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
     <th style="width:160px">模具名称</th>
     <th style="width:70px">模号</th>
     <th style="width:120px">模胚类型</th>
-    <th style="width:100px">模具结构</th>
     <th style="width:70px">材质</th>
     <th style="width:70px">颜色</th>
     <th style="width:80px">出模数</th>
@@ -561,7 +560,6 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
     ['name', 'textarea'],
     ['mold_no', 'text'],
     ['mold_type', 'textarea'],
-    ['structure', 'text'],
     ['material', 'text'], ['color', 'text'], ['cavity', 'text'], ['sets', 'number'],
     ['weight_g', 'number'],
     ['cycle_sec', 'number'],
