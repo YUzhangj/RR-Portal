@@ -133,7 +133,8 @@ test('shipping UI supports named customer-supplied products in final USD', () =>
 test('tax summary does not repeat the Indonesian freight field', () => {
   const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
   assert.doesNotMatch(source, /id="tk-indo-freight"/);
-  assert.match(source, /misc: num\(sales\.pricing_summary\?\.indo_freight\) \+ surtaxHkd/);
+  assert.match(source, /misc: num\(sales\.pricing_summary\?\.indo_freight\),/);
+  assert.doesNotMatch(source, /misc: num\(sales\.pricing_summary\?\.indo_freight\) \+ surtaxHkd/);
 });
 
 test('department tabs require save or cancel before leaving dirty edits', () => {

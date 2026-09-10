@@ -1837,9 +1837,8 @@ function renderSummaryPane(host, sections, quote, me) {
       const rate = num(yt40._freight_rate);
       return rate * num(sales.shipping?.lifting_pct ?? 52) / 100;
     })(),
-    // 杂项 = 印尼运费(手填 HKD) + 附加税 HKD
-    misc: num(sales.pricing_summary?.indo_freight) + surtaxHkd,
-    surtax_hkd: surtaxHkd,  // 供减税明细里印尼运费输入框重算 misc 用（避免丢附加税）
+    // 杂项只取印尼运费；附加税在出货价算价区单独计算，不进入减税明细。
+    misc: num(sales.pricing_summary?.indo_freight),
     hardware: (hwRaw - _sumByMatch(eng.hardware, isMotor)),  // 五金 HKD（剔除马达项；五金表已 HKD）
     electronic: elecRaw,                                  // 电子 HKD（不识别/剔除马达）
     injection_labor: weightedInjectionSum(mold, r => num(r.shot_price)),  // 啤工按各产品配比加权
