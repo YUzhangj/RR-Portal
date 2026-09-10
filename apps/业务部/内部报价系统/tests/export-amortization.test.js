@@ -1501,14 +1501,18 @@ test('shipping export matches freight formulas by scenario name without temporar
   let titleRow = 0;
   let yt40Row = 0;
   let yt40Col = 0;
+  let shippingFreightRow = 0;
+  let shippingLiftRow = 0;
   worksheet.eachRow(row => row.eachCell(cell => {
     if (cell.value === '十一、出货价算价（多场景）') titleRow = row.number;
     if (cell.value === 'YT 40柜') { yt40Row = row.number; yt40Col = cell.col; }
+    if (cell.col === 1 && cell.value === '运费 48%') shippingFreightRow = row.number;
+    if (cell.col === 1 && cell.value === '吊柜费 52%') shippingLiftRow = row.number;
   }));
-  assert.ok(titleRow && yt40Row && yt40Col);
+  assert.ok(titleRow && yt40Row && yt40Col && shippingFreightRow && shippingLiftRow);
   const rateRef = worksheet.getCell(yt40Row, yt40Col + 4).address;
-  assert.equal(worksheet.getCell(titleRow + 3, 3).value.formula, `${rateRef}*48/100`);
-  assert.equal(worksheet.getCell(titleRow + 4, 3).value.formula, `${rateRef}*52/100`);
+  assert.equal(worksheet.getCell(shippingFreightRow, 3).value.formula, `${rateRef}*48/100`);
+  assert.equal(worksheet.getCell(shippingLiftRow, 3).value.formula, `${rateRef}*52/100`);
 });
 
 test('customer-supplied products are named separately and added to exported customer price', async () => {
@@ -1544,7 +1548,7 @@ test('customer-supplied products are named separately and added to exported cust
   assert.equal(worksheet.getCell(cableRow, 3).value, 1.25);
   assert.match(worksheet.getCell(totalUsdRow, 3).value.formula, new RegExp(`C${controllerRow}\\+C${cableRow}`));
   assert.equal(worksheet.getCell(totalUsdRow, 3).value.result, 3.75);
-  assert.match(worksheet.getCell(customerPriceRow, 1).value.result, /报客货价: 3\.7500/);
+  assert.match(worksheet.getCell(customerPriceRow, 1).value.result, /报客货价: 3\.7650/);
   const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
   assert.match(source, /amount_usd_raw/);
   assert.match(source, /customer-supplied-amount[\s\S]*type="text"/);
