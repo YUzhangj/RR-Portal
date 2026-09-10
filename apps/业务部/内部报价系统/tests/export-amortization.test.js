@@ -235,7 +235,7 @@ test('carton product dimensions are labeled in inches', async () => {
   const summaryHeaderRow = worksheet.getColumn(1).values.findIndex(value => value === '注塑+吹气');
   assert.ok(summaryHeaderRow > 0);
   assert.equal(
-    worksheet.getCell(summaryHeaderRow + 1, 12).value.formula,
+    worksheet.getCell(summaryHeaderRow + 1, 10).value.formula,
     `(F${titleRow + 3}/MAX(G${titleRow + 3},1)+F${titleRow + 4})`,
   );
   const workbenchSource = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
@@ -415,8 +415,8 @@ test('surtax is stored and exported as a direct HKD amount', async () => {
     if (row.getCell(1).value === '十、合计') summaryRow = row.number + 2;
   });
   assert.ok(summaryRow);
-  assert.equal(worksheet.getCell(summaryRow, 13).value, 0.1);
-  assert.match(worksheet.getCell(summaryRow, 14).value.formula, new RegExp(`\\+M${summaryRow}$`));
+  assert.equal(worksheet.getCell(summaryRow, 11).value, 0.1);
+  assert.equal(worksheet.getCell(summaryRow, 12).value.formula, `SUM(A${summaryRow}:K${summaryRow})`);
 });
 
 test('manually adjusted carton price is preserved by the shared paper-rate formula', async () => {
@@ -1080,20 +1080,21 @@ test('export separates electronic and sewing pricing and keeps weighted sewing f
   const labels = [];
   worksheet.eachRow(row => row.eachCell(cell => {
     if (typeof cell.value === 'string') labels.push(cell.value);
-    if (cell.value === '注塑+吹气' && row.values.includes('出货底价 HKD')) summaryHeaderRow = row.number;
+    if (cell.value === '注塑+吹气' && row.values.includes('小计HKD')) summaryHeaderRow = row.number;
   }));
 
   assert.ok(summaryHeaderRow);
   assert.equal(worksheet.getCell(summaryHeaderRow, 2).value, '组装人工');
   assert.equal(worksheet.getCell(summaryHeaderRow, 3).value, '包装/混装人工');
   assert.equal(worksheet.getCell(summaryHeaderRow, 4).value, '二次加工（印喷）');
-  assert.equal(worksheet.getCell(summaryHeaderRow, 5).value, '电子');
-  assert.equal(worksheet.getCell(summaryHeaderRow, 6).value, '五金');
-  assert.equal(worksheet.getCell(summaryHeaderRow, 7).value, '包装材料');
-  assert.equal(worksheet.getCell(summaryHeaderRow, 8).value, '辅助材料');
-  assert.equal(worksheet.getCell(summaryHeaderRow, 11).value, '车缝');
-  assert.equal(worksheet.getCell(summaryHeaderRow, 14).value, '出货底价 HKD');
-  assert.match(worksheet.getCell(summaryHeaderRow + 1, 14).value.formula, /SUM\(A\d+:L\d+\)-E\d+-K\d+\+M\d+/);
+  assert.equal(worksheet.getCell(summaryHeaderRow, 5).value, '五金');
+  assert.equal(worksheet.getCell(summaryHeaderRow, 6).value, '包装材料');
+  assert.equal(worksheet.getCell(summaryHeaderRow, 7).value, '辅助材料');
+  assert.equal(worksheet.getCell(summaryHeaderRow, 10).value, '纸箱');
+  assert.equal(worksheet.getCell(summaryHeaderRow, 12).value, '小计HKD');
+  assert.ok(!worksheet.getRow(summaryHeaderRow).values.includes('电子'));
+  assert.ok(!worksheet.getRow(summaryHeaderRow).values.includes('车缝'));
+  assert.match(worksheet.getCell(summaryHeaderRow + 1, 12).value.formula, /SUM\(A\d+:K\d+\)/);
   assert.ok(labels.includes('车缝'));
   assert.ok(labels.includes('电子'));
   assert.ok(labels.includes('码点 × 1.3'));
@@ -1414,11 +1415,9 @@ test('internal export keeps Indonesian freight only in quotation summary', async
     + worksheet.getCell(injectionIndoTotalRow, 15).value.result
     + worksheet.getCell(blowIndoTotalRow, 15).value.result
     + slushWorksheet.getCell(slushIndoRow, 7).value.result;
-  assert.equal(Number(worksheet.getCell(summaryRow, 9).value.result.toFixed(4)), Number(expectedIndoTotal.toFixed(4)));
-  assert.equal(
-    worksheet.getCell(summaryRow, 9).value.formula,
-    `L${unifiedTotalRow}+O${injectionIndoTotalRow}+O${blowIndoTotalRow}+'搪胶明细'!G${slushIndoRow}`
-  );
+  const summaryFreight = worksheet.getCell(summaryRow, 8).value;
+  const summaryFreightValue = typeof summaryFreight === 'object' ? summaryFreight.result : summaryFreight;
+  assert.equal(Number(summaryFreightValue.toFixed(4)), Number(expectedIndoTotal.toFixed(4)));
   assert.ok(unifiedHeaderRow);
   assert.equal(worksheet.getCell(unifiedHeaderRow, 12).value, '印尼运费');
   const icRow = electronicIcRow;

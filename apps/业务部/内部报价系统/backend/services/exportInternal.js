@@ -1223,11 +1223,12 @@ function enhanceWorkbook(workbook, { quote, sections }) {
 
   const movedSummaryTitle = findRow(ws, '十、合计');
   if (movedSummaryTitle) {
-    ws.getCell(movedSummaryTitle + 2, 9).value = {
+    // “十、合计”已移除电子、车缝两列，印尼运费现在位于 H 列。
+    ws.getCell(movedSummaryTitle + 2, 8).value = {
       formula: indo.formula,
       result: indo.total,
     };
-    ws.getCell(movedSummaryTitle + 2, 9).numFmt = HKD4;
+    ws.getCell(movedSummaryTitle + 2, 8).numFmt = HKD4;
   }
   workbook.calcProperties = { fullCalcOnLoad: true };
   applyPrintLayout(workbook);
