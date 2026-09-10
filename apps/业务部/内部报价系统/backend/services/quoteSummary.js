@@ -117,7 +117,15 @@ SUMMARY_COLUMNS.push(['freight', '运费', 'unit'], ['cabinet', '吊柜费', 'un
   ['total_gross_after_tax', '总退税后毛利', 'amount'], ['total_gross_after_tax_rate', '总退税后毛利率', 'percent'],
   ['total_profit_after_tax', '总退税后利润', 'amount'], ['total_profit_after_tax_rate', '总退税后利润率', 'percent'],
   ['total_raw_after_tax', '总退税后料成本', 'amount'], ['total_raw_after_tax_share', '总未退税前料成本占比', 'percent'],
-  ['total_labor_after_tax', '总退税后人工成本', 'amount'], ['total_labor_after_tax_share', '总退税后人工成本占比', 'percent']);
+  ['total_labor_after_tax', '总退税后人工成本', 'amount'], ['total_labor_after_tax_share', '总退税后人工成本占比', 'percent'],
+  ['amount_share_total', '各金额占比求和', 'percent']);
+
+const AMOUNT_SHARE_KEYS = [
+  'injection_labor_share', 'assembly_labor_share', 'painting_labor_share', 'raw_material_share',
+  'color_box_share', 'libao_share', 'suction_share', 'carton_share', 'electronic_share', 'battery_share',
+  'hardware_share', 'slush_share', 'sewing_hair_share', 'sewing_cloth_share', 'paint_material_share',
+  'other_buy_share', 'misc_share', 'freight_share',
+];
 
 function calculateSummaryValues(before, after, qty, price, absMaterialCost = 0) {
   const values = {};
@@ -171,6 +179,7 @@ function calculateSummaryValues(before, after, qty, price, absMaterialCost = 0) 
   values.total_profit_after_tax=values.profit_after_tax*qty; values.total_profit_after_tax_rate=values.profit_after_tax_rate;
   values.total_raw_after_tax=values.raw_cost_after_tax*qty; values.total_raw_after_tax_share=values.production_amount?values.total_raw_after_tax/values.production_amount:0;
   values.total_labor_after_tax=values.labor_cost_after_tax*qty; values.total_labor_after_tax_share=values.production_amount?values.total_labor_after_tax/values.production_amount:0;
+  values.amount_share_total=AMOUNT_SHARE_KEYS.reduce((sum,key)=>sum+num(values[key]),0);
   return values;
 }
 
@@ -567,6 +576,7 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
       total_profit_after_tax:`${ref('profit_after_tax',row)}*${qty}`, total_profit_after_tax_rate:ref('profit_after_tax_rate',row),
       total_raw_after_tax:`${ref('raw_cost_after_tax',row)}*${qty}`, total_raw_after_tax_share:`IF(${ref('production_amount',row)}=0,0,${ref('total_raw_after_tax',row)}/${ref('production_amount',row)})`,
       total_labor_after_tax:`${ref('labor_cost_after_tax',row)}*${qty}`, total_labor_after_tax_share:`IF(${ref('production_amount',row)}=0,0,${ref('total_labor_after_tax',row)}/${ref('production_amount',row)})`,
+      amount_share_total:`SUM(${AMOUNT_SHARE_KEYS.map(key=>ref(key,row)).join(',')})`,
     };
     return formulas[key] || null;
   };

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {
-  QUOTE_COMPONENTS, TAX_DEDUCTION_RATES, SUMMARY_COLUMNS, groupSummaryRows, buildQuoteSummary, buildSummaryWorkbook,
+  QUOTE_COMPONENTS, TAX_DEDUCTION_RATES, SUMMARY_COLUMNS, calculateSummaryValues, groupSummaryRows, buildQuoteSummary, buildSummaryWorkbook,
 } = require('../backend/services/quoteSummary');
 
 test('报价汇总读取报价基本资料和客价', () => {
@@ -261,5 +261,24 @@ test('完整汇总栏目严格按参考表顺序', () => {
   assert.deepEqual(labels.slice(0, 12), ['啤工','退税后啤工','啤工金额','啤工占比','装工','退税后装工','装工金额','装工占比','喷印工','退税后喷印工','喷印工金额','喷印工占比']);
   assert.ok(labels.indexOf('料价进口料') < labels.indexOf('彩盒'));
   assert.ok(labels.indexOf('总退税可减少成本') < labels.indexOf('退税及返点后总成本（含人工）'));
-  assert.deepEqual(labels.slice(-4), ['总退税后料成本','总未退税前料成本占比','总退税后人工成本','总退税后人工成本占比']);
+  assert.deepEqual(labels.slice(-5), ['总退税后料成本','总未退税前料成本占比','总退税后人工成本','总退税后人工成本占比','各金额占比求和']);
+});
+
+test('汇总最后一列汇总各成本项目占比并导出为公式', () => {
+  const values = calculateSummaryValues(
+    { injection_labor: 1, assembly_labor: 2, imp_mat: 3, freight: 4 },
+    { injection_labor: 1, assembly_labor: 2, imp_mat: 3, freight: 4 },
+    1, 20,
+  );
+  assert.equal(values.amount_share_total, 0.5);
+  const workbook = buildSummaryWorkbook([{
+    id: 1, customer: 'TOMY', quote_no: 'SUM-1', product_name: '占比求和', qty: 1,
+    quoted_price: 20, created_at: '2026-09-10',
+    components_before_tax: { injection_labor: 1, assembly_labor: 2, imp_mat: 3, freight: 4 },
+    components: { injection_labor: 1, assembly_labor: 2, imp_mat: 3, freight: 4 }, confirmation: {},
+  }]);
+  const sheet = workbook.getWorksheet('各客报价汇总');
+  const column = sheet.getRow(4).values.findIndex(value => value === '各金额占比求和');
+  assert.match(sheet.getCell(5, column).value.formula, /^SUM\(/);
+  assert.equal(sheet.getCell(5, column).value.result, 0.5);
 });

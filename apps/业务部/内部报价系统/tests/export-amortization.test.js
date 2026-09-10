@@ -244,6 +244,8 @@ test('carton product dimensions are labeled in inches', async () => {
   assert.match(workbenchSource, /产品尺寸（mm 自动换算为英寸）/);
   assert.match(workbenchSource, /id="cc-pl-mm"/);
   assert.match(workbenchSource, /c\[k\] = mm \/ 25\.4/);
+  assert.match(workbenchSource, /const productInchInput = key =>.*toFixed\(2\)/);
+  assert.match(workbenchSource, /el\.value = mmEl\.value === '' \? '' : c\[k\]\.toFixed\(2\)/);
 });
 
 test('carton dimensions accept formulas and preserve them in Excel export', async () => {
