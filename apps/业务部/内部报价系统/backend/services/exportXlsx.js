@@ -247,13 +247,12 @@ async function buildWorkbook({ quote, sections }) {
   const fxHU = num(sales.header?.fx_hkd_usd) || 7.8;
 
   // ---------- 一、模具部分 ----------
-  // 导出不显示净重和备注：A-H 基本资料，I周期，J尺寸，K-L图片，M-O价格。
+  // 导出不显示净重和备注：A-H 基本资料，I周期，J尺寸，K图片，L-N价格。
   ws.mergeCells(row, 1, row, 17); styleSection(ws.getCell(row, 1));
   ws.getCell(row, 1).value = '一、模具部分';
   row += 1;
-  const moldHeader = ['序号', '模具名称', '模号', '模胚类型', '模具结构', '材质', '出模数', '套数', '周期(秒)', '模具尺寸', '图   片', '', '模具价格（RMB）', '模具价格（USD）', '模价 HKD'];
+  const moldHeader = ['序号', '模具名称', '模号', '模胚类型', '模具结构', '材质', '出模数', '套数', '周期(秒)', '模具尺寸', '图   片', '模具价格（RMB）', '模具价格（USD）', '模价 HKD'];
   moldHeader.forEach((h, i) => { ws.getCell(row, i + 1).value = h; styleHeader(ws.getCell(row, i + 1)); });
-  ws.mergeCells(row, 11, row, 12); // 图片列合并(K:L)
   row += 1;
 
   const molds = eng.molds || [];
@@ -274,20 +273,19 @@ async function buildWorkbook({ quote, sections }) {
     ws.getCell(r, 8).value = m.sets ?? 1;
     ws.getCell(r, 9).value = m.cycle_sec == null || m.cycle_sec === '' ? '' : num(m.cycle_sec);
     ws.getCell(r, 10).value = (m.detail && m.detail.mold_size) || '';
-    ws.mergeCells(r, 11, r, 12);
-    ws.getCell(r, 13).value = num(m.price_rmb);
-    ws.getCell(r, 13).numFmt = '"¥"#,##0';
-    ws.getCell(r, 14).value = num(m.price_usd);
-    ws.getCell(r, 14).numFmt = '"$"#,##0';
-    ws.getCell(r, 15).value = { formula: `M${r}/${fxRH}+N${r}*${MOLD_USD_HKD}`,
+    ws.getCell(r, 12).value = num(m.price_rmb);
+    ws.getCell(r, 12).numFmt = '"¥"#,##0';
+    ws.getCell(r, 13).value = num(m.price_usd);
+    ws.getCell(r, 13).numFmt = '"$"#,##0';
+    ws.getCell(r, 14).value = { formula: `L${r}/${fxRH}+M${r}*${MOLD_USD_HKD}`,
       result: num(m.price_rmb) / fxRH + num(m.price_usd) * MOLD_USD_HKD };
-    ws.getCell(r, 15).numFmt = '"HK$"#,##0';
-    for (let c = 1; c <= 15; c++) styleData(ws.getCell(r, c));
+    ws.getCell(r, 14).numFmt = '"HK$"#,##0';
+    for (let c = 1; c <= 14; c++) styleData(ws.getCell(r, c));
 
     // 嵌入所有图片：2 列 × N 行 网格布局
     const imgs = (m.images || []).filter(Boolean);
     if (imgs.length) {
-      const perRow = 2;
+      const perRow = 1;
       const imgW = 55, imgH = 55;
       const gridRows = Math.ceil(imgs.length / perRow);
       const rowHeightPt = gridRows * 50 + 10; // 留 10pt 缓冲
@@ -303,10 +301,10 @@ async function buildWorkbook({ quote, sections }) {
           const id = wb.addImage({ filename: abs, extension: ext === 'jpg' ? 'jpeg' : ext });
           const xi = i % perRow;
           const yi = Math.floor(i / perRow);
-          // tl.col: 第一张 → K 列起始 (idx 10)，第二张 → L 列起始 (idx 11)
+          // 图片全部放在 K 列，存在多张时向下排列。
           // tl.row 用 yi/gridRows 把图均分行高
           ws.addImage(id, {
-            tl: { col: 10 + xi, row: r - 1 + (yi / gridRows) },
+            tl: { col: 10, row: r - 1 + (yi / gridRows) },
             ext: { width: imgW, height: imgH },
           });
         } catch (e) { /* skip bad image */ }
@@ -317,40 +315,40 @@ async function buildWorkbook({ quote, sections }) {
   // 小计 RMB - SUM 公式（只在数值格上色）
   const moldDataEnd = row - 1;
   const whiteFill = (r) => {
-    for (let c = 1; c <= 15; c++) {
+    for (let c = 1; c <= 14; c++) {
       const cell = ws.getCell(r, c);
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
       cell.border = thinBorder();
       cell.alignment = cell.alignment || { horizontal: 'center', vertical: 'middle' };
     }
   };
-  // 小计：同一行 价格RMB(M) + 价格USD(N) + 模价HKD(O)
-  ws.mergeCells(row, 1, row, 12);
+  // 小计：同一行 价格RMB(L) + 价格USD(M) + 模价HKD(N)
+  ws.mergeCells(row, 1, row, 11);
   ws.getCell(row, 1).value = `小计 (汇率 RMB ${fxRH} · USD ${MOLD_USD_HKD})`;
   ws.getCell(row, 1).alignment = { horizontal: 'right', vertical: 'middle' };
   const moldSubtotal = sum(molds, m => num(m.price_rmb));
   const moldSubtotalUsd = sum(molds, m => num(m.price_usd));
   const moldSubtotalRow = row;
+  ws.getCell(row, 12).value = molds.length
+    ? { formula: `SUM(L${moldDataStart}:L${moldDataEnd})`, result: moldSubtotal }
+    : 0;
+  ws.getCell(row, 12).numFmt = '"¥"#,##0';
   ws.getCell(row, 13).value = molds.length
-    ? { formula: `SUM(M${moldDataStart}:M${moldDataEnd})`, result: moldSubtotal }
+    ? { formula: `SUM(M${moldDataStart}:M${moldDataEnd})`, result: moldSubtotalUsd }
     : 0;
-  ws.getCell(row, 13).numFmt = '"¥"#,##0';
+  ws.getCell(row, 13).numFmt = '"$"#,##0';
   ws.getCell(row, 14).value = molds.length
-    ? { formula: `SUM(N${moldDataStart}:N${moldDataEnd})`, result: moldSubtotalUsd }
+    ? { formula: `SUM(N${moldDataStart}:N${moldDataEnd})`, result: moldSubtotal / fxRH + moldSubtotalUsd * MOLD_USD_HKD }
     : 0;
-  ws.getCell(row, 14).numFmt = '"$"#,##0';
-  ws.getCell(row, 15).value = molds.length
-    ? { formula: `SUM(O${moldDataStart}:O${moldDataEnd})`, result: moldSubtotal / fxRH + moldSubtotalUsd * MOLD_USD_HKD }
-    : 0;
-  ws.getCell(row, 15).numFmt = '"HK$"#,##0';
+  ws.getCell(row, 14).numFmt = '"HK$"#,##0';
   whiteFill(row);
-  styleSubtotal(ws.getCell(row, 13), 'sub');
+  styleSubtotal(ws.getCell(row, 12), 'sub');
+  styleSubtotal(ws.getCell(row, 13), 'total');
   styleSubtotal(ws.getCell(row, 14), 'total');
-  styleSubtotal(ws.getCell(row, 15), 'total');
   ws.getCell(row, 1).font = { bold: true, color: { argb: 'FF1F2937' }, name: 'Microsoft YaHei' };
+  ws.getCell(row, 12).font = { bold: true, color: { argb: 'FF1F2937' }, name: 'Microsoft YaHei' };
   ws.getCell(row, 13).font = { bold: true, color: { argb: 'FF1F2937' }, name: 'Microsoft YaHei' };
   ws.getCell(row, 14).font = { bold: true, color: { argb: 'FF1F2937' }, name: 'Microsoft YaHei' };
-  ws.getCell(row, 15).font = { bold: true, color: { argb: 'FF1F2937' }, name: 'Microsoft YaHei' };
   row += 2;
 
   // 收集各 section 的"合计"单元格地址，供九、合计行用公式引用
