@@ -1248,10 +1248,13 @@ test('export combines mold RMB and USD display prices and converts production mo
 
   const moldHeaders = worksheet.getRow(moldRow - 1).values.slice(1);
   assert.ok(!moldHeaders.includes('颜色'));
+  assert.ok(!moldHeaders.includes('模具结构'));
   assert.ok(!moldHeaders.includes('净重(g)'));
   assert.ok(!moldHeaders.includes('备   注'));
   assert.equal(worksheet.getRow(moldRow).height, 32);
-  assert.equal(moldHeaders.filter(value => value === '图   片').length, 1);
+  assert.equal(worksheet.getCell(moldRow - 1, 10).value, '图   片');
+  assert.ok(worksheet.getCell(moldRow - 1, 10).isMerged);
+  assert.ok(worksheet.getCell(moldRow - 1, 11).isMerged);
   assert.equal(worksheet.getCell(moldRow, 12).numFmt, '"¥"#,##0');
   assert.equal(worksheet.getCell(moldRow, 13).numFmt, '"$"#,##0');
   assert.equal(worksheet.getCell(moldRow, 14).numFmt, '"HK$"#,##0');

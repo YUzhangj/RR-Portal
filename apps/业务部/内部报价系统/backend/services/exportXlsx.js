@@ -247,12 +247,13 @@ async function buildWorkbook({ quote, sections }) {
   const fxHU = num(sales.header?.fx_hkd_usd) || 7.8;
 
   // ---------- 一、模具部分 ----------
-  // 导出不显示净重和备注：A-H 基本资料，I周期，J尺寸，K图片，L-N价格。
+  // 导出不显示模具结构、净重和备注：A-I 基本资料，J-K图片，L-N价格。
   ws.mergeCells(row, 1, row, 17); styleSection(ws.getCell(row, 1));
   ws.getCell(row, 1).value = '一、模具部分';
   row += 1;
-  const moldHeader = ['序号', '模具名称', '模号', '模胚类型', '模具结构', '材质', '出模数', '套数', '周期(秒)', '模具尺寸', '图   片', '模具价格（RMB）', '模具价格（USD）', '模价 HKD'];
+  const moldHeader = ['序号', '模具名称', '模号', '模胚类型', '材质', '出模数', '套数', '周期(秒)', '模具尺寸', '图   片', '', '模具价格（RMB）', '模具价格（USD）', '模价 HKD'];
   moldHeader.forEach((h, i) => { ws.getCell(row, i + 1).value = h; styleHeader(ws.getCell(row, i + 1)); });
+  ws.mergeCells(row, 10, row, 11); // 图片恢复为两列合并(J:K)
   row += 1;
 
   const molds = eng.molds || [];
@@ -267,12 +268,12 @@ async function buildWorkbook({ quote, sections }) {
     ws.getCell(r, 3).value = m.mold_no || '';
     ws.getCell(r, 4).value = m.mold_type || '';
     ws.getCell(r, 4).alignment = { wrapText: true, vertical: 'middle', horizontal: 'center' };
-    ws.getCell(r, 5).value = m.structure || '';
-    ws.getCell(r, 6).value = m.material || '';
-    ws.getCell(r, 7).value = m.cavity || '';
-    ws.getCell(r, 8).value = m.sets ?? 1;
-    ws.getCell(r, 9).value = m.cycle_sec == null || m.cycle_sec === '' ? '' : num(m.cycle_sec);
-    ws.getCell(r, 10).value = (m.detail && m.detail.mold_size) || '';
+    ws.getCell(r, 5).value = m.material || '';
+    ws.getCell(r, 6).value = m.cavity || '';
+    ws.getCell(r, 7).value = m.sets ?? 1;
+    ws.getCell(r, 8).value = m.cycle_sec == null || m.cycle_sec === '' ? '' : num(m.cycle_sec);
+    ws.getCell(r, 9).value = (m.detail && m.detail.mold_size) || '';
+    ws.mergeCells(r, 10, r, 11);
     ws.getCell(r, 12).value = num(m.price_rmb);
     ws.getCell(r, 12).numFmt = '"¥"#,##0';
     ws.getCell(r, 13).value = num(m.price_usd);
@@ -285,7 +286,7 @@ async function buildWorkbook({ quote, sections }) {
     // 嵌入所有图片：2 列 × N 行 网格布局
     const imgs = (m.images || []).filter(Boolean);
     if (imgs.length) {
-      const perRow = 1;
+      const perRow = 2;
       const imgW = 55, imgH = 55;
       const gridRows = Math.ceil(imgs.length / perRow);
       const rowHeightPt = gridRows * 50 + 10; // 留 10pt 缓冲
@@ -301,10 +302,10 @@ async function buildWorkbook({ quote, sections }) {
           const id = wb.addImage({ filename: abs, extension: ext === 'jpg' ? 'jpeg' : ext });
           const xi = i % perRow;
           const yi = Math.floor(i / perRow);
-          // 图片全部放在 K 列，存在多张时向下排列。
+          // 图片在 J:K 两列中排列，超过两张时继续向下排列。
           // tl.row 用 yi/gridRows 把图均分行高
           ws.addImage(id, {
-            tl: { col: 10, row: r - 1 + (yi / gridRows) },
+            tl: { col: 9 + xi, row: r - 1 + (yi / gridRows) },
             ext: { width: imgW, height: imgH },
           });
         } catch (e) { /* skip bad image */ }
