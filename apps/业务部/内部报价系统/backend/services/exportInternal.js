@@ -116,6 +116,8 @@ function applyPrintLayout(workbook) {
     worksheet.eachRow({ includeEmpty: false }, row => {
       row.eachCell({ includeEmpty: false }, cell => {
         if (cell.value === null || cell.value === undefined || cell.value === '') return;
+        // “;;;”用于保存不展示的辅助公式；这些计算格不应把打印范围向右撑宽。
+        if (cell.numFmt === ';;;') return;
         lastRow = Math.max(lastRow, cell.row);
         lastColumn = Math.max(lastColumn, cell.col);
 

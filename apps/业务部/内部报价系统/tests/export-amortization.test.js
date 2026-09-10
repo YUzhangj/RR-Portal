@@ -164,11 +164,11 @@ test('internal quotation workbook uses print-friendly layouts on every sheet', a
   }
   const mainSheet = workbook.getWorksheet('报价明细');
   assert.equal(mainSheet.pageSetup.printTitlesRow, '1:2');
-  // 顶部标题与资料栏延伸到 Q 列，R 列及后方空白不进入打印区域。
-  assert.equal(mainSheet.pageSetup.printArea, `A1:Q${mainSheet.rowCount}`);
-  assert.equal(mainSheet.getCell('Q1').master.address, 'A1');
-  assert.equal(mainSheet.getCell('Q2').master.address, 'A2');
-  assert.notEqual(mainSheet.getCell('R1').master.address, 'A1');
+  // 顶部标题、资料栏和打印范围均只到 N 列；隐藏辅助公式不撑宽打印区域。
+  assert.equal(mainSheet.pageSetup.printArea, `A1:N${mainSheet.rowCount}`);
+  assert.equal(mainSheet.getCell('N1').master.address, 'A1');
+  assert.equal(mainSheet.getCell('N2').master.address, 'A2');
+  assert.notEqual(mainSheet.getCell('O1').master.address, 'A1');
   assert.equal(mainSheet.getCell(1, 1).font.size, 18);
   assert.ok(mainSheet.getCell(2, 1).font.size >= 12);
   assert.ok(mainSheet.getColumn(6).width >= 18);
@@ -1247,6 +1247,10 @@ test('export combines mold RMB and USD display prices and converts production mo
   }));
 
   const moldHeaders = worksheet.getRow(moldRow - 1).values.slice(1);
+  assert.ok(worksheet.getCell(1, 14).isMerged);
+  assert.equal(worksheet.getCell(1, 15).isMerged, false);
+  assert.ok(worksheet.getCell(moldRow - 2, 14).isMerged);
+  assert.equal(worksheet.getCell(moldRow - 2, 15).isMerged, false);
   assert.ok(!moldHeaders.includes('颜色'));
   assert.ok(!moldHeaders.includes('模具结构'));
   assert.ok(!moldHeaders.includes('净重(g)'));

@@ -209,7 +209,7 @@ async function buildWorkbook({ quote, sections }) {
   let row = 1;
 
   // 报价单标题
-  ws.mergeCells(row, 1, row, 17);
+  ws.mergeCells(row, 1, row, 14);
   const titleCell = ws.getCell(row, 1);
   titleCell.value = `${quote.quote_no || ''} ${quote.product_name || ''} 内部报价明细`;
   titleCell.font = { bold: true, size: 18, color: { argb: COLORS.white }, name: 'Microsoft YaHei' };
@@ -219,7 +219,7 @@ async function buildWorkbook({ quote, sections }) {
   row += 1;
 
   // 报价单元信息
-  ws.mergeCells(row, 1, row, 17);
+  ws.mergeCells(row, 1, row, 14);
   const subCell = ws.getCell(row, 1);
   subCell.value = `客户: ${quote.customer || '—'}    数量: ${quote.qty || '—'}    创建: ${quote.created_at || ''}`;
   subCell.alignment = { horizontal: 'center', vertical: 'middle' };
@@ -248,7 +248,7 @@ async function buildWorkbook({ quote, sections }) {
 
   // ---------- 一、模具部分 ----------
   // 导出不显示模具结构、净重和备注：A-I 基本资料，J-K图片，L-N价格。
-  ws.mergeCells(row, 1, row, 17); styleSection(ws.getCell(row, 1));
+  ws.mergeCells(row, 1, row, 14); styleSection(ws.getCell(row, 1));
   ws.getCell(row, 1).value = '一、模具部分';
   row += 1;
   const moldHeader = ['序号', '模具名称', '模号', '模胚类型', '材质', '出模数', '套数', '周期(秒)', '模具尺寸', '图   片', '', '模具价格（RMB）', '模具价格（USD）', '模价 HKD'];
