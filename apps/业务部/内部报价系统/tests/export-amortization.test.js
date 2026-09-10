@@ -393,7 +393,7 @@ test('USD supplier material keeps USD as source price and converts directly to H
   assert.equal(worksheet.getCell(rawOnlyDataRow, 10).value.result, 31);
 });
 
-test('surtax is stored and exported as a direct HKD amount', async () => {
+test('surtax is stored as HKD and exported only in the shipping calculation block', async () => {
   const args = {
     quote: { quote_no: 'SURTAX-HKD', product_name: '附加税港币', qty: 1000 },
     sections: [{
@@ -401,7 +401,7 @@ test('surtax is stored and exported as a direct HKD amount', async () => {
       payload_json: JSON.stringify({
         header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.8 },
         pricing_summary: { surtax: 0.1 },
-        shipping: { scenarios: [] },
+        shipping: { scenarios: [{ name: '出厂价', is_factory: true }] },
       }),
     }],
   };
@@ -418,8 +418,15 @@ test('surtax is stored and exported as a direct HKD amount', async () => {
     if (row.getCell(1).value === '十、合计') summaryRow = row.number + 2;
   });
   assert.ok(summaryRow);
-  assert.equal(worksheet.getCell(summaryRow, 11).value, 0.1);
-  assert.equal(worksheet.getCell(summaryRow, 12).value.formula, `SUM(A${summaryRow}:K${summaryRow})`);
+  assert.equal(worksheet.getCell(summaryRow - 1, 11).value, '小计HKD');
+  assert.equal(worksheet.getCell(summaryRow, 11).value.formula, `SUM(A${summaryRow}:J${summaryRow})`);
+  assert.ok(!worksheet.getRow(summaryRow - 1).values.includes('附加税0.4%'));
+  let surtaxRow = 0;
+  worksheet.eachRow(row => {
+    if (row.getCell(1).value === '附加税0.4%') surtaxRow = row.number;
+  });
+  assert.ok(surtaxRow);
+  assert.equal(worksheet.getCell(surtaxRow, 2).numFmt, '0.00');
 });
 
 test('manually adjusted carton price is preserved by the shared paper-rate formula', async () => {
@@ -1094,10 +1101,10 @@ test('export separates electronic and sewing pricing and keeps weighted sewing f
   assert.equal(worksheet.getCell(summaryHeaderRow, 6).value, '包装材料');
   assert.equal(worksheet.getCell(summaryHeaderRow, 7).value, '辅助材料');
   assert.equal(worksheet.getCell(summaryHeaderRow, 10).value, '纸箱');
-  assert.equal(worksheet.getCell(summaryHeaderRow, 12).value, '小计HKD');
+  assert.equal(worksheet.getCell(summaryHeaderRow, 11).value, '小计HKD');
   assert.ok(!worksheet.getRow(summaryHeaderRow).values.includes('电子'));
   assert.ok(!worksheet.getRow(summaryHeaderRow).values.includes('车缝'));
-  assert.match(worksheet.getCell(summaryHeaderRow + 1, 12).value.formula, /SUM\(A\d+:K\d+\)/);
+  assert.match(worksheet.getCell(summaryHeaderRow + 1, 11).value.formula, /SUM\(A\d+:J\d+\)/);
   assert.ok(labels.includes('车缝'));
   assert.ok(labels.includes('电子'));
   assert.ok(labels.includes('码点 × 1.3'));
@@ -1548,7 +1555,7 @@ test('customer-supplied products are named separately and added to exported cust
   assert.equal(worksheet.getCell(cableRow, 3).value, 1.25);
   assert.match(worksheet.getCell(totalUsdRow, 3).value.formula, new RegExp(`C${controllerRow}\\+C${cableRow}`));
   assert.equal(worksheet.getCell(totalUsdRow, 3).value.result, 3.75);
-  assert.match(worksheet.getCell(customerPriceRow, 1).value.result, /报客货价: 3\.7650/);
+  assert.match(worksheet.getCell(customerPriceRow, 1).value.result, /报客货价: 3\.77/);
   const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
   assert.match(source, /amount_usd_raw/);
   assert.match(source, /customer-supplied-amount[\s\S]*type="text"/);
