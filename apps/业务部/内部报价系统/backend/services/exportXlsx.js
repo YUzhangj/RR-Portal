@@ -1334,11 +1334,11 @@ function renderShippingBlock(ws, row, shipping, header, fxRH, refs = {}) {
   const finalFormulaRows = [rUSD, rMold, rPrototype, rTesting, ...customerSuppliedRows];
   writeRow('TOTAL (USD)',
     i => ({ formula: finalFormulaRows.map(sourceRow => `${colLetter(i + 2)}${sourceRow}`).join('+'), result: rows[i].finalUSD }),
-    { fmt: '0.00', bold: true });
+    { fmt: '0.00', bold: true, fill: 'FFDDEBF7', fontColor: 'FF1F4E78' });
 
   const rSurtax = row;
   writeRow('附加税0.4%', i => ({ formula: `${colLetter(i+2)}${rFinal}*0.4%`, result: rows[i].surtaxUsd }),
-    { fmt: '0.00', bold: true });
+    { fmt: '0.00', bold: true, fill: 'FFFFF2CC', fontColor: 'FF7F6000' });
   const rSurtaxMarkup = row;
   writeRow(`码点 × ${markupX}`, i => ({ formula: `${colLetter(i+2)}${rSurtax}*${markupX}`, result: rows[i].surtaxMarkup }),
     { fmt: '0.00' });
