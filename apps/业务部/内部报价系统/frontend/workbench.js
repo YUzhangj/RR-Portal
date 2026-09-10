@@ -1672,24 +1672,24 @@ function renderSummaryPane(host, sections, quote, me) {
   const toHkd = (rmb) => num(rmb) / fxH;
   const markupX = (sales.shipping?.markup_x == null) ? 1.2 : num(sales.shipping.markup_x);  // 允许 0；仅空/未设时默认 1.2
   // 成本明细列（HKD）— 出厂价 = 这些列之和（严格等于展示值，避免与 RMB 总额换算的舍入差）
+  // 页面小计不重复显示电子、车缝；它们在下方“出货价算价”中独立计算。
   const costCols = [
-    ['注塑+吹气', toHkd(injTotalRmb + blowTotal * fxRH)], ['二次加工（印喷）', ppTotal], ['电子', electronicTotal], ['五金', hwTotal],
+    ['注塑+吹气', toHkd(injTotalRmb + blowTotal * fxRH)], ['二次加工（印喷）', ppTotal], ['五金', hwTotal],
     ['辅助材料', auxRaw], ['包装材料', pkmatRaw], ['组装人工', asmLaborTotal + asmStepTotal], ['包装/混装人工', pkLaborTotal + pkgStepTotal],
     ['印尼运费', toHkd(shipping)],
-    ['搪胶', toHkd(slushTotalRmb)], ['车缝', toHkd(sewingTotalRmb)], ['纸箱', toHkd(cartonRmb)],
+    ['搪胶', toHkd(slushTotalRmb)], ['纸箱', toHkd(cartonRmb)],
   ];
   // 电子和车缝在出货价算价中独立乘码点、除找数，不承担运费/吊柜费。
-  const baseExclude = new Set(['电子', '车缝']);
-  const elecHkdCol = num((costCols.find(column => column[0] === '电子') || [])[1]);
-  const sewHkdCol = num((costCols.find(column => column[0] === '车缝') || [])[1]);
-  const factoryHkdSum = costCols.reduce((total, column) => total + (baseExclude.has(column[0]) ? 0 : num(column[1])), 0);
+  const elecHkdCol = num(electronicTotal);
+  const sewHkdCol = toHkd(sewingTotalRmb);
+  const factoryHkdSum = costCols.reduce((total, column) => total + num(column[1]), 0);
   const afterMarkupHkd = factoryHkdSum * markupX;
   // 出货底价 = 出厂价（HKD）+ 附加税；码点(×markup)不在此处，移到下方「出货价算价」乘一次；模具分摊也在算价处理
   const priceHkdMarked = factoryHkdSum + toHkd(surtaxManual);
   const totalsCols = [
     ...costCols,
     ['附加税0.4%', surtaxManual, 'input'],
-    ['出货底价 HKD', priceHkdMarked, 'hkd'],
+    ['小计HKD', priceHkdMarked, 'hkd'],
   ];
 
   host.innerHTML = `

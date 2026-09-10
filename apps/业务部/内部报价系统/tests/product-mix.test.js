@@ -145,6 +145,18 @@ test('summary tab recalculates whenever it is opened or clicked again', () => {
   assert.match(source, /汇总不缓存/);
 });
 
+test('page subtotal hides electronic and sewing while shipping keeps their separate prices', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  const subtotalBlock = source.match(/const costCols = \[([\s\S]*?)\n  \];/);
+  assert.ok(subtotalBlock);
+  assert.doesNotMatch(subtotalBlock[1], /\['电子'/);
+  assert.doesNotMatch(subtotalBlock[1], /\['车缝'/);
+  assert.match(source, /\['小计HKD', priceHkdMarked, 'hkd'\]/);
+  assert.match(source, /const elecHkdCol = num\(electronicTotal\)/);
+  assert.match(source, /const sewHkdCol = toHkd\(sewingTotalRmb\)/);
+  assert.match(source, /\{ sewing: sewHkdCol, electronic: elecHkdCol \}/);
+});
+
 test('shipping scenario names use the configured freight type dropdown', () => {
   const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
   assert.match(source, /const scenarioSelect = \(x, i\)/);
