@@ -133,7 +133,10 @@ test('internal export writes product-ratio weighted injection formulas', async (
   assert.ok(!injectionHeaders.includes('颜色'));
   assert.equal(worksheet.getCell(totalRow, 14).value.formula, `((N${dataStart}+N${dataStart + 1})*2+(N${dataStart + 2})*1)/3`);
   assert.equal(Number(worksheet.getCell(totalRow, 14).value.result.toFixed(4)), 33.3333);
-  assert.equal(worksheet.getCell(totalRow, 15).value.formula, `((O${dataStart}+O${dataStart + 1})*2+(O${dataStart + 2})*1)/3`);
+  assert.equal(worksheet.getCell(titleRow + 1, 15).value, null);
+  assert.equal(worksheet.getCell(dataStart, 15).value, null);
+  assert.equal(worksheet.getCell(totalRow, 15).value.formula, `N${totalRow}*2/100`);
+  assert.equal(worksheet.getCell(totalRow, 15).numFmt, ';;;');
 });
 
 test('internal quotation workbook uses print-friendly layouts on every sheet', async () => {
@@ -1594,8 +1597,8 @@ test('internal export mirrors UI formulas for slush and each departmental Indone
   });
 
   const injectionHeader = sectionRows['二、注塑部分'] + 1;
-  assert.equal(worksheet.getCell(injectionHeader, 15).value, '印尼运费 2%');
-  assert.equal(worksheet.getCell(injectionHeader + 1, 15).value.formula, `N${injectionHeader + 1}*2/100`);
+  assert.equal(worksheet.getCell(injectionHeader, 15).value, null);
+  assert.equal(worksheet.getCell(injectionHeader + 1, 15).value, null);
 
   const blowHeader = sectionRows['二·B、吹气部分 (HKD)'] + 1;
   const blowRow = blowHeader + 1;
@@ -1603,8 +1606,10 @@ test('internal export mirrors UI formulas for slush and each departmental Indone
   assert.equal(worksheet.getCell(blowRow, 11).value, 3);
   assert.equal(worksheet.getCell(blowRow, 12).value.formula, `I${blowRow}*J${blowRow}*K${blowRow}`);
   assert.equal(worksheet.getCell(blowRow, 12).value.result, 15);
-  assert.equal(worksheet.getCell(blowHeader, 15).value, '印尼运费 2%');
-  assert.equal(worksheet.getCell(blowRow, 15).value.formula, `L${blowRow}*2/100`);
+  assert.equal(worksheet.getCell(blowHeader, 15).value, null);
+  assert.equal(worksheet.getCell(blowRow, 15).value, null);
+  assert.equal(worksheet.getCell(blowRow + 1, 15).value.formula, `L${blowRow + 1}*2/100`);
+  assert.equal(worksheet.getCell(blowRow + 1, 15).numFmt, ';;;');
 
   const slushWorksheet = workbook.getWorksheet('搪胶明细');
   const slushSectionRows = {};

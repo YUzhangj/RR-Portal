@@ -380,8 +380,8 @@ function patchSimpleIndoColumns(ws, payloads) {
     ? electronic.electronics
     : (engineering.electronics || []);
   const patches = [
-    { title: '二、注塑部分', dept: payloads.molding || {}, amountCol: 14, indoCol: 15, weighted: true },
-    { title: '二·B、吹气部分 (HKD)', dept: payloads.molding || {}, amountCol: 12, indoCol: 15 },
+    { title: '二、注塑部分', dept: payloads.molding || {}, amountCol: 14, indoCol: 15, weighted: true, hideDisplay: true },
+    { title: '二·B、吹气部分 (HKD)', dept: payloads.molding || {}, amountCol: 12, indoCol: 15, hideDisplay: true },
     { title: '五、二次加工（印喷报价）', refKey: 'paintingDetail', dept: payloads.painting || {}, amountCol: 24, indoCol: 25, factor: 0.3, totalFromAmount: true },
     {
       title: '六、电子',
@@ -411,8 +411,10 @@ function patchSimpleIndoColumns(ws, payloads) {
     if (!totalRow) continue;
     const pct = num(patch.dept.indo_pct);
     const headerStyle = ws.getCell(headerRow, 1).style;
-    ws.getCell(headerRow, patch.indoCol).value = `印尼运费 ${pct}%`;
-    applyStyle(ws.getCell(headerRow, patch.indoCol), headerStyle);
+    if (!patch.hideDisplay) {
+      ws.getCell(headerRow, patch.indoCol).value = `印尼运费 ${pct}%`;
+      applyStyle(ws.getCell(headerRow, patch.indoCol), headerStyle);
+    }
     let total = 0;
     const rowResults = [];
     const eligibleAmountCells = [];
@@ -431,9 +433,11 @@ function patchSimpleIndoColumns(ws, payloads) {
         : patch.factor
           ? `${colLetter(patch.amountCol)}${row}*30%*${pct}/100`
           : `${colLetter(patch.amountCol)}${row}*${pct}/100`;
-      ws.getCell(row, patch.indoCol).value = { formula, result };
-      ws.getCell(row, patch.indoCol).numFmt = HKD4;
-      applyStyle(ws.getCell(row, patch.indoCol), ws.getCell(row, patch.amountCol).style, HKD4);
+      if (!patch.hideDisplay) {
+        ws.getCell(row, patch.indoCol).value = { formula, result };
+        ws.getCell(row, patch.indoCol).numFmt = HKD4;
+        applyStyle(ws.getCell(row, patch.indoCol), ws.getCell(row, patch.amountCol).style, HKD4);
+      }
       total += result;
       rowResults.push(result);
       if (!excluded) eligibleAmountCells.push(`${colLetter(patch.amountCol)}${row}`);
@@ -450,7 +454,9 @@ function patchSimpleIndoColumns(ws, payloads) {
     }
     const hasDetailRows = totalRow > headerRow + 1;
     ws.getCell(totalRow, patch.indoCol).value = {
-      formula: !hasDetailRows
+      formula: patch.hideDisplay
+        ? `${colLetter(patch.amountCol)}${totalRow}*${pct}/100`
+        : !hasDetailRows
         ? '0'
         : patch.totalFromAmount
           ? `${colLetter(patch.amountCol)}${totalRow}*30%*${pct}/100`
@@ -459,7 +465,12 @@ function patchSimpleIndoColumns(ws, payloads) {
           : `SUM(${colLetter(patch.indoCol)}${headerRow + 1}:${colLetter(patch.indoCol)}${totalRow - 1})`,
       result: total,
     };
-    applyStyle(ws.getCell(totalRow, patch.indoCol), ws.getCell(totalRow, patch.amountCol).style, HKD4);
+    if (patch.hideDisplay) {
+      // 保留一个不可见公式单元格供“印尼运费”总计引用，不在明细表中显示该列。
+      ws.getCell(totalRow, patch.indoCol).numFmt = ';;;';
+    } else {
+      applyStyle(ws.getCell(totalRow, patch.indoCol), ws.getCell(totalRow, patch.amountCol).style, HKD4);
+    }
     refs[patch.title] = `${colLetter(patch.amountCol)}${totalRow}`;
     refs[`${patch.title}:indo`] = `${colLetter(patch.indoCol)}${totalRow}`;
     refs[`${patch.title}:indoBase`] = eligibleAmountCells.join('+') || '0';
