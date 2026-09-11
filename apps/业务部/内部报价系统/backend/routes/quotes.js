@@ -215,6 +215,9 @@ router.put('/:id/header', async (req, res) => {
   const id = Number(req.params.id);
   const acc = await quoteAccess(req.user, id);
   if (acc.status !== 200) return res.status(acc.status).json({ error: acc.status === 404 ? '不存在' : '无权修改该客户的报价单' });
+  const locked = await db.prepare(`SELECT 1 FROM quote_customer_confirmations WHERE quote_id = ? AND status = 'confirmed'
+    UNION SELECT 1 FROM quote_verifications WHERE quote_id = ? LIMIT 1`).get(id, id);
+  if (locked) return res.status(409).json({ error: '客价已确认，报价基本资料已锁定' });
   const { quote_no, product_name, customer, qty, version } = req.body || {};
   const fields = []; const vals = [];
   if (quote_no !== undefined) {

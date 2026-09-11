@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>核价中心</title>
+  <link rel="stylesheet" href="./styles.css?v=20260911-verification-center">
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand">✓ 核价中心 <small>基于已确认报价逐项核价</small></div>
+    <div id="user-chip"><span id="who-chip"></span><a href="./index.html">← 报价列表</a></div>
+  </div>
+  <main class="verification-page">
+    <section id="verification-list" class="card verification-center-card">
+      <header class="verification-center-head">
+        <div class="verification-center-title"><span class="verification-center-icon">✓</span><div><h1>报价核价中心</h1><p>已确认报价自动进入，核价完成后锁定成本版本</p></div></div>
+        <div class="verification-center-actions"><button id="verification-records" class="mini">核价记录</button><button id="verification-export">导出核价表</button></div>
+      </header>
+      <div class="verification-flow"><span><i>1</i>报价完成</span><span><i>2</i>客价确认</span><span class="active"><i>3</i>自动进入核价</span><span><i>4</i>核价完成</span></div>
+      <div class="verification-toolbar"><input id="verification-search" type="search" placeholder="搜索货号 / 产品 / 客户"><select id="verification-status-filter"><option value="">全部状态</option><option value="not_started">待核价</option><option value="in_progress">核价中</option><option value="completed">已完成</option></select><select id="verification-customer-filter"><option value="">全部客户</option></select></div>
+      <div class="verification-master-detail">
+        <div class="verification-list-pane"><table class="verification-list-table"><thead><tr><th>货号</th><th>产品</th><th>客户</th><th>确认价</th><th>核价状态</th><th>进入时间</th></tr></thead><tbody id="verification-list-body"></tbody></table></div>
+        <aside id="verification-preview" class="verification-preview"><div class="verification-preview-empty">选择一张核价单查看</div></aside>
+      </div>
+    </section>
+    <section id="verification-detail" class="hidden"></section>
+  </main>
+  <script>(function(){var b=location.pathname.replace(/\/[^/]*$/,'');if(!b)return;var f=window.fetch.bind(window);window.fetch=function(u,o){if(typeof u==='string'&&u.indexOf('/api/')===0)u=b+u;return f(u,o)}})();</script>
+  <script>window.__WORKBENCH_EMBED__ = true;</script>
+  <script src="./formula-input.js?v=20260731-fraction-export"></script>
+  <script src="./workbench.js?v=20260911-verification-center"></script>
+  <script type="module" src="./verification.js?v=20260911-verification-center"></script>
+</body>
+</html>

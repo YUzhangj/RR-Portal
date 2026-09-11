@@ -69,6 +69,20 @@ CREATE TABLE IF NOT EXISTS quote_customer_confirmations (
   updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- 核价单：首次打开时冻结已确认报价及全部门 payload，核价结果独立保存，不回写原报价。
+CREATE TABLE IF NOT EXISTS quote_verifications (
+  quote_id           INTEGER PRIMARY KEY REFERENCES quotes(id) ON DELETE CASCADE,
+  baseline_json      TEXT NOT NULL,
+  verified_values_json TEXT NOT NULL DEFAULT '{}',
+  verified_sections_json TEXT NOT NULL DEFAULT '{}',
+  status             TEXT NOT NULL DEFAULT 'in_progress', -- in_progress / completed
+  note               TEXT,
+  created_by         TEXT,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_by         TEXT,
+  updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   quote_id  INTEGER,
