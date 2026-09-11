@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>核价中心</title>
+  <link rel="stylesheet" href="./styles.css?v=20260911-verification">
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand">✓ 核价中心 <small>基于已确认报价逐项核价</small></div>
+    <div id="user-chip"><span id="who-chip"></span><a href="./index.html">← 报价列表</a></div>
+  </div>
+  <main class="verification-page">
+    <section id="verification-list" class="card">
+      <div class="verification-head"><div><h1>核价单</h1><p class="muted">已确认的报价自动出现在这里，原报价基准不会随之后修改。</p></div><input id="verification-search" type="search" placeholder="搜索货号 / 产品 / 客户"></div>
+      <table class="wb-table verification-list-table"><thead><tr><th>货号</th><th>产品</th><th>版本</th><th>客户</th><th>确认客价 (USD)</th><th>确认数量</th><th>核价状态</th><th>操作</th></tr></thead><tbody id="verification-list-body"></tbody></table>
+    </section>
+    <section id="verification-detail" class="hidden"></section>
+  </main>
+  <script>(function(){var b=location.pathname.replace(/\/[^/]*$/,'');if(!b)return;var f=window.fetch.bind(window);window.fetch=function(u,o){if(typeof u==='string'&&u.indexOf('/api/')===0)u=b+u;return f(u,o)}})();</script>
+  <script src="./verification.js?v=20260911-verification"></script>
+</body>
+</html>
