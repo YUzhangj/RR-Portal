@@ -99,8 +99,10 @@ function renderTotals() {
 function renderDepartment(section, active) {
   const rows = sectionRows(section);
   return `<section class="verification-dept ${active ? '' : 'hidden'}" data-dept-panel="${esc(section.dept)}">
-    <div class="verification-dept-head"><div><h3>${esc(section.dept_name)}</h3><small>原报价已锁定，只填写“核价单价”列</small></div><span>${rows.length} 个价格项</span></div>
-    <table class="wb-table verification-detail-table"><thead><tr><th>明细项目</th><th>确认报价</th><th>核价价格</th><th>差额</th><th>差异率</th></tr></thead><tbody>
+    <div class="verification-dept-head"><div><h3>${esc(section.dept_name)}原报价明细</h3><small>版式与报价页面一致，确认后的内容只读</small></div><span>${rows.length} 个核价项</span></div>
+    <div class="verification-original-workbench" data-original-workbench="${esc(section.dept)}"></div>
+    <div class="verification-compare-head"><div><h3>核价填写与差异</h3><small>在原报价基础上填写核价价格</small></div></div>
+    <div class="verification-compare-wrap"><table class="wb-table verification-detail-table"><thead><tr><th>明细项目</th><th>确认报价</th><th>核价价格</th><th>差额</th><th>差异率</th></tr></thead><tbody>
     ${rows.length ? rows.map(row => {
       const has = Object.prototype.hasOwnProperty.call(detailState.values, row.storageKey);
       const verified = has ? num(detailState.values[row.storageKey]) : num(row.original);
@@ -111,11 +113,50 @@ function renderDepartment(section, active) {
         <td class="verification-delta ${delta > 0 ? 'delta-up' : delta < 0 ? 'delta-down' : ''}">${delta >= 0 ? '+' : '−'}${Math.abs(delta).toFixed(2)}</td>
         <td class="verification-pct">${row.original ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : '—'}</td></tr>`;
     }).join('') : '<tr><td colspan="5" class="summary-empty">本部门没有可核价的价格项</td></tr>'}
-    </tbody></table></section>`;
+    </tbody></table></div></section>`;
+}
+
+function renderOriginalWorkbench(section) {
+  const host = document.querySelector(`[data-original-workbench="${CSS.escape(section.dept)}"]`);
+  const workbench = window.VerificationWorkbench;
+  if (!host || !workbench) return;
+  const payload = JSON.parse(JSON.stringify(section.payload || {}));
+  const sections = (detailState.baseline.sections || []).map(item => ({
+    ...item,
+    payload_json: JSON.stringify(item.payload || {}),
+  }));
+  const sales = sections.find(item => item.dept === 'sales');
+  let salesPayload = {};
+  try { salesPayload = JSON.parse(sales?.payload_json || '{}'); } catch {}
+  const fxRmbHkd = num(salesPayload.header?.fx_rmb_hkd) || 0.85;
+  const fxHkdUsd = num(salesPayload.header?.fx_hkd_usd) || 7.8;
+  const quote = detailState.quote;
+  const noop = () => {};
+  window.__data = { quote, sections, me: detailState.me || {} };
+  window.__salesTaxPct = num(salesPayload.pricing?.tax_pct ?? 13);
+
+  if (section.dept === 'engineering') workbench.renderEngineering(host, payload, false, noop, fxRmbHkd, fxHkdUsd, quote.qty, quote.customer);
+  else if (section.dept === 'electronic') workbench.renderElectronic(host, payload, false, noop, fxRmbHkd, fxHkdUsd);
+  else if (section.dept === 'molding') workbench.renderMolding(host, payload, false, noop, [], fxRmbHkd, detailState.me?.role || 'staff');
+  else if (section.dept === 'painting') workbench.renderPainting(host, payload, false, noop, fxRmbHkd);
+  else if (section.dept === 'slush') workbench.renderSlush(host, payload, false, noop, fxRmbHkd);
+  else if (section.dept === 'sewing') workbench.renderSewing(host, payload, false, noop, fxRmbHkd);
+  else if (section.dept === 'assembly') workbench.renderAssembly(host, payload, false, noop, fxRmbHkd);
+  else if (section.dept === 'sales') workbench.renderSales(host, payload, quote, false, false, sections, noop, noop);
+  else host.innerHTML = '<p class="muted">该部门暂无专用明细版式。</p>';
+
+  // 个别报价渲染器中的参考参数原本可随时调整；核价基准区必须全部锁定。
+  const lockControls = () => host.querySelectorAll('input, select, textarea, button').forEach(control => {
+    control.disabled = true;
+    control.setAttribute('aria-label', `${control.getAttribute('aria-label') || control.closest('label')?.textContent?.trim() || '原报价字段'}（已锁定）`);
+  });
+  lockControls();
+  new MutationObserver(lockControls).observe(host, { childList: true, subtree: true });
 }
 
 async function openDetail(id) {
-  detailState = await api('/verifications/' + id);
+  const [verification, me] = await Promise.all([api('/verifications/' + id), api('/auth/me')]);
+  detailState = { ...verification, me };
   const quote = detailState.quote;
   const sections = detailState.baseline.sections || [];
   $('verification-list').classList.add('hidden');
@@ -152,6 +193,7 @@ async function openDetail(id) {
   });
   if ($('verification-save')) $('verification-save').onclick = () => saveDetail('in_progress');
   if ($('verification-complete')) $('verification-complete').onclick = () => saveDetail('completed');
+  sections.forEach(renderOriginalWorkbench);
   renderTotals();
 }
 

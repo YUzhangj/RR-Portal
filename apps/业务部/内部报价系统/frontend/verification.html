@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>核价中心</title>
-  <link rel="stylesheet" href="./styles.css?v=20260911-verification">
+  <link rel="stylesheet" href="./styles.css?v=20260911-verification-detail">
 </head>
 <body>
   <div class="topbar">
@@ -19,6 +19,9 @@
     <section id="verification-detail" class="hidden"></section>
   </main>
   <script>(function(){var b=location.pathname.replace(/\/[^/]*$/,'');if(!b)return;var f=window.fetch.bind(window);window.fetch=function(u,o){if(typeof u==='string'&&u.indexOf('/api/')===0)u=b+u;return f(u,o)}})();</script>
-  <script src="./verification.js?v=20260911-verification"></script>
+  <script>window.__WORKBENCH_EMBED__ = true;</script>
+  <script src="./formula-input.js?v=20260731-fraction-export"></script>
+  <script src="./workbench.js?v=20260911-verification-detail"></script>
+  <script type="module" src="./verification.js?v=20260911-verification-detail"></script>
 </body>
 </html>
