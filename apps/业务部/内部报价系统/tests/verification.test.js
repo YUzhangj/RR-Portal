@@ -16,20 +16,24 @@ test('confirmed quotations create an immutable verification baseline snapshot', 
   assert.match(quotes, /报价基本资料已锁定/);
 });
 
-test('verification center exposes department detail comparison and independent prices', () => {
+test('verification center exposes a quotation-style department workflow with a frozen comparison', () => {
   const route = fs.readFileSync(path.join(root, 'backend/routes/verifications.js'), 'utf8');
+  const sqliteSchema = fs.readFileSync(path.join(root, 'backend/db/schema.sql'), 'utf8');
   const page = fs.readFileSync(path.join(root, 'frontend/verification.js'), 'utf8');
   assert.match(route, /verified_values_json/);
+  assert.match(route, /verified_sections_json/);
+  assert.match(route, /sectionsJson/);
+  assert.match(route, /allowedDepartments/);
+  assert.match(sqliteSchema, /verified_sections_json/);
   assert.match(route, /c\.status='confirmed'/);
   assert.match(page, /data-dept-panel/);
-  assert.match(page, /确认报价/);
-  assert.match(page, /核价价格/);
-  assert.match(page, /差异率/);
-  assert.match(page, /detailState\.values/);
-  assert.match(page, /renderOriginalWorkbench/);
+  assert.match(page, /核价工作台/);
+  assert.match(page, /原报价对比/);
+  assert.match(page, /verified_sections/);
+  assert.match(page, /renderVerificationWorkbench/);
+  assert.match(page, /sections: detailState\.verified_sections/);
   assert.match(page, /VerificationWorkbench/);
-  assert.match(page, /原报价完整明细|原报价明细/);
-  assert.match(page, /只列实际录入的成本\/单价/);
+  assert.match(page, /操作方式与报价一致/);
   assert.doesNotMatch(page, /collectMoneyFields/);
 });
 

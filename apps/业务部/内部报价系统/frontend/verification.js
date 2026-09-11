@@ -139,12 +139,13 @@ function sectionRows(section) {
 }
 
 function calculateTotals() {
-  const allRows = detailState.baseline.sections.flatMap(sectionRows);
+  const allRows = detailState.baseline.sections.flatMap(section => sectionRows(section).map(row => ({ ...row, dept: section.dept })));
   let changed = 0;
   let increased = 0;
   let decreased = 0;
   allRows.forEach(row => {
-    const next = Object.prototype.hasOwnProperty.call(detailState.values, row.storageKey) ? num(detailState.values[row.storageKey]) : num(row.original);
+    const section = detailState.baseline.sections.find(item => item.dept === row.dept);
+    const next = num(getPath(verifiedPayloadFor(section), row.key));
     const delta = next - num(row.original);
     if (Math.abs(delta) > 0.00001) changed++;
     if (delta > 0.00001) increased++;
@@ -171,8 +172,8 @@ function previewSummary() {
   const fxHkdUsd = num(sales.header?.fx_hkd_usd) || 7.8;
   const delta = { material: 0, labor: 0, packing: 0 };
   detailState.baseline.sections.forEach(section => sectionRows(section).forEach(row => {
-    if (!Object.prototype.hasOwnProperty.call(detailState.values, row.storageKey)) return;
-    let difference = num(detailState.values[row.storageKey]) - num(row.original);
+    let difference = num(getPath(verifiedPayloadFor(section), row.key)) - num(row.original);
+    if (Math.abs(difference) < 0.00001) return;
     if (row.currency === 'RMB') difference /= fxRmbHkd;
     if (row.currency === 'USD') difference *= fxHkdUsd;
     const category = section.dept === 'sales' || /包装|运费|纸箱|彩盒/.test(row.label)
@@ -226,34 +227,67 @@ function renderTotals() {
   $('verification-down-count').textContent = String(totals.decreased);
 }
 
-function renderDepartment(section, active) {
-  const rows = sectionRows(section);
-  return `<section class="verification-dept ${active ? '' : 'hidden'}" data-dept-panel="${esc(section.dept)}">
-    <div class="verification-dept-head"><div><h3>${esc(section.dept_name)}原报价明细</h3><small>版式与报价页面一致，确认后的内容只读</small></div><span>${rows.length} 个核价项</span></div>
-    <div class="verification-original-workbench" data-original-workbench="${esc(section.dept)}"></div>
-    <div class="verification-compare-head"><div><h3>核价填写与差异</h3><small>只核对实际录入的成本和单价；合计、换算和税费由系统自动计算</small></div></div>
-    <div class="verification-compare-wrap"><table class="wb-table verification-detail-table"><thead><tr><th>明细项目</th><th>确认报价</th><th>核价价格</th><th>差额</th><th>差异率</th></tr></thead><tbody>
-    ${rows.length ? rows.map(row => {
-      const has = Object.prototype.hasOwnProperty.call(detailState.values, row.storageKey);
-      const verified = has ? num(detailState.values[row.storageKey]) : num(row.original);
-      const delta = verified - num(row.original);
-      const pct = row.original ? delta / num(row.original) * 100 : 0;
-      return `<tr data-price-row="${esc(row.storageKey)}"><td>${esc(row.label)}</td><td>${money(row.original, row.currency)}</td>
-        <td>${detailState.can_edit ? `<div class="verification-price-cell"><span>${row.currency === 'USD' ? 'US$' : row.currency === 'RMB' ? '¥' : 'HK$'}</span><input class="verification-price" data-key="${esc(row.storageKey)}" type="number" min="0" step="0.0001" value="${verified}"></div>` : money(verified, row.currency)}</td>
-        <td class="verification-delta ${delta > 0 ? 'delta-up' : delta < 0 ? 'delta-down' : ''}">${delta >= 0 ? '+' : '−'}${Math.abs(delta).toFixed(2)}</td>
-        <td class="verification-pct">${row.original ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : '—'}</td></tr>`;
-    }).join('') : '<tr><td colspan="5" class="summary-empty">本部门没有可核价的价格项</td></tr>'}
-    </tbody></table></div></section>`;
+function pathParts(path) {
+  return String(path).replace(/\[(\d+)\]/g, '.$1').split('.').filter(Boolean);
 }
 
-function renderOriginalWorkbench(section) {
-  const host = document.querySelector(`[data-original-workbench="${CSS.escape(section.dept)}"]`);
+function getPath(source, path) {
+  return pathParts(path).reduce((value, key) => value == null ? undefined : value[key], source);
+}
+
+function setPath(target, path, value) {
+  const parts = pathParts(path);
+  let cursor = target;
+  parts.forEach((key, index) => {
+    if (index === parts.length - 1) cursor[key] = value;
+    else {
+      const nextIsArray = /^\d+$/.test(parts[index + 1]);
+      if (cursor[key] == null) cursor[key] = nextIsArray ? [] : {};
+      cursor = cursor[key];
+    }
+  });
+}
+
+function verifiedPayloadFor(section) {
+  detailState.verified_sections = detailState.verified_sections || {};
+  if (!detailState.verified_sections[section.dept]) {
+    const payload = JSON.parse(JSON.stringify(section.payload || {}));
+    const prefix = section.dept + ':';
+    Object.entries(detailState.values || {}).forEach(([key, value]) => {
+      if (key.startsWith(prefix)) setPath(payload, key.slice(prefix.length), num(value));
+    });
+    detailState.verified_sections[section.dept] = payload;
+  }
+  return detailState.verified_sections[section.dept];
+}
+
+function comparisonHtml(section, verifiedPayload) {
+  const rows = sectionRows(section);
+  return rows.length ? rows.map(row => {
+    const verified = num(getPath(verifiedPayload, row.key));
+    const delta = verified - num(row.original);
+    return `<div class="verification-side-row"><div><strong>${esc(row.label)}</strong><small>${money(row.original, row.currency)} 原报价</small></div><div><b>${money(verified, row.currency)}</b><span class="${delta > 0 ? 'delta-up' : delta < 0 ? 'delta-down' : ''}">${Math.abs(delta) < 0.00001 ? '不变' : `${delta > 0 ? '+' : '−'}${Math.abs(delta).toFixed(2)}`}</span></div></div>`;
+  }).join('') : '<div class="verification-preview-empty">本部门没有单独核价价格项</div>';
+}
+
+function renderDepartment(section, active) {
+  return `<section class="verification-dept ${active ? '' : 'hidden'}" data-dept-panel="${esc(section.dept)}">
+    <div class="verification-dept-head"><div><h3>${esc(section.dept_name)}核价工作台</h3><small>操作方式与报价一致，右侧固定显示客价确认时的原报价</small></div><span>🔒 原报价已锁定</span></div>
+    <div class="verification-workbench-compare">
+      <div class="verification-live-workbench" data-live-workbench="${esc(section.dept)}"></div>
+      <aside class="verification-original-side"><div class="verification-original-side-head"><strong>原报价对比</strong><small>客价确认版本</small></div><div data-comparison-list="${esc(section.dept)}"></div></aside>
+    </div>
+  </section>`;
+}
+
+function renderVerificationWorkbench(section) {
+  const host = document.querySelector(`[data-live-workbench="${CSS.escape(section.dept)}"]`);
   const workbench = window.VerificationWorkbench;
   if (!host || !workbench) return;
-  const payload = JSON.parse(JSON.stringify(section.payload || {}));
+  const payload = verifiedPayloadFor(section);
   const sections = (detailState.baseline.sections || []).map(item => ({
     ...item,
-    payload_json: JSON.stringify(item.payload || {}),
+    payload_json: JSON.stringify(verifiedPayloadFor(item)),
   }));
   const sales = sections.find(item => item.dept === 'sales');
   let salesPayload = {};
@@ -261,27 +295,25 @@ function renderOriginalWorkbench(section) {
   const fxRmbHkd = num(salesPayload.header?.fx_rmb_hkd) || 0.85;
   const fxHkdUsd = num(salesPayload.header?.fx_hkd_usd) || 7.8;
   const quote = detailState.quote;
-  const noop = () => {};
+  const refreshComparison = () => {
+    detailState.verified_sections[section.dept] = payload;
+    const comparison = document.querySelector(`[data-comparison-list="${CSS.escape(section.dept)}"]`);
+    if (comparison) comparison.innerHTML = comparisonHtml(section, payload);
+    renderTotals();
+  };
   window.__data = { quote, sections, me: detailState.me || {} };
   window.__salesTaxPct = num(salesPayload.pricing?.tax_pct ?? 13);
 
-  if (section.dept === 'engineering') workbench.renderEngineering(host, payload, false, noop, fxRmbHkd, fxHkdUsd, quote.qty, quote.customer);
-  else if (section.dept === 'electronic') workbench.renderElectronic(host, payload, false, noop, fxRmbHkd, fxHkdUsd);
-  else if (section.dept === 'molding') workbench.renderMolding(host, payload, false, noop, [], fxRmbHkd, detailState.me?.role || 'staff');
-  else if (section.dept === 'painting') workbench.renderPainting(host, payload, false, noop, fxRmbHkd);
-  else if (section.dept === 'slush') workbench.renderSlush(host, payload, false, noop, fxRmbHkd);
-  else if (section.dept === 'sewing') workbench.renderSewing(host, payload, false, noop, fxRmbHkd);
-  else if (section.dept === 'assembly') workbench.renderAssembly(host, payload, false, noop, fxRmbHkd);
-  else if (section.dept === 'sales') workbench.renderSales(host, payload, quote, false, false, sections, noop, noop);
+  if (section.dept === 'engineering') workbench.renderEngineering(host, payload, detailState.can_edit, refreshComparison, fxRmbHkd, fxHkdUsd, quote.qty, quote.customer);
+  else if (section.dept === 'electronic') workbench.renderElectronic(host, payload, detailState.can_edit, refreshComparison, fxRmbHkd, fxHkdUsd);
+  else if (section.dept === 'molding') workbench.renderMolding(host, payload, detailState.can_edit, refreshComparison, verifiedPayloadFor(detailState.baseline.sections.find(item => item.dept === 'engineering') || {}).molds || [], fxRmbHkd, detailState.me?.role || 'staff');
+  else if (section.dept === 'painting') workbench.renderPainting(host, payload, detailState.can_edit, refreshComparison, fxRmbHkd);
+  else if (section.dept === 'slush') workbench.renderSlush(host, payload, detailState.can_edit, refreshComparison, fxRmbHkd);
+  else if (section.dept === 'sewing') workbench.renderSewing(host, payload, detailState.can_edit, refreshComparison, fxRmbHkd);
+  else if (section.dept === 'assembly') workbench.renderAssembly(host, payload, detailState.can_edit, refreshComparison, fxRmbHkd);
+  else if (section.dept === 'sales') workbench.renderSales(host, payload, quote, false, detailState.can_edit, sections, refreshComparison, () => {});
   else host.innerHTML = '<p class="muted">该部门暂无专用明细版式。</p>';
-
-  // 个别报价渲染器中的参考参数原本可随时调整；核价基准区必须全部锁定。
-  const lockControls = () => host.querySelectorAll('input, select, textarea, button').forEach(control => {
-    control.disabled = true;
-    control.setAttribute('aria-label', `${control.getAttribute('aria-label') || control.closest('label')?.textContent?.trim() || '原报价字段'}（已锁定）`);
-  });
-  lockControls();
-  new MutationObserver(lockControls).observe(host, { childList: true, subtree: true });
+  refreshComparison();
 }
 
 async function openDetail(id) {
@@ -297,7 +329,7 @@ async function openDetail(id) {
     <span class="verification-lock">🔒 确认报价只读</span>
   </div>
   <div class="verification-metrics">
-    <div><span>原报价价格项</span><strong id="verification-item-count"></strong></div>
+    <div><span>核价字段</span><strong id="verification-item-count"></strong></div>
     <div><span>已调整项目</span><strong id="verification-changed-count"></strong></div>
     <div><span>价格上涨</span><strong id="verification-up-count" class="delta-up"></strong></div>
     <div><span>价格下降</span><strong id="verification-down-count" class="delta-down"></strong></div>
@@ -311,25 +343,15 @@ async function openDetail(id) {
     document.querySelectorAll('.verification-tab').forEach(item => item.classList.toggle('active', item === button));
     document.querySelectorAll('.verification-dept').forEach(panel => panel.classList.toggle('hidden', panel.dataset.deptPanel !== button.dataset.dept));
   });
-  document.querySelectorAll('.verification-price').forEach(input => input.oninput = () => {
-    detailState.values[input.dataset.key] = input.value;
-    const row = input.closest('tr');
-    const original = num(row.children[1].textContent.replace(/[^0-9.-]/g, ''));
-    const delta = num(input.value) - original;
-    row.querySelector('.verification-delta').textContent = `${delta >= 0 ? '+' : '−'}${Math.abs(delta).toFixed(2)}`;
-    row.querySelector('.verification-delta').className = `verification-delta ${delta > 0 ? 'delta-up' : delta < 0 ? 'delta-down' : ''}`;
-    row.querySelector('.verification-pct').textContent = original ? `${delta >= 0 ? '+' : ''}${(delta / original * 100).toFixed(2)}%` : '—';
-    renderTotals();
-  });
   if ($('verification-save')) $('verification-save').onclick = () => saveDetail('in_progress');
   if ($('verification-complete')) $('verification-complete').onclick = () => saveDetail('completed');
-  sections.forEach(renderOriginalWorkbench);
+  sections.forEach(renderVerificationWorkbench);
   renderTotals();
 }
 
 async function saveDetail(status) {
   try {
-    await api('/verifications/' + detailState.quote.id, { method: 'PUT', body: JSON.stringify({ values: detailState.values, status, note: $('verification-note').value }) });
+    await api('/verifications/' + detailState.quote.id, { method: 'PUT', body: JSON.stringify({ values: detailState.values || {}, sections: detailState.verified_sections || {}, status, note: $('verification-note').value }) });
     detailState.status = status;
     alert(status === 'completed' ? '核价已完成' : '核价进度已保存');
   } catch (error) { alert(error.message); }

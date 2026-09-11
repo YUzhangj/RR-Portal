@@ -74,6 +74,7 @@ router.get('/:quoteId', async (req, res) => {
     quote: loaded.quote,
     baseline: parseJson(verification.baseline_json, {}),
     values: parseJson(verification.verified_values_json, {}),
+    verified_sections: parseJson(verification.verified_sections_json, {}),
     status: verification.status,
     note: verification.note || '',
     updated_at: verification.updated_at,
@@ -100,11 +101,25 @@ router.put('/:quoteId', async (req, res) => {
     if (!Number.isFinite(number) || number < 0) return res.status(400).json({ error: `核价值不正确：${key}` });
     values[key] = number;
   }
+  const rawSections = req.body?.sections || {};
+  if (!rawSections || typeof rawSections !== 'object' || Array.isArray(rawSections)) {
+    return res.status(400).json({ error: '核价部门数据格式不正确' });
+  }
+  const allowedDepartments = new Set(['sales', 'engineering', 'electronic', 'molding', 'painting', 'slush', 'sewing', 'assembly']);
+  const sections = {};
+  for (const [department, payload] of Object.entries(rawSections)) {
+    if (!allowedDepartments.has(department) || !payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return res.status(400).json({ error: `核价部门数据不正确：${department}` });
+    }
+    sections[department] = payload;
+  }
+  const sectionsJson = JSON.stringify(sections);
+  if (sectionsJson.length > 2_000_000) return res.status(413).json({ error: '核价部门数据过大' });
   const status = req.body?.status === 'completed' ? 'completed' : 'in_progress';
   const note = String(req.body?.note || '').trim().slice(0, 1000);
-  await db.prepare(`UPDATE quote_verifications SET verified_values_json=?, status=?, note=?,
+  await db.prepare(`UPDATE quote_verifications SET verified_values_json=?, verified_sections_json=?, status=?, note=?,
     updated_by=?, updated_at=CURRENT_TIMESTAMP WHERE quote_id=?`)
-    .run(JSON.stringify(values), status, note, req.user.name, quoteId);
+    .run(JSON.stringify(values), sectionsJson, status, note, req.user.name, quoteId);
   await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
     VALUES (?, ?, ?, 'verification_save', ?)`)
     .run(quoteId, req.user.dept, req.user.name, status === 'completed' ? '完成核价' : '保存核价进度');

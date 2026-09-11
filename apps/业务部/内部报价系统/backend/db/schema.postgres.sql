@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS quote_verifications (
   quote_id INTEGER PRIMARY KEY REFERENCES quotes(id) ON DELETE CASCADE,
   baseline_json TEXT NOT NULL,
   verified_values_json TEXT NOT NULL DEFAULT '{}',
+  verified_sections_json TEXT NOT NULL DEFAULT '{}',
   status TEXT NOT NULL DEFAULT 'in_progress',
   note TEXT,
   created_by TEXT,
