@@ -190,6 +190,7 @@ async function initialize() {
   await pool.query('ALTER TABLE quotes ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ');
   await pool.query('ALTER TABLE quotes ADD COLUMN IF NOT EXISTS deleted_by TEXT');
   await pool.query("ALTER TABLE quote_verifications ADD COLUMN IF NOT EXISTS verified_sections_json TEXT NOT NULL DEFAULT '{}'");
+  await pool.query("ALTER TABLE quote_verifications ALTER COLUMN status SET DEFAULT 'not_started'");
   await pool.query("DELETE FROM audit_log WHERE quote_id IN (SELECT id FROM quotes WHERE deleted_at IS NOT NULL AND deleted_at < CURRENT_TIMESTAMP - INTERVAL '30 days')");
   await pool.query("DELETE FROM quotes WHERE deleted_at IS NOT NULL AND deleted_at < CURRENT_TIMESTAMP - INTERVAL '30 days'");
   await migrateLegacySqlite();

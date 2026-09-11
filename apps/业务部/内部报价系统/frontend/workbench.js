@@ -1848,7 +1848,21 @@ function renderSummaryPane(host, sections, quote, me) {
     // 即把最终总价还原到找数前；包含主体、车缝、电子及该场景运费/吊柜费。
     base_price: shippingCalc.customerBeforeDivisorHkd,
   };
-  renderTaxDeductionBlock(taxHost, sales, salesSec, me, autoFill);
+  const taxSummary = renderTaxDeductionBlock(taxHost, sales, salesSec, me, autoFill);
+  return {
+    material: num(autoFill.imp_mat) + num(autoFill.dom_mat) + num(autoFill.hardware)
+      + num(autoFill.electronic) + num(autoFill.motor) + num(autoFill.suction)
+      + num(autoFill.glue_bag) + num(autoFill.paint_material),
+    labor: num(autoFill.blow) + num(autoFill.slush) + num(autoFill.sewing_hair)
+      + num(autoFill.sewing_cloth) + num(autoFill.injection_labor)
+      + num(autoFill.painting_labor) + num(autoFill.assembly_labor),
+    packing: num(autoFill.color_box) + num(autoFill.battery) + num(autoFill.libao)
+      + num(autoFill.plating) + num(autoFill.other_buy) + num(autoFill.carton)
+      + num(autoFill.freight) + num(autoFill.cabinet) + num(autoFill.misc),
+    total: num(taxSummary?.totalCost),
+    totalDeduction: num(taxSummary?.totalDeduction),
+    afterDeduction: num(taxSummary?.afterDeduction),
+  };
 }
 
 // ============== 汇总 · 减税明细 4 表 ==============
@@ -2010,6 +2024,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     ${buildT3()}
     ${buildT4()}`;
 
+  let calculatedSummary = null;
   function recalc() {
     const sum = (obj) => Object.values(obj).reduce((s, v) => s + num(v), 0);
     // 与参考格式及导出一致：不含人工成本 = 表1（除货价）+ 表2（除码数）+ 油漆。
@@ -2082,9 +2097,10 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     ps.t2.code_after = +codeAfter.toFixed(4);
     const codeAfterInp = host.querySelector('[data-tbl="t2"][data-key="code_after"]');
     if (codeAfterInp) codeAfterInp.textContent = formatNum(ps.t2.code_after);
+    calculatedSummary = { totalCost, totalDeduction: totalDed, afterDeduction: afterDed };
   }
   recalc();
-
+  return calculatedSummary;
 }
 
 function hasSlushCostingInputs(row) {
@@ -5343,7 +5359,7 @@ function renderSales(host, payload, quote, canEditHeader, canEditPricing, allSec
     hk40: 8000, hk20: 7100, yt40: 7200, yt20: 6000,
     hk10t: 14900, yt10t: 11500, hk5t: 12500, yt5t: 11000,
   };
-  renderFreightCalc(host.querySelector('#wb-freight'), payload.freight_calc, eCarton, true, onChange);
+  renderFreightCalc(host.querySelector('#wb-freight'), payload.freight_calc, eCarton, canEditPricing, onChange);
 
   if (canEditHeader) {
     const saveHeader = () => onHeaderChange({
@@ -5894,6 +5910,7 @@ window.VerificationWorkbench = {
   renderSewing,
   renderAssembly,
   renderSales,
+  renderSummaryPane,
 };
 
 if (!window.__WORKBENCH_EMBED__) renderQuotePage();

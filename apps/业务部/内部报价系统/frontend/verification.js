@@ -75,8 +75,19 @@ function collectVerificationFields(section) {
     });
   } else if (section.dept === 'assembly') {
     addPrice(rows, 'assembly_base_rate', '组装人工基数', p.assembly_base_rate, 'HKD');
+    addPrice(rows, 'assembly_std_time', '标准工时', p.assembly_std_time, 'NUMBER');
     addItemPrices(rows, p.assembly_labor, 'assembly_labor', [{ key: 'unit_price', label: '人工单价', currency: 'HKD' }], (item, i) => item.name || item.product || `组装 ${i + 1}`);
     addItemPrices(rows, p.packaging_labor, 'packaging_labor', [{ key: 'unit_price', label: '人工单价', currency: 'HKD' }], (item, i) => item.name || item.product || `包装 ${i + 1}`);
+    const addStepGroups = (groups, basePath, type) => (groups || []).forEach((group, groupIndex) => {
+      const name = group.product || `${type}产品 ${groupIndex + 1}`;
+      addPrice(rows, `${basePath}[${groupIndex}].qty`, `${name} · 生产量`, group.qty, 'NUMBER');
+      addPrice(rows, `${basePath}[${groupIndex}].team`, `${name} · 小组数`, group.team, 'NUMBER');
+      (group.steps || []).forEach((step, stepIndex) => addPrice(rows,
+        `${basePath}[${groupIndex}].steps[${stepIndex}].count`,
+        `${name} · ${step.name || `工序 ${stepIndex + 1}`}人数`, step.count, 'NUMBER'));
+    });
+    addStepGroups(p.assembly_step_groups, 'assembly_step_groups', '组装');
+    addStepGroups(p.packaging_step_groups, 'packaging_step_groups', '包装');
   }
   return rows;
 }
@@ -159,6 +170,20 @@ function sumObject(source, keys) {
 }
 
 function previewSummary() {
+  const workbench = window.VerificationWorkbench;
+  if (workbench?.renderSummaryPane && detailState?.baseline?.sections?.length) {
+    try {
+      const calculate = useVerified => {
+        const host = document.createElement('div');
+        const sections = workbenchSections(useVerified);
+        window.__data = { quote: detailState.quote, sections, me: detailState.me || {} };
+        return workbench.renderSummaryPane(host, sections, detailState.quote, { dept: 'verification_readonly', role: 'staff' });
+      };
+      return { original: calculate(false), verified: calculate(true) };
+    } catch (error) {
+      console.warn('核价汇总实时计算失败，回退到价格项差异汇总', error);
+    }
+  }
   const sales = detailState.baseline.sections.find(section => section.dept === 'sales')?.payload || {};
   const t1 = sales.pricing_summary?.t1 || {};
   const t2 = sales.pricing_summary?.t2 || {};
@@ -261,59 +286,106 @@ function verifiedPayloadFor(section) {
   return detailState.verified_sections[section.dept];
 }
 
-function comparisonHtml(section, verifiedPayload) {
-  const rows = sectionRows(section);
-  return rows.length ? rows.map(row => {
-    const verified = num(getPath(verifiedPayload, row.key));
-    const delta = verified - num(row.original);
-    return `<div class="verification-side-row"><div><strong>${esc(row.label)}</strong><small>${money(row.original, row.currency)} 原报价</small></div><div><b>${money(verified, row.currency)}</b><span class="${delta > 0 ? 'delta-up' : delta < 0 ? 'delta-down' : ''}">${Math.abs(delta) < 0.00001 ? '不变' : `${delta > 0 ? '+' : '−'}${Math.abs(delta).toFixed(2)}`}</span></div></div>`;
-  }).join('') : '<div class="verification-preview-empty">本部门没有单独核价价格项</div>';
-}
-
-function renderDepartment(section, active) {
-  return `<section class="verification-dept ${active ? '' : 'hidden'}" data-dept-panel="${esc(section.dept)}">
-    <div class="verification-dept-head"><div><h3>${esc(section.dept_name)}核价工作台</h3><small>操作方式与报价一致，右侧固定显示客价确认时的原报价</small></div><span>🔒 原报价已锁定</span></div>
-    <div class="verification-workbench-compare">
-      <div class="verification-live-workbench" data-live-workbench="${esc(section.dept)}"></div>
-      <aside class="verification-original-side"><div class="verification-original-side-head"><strong>原报价对比</strong><small>客价确认版本</small></div><div data-comparison-list="${esc(section.dept)}"></div></aside>
+function renderDepartment(section) {
+  return `<section class="verification-dept" data-dept-panel="${esc(section.dept)}">
+    <div class="verification-dept-head"><div><h3>${esc(section.dept_name)}核价工作台</h3><small>操作方式与报价一致，沿用完整表格和计算方式，修改后差异会自动汇总</small></div><span>🔒 确认报价已锁定</span></div>
+    <div class="verification-workbench-scroll">
+      <div class="verification-workbench-compare">
+        <article class="verification-compare-column verification-live-column">
+          <header><div><b>核价填写</b><small>当前核价版本 · 可独立修改</small></div><span class="verification-column-badge">核价</span></header>
+          <div class="verification-live-workbench" data-live-workbench="${esc(section.dept)}"></div>
+        </article>
+        <article class="verification-compare-column verification-baseline-column">
+          <header><div><b>原报价参考</b><small>客价确认时冻结 · 不可修改</small></div><span class="verification-column-badge">只读</span></header>
+          <div class="verification-original-workbench" data-original-workbench="${esc(section.dept)}"></div>
+        </article>
+      </div>
     </div>
   </section>`;
 }
 
-function renderVerificationWorkbench(section) {
-  const host = document.querySelector(`[data-live-workbench="${CSS.escape(section.dept)}"]`);
-  const workbench = window.VerificationWorkbench;
-  if (!host || !workbench) return;
-  const payload = verifiedPayloadFor(section);
-  const sections = (detailState.baseline.sections || []).map(item => ({
+function workbenchSections(useVerified) {
+  return (detailState.baseline.sections || []).map(item => ({
     ...item,
-    payload_json: JSON.stringify(verifiedPayloadFor(item)),
+    payload_json: JSON.stringify(useVerified ? verifiedPayloadFor(item) : item.payload || {}),
   }));
+}
+
+function renderOneWorkbench(workbench, host, section, payload, canEdit, sections, fxRmbHkd, fxHkdUsd, quote, onChange) {
+  if (section.dept === 'engineering') workbench.renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quote.qty, quote.customer);
+  else if (section.dept === 'electronic') workbench.renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd);
+  else if (section.dept === 'molding') {
+    const engineering = sections.find(item => item.dept === 'engineering');
+    let engineeringPayload = {};
+    try { engineeringPayload = JSON.parse(engineering?.payload_json || '{}'); } catch {}
+    workbench.renderMolding(host, payload, canEdit, onChange, engineeringPayload.molds || [], fxRmbHkd, detailState.me?.role || 'staff');
+  } else if (section.dept === 'painting') workbench.renderPainting(host, payload, canEdit, onChange, fxRmbHkd);
+  else if (section.dept === 'slush') workbench.renderSlush(host, payload, canEdit, onChange, fxRmbHkd);
+  else if (section.dept === 'sewing') workbench.renderSewing(host, payload, canEdit, onChange, fxRmbHkd);
+  else if (section.dept === 'assembly') workbench.renderAssembly(host, payload, canEdit, onChange, fxRmbHkd);
+  else if (section.dept === 'sales') workbench.renderSales(host, payload, quote, false, canEdit, sections, onChange, () => {});
+  else host.innerHTML = '<p class="muted">该部门暂无专用明细版式。</p>';
+}
+
+function renderVerificationWorkbench(section) {
+  const panel = document.querySelector(`[data-dept-panel="${CSS.escape(section.dept)}"]`);
+  const host = panel?.querySelector(`[data-live-workbench="${CSS.escape(section.dept)}"]`);
+  const originalHost = panel?.querySelector(`[data-original-workbench="${CSS.escape(section.dept)}"]`);
+  const workbench = window.VerificationWorkbench;
+  if (!host || !originalHost || !workbench) return;
+  const payload = verifiedPayloadFor(section);
+  const sections = workbenchSections(true);
+  const originalSections = workbenchSections(false);
   const sales = sections.find(item => item.dept === 'sales');
   let salesPayload = {};
   try { salesPayload = JSON.parse(sales?.payload_json || '{}'); } catch {}
   const fxRmbHkd = num(salesPayload.header?.fx_rmb_hkd) || 0.85;
   const fxHkdUsd = num(salesPayload.header?.fx_hkd_usd) || 7.8;
   const quote = detailState.quote;
-  const refreshComparison = () => {
+  const refreshVerification = () => {
     detailState.verified_sections[section.dept] = payload;
-    const comparison = document.querySelector(`[data-comparison-list="${CSS.escape(section.dept)}"]`);
-    if (comparison) comparison.innerHTML = comparisonHtml(section, payload);
     renderTotals();
   };
   window.__data = { quote, sections, me: detailState.me || {} };
   window.__salesTaxPct = num(salesPayload.pricing?.tax_pct ?? 13);
+  const canEdit = detailState.can_edit && detailState.status !== 'completed';
+  renderOneWorkbench(workbench, host, section, payload, canEdit, sections, fxRmbHkd, fxHkdUsd, quote, refreshVerification);
 
-  if (section.dept === 'engineering') workbench.renderEngineering(host, payload, detailState.can_edit, refreshComparison, fxRmbHkd, fxHkdUsd, quote.qty, quote.customer);
-  else if (section.dept === 'electronic') workbench.renderElectronic(host, payload, detailState.can_edit, refreshComparison, fxRmbHkd, fxHkdUsd);
-  else if (section.dept === 'molding') workbench.renderMolding(host, payload, detailState.can_edit, refreshComparison, verifiedPayloadFor(detailState.baseline.sections.find(item => item.dept === 'engineering') || {}).molds || [], fxRmbHkd, detailState.me?.role || 'staff');
-  else if (section.dept === 'painting') workbench.renderPainting(host, payload, detailState.can_edit, refreshComparison, fxRmbHkd);
-  else if (section.dept === 'slush') workbench.renderSlush(host, payload, detailState.can_edit, refreshComparison, fxRmbHkd);
-  else if (section.dept === 'sewing') workbench.renderSewing(host, payload, detailState.can_edit, refreshComparison, fxRmbHkd);
-  else if (section.dept === 'assembly') workbench.renderAssembly(host, payload, detailState.can_edit, refreshComparison, fxRmbHkd);
-  else if (section.dept === 'sales') workbench.renderSales(host, payload, quote, false, detailState.can_edit, sections, refreshComparison, () => {});
-  else host.innerHTML = '<p class="muted">该部门暂无专用明细版式。</p>';
-  refreshComparison();
+  const originalPayload = JSON.parse(JSON.stringify(section.payload || {}));
+  const originalSales = originalSections.find(item => item.dept === 'sales');
+  let originalSalesPayload = {};
+  try { originalSalesPayload = JSON.parse(originalSales?.payload_json || '{}'); } catch {}
+  const originalFxRmbHkd = num(originalSalesPayload.header?.fx_rmb_hkd) || 0.85;
+  const originalFxHkdUsd = num(originalSalesPayload.header?.fx_hkd_usd) || 7.8;
+  renderOneWorkbench(workbench, originalHost, section, originalPayload, false, originalSections, originalFxRmbHkd, originalFxHkdUsd, quote, () => {});
+  originalHost.querySelectorAll('input, select, textarea, button').forEach(control => {
+    control.disabled = true;
+    if (control.tagName === 'BUTTON') control.hidden = true;
+  });
+  refreshVerification();
+}
+
+function renderVerificationSummary() {
+  const panel = $('verification-panel-host');
+  const workbench = window.VerificationWorkbench;
+  if (!panel || !workbench?.renderSummaryPane) return;
+  panel.innerHTML = `<section class="verification-dept verification-summary-panel" data-dept-panel="__summary__">
+    <div class="verification-dept-head"><div><h3>核价汇总与减税</h3><small>先核对成本差异，再按核价后的数据重新计算出货价、利润和减税</small></div><span class="verification-column-badge">仅核价减税</span></div>
+    <table class="verification-preview-table verification-summary-compare"><thead><tr><th>核对项目</th><th>确认报价</th><th>核价结果</th><th>差异</th></tr></thead><tbody data-summary-comparison></tbody></table>
+    <div class="verification-tax-note"><b>减税口径</b><span>下方减税明细只显示并计算核价数据，不重复展示原报价减税。</span></div>
+    <div class="verification-summary-workbench"></div>
+  </section>`;
+  const sections = workbenchSections(true);
+  window.__data = { quote: detailState.quote, sections, me: detailState.me || {} };
+  workbench.renderSummaryPane(panel.querySelector('.verification-summary-workbench'), sections, detailState.quote, { dept: 'verification_readonly', role: 'staff' });
+  const comparison = previewSummary();
+  panel.querySelector('[data-summary-comparison]').innerHTML = `
+    ${comparisonRow('材料成本', comparison.original.material, comparison.verified.material)}
+    ${comparisonRow('人工成本', comparison.original.labor, comparison.verified.labor)}
+    ${comparisonRow('包装及运费', comparison.original.packing, comparison.verified.packing)}
+    ${comparisonRow('总成本', comparison.original.total, comparison.verified.total)}
+    ${comparisonRow('减税后成本', comparison.original.afterDeduction, comparison.verified.afterDeduction)}
+    ${comparisonRow('客户确认价', num(detailState.quote.confirmed_price), num(detailState.quote.confirmed_price), 'USD')}`;
 }
 
 async function openDetail(id) {
@@ -334,18 +406,27 @@ async function openDetail(id) {
     <div><span>价格上涨</span><strong id="verification-up-count" class="delta-up"></strong></div>
     <div><span>价格下降</span><strong id="verification-down-count" class="delta-down"></strong></div>
   </div>
-  <div class="verification-tabs">${sections.map((section, index) => `<button class="verification-tab ${index === 0 ? 'active' : ''}" data-dept="${esc(section.dept)}">${esc(section.dept_name)}</button>`).join('')}</div>
-  ${sections.map((section, index) => renderDepartment(section, index === 0)).join('')}
+  <div class="verification-tabs">${sections.map((section, index) => `<button class="verification-tab ${index === 0 ? 'active' : ''}" data-dept="${esc(section.dept)}">${esc(section.dept_name)}</button>`).join('')}<button class="verification-tab" data-dept="__summary__">汇总与减税</button></div>
+  <div id="verification-panel-host"></div>
   <div class="verification-savebar"><label>核价备注 <input id="verification-note" value="${esc(detailState.note)}" placeholder="选填"></label>
-    ${detailState.can_edit ? '<button id="verification-save" class="mini">保存进度</button><button id="verification-complete">完成核价</button>' : ''}</div>`;
+    ${detailState.can_edit && detailState.status !== 'completed' ? '<button id="verification-save" class="mini">保存进度</button><button id="verification-complete">完成核价</button>' : '<span class="verification-lock">核价已锁定</span>'}</div>`;
   $('verification-back').onclick = () => { $('verification-detail').classList.add('hidden'); $('verification-list').classList.remove('hidden'); loadList(); };
   document.querySelectorAll('.verification-tab').forEach(button => button.onclick = () => {
     document.querySelectorAll('.verification-tab').forEach(item => item.classList.toggle('active', item === button));
-    document.querySelectorAll('.verification-dept').forEach(panel => panel.classList.toggle('hidden', panel.dataset.deptPanel !== button.dataset.dept));
+    if (button.dataset.dept === '__summary__') renderVerificationSummary();
+    else {
+      const section = sections.find(item => item.dept === button.dataset.dept);
+      $('verification-panel-host').innerHTML = section ? renderDepartment(section) : '';
+      if (section) renderVerificationWorkbench(section);
+    }
   });
   if ($('verification-save')) $('verification-save').onclick = () => saveDetail('in_progress');
   if ($('verification-complete')) $('verification-complete').onclick = () => saveDetail('completed');
-  sections.forEach(renderVerificationWorkbench);
+  const initialSection = sections[0];
+  if (initialSection) {
+    $('verification-panel-host').innerHTML = renderDepartment(initialSection);
+    renderVerificationWorkbench(initialSection);
+  }
   renderTotals();
 }
 

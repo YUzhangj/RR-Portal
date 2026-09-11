@@ -105,8 +105,8 @@ router.put('/:id/confirmation', async (req, res) => {
       frozen_at: new Date().toISOString(),
     };
     await db.prepare(`INSERT INTO quote_verifications
-      (quote_id, baseline_json, verified_values_json, created_by, updated_by)
-      VALUES (?, ?, '{}', ?, ?) ON CONFLICT (quote_id) DO NOTHING`)
+      (quote_id, baseline_json, verified_values_json, status, created_by, updated_by)
+      VALUES (?, ?, '{}', 'not_started', ?, ?) ON CONFLICT (quote_id) DO NOTHING`)
       .run(id, JSON.stringify(baseline), req.user.name, req.user.name);
   }
   await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail) VALUES (?, 'sales', ?, 'customer_confirmation', ?)`)

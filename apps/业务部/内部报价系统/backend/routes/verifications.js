@@ -62,8 +62,8 @@ router.get('/:quoteId', async (req, res) => {
       frozen_at: new Date().toISOString(),
     };
     await db.prepare(`INSERT INTO quote_verifications
-      (quote_id, baseline_json, verified_values_json, created_by, updated_by)
-      VALUES (?, ?, '{}', ?, ?)`)
+      (quote_id, baseline_json, verified_values_json, status, created_by, updated_by)
+      VALUES (?, ?, '{}', 'not_started', ?, ?)`)
       .run(quoteId, JSON.stringify(baseline), req.user.name, req.user.name);
     verification = await db.prepare('SELECT * FROM quote_verifications WHERE quote_id=?').get(quoteId);
     await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
@@ -87,8 +87,9 @@ router.put('/:quoteId', async (req, res) => {
   const quoteId = Number(req.params.quoteId);
   const loaded = await loadConfirmedQuote(req.user, quoteId);
   if (loaded.error) return res.status(loaded.error).json({ error: '报价未确认或无权操作' });
-  const existing = await db.prepare('SELECT quote_id FROM quote_verifications WHERE quote_id=?').get(quoteId);
+  const existing = await db.prepare('SELECT quote_id, status FROM quote_verifications WHERE quote_id=?').get(quoteId);
   if (!existing) return res.status(409).json({ error: '请先打开核价单生成基准快照' });
+  if (existing.status === 'completed') return res.status(409).json({ error: '核价已经完成并锁定，不能再次修改' });
   const rawValues = req.body?.values;
   if (!rawValues || typeof rawValues !== 'object' || Array.isArray(rawValues) || Object.keys(rawValues).length > 5000) {
     return res.status(400).json({ error: '核价数据格式不正确' });
