@@ -29,6 +29,8 @@ test('verification center exposes department detail comparison and independent p
   assert.match(page, /renderOriginalWorkbench/);
   assert.match(page, /VerificationWorkbench/);
   assert.match(page, /原报价完整明细|原报价明细/);
+  assert.match(page, /只列实际录入的成本\/单价/);
+  assert.doesNotMatch(page, /collectMoneyFields/);
 });
 
 test('main quotation page links to verification center', () => {

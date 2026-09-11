@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 const num = value => Number.isFinite(Number(value)) ? Number(value) : 0;
-const money = value => `HK$ ${num(value).toFixed(2)}`;
+const money = (value, currency = 'HKD') => `${currency === 'USD' ? 'US$' : currency === 'RMB' ? '¥' : 'HK$'} ${num(value).toFixed(2)}`;
 
 async function api(path, options = {}) {
   const response = await fetch('/api' + path, { credentials: 'include', headers: { 'Content-Type': 'application/json' }, ...options });
@@ -9,37 +9,74 @@ async function api(path, options = {}) {
   return response.json();
 }
 
-const FIELD_LABELS = {
-  price: '单价', unit_price: '单价', amount: '金额', total: '合计', cost: '成本', material_price: '材料价',
-  shot_price: '啤价', labor: '人工', labor_cost: '人工成本', freight: '运费', indo_freight: '印尼运费',
-  mold_price: '模具价格', hkd: '港币金额', rmb: '人民币金额', usd: '美元金额', subtotal: '小计',
-};
-const MONEY_KEY = /(price|cost|amount|total|subtotal|labor|freight|fee|hkd|rmb|usd|shot)/i;
-const SKIP_KEY = /(pct|percent|rate|ratio|qty|quantity|count|number|length|width|height|weight|cycle|sets?|cavity|markup|divisor|fx_)/i;
-
-function labelFor(key) {
-  return FIELD_LABELS[key] || key.replace(/_/g, ' ');
+function addPrice(rows, path, label, value, currency = 'HKD') {
+  if (value === '' || value == null || !Number.isFinite(Number(value))) return;
+  rows.push({ key: path, label, original: Number(value), currency });
 }
 
-function itemName(value, fallback) {
-  if (!value || typeof value !== 'object') return fallback;
-  return value.name || value.product_name || value.part_name || value.item_name || value.process || value.description || value.model || fallback;
+function addItemPrices(rows, items, basePath, fields, nameOf) {
+  (items || []).forEach((item, index) => {
+    const name = nameOf(item, index);
+    fields.forEach(field => {
+      if (field.when && !field.when(item)) return;
+      addPrice(rows, `${basePath}[${index}].${field.key}`, `${name} · ${field.label}`, item[field.key], field.currencyOf ? field.currencyOf(item) : field.currency);
+    });
+  });
 }
 
-function collectMoneyFields(value, path = '', trail = [], rows = [], depth = 0) {
-  if (depth > 7 || value == null) return rows;
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => collectMoneyFields(item, `${path}[${index}]`, [...trail, itemName(item, `第 ${index + 1} 项`)], rows, depth + 1));
-    return rows;
-  }
-  if (typeof value !== 'object') return rows;
-  for (const [key, child] of Object.entries(value)) {
-    const childPath = path ? `${path}.${key}` : key;
-    if (typeof child === 'number' && MONEY_KEY.test(key) && !SKIP_KEY.test(key)) {
-      rows.push({ key: childPath, label: [...trail, labelFor(key)].filter(Boolean).join(' · '), original: child });
-    } else if (child && typeof child === 'object') {
-      collectMoneyFields(child, childPath, trail, rows, depth + 1);
-    }
+// 只列实际录入的成本/单价。汇总、换算、税差、场景合计等计算字段由系统自动重算，不重复核价。
+function collectVerificationFields(section) {
+  const p = section.payload || {};
+  const rows = [];
+  if (section.dept === 'sales') {
+    addPrice(rows, 'pricing_summary.surtax', '附加费用', p.pricing_summary?.surtax, 'HKD');
+    addPrice(rows, 'pricing_summary.indo_freight', '印尼运费', p.pricing_summary?.indo_freight, 'HKD');
+  } else if (section.dept === 'engineering') {
+    addItemPrices(rows, p.molds, 'molds', [{ key: 'price_rmb', label: '模具价格', currency: 'RMB' }], (item, i) => item.name || item.mold_no || `模具 ${i + 1}`);
+    const supplierFields = [
+      { key: 'unit_price_rmb', label: '材料单价', currency: 'RMB', when: item => (item.source_currency || 'RMB') === 'RMB' },
+      { key: 'unit_price_usd', label: '材料单价', currency: 'USD', when: item => item.source_currency === 'USD' },
+      { key: 'unit_price', label: '材料单价', currency: 'HKD', when: item => item.source_currency === 'HKD' },
+    ];
+    ['hardware', 'aux_materials', 'packaging_materials'].forEach(key => addItemPrices(rows, p[key], key, supplierFields, (item, i) => item.name || item.category || item.spec || `物料 ${i + 1}`));
+    addItemPrices(rows, p.mold_costs?.items, 'mold_costs.items', [{ key: 'price_rmb', label: '金额', currency: 'RMB' }], (item, i) => item.name || `模具费用 ${i + 1}`);
+    addPrice(rows, 'mold_costs.prototype_fee_usd', '手板费', p.mold_costs?.prototype_fee_usd, 'USD');
+    addPrice(rows, 'mold_costs.testing_fee_usd', '测试费', p.mold_costs?.testing_fee_usd, 'USD');
+  } else if (section.dept === 'electronic') {
+    addItemPrices(rows, p.electronics, 'electronics', [{ key: 'unit_price_rmb', label: '单价', currency: 'RMB' }], (item, i) => item.name || item.spec || `电子件 ${i + 1}`);
+    const extraLabels = { test_repair: '测试维修费', packing_shipping: '包装运费', bonding_cost: '邦定费', smt_cost: '贴片费', labor_cost: '人工费' };
+    Object.entries(extraLabels).forEach(([key, label]) => addPrice(rows, `electronics_extra.${key}`, label, p.electronics_extra?.[key], 'HKD'));
+  } else if (section.dept === 'molding') {
+    addItemPrices(rows, p.injection, 'injection', [
+      { key: 'material_unit_price', label: '材料单价', currency: 'HKD' },
+      { key: 'shot_price', label: '啤价', currency: 'HKD' },
+    ], (item, i) => item.name || item.mold_no || `注塑件 ${i + 1}`);
+    addItemPrices(rows, p.blow_items, 'blow_items', [
+      { key: 'material_price_lb', label: '料价', currency: 'HKD' },
+      { key: 'blow_labor', label: '吹工', currency: 'HKD' },
+      { key: 'flash', label: '披锋', currency: 'HKD' },
+    ], (item, i) => item.name || `吹气件 ${i + 1}`);
+  } else if (section.dept === 'painting') {
+    const processes = { clamp: '夹模', pad: '移印', roast: '烤漆', spray: '喷油', edge: '边油', color: '调色', dip: '浸油', oil: '油漆', pp_water: 'PP水', uv: 'UV' };
+    (p.painting_items || []).forEach((item, index) => Object.entries(processes).forEach(([key, label]) => {
+      if (!num(item[`${key}_qty`]) && !num(item[`${key}_unit`])) return;
+      addPrice(rows, `painting_items[${index}].${key}_unit`, `${item.name || item.position || `喷油件 ${index + 1}`} · ${label}单价`, item[`${key}_unit`], 'HKD');
+    }));
+  } else if (section.dept === 'slush') {
+    const fields = [
+      ['material_price_lb', '材料价'], ['slush_labor_24h', '搪胶人工'], ['batch_labor_12h', '批锋人工'],
+      ['diesel_24h', '柴油费'], ['electricity_24h', '电费'], ['pigment_price', '色粉价'], ['shipping_bag', '包装袋'], ['mold_fee', '模具费'],
+    ];
+    addItemPrices(rows, p.slush_items, 'slush_items', fields.map(([key, label]) => ({ key, label, currencyOf: item => key === 'mold_fee' ? (item.mold_fee_currency || 'RMB') : 'HKD' })), (item, i) => item.name || `搪胶件 ${i + 1}`);
+  } else if (section.dept === 'sewing') {
+    (p.sewing_groups || []).forEach((group, groupIndex) => {
+      addPrice(rows, `sewing_groups[${groupIndex}].labor_amount`, `${group.name || `产品 ${groupIndex + 1}`} · 车缝人工`, group.labor_amount, 'HKD');
+      addItemPrices(rows, group.items, `sewing_groups[${groupIndex}].items`, [{ key: 'mat_price', label: '材料单价', currency: 'HKD' }], (item, i) => item.part || item.fabric || `布料 ${i + 1}`);
+    });
+  } else if (section.dept === 'assembly') {
+    addPrice(rows, 'assembly_base_rate', '组装人工基数', p.assembly_base_rate, 'HKD');
+    addItemPrices(rows, p.assembly_labor, 'assembly_labor', [{ key: 'unit_price', label: '人工单价', currency: 'HKD' }], (item, i) => item.name || item.product || `组装 ${i + 1}`);
+    addItemPrices(rows, p.packaging_labor, 'packaging_labor', [{ key: 'unit_price', label: '人工单价', currency: 'HKD' }], (item, i) => item.name || item.product || `包装 ${i + 1}`);
   }
   return rows;
 }
@@ -69,7 +106,7 @@ function renderList() {
 
 function sectionRows(section) {
   const prefix = section.dept + ':';
-  const rows = collectMoneyFields(section.payload).map(row => ({ ...row, storageKey: prefix + row.key }));
+  const rows = collectVerificationFields(section).map(row => ({ ...row, storageKey: prefix + row.key }));
   return rows.filter((row, index) => rows.findIndex(other => other.storageKey === row.storageKey) === index);
 }
 
@@ -101,15 +138,15 @@ function renderDepartment(section, active) {
   return `<section class="verification-dept ${active ? '' : 'hidden'}" data-dept-panel="${esc(section.dept)}">
     <div class="verification-dept-head"><div><h3>${esc(section.dept_name)}原报价明细</h3><small>版式与报价页面一致，确认后的内容只读</small></div><span>${rows.length} 个核价项</span></div>
     <div class="verification-original-workbench" data-original-workbench="${esc(section.dept)}"></div>
-    <div class="verification-compare-head"><div><h3>核价填写与差异</h3><small>在原报价基础上填写核价价格</small></div></div>
+    <div class="verification-compare-head"><div><h3>核价填写与差异</h3><small>只核对实际录入的成本和单价；合计、换算和税费由系统自动计算</small></div></div>
     <div class="verification-compare-wrap"><table class="wb-table verification-detail-table"><thead><tr><th>明细项目</th><th>确认报价</th><th>核价价格</th><th>差额</th><th>差异率</th></tr></thead><tbody>
     ${rows.length ? rows.map(row => {
       const has = Object.prototype.hasOwnProperty.call(detailState.values, row.storageKey);
       const verified = has ? num(detailState.values[row.storageKey]) : num(row.original);
       const delta = verified - num(row.original);
       const pct = row.original ? delta / num(row.original) * 100 : 0;
-      return `<tr data-price-row="${esc(row.storageKey)}"><td>${esc(row.label)}</td><td>${money(row.original)}</td>
-        <td>${detailState.can_edit ? `<input class="verification-price" data-key="${esc(row.storageKey)}" type="number" min="0" step="0.0001" value="${verified}">` : money(verified)}</td>
+      return `<tr data-price-row="${esc(row.storageKey)}"><td>${esc(row.label)}</td><td>${money(row.original, row.currency)}</td>
+        <td>${detailState.can_edit ? `<div class="verification-price-cell"><span>${row.currency === 'USD' ? 'US$' : row.currency === 'RMB' ? '¥' : 'HK$'}</span><input class="verification-price" data-key="${esc(row.storageKey)}" type="number" min="0" step="0.0001" value="${verified}"></div>` : money(verified, row.currency)}</td>
         <td class="verification-delta ${delta > 0 ? 'delta-up' : delta < 0 ? 'delta-down' : ''}">${delta >= 0 ? '+' : '−'}${Math.abs(delta).toFixed(2)}</td>
         <td class="verification-pct">${row.original ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : '—'}</td></tr>`;
     }).join('') : '<tr><td colspan="5" class="summary-empty">本部门没有可核价的价格项</td></tr>'}
