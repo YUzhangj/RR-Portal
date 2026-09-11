@@ -40,7 +40,6 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/quotes', require('./routes/quotes'));
 app.use('/api/quotes', require('./routes/export')); // GET /:id/export
 app.use('/api/quote-summary', require('./routes/summary'));
-app.use('/api/verifications', require('./routes/verifications'));
 app.use('/api/sections', require('./routes/sections'));
 app.use('/api/reviews', require('./routes/reviews'));
 app.use('/api/uploads', require('./routes/uploads'));

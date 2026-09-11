@@ -5884,16 +5884,4 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }
 
-// 核价页复用报价页的部门明细渲染器，但不执行报价详情页入口。
-window.VerificationWorkbench = {
-  renderEngineering,
-  renderElectronic,
-  renderMolding,
-  renderPainting,
-  renderSlush,
-  renderSewing,
-  renderAssembly,
-  renderSales,
-};
-
-if (!window.__WORKBENCH_EMBED__) renderQuotePage();
+renderQuotePage();

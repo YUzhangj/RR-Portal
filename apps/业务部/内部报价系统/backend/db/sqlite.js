@@ -112,8 +112,6 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_quotes_factory ON quotes(factory_code)')
 const _softDeleteCols = db.prepare('PRAGMA table_info(quotes)').all().map(c => c.name);
 if (!_softDeleteCols.includes('deleted_at')) db.exec('ALTER TABLE quotes ADD COLUMN deleted_at TEXT');
 if (!_softDeleteCols.includes('deleted_by')) db.exec('ALTER TABLE quotes ADD COLUMN deleted_by TEXT');
-const _verificationCols = db.prepare('PRAGMA table_info(quote_verifications)').all().map(c => c.name);
-if (!_verificationCols.includes('verified_sections_json')) db.exec("ALTER TABLE quote_verifications ADD COLUMN verified_sections_json TEXT NOT NULL DEFAULT '{}'");
 db.prepare("DELETE FROM audit_log WHERE quote_id IN (SELECT id FROM quotes WHERE deleted_at IS NOT NULL AND deleted_at < datetime('now', '-30 days'))").run();
 db.prepare("DELETE FROM quotes WHERE deleted_at IS NOT NULL AND deleted_at < datetime('now', '-30 days')").run();
 db.exec('CREATE INDEX IF NOT EXISTS idx_users_factory ON users(factory_code)');

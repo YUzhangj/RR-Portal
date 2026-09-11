@@ -95,7 +95,7 @@ const migrationTables = [
   'factories', 'departments', 'users', 'quotes', 'quote_sections', 'audit_log',
   'ref_tables', 'app_migrations', 'factory_ref_tables', 'user_factories',
   'user_customers', 'user_perms', 'factory_material_price_control', 'factory_material_price_managers',
-  'quote_customer_confirmations', 'quote_verifications',
+  'quote_customer_confirmations',
 ];
 
 async function migrateLegacySqlite() {
@@ -189,7 +189,6 @@ async function initialize() {
   await pool.query(fs.readFileSync(path.join(__dirname, 'schema.postgres.sql'), 'utf8'));
   await pool.query('ALTER TABLE quotes ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ');
   await pool.query('ALTER TABLE quotes ADD COLUMN IF NOT EXISTS deleted_by TEXT');
-  await pool.query("ALTER TABLE quote_verifications ADD COLUMN IF NOT EXISTS verified_sections_json TEXT NOT NULL DEFAULT '{}'");
   await pool.query("DELETE FROM audit_log WHERE quote_id IN (SELECT id FROM quotes WHERE deleted_at IS NOT NULL AND deleted_at < CURRENT_TIMESTAMP - INTERVAL '30 days')");
   await pool.query("DELETE FROM quotes WHERE deleted_at IS NOT NULL AND deleted_at < CURRENT_TIMESTAMP - INTERVAL '30 days'");
   await migrateLegacySqlite();
