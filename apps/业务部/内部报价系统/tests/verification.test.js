@@ -39,3 +39,15 @@ test('main quotation page links to verification center', () => {
   assert.match(index, /href="\.\/verification\.html"/);
   assert.match(server, /\/api\/verifications/);
 });
+
+test('verification center uses a master-detail workbench with workflow and filters', () => {
+  const html = fs.readFileSync(path.join(root, 'frontend/verification.html'), 'utf8');
+  const page = fs.readFileSync(path.join(root, 'frontend/verification.js'), 'utf8');
+  assert.match(html, /报价核价中心/);
+  assert.match(html, /verification-flow/);
+  assert.match(html, /verification-master-detail/);
+  assert.match(html, /verification-status-filter/);
+  assert.match(html, /verification-customer-filter/);
+  assert.match(page, /renderPreview/);
+  assert.match(page, /进入核价明细/);
+});

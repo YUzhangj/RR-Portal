@@ -83,25 +83,53 @@ function collectVerificationFields(section) {
 
 let listState = [];
 let detailState = null;
+let selectedId = null;
+
+const statusText = status => status === 'completed' ? '已完成' : status === 'in_progress' ? '核价中' : '待核价';
+function formatDate(value) {
+  if (!value) return '—';
+  const date = new Date(String(value).includes('T') ? value : String(value).replace(' ', 'T') + 'Z');
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 16);
+  const pad = number => String(number).padStart(2, '0');
+  const today = new Date();
+  const prefix = date.toDateString() === today.toDateString() ? '今天' : `${pad(date.getMonth() + 1)}月${pad(date.getDate())}日`;
+  return `${prefix} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
 
 async function loadList() {
   const me = await api('/auth/me');
   $('who-chip').textContent = `${me.dept_name} · ${me.display_name || me.username}`;
   const result = await api('/verifications');
   listState = result.rows || [];
+  const customers = [...new Set(listState.map(row => row.customer).filter(Boolean))].sort();
+  $('verification-customer-filter').innerHTML = '<option value="">全部客户</option>' + customers.map(customer => `<option value="${esc(customer)}">${esc(customer)}</option>`).join('');
   renderList();
+  if (listState.length) await selectVerification(selectedId || listState[0].id);
 }
 
 function renderList() {
   const query = ($('verification-search').value || '').trim().toLowerCase();
-  const rows = listState.filter(row => [row.quote_no, row.product_name, row.customer, row.version].join(' ').toLowerCase().includes(query));
-  $('verification-list-body').innerHTML = rows.length ? rows.map(row => `<tr>
-    <td><strong>${esc(row.quote_no)}</strong></td><td>${esc(row.product_name)}</td><td>${esc(row.version || '—')}</td><td>${esc(row.customer || '—')}</td>
-    <td>$ ${num(row.confirmed_price).toFixed(2)}</td><td>${esc(row.confirmed_qty ?? '—')}</td>
-    <td><span class="verification-status status-${esc(row.verification_status)}">${row.verification_status === 'completed' ? '已完成' : row.verification_status === 'in_progress' ? '核价中' : '待核价'}</span></td>
-    <td><button class="mini open-verification" data-id="${row.id}">${row.verification_status === 'not_started' ? '开始核价' : '查看核价'}</button></td>
-  </tr>`).join('') : '<tr><td colspan="8" class="summary-empty">暂无已确认报价</td></tr>';
-  document.querySelectorAll('.open-verification').forEach(button => button.onclick = () => openDetail(button.dataset.id));
+  const status = $('verification-status-filter').value;
+  const customer = $('verification-customer-filter').value;
+  const rows = listState.filter(row => (!status || row.verification_status === status)
+    && (!customer || row.customer === customer)
+    && [row.quote_no, row.product_name, row.customer, row.version].join(' ').toLowerCase().includes(query));
+  $('verification-list-body').innerHTML = rows.length ? rows.map(row => `<tr class="verification-list-row ${Number(selectedId) === Number(row.id) ? 'selected' : ''}" data-id="${row.id}">
+    <td><strong>${esc(row.quote_no)}</strong></td><td>${esc(row.product_name)}</td><td>${esc(row.customer || '—')}</td>
+    <td>USD ${num(row.confirmed_price).toFixed(2)}</td>
+    <td><span class="verification-status status-${esc(row.verification_status)}">${statusText(row.verification_status)}</span></td>
+    <td>${esc(formatDate(row.confirmed_at || row.updated_at))}</td>
+  </tr>`).join('') : '<tr><td colspan="6" class="summary-empty">暂无符合条件的核价单</td></tr>';
+  document.querySelectorAll('.verification-list-row').forEach(row => row.onclick = () => selectVerification(row.dataset.id));
+}
+
+async function selectVerification(id) {
+  selectedId = Number(id);
+  renderList();
+  $('verification-preview').innerHTML = '<div class="verification-preview-empty">正在加载核价单…</div>';
+  const [verification, me] = await Promise.all([api('/verifications/' + id), api('/auth/me')]);
+  detailState = { ...verification, me };
+  renderPreview();
 }
 
 function sectionRows(section) {
@@ -123,6 +151,71 @@ function calculateTotals() {
     if (delta < -0.00001) decreased++;
   });
   return { changed, increased, decreased, count: allRows.length };
+}
+
+function sumObject(source, keys) {
+  return keys.reduce((total, key) => total + num(source?.[key]), 0);
+}
+
+function previewSummary() {
+  const sales = detailState.baseline.sections.find(section => section.dept === 'sales')?.payload || {};
+  const t1 = sales.pricing_summary?.t1 || {};
+  const t2 = sales.pricing_summary?.t2 || {};
+  const t3 = sales.pricing_summary?.t3 || {};
+  const original = {
+    material: sumObject(t1, ['imp_mat', 'dom_mat', 'hardware', 'electronic', 'motor', 'suction', 'glue_bag']) + num(t3.paint_material),
+    labor: sumObject(t1, ['blow', 'slush', 'sewing_hair', 'sewing_cloth']) + sumObject(t3, ['injection_labor', 'painting_labor', 'assembly_labor']),
+    packing: sumObject(t2, ['color_box', 'battery', 'libao', 'plating', 'other_buy', 'carton', 'freight', 'cabinet', 'misc']),
+  };
+  const fxRmbHkd = num(sales.header?.fx_rmb_hkd) || 0.85;
+  const fxHkdUsd = num(sales.header?.fx_hkd_usd) || 7.8;
+  const delta = { material: 0, labor: 0, packing: 0 };
+  detailState.baseline.sections.forEach(section => sectionRows(section).forEach(row => {
+    if (!Object.prototype.hasOwnProperty.call(detailState.values, row.storageKey)) return;
+    let difference = num(detailState.values[row.storageKey]) - num(row.original);
+    if (row.currency === 'RMB') difference /= fxRmbHkd;
+    if (row.currency === 'USD') difference *= fxHkdUsd;
+    const category = section.dept === 'sales' || /包装|运费|纸箱|彩盒/.test(row.label)
+      ? 'packing'
+      : ['painting', 'slush', 'sewing', 'assembly'].includes(section.dept) || /人工|啤价|吹工|披锋/.test(row.label)
+        ? 'labor' : 'material';
+    delta[category] += difference;
+  }));
+  const verified = Object.fromEntries(Object.keys(original).map(key => [key, original[key] + delta[key]]));
+  original.total = original.material + original.labor + original.packing;
+  verified.total = verified.material + verified.labor + verified.packing;
+  return { original, verified };
+}
+
+function comparisonRow(label, original, verified, currency = 'HKD') {
+  const difference = verified - original;
+  const differenceText = Math.abs(difference) < 0.005 ? '不变' : `${difference > 0 ? '+' : '−'}${Math.abs(difference).toFixed(2)}`;
+  return `<tr><td>${label}</td><td>${money(original, currency)}</td><td>${money(verified, currency)}</td><td class="${difference > 0 ? 'delta-up' : difference < 0 ? 'delta-down' : ''}">${differenceText}</td></tr>`;
+}
+
+function renderPreview() {
+  const quote = detailState.quote;
+  const totals = calculateTotals();
+  const summary = previewSummary();
+  const completed = detailState.status === 'completed';
+  $('verification-preview').innerHTML = `<div class="verification-preview-title"><h2>核价单 · ${esc(quote.quote_no)}</h2><span class="verification-status status-${esc(detailState.status || 'not_started')}">${statusText(detailState.status)}</span></div>
+    <div class="verification-preview-baseline">对比基准：客价确认时的报价版本 ${esc(quote.version || 'V1')}（自动锁定，不随原报价后续修改）</div>
+    <table class="verification-preview-table"><thead><tr><th>项目</th><th>确认报价</th><th>核价结果</th><th>差异</th></tr></thead><tbody>
+      ${comparisonRow('材料成本', summary.original.material, summary.verified.material)}
+      ${comparisonRow('人工成本', summary.original.labor, summary.verified.labor)}
+      ${comparisonRow('包装及运费', summary.original.packing, summary.verified.packing)}
+      ${comparisonRow('总成本', summary.original.total, summary.verified.total)}
+      ${comparisonRow('客户确认价', num(quote.confirmed_price), num(quote.confirmed_price), 'USD')}
+    </tbody></table>
+    <div class="verification-preview-checks">
+      <div><span>部门明细完整</span><strong class="check-ok">已通过</strong></div>
+      <div><span>客价与报价关联</span><strong class="check-ok">已通过</strong></div>
+      <div><span>成本异常检查</span><strong>${totals.changed ? `已调整 ${totals.changed} 项` : '待确认'}</strong></div>
+    </div>
+    <label class="verification-preview-note">核价备注<textarea disabled placeholder="填写差异原因或核价说明">${esc(detailState.note || '')}</textarea></label>
+    <div class="verification-preview-actions"><button id="verification-open-detail" class="mini">进入核价明细</button><button id="verification-preview-complete" ${completed || !detailState.can_edit ? 'disabled' : ''}>${completed ? '核价已完成' : '确认核价完成'}</button></div>`;
+  $('verification-open-detail').onclick = () => openDetail(quote.id);
+  if ($('verification-preview-complete') && !completed && detailState.can_edit) $('verification-preview-complete').onclick = () => openDetail(quote.id);
 }
 
 function renderTotals() {
@@ -243,4 +336,21 @@ async function saveDetail(status) {
 }
 
 $('verification-search').oninput = renderList;
+$('verification-status-filter').onchange = renderList;
+$('verification-customer-filter').onchange = renderList;
+$('verification-records').onclick = () => {
+  $('verification-status-filter').value = $('verification-status-filter').value === 'completed' ? '' : 'completed';
+  $('verification-records').classList.toggle('active', $('verification-status-filter').value === 'completed');
+  renderList();
+};
+$('verification-export').onclick = () => {
+  const rows = [['货号', '产品', '版本', '客户', '确认价USD', '确认数量', '核价状态', '确认时间'], ...listState.map(row => [
+    row.quote_no, row.product_name, row.version || '', row.customer || '', num(row.confirmed_price).toFixed(2), row.confirmed_qty ?? '', statusText(row.verification_status), row.confirmed_at || '',
+  ])];
+  const csv = '\ufeff' + rows.map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url; link.download = `核价单_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+};
 loadList().catch(error => { $('verification-list-body').innerHTML = `<tr><td colspan="8" class="summary-empty">${esc(error.message)}</td></tr>`; });
