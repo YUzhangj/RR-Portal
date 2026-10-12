@@ -13,6 +13,7 @@ if(config.sync?.enabled||config.role==='slave')throw Error('请先停用旧主�
 const backup=file+'.before-business-sync';if(!existsSync(backup))copyFileSync(file,backup);
 copyFileSync(path.join(here,'business-sync-adapter.cjs'),path.resolve(target,'business-sync-adapter.cjs'));
 copyFileSync(path.join(here,'../shared/business-sync.cjs'),path.resolve(target,'business-sync-core.cjs'));
+copyFileSync(path.join(here,'../shared/json-stream.cjs'),path.resolve(target,'json-stream.cjs'));
 if(!raw.includes(marker)){
  const hook=`${anchor}\n  ${marker}\n  if(req.url==='/api/business-sync'){\n    require('./business-sync-adapter.cjs')(req,res,{load:loadData,save:saveData,readDisk:()=>JSON.parse(fs.readFileSync(DATA_FILE,'utf8')),enabled:_config.businessSync===true&&!_syncEnabled&&_role!=='slave'});return;\n  }`;
  writeFileSync(file,raw.replace(anchor,hook.replaceAll('\n',nl)));

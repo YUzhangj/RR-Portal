@@ -13,12 +13,22 @@ module.exports=function createDataImages(store){
   }));
  }
  function restore(data){
-  return JSON.parse(JSON.stringify(data,(key,value)=>{
-   if(typeof value!=='string'||!value.startsWith(prefix))return value;
-   const uri=get.get(value.slice(prefix.length))?.uri;
-   if(!uri)throw Error('图片引用已失效，请重新加载后保存');
-   return uri;
-  }));
+  // Input comes from the JSON snapshot/request. Copy its containers without
+  // serializing all inline images again: a full snapshot can exceed 20 MB.
+  function visit(value){
+   if(typeof value==='string'){
+    if(!value.startsWith(prefix))return value;
+    const uri=get.get(value.slice(prefix.length))?.uri;
+    if(!uri)throw Error('图片引用已失效，请重新加载后保存');
+    return uri;
+   }
+   if(Array.isArray(value))return value.map(visit);
+   if(value===null||typeof value!=='object')return value;
+   const restored={};
+   for(const key of Object.keys(value))Object.defineProperty(restored,key,{value:visit(value[key]),enumerable:true,writable:true,configurable:true});
+   return restored;
+  }
+  return visit(data);
  }
  function image(hash){
   if(!/^[a-f0-9]{64}$/.test(hash))return null;

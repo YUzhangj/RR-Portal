@@ -1,0 +1,32 @@
+name: PrintLink large business sync
+
+on:
+  pull_request:
+    paths:
+      - 'apps/工程部/3D打印协同平台/**'
+      - '.github/workflows/printlink-large-business-sync.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  large-business-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/工程部/3D打印协同平台
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run complete PrintLink test suite
+        run: npm test
+      - name: Build production Node 24 image
+        run: docker build --tag printlink-large-sync:test .
+      - name: Exercise full upload inside the production 512 MiB cgroup
+        env:
+          PRINTLINK_LARGE_TEST_DOCKER_IMAGE: printlink-large-sync:test
+        run: node --test tests/business-sync-large-upload.test.mjs

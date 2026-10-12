@@ -163,15 +163,30 @@ const handleProductFiles = createProductFileHandler({
 });
 
 const businessSync=require('./business-sync.cjs')(store,{
- load:()=>dataImages.restore(loadData()),
+ load:()=>dataImages.restore(JSON.parse(store.prepare('SELECT value FROM snapshot WHERE id=1').get().value)),
  write:data=>{store.prepare('UPDATE snapshot SET value=? WHERE id=1').run(JSON.stringify(data));_cachedData=null;dataVersion=Math.max(Date.now(),dataVersion+1);}
 });
+const businessTransport=require('../shared/business-sync-transport.cjs');
+let collectorUpload=false;
+async function handleBusinessSync(req,res,collector){
+  const station=req.headers['x-printlink-sync-station'];
+  if(collector&&(!process.env.BUSINESS_SYNC_STATION||station!==process.env.BUSINESS_SYNC_STATION)){
+    req.resume();businessTransport.replyJSON(res,403,{error:'未启用此站双向同步'});return;
+  }
+  if(collector&&collectorUpload){req.resume();businessTransport.replyJSON(res,503,{error:'同步正在进行，请稍后重试'});return;}
+  if(collector)collectorUpload=true;
+  try{
+    const input=await businessTransport.readJSON(req);
+    if(req.aborted||res.destroyed)return;
+    const value=businessSync(collector?businessTransport.collectorInput(input,station):input);
+    businessTransport.replyJSON(res,200,value);
+  }catch(e){businessTransport.replyJSON(res,e.status||400,{error:e.message});}
+  finally{if(collector)collectorUpload=false;}
+}
 const server = http.createServer((req, res) => {
   if (!requireAuth(req,res)) return;
-  if(req.url==='/bridge/business-sync'&&req.method==='POST'){
-    const chunks=[];let size=0,tooLarge=false;
-    req.on('data',c=>{size+=c.length;if(size>128*1024*1024){tooLarge=true;chunks.length=0;}else if(!tooLarge)chunks.push(c);});
-    req.on('end',()=>{try{if(tooLarge)throw Error('同步资料超过 128MB');const value=businessSync(JSON.parse(Buffer.concat(chunks)));res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(value));}catch(e){res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:e.message}));}});return;
+  if(['/bridge/business-sync','/bridge/collector-business-sync'].includes(req.url)&&req.method==='POST'){
+    handleBusinessSync(req,res,req.url==='/bridge/collector-business-sync');return;
   }
 
   if(req.url==='/api/legacy-import/limits'&&req.method==='GET'){res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({maxBytes:businessLimitBytes,maxMB:businessLimitMB}));return;}

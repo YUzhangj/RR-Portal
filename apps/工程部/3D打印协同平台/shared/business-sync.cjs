@@ -1,4 +1,5 @@
 const {createHash}=require('node:crypto');
+const jsonStream=require('./json-stream.cjs');
 const arrays=['products','materials','schedules','maintenance','miscExpenses','stockInLogs'];
 const ignored=new Set(['_updatedAt','_mergedAt','_sourceFacts','sourceStation','sourceRecordId','platformMachine','inventorySync','inventoryReview','inventoryReason','inventoryDeduction','qualitySettled','cloudJobId','cloudAttempt','orderId','orderNumber','cloudManaged','printerOutcome']);
 const settingKeys=['machines','elecPerMachine','laborPerDay','resinQuotePerGram','resinElecPerDay','resinLaborPerDay','lossRate','profitRate'];
@@ -6,7 +7,7 @@ const safeKey=k=>!['__proto__','constructor','prototype'].includes(String(k));
 const localMetadata=row=>Object.fromEntries(Object.entries(row||{}).filter(([k])=>ignored.has(k)));
 const blocked=/password|token|secret|accesscode|checkcode|credential/i;
 function clean(x){if(Array.isArray(x))return x.map(clean);if(x&&typeof x==='object'){const y={};for(const k of Object.keys(x).sort()){if(['__proto__','constructor','prototype'].includes(k)||ignored.has(k)||blocked.test(k))continue;y[k]=clean(x[k]);}return y;}return x;}
-const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+const equal=jsonStream.equal;
 function project(data){
  const out={};
  for(const name of arrays){out[name]={};for(const row of data[name]||[]){if(row.id===undefined)throw Error(name+' 存在缺少 ID 的数据，请先修复');const key=String(row.id);if(!safeKey(key))throw Error('无效 ID');if(Object.hasOwn(out[name],key))throw Error(name+' ID 重复：'+key);out[name][key]=clean(row);}}
@@ -16,7 +17,7 @@ function project(data){
  out.settings={};for(const k of settingKeys)if(data.settings?.[k]!==undefined)out.settings[k]=data.settings[k];
  return clean(out);
 }
-function fingerprint(data){return createHash('sha256').update(JSON.stringify(clean(data))).digest('hex');}
+function fingerprint(data){const hash=createHash('sha256');for(const part of jsonStream.parts(clean(data)))hash.update(part);return hash.digest('hex');}
 // Three-way merge: simultaneous changes to a field never silently win.
 function merge(base,cloud,windows,choices={}){
  const conflicts=[];const absent=undefined;
