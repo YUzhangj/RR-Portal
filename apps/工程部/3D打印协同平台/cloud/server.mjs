@@ -208,7 +208,7 @@ const server = http.createServer(async (req,res) => {
     }
     if(route==='/api/orders' && req.method==='POST') {
       const d=await body(req), factory=field(d,'factory',true); if(!factories.includes(factory) || !userFactories(u).includes(factory)) fail(403,'不能向该厂区下单');
-      const p={}; for(const key of ['workshop','customer','engineer']) p[key]=field(d,key,true);
+      const p={engineer:u.name}; for(const key of ['workshop','customer']) p[key]=field(d,key,true);
       p.follower=field(d,'follower');  p.replyDate=date(field(d,'replyDate'));
       p.priority=field(d,'priority')||'普通'; if(!['普通','加急'].includes(p.priority)) fail(400,'优先级无效');
       Object.assign(p,itemSummary(parseItems(d,{field,date,fail},p)));
@@ -256,7 +256,7 @@ const server = http.createServer(async (req,res) => {
       if(o.status!=='待接单' || db.prepare('SELECT id FROM production_jobs WHERE order_id=?').get(o.id)) fail(409,'订单已接单或关联生产，请刷新后联系管理员处理');
       if(d.updated!==o.updated) fail(409,'申请已被其他人修改，请重新打开订单后再编辑');
       const factory=field(d,'factory',true); if(!factories.includes(factory)||!userFactories(u).includes(factory)) fail(403,'不能向该厂区下单');
-      const p={...JSON.parse(o.payload)}; for(const key of ['workshop','customer','engineer']) p[key]=field(d,key,true);
+      const p={...JSON.parse(o.payload)}; for(const key of ['workshop','customer']) p[key]=field(d,key,true);
       p.follower=field(d,'follower');
       p.priority=field(d,'priority')||'普通'; if(!['普通','加急'].includes(p.priority)) fail(400,'优先级无效');
       Object.assign(p,itemSummary(parseItems(d,{field,date,fail},p)));
