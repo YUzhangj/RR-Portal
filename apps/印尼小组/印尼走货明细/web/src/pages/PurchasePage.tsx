@@ -5,7 +5,7 @@ import {
 } from 'antd'
 import dayjs from 'dayjs'
 import { api, type Material } from '../api/client'
-import { numToChinese, poDetermineEntity, poGenContractNo, PO_ENTITY_META, type PoEntity } from '../utils/poNumber'
+import { numToChinese, poCorrectHsyNumber, poDetermineEntity, poGenContractNo, PO_ENTITY_META, type PoEntity } from '../utils/poNumber'
 import './PurchasePage.css'
 import { combinePurchaseContracts } from '../utils/purchaseContractWorkbook'
 import PurchaseMaterialPicker from '../components/PurchaseMaterialPicker'
@@ -805,6 +805,49 @@ export default function PurchasePage() {
       message.error('检查货号库失败：' + (e?.message ?? e))
     }
   }
+  async function correctHsyNumber() {
+    if (!editing?.id || creating) return
+    const id = editing.id
+    const readPlan = async () => {
+      const [{ data: detail }, { data: all }] = await Promise.all([
+        api.get<PoDetail>(`/purchase/${id}`), api.get<PoSummary[]>('/purchase'),
+      ])
+      const savedItems = detail.items || []
+      const materials = await loadPurchaseMaterials(savedItems)
+      const oldNo = detail.po_no || ''
+      const newNo = poCorrectHsyNumber(oldNo, savedItems.map(item =>
+        item.material_id == null ? undefined : materials.get(Number(item.material_id))?.customs_company,
+      ), all.map(po => po.po_no || ''))
+      return { oldNo, newNo }
+    }
+    try {
+      const plan = await readPlan()
+      if (plan.oldNo === plan.newNo) { message.info('当前已是华胜益编号，无需修改'); return }
+      Modal.confirm({
+        title: '修正当前采购单为华胜益编号',
+        okText: '确认修改编号', cancelText: '取消',
+        content: <>
+          <p>{plan.oldNo} → {plan.newNo}</p>
+          <p>按已保存明细核对，仅修改这张采购单编号。供应商、物料、金额、入库记录及基础资料不变；当前其他未保存编辑不会写入。</p>
+          <p>合同将按新编号使用华胜益主体。现有币种和单价不自动换算，请核对报价后再导出。</p>
+        </>,
+        onOk: async () => {
+          const latest = await readPlan()
+          if (latest.oldNo !== plan.oldNo || latest.newNo !== plan.newNo) {
+            message.warning('订单或可用编号已变化，请取消后重新检查')
+            throw new Error('编号已变化')
+          }
+          await api.patch(`/purchase/${id}`, { po_no: plan.newNo })
+          form.setFieldsValue({ po_no: plan.newNo })
+          setEditing(current => current?.id === id ? { ...current, po_no: plan.newNo } : current)
+          message.success(`编号已修改：${plan.newNo}`)
+          load()
+        },
+      })
+    } catch (e: any) {
+      message.error(e?.message || '无法检查采购单编号')
+    }
+  }
   async function openEdit(p: PoSummary) {
     setCreating(false); setEditing(p)
     form.resetFields()
@@ -1545,6 +1588,7 @@ export default function PurchasePage() {
             <Button onClick={() => setSchedPickerOpen(true)}>🔗 从排期选</Button>
             <Button onClick={() => setMaterialSelection({ mode: 'append' })}>📦 从物料库选择</Button>
             {!creating && <Button onClick={checkMaterialSync}>🔄 检查货号库更新</Button>}
+            {!creating && <Button onClick={correctHsyNumber}>修正华胜益编号</Button>}
             <Button onClick={mergeSameName}>🔀 合并同名</Button>
             <Button onClick={undoMerge} disabled={!mergeUndo}>↩ 取消合并</Button>
             <Button onClick={applyQuotes}>💲 套用报价</Button>
