@@ -8,7 +8,7 @@ set -euo pipefail
 #   - 改 paiji 不会把其他 16 个服务也 recreate / IP 重洗
 #   - 改 nginx.conf 只 recreate nginx 容器刷新 bind mount（约 3s 停机），不动其他服务
 #   - 改非部署文件（docs/scripts/markdown）跳过 deploy
-#   - fallback：docker-compose.cloud.yml 变动时走全量，唯一邮箱变量新增可精确增量
+#   - fallback：docker-compose.cloud.yml 变动时走全量，白名单单行环境传递新增可精确增量
 #
 # 使用：
 #   bash /opt/rr-portal/deploy/update-server.sh
@@ -152,7 +152,7 @@ AFFECTED_SERVICES=()
 NGINX_CHANGED=0
 FRONTEND_CHANGED=0
 COMPOSE_CHANGED=0
-COMPOSE_MAILBOX_ONLY=0
+COMPOSE_INCREMENTAL_SERVICE=""
 DB_INIT_CHANGED=0
 PLUGIN_SDK_CHANGED=0
 NONRUNTIME_ONLY=1  # 默认假设只改了非运行时文件，遇到需部署的就翻转
@@ -166,16 +166,17 @@ while IFS= read -r file; do
       continue ;;
   esac
 
-  # 只豁免 voyageplex-api 的指定邮箱环境传递新增行；其他字节必须完全一致。
+  # 只豁免 voyageplex-api 邮箱或 printlink station 的指定单行新增；其他字节必须完全一致。
   # helper 直接读取两个 Git blob，不解析/展开生产 .env，也不输出 compose 内容。
   # helper 缺失、读取失败或任意其他 compose 变动都回到保守全量。
   if [[ "$file" == "docker-compose.cloud.yml" ]]; then
-    if python3 "$INSTALL_DIR/deploy/compose-mailbox-only-change.py" "$BEFORE_HEAD" "$AFTER_HEAD"; then
-      COMPOSE_MAILBOX_ONLY=1
-      if [[ ! " ${AFFECTED_SERVICES[*]} " =~ " voyageplex-api " ]]; then
-        AFFECTED_SERVICES+=("voyageplex-api")
+    if COMPOSE_INCREMENTAL_SERVICE=$(python3 "$INSTALL_DIR/deploy/compose-mailbox-only-change.py" --service "$BEFORE_HEAD" "$AFTER_HEAD") &&
+       [[ "$COMPOSE_INCREMENTAL_SERVICE" == voyageplex-api || "$COMPOSE_INCREMENTAL_SERVICE" == printlink ]]; then
+      if [[ ! " ${AFFECTED_SERVICES[*]} " =~ " $COMPOSE_INCREMENTAL_SERVICE " ]]; then
+        AFFECTED_SERVICES+=("$COMPOSE_INCREMENTAL_SERVICE")
       fi
     else
+      COMPOSE_INCREMENTAL_SERVICE=""
       COMPOSE_CHANGED=1
     fi
     NONRUNTIME_ONLY=0
@@ -260,8 +261,8 @@ echo "    Nginx config:      $([ $NGINX_CHANGED -eq 1 ] && echo 'changed → wil
 echo "    Frontend static:   $([ $FRONTEND_CHANGED -eq 1 ] && echo 'changed → will recreate nginx' || echo 'unchanged')"
 if [[ "$COMPOSE_CHANGED" -eq 1 ]]; then
   echo '    Compose:           changed → FULL RECREATE'
-elif [[ "$COMPOSE_MAILBOX_ONLY" -eq 1 ]]; then
-  echo '    Compose:           mailbox environment addition → incremental voyageplex-api'
+elif [[ -n "$COMPOSE_INCREMENTAL_SERVICE" ]]; then
+  echo "    Compose:           environment addition → incremental $COMPOSE_INCREMENTAL_SERVICE"
 else
   echo '    Compose:           unchanged'
 fi

@@ -208,7 +208,7 @@ ensure_service_base_images() { :; }
         before, after, services = self.mailbox_compose_fixture()
         result, calls = self.run_update_script(before, after, services_config=services)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('mailbox environment addition', result.stdout)
+        self.assertIn('environment addition → incremental voyageplex-api', result.stdout)
         self.assertEqual([a[-1] for a in calls if 'up' in a], ['voyageplex-api'])
         self.assertEqual([a[-1] for a in calls if 'build' in a], ['voyageplex-api'])
         self.assertEqual(list(self.flags.iterdir()), [])
@@ -246,6 +246,49 @@ ensure_service_base_images() { :; }
     @unittest.skipUnless(BASH_MAJOR >= 4, 'full server script requires Bash 4+; covered on Linux CI')
     def test_force_full_rebuild_overrides_mailbox_exception(self):
         before, after, services = self.mailbox_compose_fixture()
+        result, calls = self.run_update_script(before, after, services_config=services, force=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('FULL RECREATE', result.stdout)
+        self.assertCountEqual([a[-1] for a in calls if 'up' in a], services)
+
+    def station_compose_fixture(self):
+        before = b'services:\n  printlink:\n    environment:\n      APP_MODE: production\n'
+        after = before + b'      BUSINESS_SYNC_STATION: ${BUSINESS_SYNC_STATION:-}\n'
+        services = {svc: {} for svc in ['db', 'paiji', 'printlink', 'voyageplex-api', 'nginx']}
+        return before, after, services
+
+    @unittest.skipUnless(BASH_MAJOR >= 4, 'full server script requires Bash 4+; covered on Linux CI')
+    def test_station_compose_addition_deploys_only_printlink(self):
+        before, after, services = self.station_compose_fixture()
+        result, calls = self.run_update_script(before, after, services_config=services)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('environment addition → incremental printlink', result.stdout)
+        self.assertEqual([a[-1] for a in calls if 'up' in a], ['printlink'])
+        self.assertEqual([a[-1] for a in calls if 'build' in a], ['printlink'])
+        self.assertEqual(list(self.flags.iterdir()), [])
+
+    @unittest.skipUnless(BASH_MAJOR >= 4, 'full server script requires Bash 4+; covered on Linux CI')
+    def test_station_addition_preserves_app_deployment_and_deduplicates_printlink(self):
+        before, after, services = self.station_compose_fixture()
+        changed = ('docker-compose.cloud.yml\n'
+                   'apps/工程部/3D打印协同平台/lib/business-sync.ts\n'
+                   'apps/生产部/注塑啤机排产系统/app.py')
+        result, calls = self.run_update_script(before, after, changed, services)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertCountEqual([a[-1] for a in calls if 'up' in a], ['printlink', 'paiji'])
+        self.assertEqual(list(self.flags.iterdir()), [])
+
+    @unittest.skipUnless(BASH_MAJOR >= 4, 'full server script requires Bash 4+; covered on Linux CI')
+    def test_station_addition_with_other_compose_change_uses_full_rollout(self):
+        before, after, services = self.station_compose_fixture()
+        result, calls = self.run_update_script(before, after + b'networks:\n  extra:\n', services_config=services)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('FULL RECREATE', result.stdout)
+        self.assertCountEqual([a[-1] for a in calls if 'up' in a], services)
+
+    @unittest.skipUnless(BASH_MAJOR >= 4, 'full server script requires Bash 4+; covered on Linux CI')
+    def test_force_full_rebuild_overrides_station_exception(self):
+        before, after, services = self.station_compose_fixture()
         result, calls = self.run_update_script(before, after, services_config=services, force=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('FULL RECREATE', result.stdout)

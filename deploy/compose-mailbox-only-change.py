@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Accept only the single, literal VoyagePlex mailbox environment addition.
+"""Accept one of two exact, single-line Compose environment additions.
 
-Exit 0 means update-server.sh may deploy voyageplex-api incrementally. All other
+Exit 0 means update-server.sh may deploy the matching service incrementally. All other
 changes and read failures exit 1, preserving the full Compose rollout fallback.
-Read Git blobs only; never expand .env values or print Compose contents.
+Read Git blobs only; never expand .env values or print Compose contents. With
+--service, print only the whitelisted service name. Default invocation preserves
+the legacy silent VoyagePlex-only validation contract.
 """
 
 import re
@@ -14,17 +16,36 @@ import sys
 COMPOSE_PATH = "docker-compose.cloud.yml"
 MAILBOX_KEY = b"VOYAGEPLEX_HUADENG_MAILBOXES_JSON"
 ADDED_LINE = b"      " + MAILBOX_KEY + b": ${" + MAILBOX_KEY + b":-}\n"
+STATION_KEY = b"BUSINESS_SYNC_STATION"
+STATION_LINE = b"      " + STATION_KEY + b": ${" + STATION_KEY + b":-}\n"
 
 
 def is_mailbox_only_addition(before: bytes, after: bytes) -> bool:
+    return _is_environment_only_addition(before, after, b"voyageplex-api", MAILBOX_KEY, ADDED_LINE)
+
+
+def is_station_only_addition(before: bytes, after: bytes) -> bool:
+    return _is_environment_only_addition(before, after, b"printlink", STATION_KEY, STATION_LINE)
+
+
+def incremental_service(before: bytes, after: bytes):
+    if is_mailbox_only_addition(before, after):
+        return "voyageplex-api"
+    if is_station_only_addition(before, after):
+        return "printlink"
+    return None
+
+
+def _is_environment_only_addition(before: bytes, after: bytes, target: bytes,
+                                  key: bytes, added_line: bytes) -> bool:
     # No removals, edits, duplicate definitions, line-ending changes, or changes
     # elsewhere qualify. In particular, this does not allow any literal secret.
-    if MAILBOX_KEY in before or after.count(ADDED_LINE) != 1:
+    if key in before or after.count(added_line) != 1:
         return False
-    if after.replace(ADDED_LINE, b"", 1) != before:
+    if after.replace(added_line, b"", 1) != before:
         return False
 
-    # Verify the literal is a mapping entry in services.voyageplex-api.environment,
+    # Verify the literal is a mapping entry in the target service's environment,
     # not a similarly named variable under another service or a YAML block scalar.
     # Deliberately accept only the existing, plain indentation convention; unusual
     # YAML layouts fail closed rather than trying to infer their semantics.
@@ -33,7 +54,7 @@ def is_mailbox_only_addition(before: bytes, after: bytes) -> bool:
     section = None
     in_services = False
     services_seen = 0
-    api_seen = 0
+    target_seen = 0
     environments_seen = 0
     eligible = False
     for line in lines:
@@ -50,17 +71,17 @@ def is_mailbox_only_addition(before: bytes, after: bytes) -> bool:
             if not re.fullmatch(rb"  [A-Za-z0-9_-]+:\n", line):
                 return False
             service = line[2:-2]
-            api_seen += int(service == b"voyageplex-api")
+            target_seen += int(service == target)
             section = None
             continue
-        if service != b"voyageplex-api":
+        if service != target:
             continue
         if line.startswith(b"    ") and not line.startswith(b"     "):
             section = b"environment" if line == b"    environment:\n" else None
             environments_seen += int(section == b"environment")
             continue
         if section == b"environment":
-            if line == ADDED_LINE:
+            if line == added_line:
                 eligible = True
             # Only plain, one-line environment map entries are understood here.
             # This excludes multiline values, anchors and nested structures that
@@ -69,15 +90,19 @@ def is_mailbox_only_addition(before: bytes, after: bytes) -> bool:
                 return False
             elif re.search(rb": [>|&*!]", line):
                 return False
-    return eligible and services_seen == api_seen == environments_seen == 1
+    return eligible and services_seen == target_seen == environments_seen == 1
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+    show_service = args[:1] == ["--service"]
+    if show_service:
+        args = args[1:]
+    if len(args) != 2:
         return 1
     blobs = []
     try:
-        for revision in sys.argv[1:]:
+        for revision in args:
             # update-server.sh supplies verified hashes; enforce that contract so
             # a revision cannot be interpreted as a git option or path expression.
             if not re.fullmatch(r"[0-9a-fA-F]{40,64}", revision):
@@ -91,7 +116,12 @@ def main() -> int:
             blobs.append(result.stdout)
     except (OSError, subprocess.CalledProcessError):
         return 1
-    return 0 if is_mailbox_only_addition(*blobs) else 1
+    service = incremental_service(*blobs)
+    if service is None or (not show_service and service != "voyageplex-api"):
+        return 1
+    if show_service:
+        print(service)
+    return 0
 
 
 if __name__ == "__main__":

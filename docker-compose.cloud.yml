@@ -249,6 +249,7 @@ services:
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: ${PRINTLINK_ADMIN_PASSWORD:?PRINTLINK_ADMIN_PASSWORD is required}
       COOKIE_SECURE: "false"
+      BUSINESS_SYNC_STATION: ${BUSINESS_SYNC_STATION:-}
     ports:
       - "3100:3100"
     volumes:
