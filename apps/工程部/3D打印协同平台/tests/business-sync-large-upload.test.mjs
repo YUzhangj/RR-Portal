@@ -111,7 +111,13 @@ async function launch(dir) {
         child.once('exit', (code, signal) => code === 0 ? resolve() : reject(Error(`Concurrent healthcheck failed: code=${code} signal=${signal}`)));
       }),
       logs: () => docker(['logs', '--tail', '30', id]),
-      stop: async () => {docker(['rm', '--force', id]);}};
+      stop: async () => {
+        docker(['rm', '--force', id]);
+        // The production USER node owns nested directories/0700 locks. Return
+        // this synthetic mount to the runner even if the app exited from OOM.
+        docker(['run', '--rm', '--user', '0:0', '--mount', `type=bind,src=${dir},dst=/app/runtime`,
+          dockerImage, 'chown', '-R', `${process.getuid()}:${process.getgid()}`, '/app/runtime']);
+      }};
   }
   const port = await unusedPort(), internalPort = await unusedPort();
   // Do not tune NODE_OPTIONS: this must use the same heap policy as production.
