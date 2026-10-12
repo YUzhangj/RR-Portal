@@ -6,6 +6,7 @@ on:
       - 'deploy/update-server.sh'
       - 'deploy/service-maintenance.sh'
       - 'deploy/tests/**'
+      - '.github/workflows/deploy.yml'
       - 'nginx/nginx.cloud.conf'
       - 'frontend/maintenance.html'
       - '.github/workflows/maintenance-regression.yml'

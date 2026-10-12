@@ -183,22 +183,60 @@ jobs:
             # PrintLink 采集站配置（清溪 Windows 桥接）：secret 为单行 stations.json 内容
             # （含站点令牌，不进仓库、不回显）。start.mjs 检测到平台数据目录里的
             # stations.json 即以其为采集站配置；secret 为空则跳过，保持服务器现状。
-            PRINTLINK_STATIONS='${{ secrets.PRINTLINK_STATIONS_JSON }}'
-            if [ -n "$PRINTLINK_STATIONS" ]; then
-              echo "=== printlink stations.json guard ==="
-              if printf '%s' "$PRINTLINK_STATIONS" | docker compose -f docker-compose.cloud.yml --env-file .env.cloud.production exec -T printlink sh -c 'cat > /app/runtime/stations.json && chmod 600 /app/runtime/stations.json'; then
-                echo "[GUARD] stations.json 已写入数据卷，force-recreate printlink"
-                docker compose -f docker-compose.cloud.yml --env-file .env.cloud.production up -d --no-deps --force-recreate printlink
-                sleep 8
-                docker compose -f docker-compose.cloud.yml --env-file .env.cloud.production exec -T printlink sh -c 'test -s /app/runtime/stations.json' \
-                  && echo "[GUARD] stations.json 已生效" || { echo "[GUARD][ERROR] stations.json 未生效"; exit 1; }
-              else
-                echo "[GUARD][ERROR] 写入 stations.json 失败（printlink 容器未在运行？）"
-                exit 1
+            # Inline guard 来自本次 workflow 定义，首次部署也立即生效；
+            # subshell 独立清理 trap，不覆盖下方 deploy runner 的 EXIT trap。
+            sync_printlink_stations() (
+              set +x
+              if [ -z "${PRINTLINK_STATIONS:-}" ]; then
+                echo "[GUARD] PRINTLINK_STATIONS_JSON 为空，跳过 printlink 采集站同步"
+                return 0
               fi
-            else
-              echo "[GUARD] PRINTLINK_STATIONS_JSON 为空，跳过 printlink 采集站同步"
-            fi
+              umask 077
+              local stations_tmp read_status compare_status
+              stations_tmp=$(mktemp -d "${TMPDIR:-/tmp}/printlink-stations.XXXXXX")
+              trap 'rm -rf "$stations_tmp"' EXIT
+              printf '%s' "$PRINTLINK_STATIONS" > "$stations_tmp/incoming"
+              echo "=== printlink stations.json guard ==="
+              # exit 3 仅表示首次配置文件不存在；cat/exec 读取失败必须报错。
+              # 内容只进入 600 临时文件；Docker 错误输出也可能含凭据，统一隐藏。
+              if docker compose -f docker-compose.cloud.yml --env-file .env.cloud.production exec -T printlink sh -c 'if [ -f /app/runtime/stations.json ]; then cat /app/runtime/stations.json; elif [ ! -e /app/runtime/stations.json ]; then exit 3; else exit 1; fi' > "$stations_tmp/current" 2>/dev/null; then
+                read_status=0
+              else
+                read_status=$?
+              fi
+              if [ "$read_status" -eq 0 ]; then
+                if cmp -s "$stations_tmp/incoming" "$stations_tmp/current" >/dev/null 2>&1; then
+                  echo "[GUARD] stations.json 内容一致，跳过写入和 recreate"
+                  return 0
+                else
+                  compare_status=$?
+                fi
+                if [ "$compare_status" -ne 1 ]; then
+                  echo "[GUARD][ERROR] stations.json 比较失败"
+                  return 1
+                fi
+              elif [ "$read_status" -ne 3 ]; then
+                echo "[GUARD][ERROR] 读取 stations.json 失败，未修改配置"
+                return 1
+              fi
+              if ! docker compose -f docker-compose.cloud.yml --env-file .env.cloud.production exec -T printlink sh -c 'cat > /app/runtime/stations.json && chmod 600 /app/runtime/stations.json' < "$stations_tmp/incoming" >/dev/null 2>&1; then
+                echo "[GUARD][ERROR] 写入 stations.json 失败（printlink 容器未在运行？）"
+                return 1
+              fi
+              echo "[GUARD] stations.json 已写入数据卷，force-recreate printlink"
+              if ! docker compose -f docker-compose.cloud.yml --env-file .env.cloud.production up -d --no-deps --force-recreate printlink >/dev/null 2>&1; then
+                echo "[GUARD][ERROR] recreate printlink 失败"
+                return 1
+              fi
+              sleep 8
+              if ! docker compose -f docker-compose.cloud.yml --env-file .env.cloud.production exec -T printlink sh -c 'test -s /app/runtime/stations.json' >/dev/null 2>&1; then
+                echo "[GUARD][ERROR] stations.json 未生效"
+                return 1
+              fi
+              echo "[GUARD] stations.json 已生效"
+            )
+            PRINTLINK_STATIONS='${{ secrets.PRINTLINK_STATIONS_JSON }}'
+            sync_printlink_stations
 
             echo "=== Script version check ==="
             git fetch origin main
