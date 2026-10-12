@@ -7,6 +7,7 @@ services:
       - "${PLATFORM_BIND_IP:-127.0.0.1}:3100:3100"
     environment:
       APP_MODE: production
+      BUSINESS_SYNC_STATION: ${BUSINESS_SYNC_STATION:-}
       HOST: 0.0.0.0
       PRODUCTION_JSON_LIMIT_MB: ${PRODUCTION_JSON_LIMIT_MB:-64}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}

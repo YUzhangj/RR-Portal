@@ -17,6 +17,12 @@ export function integration({db,body,json,fail,recordEvent,DEMO,ROOT}) {
  const station=stations[0].id;
  const digest=x=>createHash('sha256').update(x).digest();
  const stamp=()=>new Date().toISOString();
+ async function exchangeBusiness(input){
+  const r=await fetch(`http://127.0.0.1:${process.env.PRODUCTION_PORT||3102}/bridge/business-sync`,{method:'POST',headers:{'Content-Type':'application/json','X-Internal-Token':process.env.INTERNAL_TOKEN},body:JSON.stringify(input),signal:AbortSignal.timeout(120000)});
+  const data=await r.json();if(!r.ok)fail(r.status,data.error||'双向同步失败');return data;
+ }
+ async function businessBody(req){let size=0;const chunks=[];for await(const c of req){size+=c.length;if(size>128*1024*1024)fail(413,'同步资料超过 128MB');chunks.push(c);}try{return JSON.parse(Buffer.concat(chunks));}catch{fail(400,'无效同步数据');}}
+
  async function catalog(){const response=await fetch(`http://127.0.0.1:${process.env.PRODUCTION_PORT||3102}/api/data`,{headers:{'X-Internal-Token':process.env.INTERNAL_TOKEN},signal:AbortSignal.timeout(3000)});if(!response.ok)fail(503,'生产资料暂时不可用');return response.json();}
  // Bring orders with an already-confirmed completion into the same display stage.
  db.exec('BEGIN IMMEDIATE');
@@ -40,6 +46,11 @@ export function integration({db,body,json,fail,recordEvent,DEMO,ROOT}) {
  return async function handle(req,res,route,u){
   if(route.startsWith('/api/collector/')){
    const authorizedStation=collectorAuth(req),station=authorizedStation.id;
+   if(route==='/api/collector/business-sync'&&req.method==='POST'){
+    if(!process.env.BUSINESS_SYNC_STATION||station!==process.env.BUSINESS_SYNC_STATION)fail(403,'此采集站未获全业务双向同步授权');
+    const input=await businessBody(req);return json(res,200,await exchangeBusiness(input.probe?{action:'probe',station,clientId:input.clientId,baseHash:input.baseHash,remoteHash:input.remoteHash}:{action:'exchange',station,clientId:input.clientId,base:input.base,remote:input.remote})),true;
+   }
+
    if(route==='/api/collector/jobs'&&req.method==='GET')return json(res,200,{station,machines:stations.find(s=>s.id===station).machines.map(String),jobs:jobs().filter(j=>j.station===station&&['待打印','打印中','待质检','异常'].includes(j.status)).map(j=>({id:j.id,number:j.number,product:j.product,status:j.status,machine:j.machine,attempt:j.attempt||1,created:j.created,attemptStarted:j.attemptStarted,requestedState:DEMO?j.requestedState:undefined}))}),true;
    if(route==='/api/collector/records'&&req.method==='POST'){
     const input=await body(req);
@@ -85,6 +96,10 @@ export function integration({db,body,json,fail,recordEvent,DEMO,ROOT}) {
   }
   if(!route.startsWith('/api/platform/')&&!route.startsWith('/api/production/')&&!route.startsWith('/production/'))return false;
   if(!u||u.role!=='admin')fail(403,'仅管理员可访问生产业务');
+  if(route==='/api/platform/business-sync'&&['GET','POST'].includes(req.method)){
+   return json(res,200,await exchangeBusiness(req.method==='GET'?{action:'status'}:{action:'resolve',choices:(await body(req)).choices})),true;
+  }
+
   if(route==='/api/platform/devices'&&req.method==='GET')return json(res,200,{demo:DEMO,stations:stations.map(({token,...s})=>({...s,...db.prepare('SELECT last_seen FROM collector_stations WHERE id=?').get(s.id),devices:s.machines.map(machine=>{const d=db.prepare('SELECT * FROM collector_devices WHERE station=? AND machine=?').get(s.id,machine);return {machine,...(d?JSON.parse(d.payload):{}),observed:d?.observed,online:!!d&&JSON.parse(d.payload).connected&&Date.now()-Date.parse(d.observed)<20000};})}))}),true;
   if(route==='/api/platform/catalog'&&req.method==='GET'){const d=await catalog();return json(res,200,{products:(d.products||[]).map(({image,...product})=>product),materials:(d.materials||[]).map(m=>({...m,stockG:d.inventory?.[m.name]?.stockG||0}))}),true;}
   if(route==='/api/platform/overview'&&req.method==='GET'){
@@ -116,6 +131,7 @@ export function integration({db,body,json,fail,recordEvent,DEMO,ROOT}) {
    const p=await body(req),j=db.prepare('SELECT * FROM production_jobs WHERE id=?').get(match[1]);if(!j)fail(404,'任务不存在');
    let quality;
    if(p.action==='quality'){
+    if(process.env.BUSINESS_SYNC_STATION)fail(409,'双向同步期间请在每日记录和库存中核对耗材，不能重复质检入账');
     if(!['待质检','待交付'].includes(j.status)||JSON.parse(j.payload).quality)fail(409,'任务已处理，请刷新');
     const o=db.prepare('SELECT payload,status FROM orders WHERE id=?').get(j.order_id),op=JSON.parse(o.payload);
     if(!['打印中','待交付'].includes(o.status))fail(409,'订单已处理，请刷新');

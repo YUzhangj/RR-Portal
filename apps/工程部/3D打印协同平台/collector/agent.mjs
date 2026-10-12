@@ -1,3 +1,5 @@
+import {lockData} from '../ops/lock.mjs';
+import {startBusinessSync} from './business-sync.mjs';
 import {startRecordSync} from './records.mjs';
 import {deviceDetails} from '../shared/device-details.mjs';
 import {readLegacy} from './bridge.mjs';
@@ -15,13 +17,14 @@ const url=new URL(config.cloudUrl);
 // loadConfig applies the same transport policy as the preflight checker.
 if(url.protocol==='http:'&&config.allowInsecureHttp===true)console.warn('已启用 HTTP 上报：令牌与生产信息不加密');
 const dir=process.env.COLLECTOR_DATA_DIR||path.join(root,'../data/collector');mkdirSync(dir,{recursive:true});
+if(config.businessSync){const unlock=lockData(dir,'business-sync-collector');process.once('exit',unlock);process.once('SIGTERM',()=>process.exit(0));process.once('SIGINT',()=>process.exit(0));}
 const db=new DatabaseSync(path.join(dir,'outbox.sqlite'));db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS outbox(sequence INTEGER PRIMARY KEY AUTOINCREMENT,payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS readings(machine TEXT PRIMARY KEY,state TEXT NOT NULL); CREATE TABLE IF NOT EXISTS rejected(sequence INTEGER PRIMARY KEY,payload TEXT,error TEXT);');
 let statuses={},sourceError='';
 if(config.mode==='live'){
  if(!process.argv.includes('--live'))throw Error('连接真实设备需要显式 --live 参数');
  statuses=createRequire(import.meta.url)('./drivers.cjs').start(config);
 }else if(config.mode==='bridge'){if(!process.argv.includes('--bridge'))throw Error('桥接需显式 --bridge 参数');}else if(config.mode!=='simulation')throw Error('未知采集模式');
-async function call(route,body){const r=await fetch(new URL(route,url),{method:body?'POST':'GET',headers:{Authorization:'Bearer '+config.token,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(route==='/api/collector/records'?30000:5000),redirect:'error'});if(!r.ok)throw Object.assign(Error(`上报返回 ${r.status}`),{status:r.status});return r.json();}
+async function call(route,body){const r=await fetch(new URL(route,url),{method:body?'POST':'GET',headers:{Authorization:'Bearer '+config.token,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(route==='/api/collector/business-sync'?120000:route==='/api/collector/records'?30000:5000),redirect:'error'});if(!r.ok){const detail=await r.json().catch(()=>({}));throw Object.assign(Error(detail.error||`上报返回 ${r.status}`),{status:r.status});}return r.json();}
 function enqueue(value){if(db.prepare('SELECT COUNT(*) n FROM outbox').get().n>20000){console.error('离线队列已满，暂停采样；恢复连接后继续。');return null;}const e={id:randomUUID(),observedAt:new Date().toISOString(),...value};const id=db.prepare('INSERT INTO outbox(payload) VALUES (?)').run(JSON.stringify(e)).lastInsertRowid;return id;}
 db.exec('CREATE TABLE IF NOT EXISTS assignments (id INTEGER PRIMARY KEY,value TEXT)');
 const bindingPath=config.bindingsFile||path.join(dir,'bindings.json');
@@ -60,7 +63,7 @@ await tick();setInterval(tick,3000);
 
 function deviceSnapshot(){return config.mode==='simulation'?known.map(j=>({machine:j.machine,connected:true,state:j.requestedState||'IDLE',progress:j.requestedState==='FINISH'?100:j.requestedState==='RUNNING'?45:0})):Object.entries(statuses).map(([machine,s])=>({...deviceDetails(s),machine,connected:!!s.connected,state:s.gcodeState==='ERROR'?'FAILED':['RUNNING','FINISH','FAILED','PAUSE','IDLE'].includes(s.gcodeState)?s.gcodeState:'UNKNOWN',progress:Math.min(100,Math.max(0,Number(s.printProgress)||0))}));}
 
-const recordSync=config.mode==='bridge'?startRecordSync({config:config.legacy,db,call,bindings:readBindings,assignments:()=>known}):()=>null;
+const recordSync=config.mode==='bridge'?(config.businessSync?startBusinessSync:startRecordSync)({config:config.legacy,db,call,bindings:readBindings,assignments:()=>known}):()=>null;
 
 if(process.env.COLLECTOR_CONSOLE_PORT||config.consolePort)startConsole({port:Number(process.env.COLLECTOR_CONSOLE_PORT||config.consolePort),
  status:()=>({recordSync:recordSync(),mode:config.mode,sourceError,paused,lastSuccess,connected:!paused&&!!lastSuccess&&Date.now()-Date.parse(lastSuccess)<20000,pending:db.prepare('SELECT COUNT(*) n FROM outbox').get().n,rejected:db.prepare('SELECT COUNT(*) n FROM rejected').get().n,devices:deviceSnapshot(),jobs:known.map(j=>({...j,bound:readBindings()[j.machine]?.jobId===j.id&&readBindings()[j.machine]?.attempt===(j.attempt||1)}))}),
