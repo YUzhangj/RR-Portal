@@ -6,6 +6,7 @@ import http from 'node:http';
 import {createHash,randomUUID,timingSafeEqual} from 'node:crypto';
 import {createReadStream} from 'node:fs';
 import path from 'node:path';
+import businessTransport from '../shared/business-sync-transport.cjs';
 export function integration({db,body,json,fail,recordEvent,DEMO,ROOT}) {
  db.exec(`CREATE TABLE IF NOT EXISTS production_jobs(id TEXT PRIMARY KEY,order_id TEXT UNIQUE NOT NULL,station TEXT NOT NULL,machine TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,telemetry TEXT,sequence INTEGER DEFAULT 0,synced INTEGER DEFAULT 0,created TEXT NOT NULL);
  CREATE UNIQUE INDEX IF NOT EXISTS one_active_machine ON production_jobs(station,machine) WHERE status IN ('待打印','打印中','待质检','异常');
@@ -40,7 +41,7 @@ export function integration({db,body,json,fail,recordEvent,DEMO,ROOT}) {
   const r=await fetch(`http://127.0.0.1:${process.env.PRODUCTION_PORT||3102}/bridge/business-sync`,{method:'POST',headers:{'Content-Type':'application/json','X-Internal-Token':process.env.INTERNAL_TOKEN},body:JSON.stringify(input),signal:AbortSignal.timeout(120000)});
   const data=await r.json();if(!r.ok)fail(r.status,data.error||'双向同步失败');return data;
  }
- async function businessBody(req){let size=0;const chunks=[];for await(const c of req){size+=c.length;if(size>128*1024*1024)fail(413,'同步资料超过 128MB');chunks.push(c);}try{return JSON.parse(Buffer.concat(chunks));}catch{fail(400,'无效同步数据');}}
+ const forwardBusiness=businessTransport.createCollectorProxy({port:Number(process.env.PRODUCTION_PORT||3102),token:process.env.INTERNAL_TOKEN});
 
  async function catalog(){const response=await fetch(`http://127.0.0.1:${process.env.PRODUCTION_PORT||3102}/api/data`,{headers:{'X-Internal-Token':process.env.INTERNAL_TOKEN},signal:AbortSignal.timeout(3000)});if(!response.ok)fail(503,'生产资料暂时不可用');return response.json();}
  // Bring orders with an already-confirmed completion into the same display stage.
@@ -67,7 +68,7 @@ export function integration({db,body,json,fail,recordEvent,DEMO,ROOT}) {
    const authorizedStation=collectorAuth(req),station=authorizedStation.id;
    if(route==='/api/collector/business-sync'&&req.method==='POST'){
     if(!process.env.BUSINESS_SYNC_STATION||station!==process.env.BUSINESS_SYNC_STATION)fail(403,'此采集站未获全业务双向同步授权');
-    const input=await businessBody(req);return json(res,200,await exchangeBusiness(input.probe?{action:'probe',station,clientId:input.clientId,baseHash:input.baseHash,remoteHash:input.remoteHash}:{action:'exchange',station,clientId:input.clientId,base:input.base,remote:input.remote})),true;
+    await forwardBusiness(req,res,station);return true;
    }
 
    if(route==='/api/collector/jobs'&&req.method==='GET')return json(res,200,{station,machines:stations.find(s=>s.id===station).machines.map(String),jobs:jobs().filter(j=>j.station===station&&['待打印','打印中','待质检','异常'].includes(j.status)).map(j=>({id:j.id,number:j.number,product:j.product,status:j.status,machine:j.machine,attempt:j.attempt||1,created:j.created,attemptStarted:j.attemptStarted,requestedState:DEMO?j.requestedState:undefined}))}),true;

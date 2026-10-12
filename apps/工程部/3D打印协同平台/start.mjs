@@ -14,7 +14,7 @@ if(!existsSync(secretFile))writeFileSync(secretFile,JSON.stringify({internal:ran
 const secret=JSON.parse(readFileSync(secretFile));
 const env={...process.env,PORT:cloudPort,PRODUCTION_PORT:internalPort,DATA_DIR:path.join(data,'orders'),PRODUCTION_SOURCE:path.join(data,'production-source.json'),PRODUCTION_DB:path.join(data,'production.sqlite'),PRODUCT_FILES_DIR:path.join(data,'product-files'),INTERNAL_TOKEN:secret.internal,COLLECTOR_TOKEN:secret.collector,...(existsSync(path.join(data,'stations.json'))?{COLLECTOR_STATIONS:readFileSync(path.join(data,'stations.json'),'utf8')}:{})};
 const children=[];let stopping=false;
-function start(file,extra={}){const p=spawn(process.execPath,[file],{cwd:root,env:{...env,...extra},stdio:'inherit'});children.push(p);p.on('exit',code=>{if(!stopping){console.error('子服务退出：'+file);stop(code||1);}});return p;}
+function start(file,extra={}){const p=spawn(process.execPath,[file],{cwd:root,env:{...env,...extra},stdio:'inherit'});children.push(p);p.on('exit',(code,signal)=>{if(!stopping){console.error('子服务退出：'+file+' exitCode='+String(code)+' signal='+String(signal));stop(code||1);}});return p;}
 function stop(code=0){
  if(stopping)return;stopping=true;
  Promise.all(children.map(p=>new Promise(resolve=>{if(p.exitCode!==null||p.signalCode!==null)return resolve();p.once('exit',resolve);p.kill('SIGTERM');}))).then(()=>{unlock();process.exit(code);});
