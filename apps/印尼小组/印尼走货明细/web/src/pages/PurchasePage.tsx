@@ -1621,7 +1621,7 @@ export default function PurchasePage() {
               { title: '金额', width: 100, align: 'right', render: (_v, r) => <b style={{ color: '#c0392b' }}>{((r.purchase_qty ?? r.qty ?? 0) * (r.price ?? 0)).toFixed(2)}</b> },
               { title: '采购单位', width: 110, render: (_v, r, i) => fillable(i, 'purchase_unit',
                 <Select size="small" value={r.purchase_unit || '个'} style={{ width: '100%' }}
-                  options={['个', '只', '米'].map(x => ({ value: x, label: x }))}
+                  options={['个', '只', '米', '卷', '套'].map(x => ({ value: x, label: x }))}
                   onChange={(v) => patchItem(i, 'purchase_unit', v)} />
               ) },
               { title: '走货单位（货号库）', width: 150, render: (_v, r, i) => r.material_id ? (
