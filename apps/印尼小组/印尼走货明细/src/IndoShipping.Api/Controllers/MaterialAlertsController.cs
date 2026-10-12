@@ -347,9 +347,11 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
             var purchaseShortage = Math.Max(agg.required_qty - ordered, 0);
             var receiptShortage = Math.Max(agg.required_qty - received, 0);
             var outboundShortage = Math.Max(agg.required_qty - outbound, 0);
-            var completed = received >= agg.required_qty && outbound >= agg.required_qty;
-            DateTime? due = EstimateDeliveryDate(profile, agg.accepted_date, agg.required_qty);
-            var estimatedDays = due.HasValue ? (due.Value.Date - agg.accepted_date.Date).Days : 0;
+            var orderDetails = ToOrderDetails(agg.order_details, received, outbound);
+            var timing = OutstandingTiming(orderDetails, profile);
+            var completed = timing.accepted is null;
+            DateTime? due = timing.due;
+            var estimatedDays = due.HasValue ? (due.Value.Date - timing.accepted!.Value.Date).Days : 0;
             var daysRemaining = due.HasValue ? (due.Value.Date - today).Days : (int?)null;
             var status = completed
                 ? "covered"
@@ -373,8 +375,8 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
                 supplier = material.supplier ?? "",
                 order_count = agg.order_details.Count,
                 order_nos = agg.order_details.Values.Select(x => x.order_no).Where(x => x.Length > 0).Distinct().OrderBy(x => x).Take(8).ToArray(),
-                order_details = ToOrderDetails(agg.order_details, received, outbound),
-                accepted_date = agg.accepted_date.ToString("yyyy-MM-dd"),
+                order_details = orderDetails,
+                accepted_date = timing.accepted?.ToString("yyyy-MM-dd") ?? "",
                 due_date = due?.ToString("yyyy-MM-dd"),
                 lead_days = profile?.lead_days,
                 capacity_per_day = profile?.capacity_per_day ?? 0,
@@ -400,10 +402,12 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
             var part = agg.part;
             var profile = ResolveProfile(profileMap, part.product_code, part.category, part.name);
             productionPlan.TryGetValue(part.key, out var planned);
-            DateTime? due = EstimateDeliveryDate(profile, agg.accepted_date, agg.required_qty);
-            var estimatedDays = due.HasValue ? (due.Value.Date - agg.accepted_date.Date).Days : 0;
+            var orderDetails = ToOrderDetails(agg.order_details, 0, 0);
+            var timing = OutstandingTiming(orderDetails, profile);
+            DateTime? due = timing.due;
+            var estimatedDays = due.HasValue ? (due.Value.Date - timing.accepted!.Value.Date).Days : 0;
             var daysRemaining = due.HasValue ? (due.Value.Date - today).Days : (int?)null;
-            var status = estimatedDays <= 0
+            var status = timing.accepted is null ? "covered" : estimatedDays <= 0
                     ? "unconfigured"
                     : daysRemaining <= 3
                         ? "critical"
@@ -424,8 +428,8 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
                 detail = part.detail,
                 order_count = agg.order_details.Count,
                 order_nos = agg.order_details.Values.Select(x => x.order_no).Where(x => x.Length > 0).Distinct().OrderBy(x => x).Take(8).ToArray(),
-                order_details = ToOrderDetails(agg.order_details, 0, 0),
-                accepted_date = agg.accepted_date.ToString("yyyy-MM-dd"),
+                order_details = orderDetails,
+                accepted_date = timing.accepted?.ToString("yyyy-MM-dd") ?? "",
                 due_date = due?.ToString("yyyy-MM-dd"),
                 lead_days = profile?.lead_days > 0 ? profile.lead_days : estimatedDays > 0 ? estimatedDays : null,
                 capacity_per_day = profile?.capacity_per_day ?? 0,
@@ -564,6 +568,21 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
         var days = Math.Max(leadDays ?? 0, 0);
         var capacity = Math.Max(capacityPerDay ?? 0, 0);
         return days == 0 && capacity > 0 && (normalized is "搪胶" or "喷油") ? 15 : days;
+    }
+
+    private static (DateTime? accepted, DateTime? due) OutstandingTiming(
+        List<OrderDetail> details, ProfileRow? profile)
+    {
+        // Keep completed orders in history, but exclude them from deadline/risk calculations.
+        // Manual confirmation and real movements cover the same quantity, never add them.
+        var pending = details.Select(x => new {
+            accepted = DateTime.ParseExact(x.accepted_date, "yyyy-MM-dd", CultureInfo.InvariantCulture),
+            remaining = Math.Max(x.required_qty - Math.Max(x.manual_qty, Math.Min(x.received_qty, x.outbound_qty)), 0),
+        }).Where(x => x.remaining > 0).ToList();
+        if (pending.Count == 0) return (null, null);
+        var accepted = pending.Min(x => x.accepted);
+        // Preserve aggregate capacity scheduling, using only the outstanding workload.
+        return (accepted, EstimateDeliveryDate(profile, accepted, pending.Sum(x => x.remaining)));
     }
 
     private static DateTime? EstimateDeliveryDate(ProfileRow? profile, DateTime acceptedDate, decimal requiredQty)

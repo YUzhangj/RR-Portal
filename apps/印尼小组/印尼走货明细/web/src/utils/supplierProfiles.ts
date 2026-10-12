@@ -2,15 +2,15 @@ import type { SupplierDict } from '../api/client'
 
 export const HUASHENGYI_FULL_NAME = '深圳市华胜益出口贸易有限公司'
 
-// 物料只保存供应商名称，因此同一名称在候选列表中只需出现一次。
+// 使用供应商显示名称，允许同一公司下的不同供应商名称分别选择。
 // 合并搜索别名但不修改档案；供应商汇总仍逐条显示全部记录。
 export function supplierAutocompleteOptions(profiles: SupplierDict[]) {
   const options = new Map<string, { value: string; label: string; searchText: string }>()
   for (const profile of profiles) {
-    const value = profile.full?.trim() || profile.keyword?.trim() || ''
+    const value = profile.keyword?.trim() || profile.full?.trim() || ''
     if (!value) continue
     const key = value.toLocaleLowerCase()
-    const searchText = [value, profile.keyword?.trim()].filter(Boolean).join('\n').toLocaleLowerCase()
+    const searchText = [value, profile.full?.trim()].filter(Boolean).join('\n').toLocaleLowerCase()
     const existing = options.get(key)
     if (existing) existing.searchText += '\n' + searchText
     else options.set(key, { value, label: value, searchText })
@@ -20,6 +20,11 @@ export function supplierAutocompleteOptions(profiles: SupplierDict[]) {
 
 export function filterSupplierOption(input: string, option?: { searchText: string }): boolean {
   return (option?.searchText || '').includes(input.trim().toLocaleLowerCase())
+}
+
+export function supplierDisplayName(name: string, profiles: SupplierDict[]): string {
+  const profile = supplierProfileForName(name, profiles)
+  return profile?.keyword?.trim() || profile?.full?.trim() || name
 }
 
 function isHuashengyi(name: string): boolean {

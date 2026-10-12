@@ -526,7 +526,7 @@ export default function MaterialAlertsPage() {
                   ]}
                 />
                 <Tag color="blue">{revisionId ? '历史排期' : '最新排期'}：{data.schedule_label || '暂无'}</Tag>
-                <Typography.Text type="secondary">应交日 = 接单日期 + 货号物料交货周期</Typography.Text>
+                <Typography.Text type="secondary">预警日期仅统计未交完订单：最早接单日 + 货号物料交货周期</Typography.Text>
                 <Tag color="green">完成 = 入出库达标或手动确认送完</Tag>
                 <Tag color="purple">日产能生产天数不计周日</Tag>
             </Space>
@@ -586,7 +586,7 @@ export default function MaterialAlertsPage() {
         footer={null}
         onCancel={() => setOrderDetailItem(null)}
       >
-        <Typography.Paragraph type="secondary">入库、出库数量按最早接单日期 FIFO 自动分配到订单。手动确认量按订单、货号及物料保留；与实际记录不重复相加，追加需求继续追踪。</Typography.Paragraph>
+        <Typography.Paragraph type="secondary">入库、出库数量按最早接单日期 FIFO 自动分配到订单。手动确认量按订单、货号及物料保留；与实际记录不重复相加，追加需求继续追踪。已交完订单保留在明细中，不参与最早接单日、应交日及逾期预警计算。</Typography.Paragraph>
         <Table
           rowKey="key"
           size="small"
