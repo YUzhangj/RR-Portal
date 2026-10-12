@@ -1199,6 +1199,7 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       ConnectionStrings__Default: Data Source=/app/data/voyageplex.db
       EmailParser__BaseUrl: http://voyageplex-parser:8091
+      VOYAGEPLEX_HUADENG_MAILBOXES_JSON: ${VOYAGEPLEX_HUADENG_MAILBOXES_JSON:-}
       SSO_SECRET: ${SSO_SECRET:?SSO_SECRET is required}
     volumes:
       - ./apps/船务部/VoyagePlex船务协同系统/data-runtime:/app/data

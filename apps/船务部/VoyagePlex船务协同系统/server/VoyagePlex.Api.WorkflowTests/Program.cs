@@ -2,6 +2,32 @@ using VoyagePlex.Api.Services;
 using VoyagePlex.Api.Entities;
 using System.Text.Json.Nodes;
 
+var mailboxOwner = new AppUser { Username = "huadeng-shipping", MailboxAddress = "owner@163.com" };
+Environment.SetEnvironmentVariable(ServerMailboxConfiguration.EnvironmentVariable,
+    """[{"username":"huadeng-shipping","address":"owner@163.com","authCode":"test-code","host":"imap.163.com","folder":"INBOX"}]""");
+if (!ServerMailboxConfiguration.TryGet(mailboxOwner, out var mailboxCredentials, out _) ||
+    mailboxCredentials.AuthCode != "test-code" || mailboxCredentials.Host != "imap.163.com")
+    throw new InvalidOperationException("服务器邮箱配置没有按用户账号解析");
+var rotatedCredentials = mailboxCredentials with { AuthCode = "rotated-test-code" };
+if (ServerMailboxConfiguration.MailboxIdentity(mailboxCredentials) != ServerMailboxConfiguration.MailboxIdentity(rotatedCredentials) ||
+    ServerMailboxConfiguration.ConfigurationKey(mailboxCredentials) == ServerMailboxConfiguration.ConfigurationKey(rotatedCredentials) ||
+    ServerMailboxConfiguration.MailboxIdentity(mailboxCredentials) == ServerMailboxConfiguration.MailboxIdentity(mailboxCredentials with { Folder = "Archive" }) ||
+    ServerMailboxConfiguration.MailboxIdentity(mailboxCredentials) == ServerMailboxConfiguration.MailboxIdentity(mailboxCredentials with { Host = "other.example.com" }))
+    throw new InvalidOperationException("授权码轮换必须保持邮箱身份，服务器或文件夹变更必须隔离同步断点");
+mailboxOwner.MailboxAddress = "other@163.com";
+if (ServerMailboxConfiguration.IsConfigured(mailboxOwner))
+    throw new InvalidOperationException("服务器邮箱配置与用户绑定地址不一致时必须拒绝连接");
+Environment.SetEnvironmentVariable(ServerMailboxConfiguration.EnvironmentVariable, null);
+mailboxOwner.MailboxAddress = "owner@163.com";
+foreach (var invalidConfiguration in new[] { "invalid", "[null]", "{}", "[{\"username\":\"huadeng-shipping\"},{\"username\":\"huadeng-shipping\"}]" })
+{
+    Environment.SetEnvironmentVariable(ServerMailboxConfiguration.EnvironmentVariable, invalidConfiguration);
+    if (ServerMailboxConfiguration.TryGet(mailboxOwner, out _, out _))
+        throw new InvalidOperationException("无效或重复的服务器邮箱配置必须拒绝连接");
+}
+Environment.SetEnvironmentVariable(ServerMailboxConfiguration.EnvironmentVariable, null);
+Console.WriteLine("Server-managed mailbox configuration tests passed.");
+
 if (MailboxDateRules.ReceivedDate("2026-09-17T15:59:00+00:00") != "2026-09-17" ||
     MailboxDateRules.ReceivedDate("2026-09-17T16:00:00+00:00") != "2026-09-18" ||
     MailboxDateRules.ReceivedDate("2026-09-18T00:30:00+08:00") != "2026-09-18")

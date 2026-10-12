@@ -433,7 +433,7 @@ app.MapPost("/api/users", async (JsonObject payload, AppDbContext db, Cancellati
     return Results.Created($"/api/users/{user.Id}", UserResponse(user));
 });
 
-app.MapPut("/api/users/{id:long}", async (long id, JsonObject payload, HttpContext context, AppDbContext db, IDataProtectionProvider protection, CancellationToken cancellationToken) =>
+app.MapPut("/api/users/{id:long}", async (long id, JsonObject payload, HttpContext context, AppDbContext db, CancellationToken cancellationToken) =>
 {
     var user = await db.Users.FindAsync([id], cancellationToken);
     if (user is null) return Results.NotFound(new { error = "用户不存在" });
@@ -454,49 +454,20 @@ app.MapPut("/api/users/{id:long}", async (long id, JsonObject payload, HttpConte
     if (payload.ContainsKey("mailboxAddress"))
     {
         var address = payload["mailboxAddress"]?.ToString().Trim().ToLowerInvariant() ?? "";
-        var host = payload["mailboxHost"]?.ToString().Trim() ?? "imap.exmail.qq.com";
-        var folder = payload["mailboxFolder"]?.ToString().Trim() ?? "INBOX";
-        var secret = payload["mailboxAuthCode"]?.ToString() ?? "";
         if (address != "" && (!System.Net.Mail.MailAddress.TryCreate(address, out var parsedAddress) || parsedAddress.Address != address))
             return Results.BadRequest(new { error = "邮箱地址格式无效" });
-        if (host.Length > 253 || Uri.CheckHostName(host) != UriHostNameType.Dns || folder.Length is < 1 or > 100 || folder.Any(char.IsControl))
-            return Results.BadRequest(new { error = "邮箱服务器或文件夹格式无效" });
         if (address != "" && companyAccess == "Xingxin" && role != "admin")
             return Results.BadRequest(new { error = "个人邮箱用于华登板块，请先分配华登权限" });
         if (address != "" && await db.Users.AnyAsync(value => value.Id != id && value.MailboxAddress == address, cancellationToken))
             return Results.Conflict(new { error = "该邮箱已绑定其他账号" });
-        if (address != "" && secret == "" && (address != user.MailboxAddress || user.MailboxSecretProtected == ""))
-            return Results.BadRequest(new { error = "首次绑定或更换邮箱时请填写邮箱授权码" });
-        if (secret.Length > 1024) return Results.BadRequest(new { error = "邮箱授权码过长" });
-        if (address != user.MailboxAddress || host != user.MailboxHost || folder != user.MailboxFolder)
+        if (address != user.MailboxAddress)
         {
             var state = await db.MailSyncStates.IgnoreQueryFilters().FirstOrDefaultAsync(value => value.Id == checked(1000 + (int)id), cancellationToken);
             if (state is not null) db.MailSyncStates.Remove(state);
+            user.MailboxTestStatus = "Unknown"; user.MailboxTestedAt = null;
+            user.MailboxTestConfigurationKey = "";
         }
-        if (address != user.MailboxAddress || host != user.MailboxHost || folder != user.MailboxFolder || secret != "")
-        { user.MailboxTestStatus = "Unknown"; user.MailboxTestedAt = null; }
-        if (secret != "")
-        {
-            var cursor = await db.MailSyncStates.IgnoreQueryFilters().FirstOrDefaultAsync(value => value.Id == checked(1000 + (int)id), cancellationToken);
-            if (cursor is not null && db.Entry(cursor).State != EntityState.Deleted)
-            { cursor.LastSuccessAt = null; cursor.LastError = ""; }
-        }
-        user.MailboxAddress = address; user.MailboxHost = host; user.MailboxFolder = folder;
-        if (address == "") user.MailboxSecretProtected = "";
-        else if (secret != "") user.MailboxSecretProtected = protection.CreateProtector("PersonalMailbox.v1").Protect(secret);
-        var proof = payload["mailboxTestToken"]?.ToString() ?? "";
-        if (address != "" && proof != "")
-        {
-            try
-            {
-                var evidence = JsonNode.Parse(protection.CreateProtector("MailboxConnectionTest.v1").Unprotect(proof))!.AsObject();
-                var savedSecret = protection.CreateProtector("PersonalMailbox.v1").Unprotect(user.MailboxSecretProtected);
-                if (evidence["key"]?.ToString() == MailboxConfigurationKey(user.Id, address, host, folder, savedSecret) &&
-                    DateTime.TryParse(evidence["at"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var testedAt) && testedAt > DateTime.UtcNow.AddHours(-1))
-                { user.MailboxTestStatus = evidence["connected"]?.GetValue<bool>() == true ? "Connected" : "Failed"; user.MailboxTestedAt = testedAt; }
-            }
-            catch (Exception error) when (error is CryptographicException or JsonException or InvalidOperationException or FormatException) { /* Invalid evidence leaves the mailbox untested. */ }
-        }
+        user.MailboxAddress = address;
     }
     user.CompanyAccess = companyAccess;
     user.DisplayName = displayName; user.Role = role; user.IsActive = isActive; user.UpdatedAt = DateTime.UtcNow;
@@ -505,37 +476,30 @@ app.MapPut("/api/users/{id:long}", async (long id, JsonObject payload, HttpConte
     return Results.Ok(UserResponse(user));
 });
 
-app.MapPost("/api/users/{id:long}/mailbox-test", async (long id, JsonObject payload, AppDbContext db, IDataProtectionProvider protection, EmailParserClient parser, CancellationToken cancellationToken) =>
+app.MapPost("/api/users/{id:long}/mailbox-test", async (long id, AppDbContext db, EmailParserClient parser, CancellationToken cancellationToken) =>
 {
     var user = await db.Users.FirstOrDefaultAsync(value => value.Id == id, cancellationToken);
     if (user is null) return Results.NotFound(new { error = "用户不存在" });
-    var address = payload["mailboxAddress"]?.ToString().Trim().ToLowerInvariant() ?? user.MailboxAddress;
-    var host = payload["mailboxHost"]?.ToString().Trim() ?? user.MailboxHost;
-    var folder = payload["mailboxFolder"]?.ToString().Trim() ?? user.MailboxFolder;
-    var secret = payload["mailboxAuthCode"]?.ToString() ?? "";
-    if (address == "" || !System.Net.Mail.MailAddress.TryCreate(address, out var parsed) || parsed.Address != address)
-        return Results.BadRequest(new { error = "请填写有效的邮箱地址" });
-    if (host.Length > 253 || Uri.CheckHostName(host) != UriHostNameType.Dns || folder.Length is < 1 or > 100 || folder.Any(char.IsControl))
-        return Results.BadRequest(new { error = "邮箱服务器或文件夹格式无效" });
-    if (secret.Length > 1024) return Results.BadRequest(new { error = "邮箱授权码过长" });
+    if (!ServerMailboxConfiguration.TryGet(user, out var credentials, out var configurationError))
+        return Results.BadRequest(new { error = configurationError });
+    var configurationKey = ServerMailboxConfiguration.ConfigurationKey(credentials);
     try
     {
-        if (secret == "" && address == user.MailboxAddress && user.MailboxSecretProtected != "")
-            secret = protection.CreateProtector("PersonalMailbox.v1").Unprotect(user.MailboxSecretProtected);
-        if (secret == "") return Results.BadRequest(new { error = "请填写邮箱授权码" });
-        var response = await parser.TestMailboxAsync(address, secret, host, folder, cancellationToken);
+        var response = await parser.TestMailboxAsync(credentials.Address, credentials.AuthCode, credentials.Host, credentials.Folder, cancellationToken);
         if (response.StatusCode != 200) return Results.Json(new { error = "邮箱测试服务暂时不可用，请稍后重试" }, statusCode: 502);
         var result = JsonNode.Parse(response.Body)?.AsObject();
         if (result?["connected"] is null) return Results.Json(new { error = "邮箱测试服务返回异常，请稍后重试" }, statusCode: 502);
         var connected = result["connected"]!.GetValue<bool>(); var testedAt = DateTime.UtcNow;
-        var key = MailboxConfigurationKey(id, address, host, folder, secret);
-        var evidence = new JsonObject { ["key"] = key, ["connected"] = connected, ["at"] = testedAt.ToString("O") };
-        var testToken = protection.CreateProtector("MailboxConnectionTest.v1").Protect(evidence.ToJsonString());
         await db.Entry(user).ReloadAsync(cancellationToken);
-        if (address == user.MailboxAddress && host == user.MailboxHost && folder == user.MailboxFolder && user.MailboxSecretProtected != "" &&
-            key == MailboxConfigurationKey(id, user.MailboxAddress, user.MailboxHost, user.MailboxFolder, protection.CreateProtector("PersonalMailbox.v1").Unprotect(user.MailboxSecretProtected)))
-        { user.MailboxTestStatus = connected ? "Connected" : "Failed"; user.MailboxTestedAt = testedAt; await db.SaveChangesAsync(cancellationToken); }
-        return Results.Ok(new { connected, testToken, testedAt, message = result["message"]?.ToString() ?? "连接测试完成" });
+        if (!ServerMailboxConfiguration.TryGet(user, out var currentCredentials, out _) ||
+            ServerMailboxConfiguration.ConfigurationKey(currentCredentials) != configurationKey)
+            return Results.Conflict(new { error = "邮箱绑定或服务器配置已更改，请重新测试连接" });
+        var updated = await db.Users.Where(value => value.Id == id && value.MailboxAddress == user.MailboxAddress && value.UpdatedAt == user.UpdatedAt)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.MailboxTestStatus, connected ? "Connected" : "Failed")
+                .SetProperty(value => value.MailboxTestedAt, (DateTime?)testedAt)
+                .SetProperty(value => value.MailboxTestConfigurationKey, configurationKey), cancellationToken);
+        if (updated == 0) return Results.Conflict(new { error = "邮箱绑定已更改，请重新测试连接" });
+        return Results.Ok(new { connected, testedAt, message = result["message"]?.ToString() ?? "连接测试完成" });
     }
     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
     { return Results.Json(new { error = "连接测试超时，请检查网络和邮箱服务器" }, statusCode: 504); }
@@ -615,7 +579,7 @@ app.MapGet("/api/mail/accounts", async (HttpContext context, AppDbContext db, Ca
     if (db.Company != "Huadeng") return Results.Ok(new { selectedOwnerId = (long?)null, accounts = Array.Empty<object>() });
     var users = await db.Users.AsNoTracking().Where(value => value.IsActive && (value.CompanyAccess == "Huadeng" || (current.Role == "admin" && (value.CompanyAccess == "Both" || value.Role == "admin"))) && (current.Role == "admin" || current.Role == "supervisor" || value.Id == current.Id))
         .OrderBy(value => value.DisplayName).ToListAsync(cancellationToken);
-    return Results.Ok(new { selectedOwnerId = db.MailOwnerId, accounts = users.Select(value => new { value.Id, value.DisplayName, value.MailboxAddress, configured = value.MailboxSecretProtected != "" }) });
+    return Results.Ok(new { selectedOwnerId = db.MailOwnerId, accounts = users.Select(value => new { value.Id, value.DisplayName, value.MailboxAddress, configured = ServerMailboxConfiguration.IsConfigured(value) }) });
 });
 
 app.MapGet("/api/mail/contacts", async (AppDbContext db, CancellationToken cancellationToken) =>
@@ -664,15 +628,21 @@ app.MapGet("/api/mail/settings", async (HttpContext context, AppDbContext db, Ca
     var setting = await db.MailSystemSettings.AsNoTracking().FirstAsync(value => value.Id == db.CompanySettingId, cancellationToken);
     var state = await db.MailSyncStates.AsNoTracking().FirstOrDefaultAsync(cancellationToken);
     var owner = db.Company == "Huadeng" && db.MailOwnerId > 0 ? await db.Users.AsNoTracking().FirstOrDefaultAsync(value => value.Id == db.MailOwnerId, cancellationToken) : null;
-    var configured = owner is not null ? owner.MailboxAddress != "" && owner.MailboxSecretProtected != "" : !string.IsNullOrEmpty(state?.Address);
+    ServerMailboxCredentials credentials = new("", "", "", "");
+    var configured = owner is not null ? ServerMailboxConfiguration.TryGet(owner, out credentials, out _) : !string.IsNullOrEmpty(state?.Address);
+    var configurationKey = owner is not null && configured ? ServerMailboxConfiguration.ConfigurationKey(credentials) : "";
+    var currentTest = owner is not null && configured && owner.MailboxTestConfigurationKey == configurationKey;
+    var currentSync = owner is null || (configured && state?.ConfigurationKey == configurationKey);
     var connectionStatus = db.Company == "Huadeng" && db.MailOwnerId is null ? "SelectMailbox" : !configured ? "NotConfigured" :
-        !string.IsNullOrEmpty(state?.LastError) || owner?.MailboxTestStatus == "Failed" ? "SyncError" :
-        state?.LastSuccessAt is not null || owner?.MailboxTestStatus == "Connected" ? "Connected" : "PendingConnection";
+        (currentSync && !string.IsNullOrEmpty(state?.LastError)) || (currentTest && owner?.MailboxTestStatus == "Failed") ? "SyncError" :
+        (currentSync && state?.LastSuccessAt is not null) || (currentTest && owner?.MailboxTestStatus == "Connected") ? "Connected" : "PendingConnection";
 
     var mailCount = await db.ImportEmailItems.AsNoTracking().CountAsync(item => item.MailboxKey != "", cancellationToken);
     var failedCount = await db.ImportEmailItems.AsNoTracking().CountAsync(item => item.MailboxKey != "" && item.Error != "", cancellationToken);
     return Results.Ok(new { setting.SyncEnabled, setting.SyncIntervalMinutes, setting.RetentionDays, setting.StartDate, setting.UpdatedAt,
-        address = owner?.MailboxAddress ?? state?.Address ?? "", connectionStatus, testedAt = owner?.MailboxTestedAt, state?.LastSuccessAt, lastError = state?.LastError ?? (owner?.MailboxTestStatus == "Failed" ? "最近一次连接测试失败，请重新检查邮箱配置" : ""), mailCount, failedCount });
+        address = owner?.MailboxAddress ?? state?.Address ?? "", connectionStatus, testedAt = currentTest ? owner?.MailboxTestedAt : null,
+        lastSuccessAt = currentSync ? state?.LastSuccessAt : null,
+        lastError = currentSync && !string.IsNullOrEmpty(state?.LastError) ? state.LastError : currentTest && owner?.MailboxTestStatus == "Failed" ? "最近一次连接测试失败，请重新检查邮箱配置" : "", mailCount, failedCount });
 });
 
 app.MapPatch("/api/mail/settings", async (JsonObject payload, HttpContext context, AppDbContext db, CancellationToken cancellationToken) =>
@@ -1733,12 +1703,9 @@ static Task<bool> ProductInfoExists(AppDbContext db, string productCode, int? qu
 
 static object UserResponse(AppUser user) => new
 {
-    user.Id, user.Username, user.DisplayName, user.Role, user.CompanyAccess, user.IsActive, user.MailboxAddress, user.MailboxHost, user.MailboxFolder, mailboxConfigured = user.MailboxSecretProtected != "",
+    user.Id, user.Username, user.DisplayName, user.Role, user.CompanyAccess, user.IsActive, user.MailboxAddress, mailboxConfigured = ServerMailboxConfiguration.IsConfigured(user),
     user.CreatedAt, user.UpdatedAt, user.LastLoginAt,
 };
-
-static string MailboxConfigurationKey(long id, string address, string host, string folder, string secret) =>
-    Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { id, address, host, folder, secret }))));
 
 static string? ValidateUserInput(string username, string displayName, string password, bool requirePassword)
 {

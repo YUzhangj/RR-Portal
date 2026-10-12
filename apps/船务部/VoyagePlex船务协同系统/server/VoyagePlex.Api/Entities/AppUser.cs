@@ -12,6 +12,7 @@ public sealed class AppUser
     public string MailboxSecretProtected { get; set; } = "";
     public string MailboxTestStatus { get; set; } = "Unknown";
     public DateTime? MailboxTestedAt { get; set; }
+    public string MailboxTestConfigurationKey { get; set; } = "";
     public string Role { get; set; } = "shipping";
     public string PasswordHash { get; set; } = string.Empty;
     public bool IsActive { get; set; } = true;

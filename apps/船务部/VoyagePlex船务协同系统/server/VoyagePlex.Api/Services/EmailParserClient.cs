@@ -1,18 +1,16 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using Microsoft.AspNetCore.DataProtection;
-using VoyagePlex.Api.Entities;
 
 namespace VoyagePlex.Api.Services;
 
-public sealed class EmailParserClient(HttpClient httpClient, VoyagePlex.Api.Data.AppDbContext db, IDataProtectionProvider protection)
+public sealed class EmailParserClient(HttpClient httpClient, VoyagePlex.Api.Data.AppDbContext db)
 {
-    public async Task<ParserResponse> PollMailboxAsync(long afterUid, string startDate, CancellationToken cancellationToken, string company = "Xingxin", AppUser? owner = null)
+    public async Task<ParserResponse> PollMailboxAsync(long afterUid, string startDate, CancellationToken cancellationToken, string company = "Xingxin", ServerMailboxCredentials? credentials = null)
     {
-        using var response = owner is null
+        using var response = credentials is null
             ? await httpClient.GetAsync($"/v1/mailbox/poll?after_uid={afterUid}&start_date={Uri.EscapeDataString(startDate)}&company={company}", cancellationToken)
             : await httpClient.PostAsJsonAsync("/v1/mailbox/poll", new { after_uid = afterUid, start_date = startDate, company,
-                address = owner.MailboxAddress, auth_code = protection.CreateProtector("PersonalMailbox.v1").Unprotect(owner.MailboxSecretProtected), host = owner.MailboxHost, folder = owner.MailboxFolder }, cancellationToken);
+                address = credentials.Address, auth_code = credentials.AuthCode, host = credentials.Host, folder = credentials.Folder }, cancellationToken);
         return new ParserResponse((int)response.StatusCode,
             response.Content.Headers.ContentType?.ToString() ?? "application/json",
             await response.Content.ReadAsStringAsync(cancellationToken));

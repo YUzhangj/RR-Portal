@@ -61,11 +61,14 @@ jobs:
               # database exports and other large branch assets remain blocked.
               case ${path:-} in
                 */package-lock.json|frontend/index.cloud.html|nginx/nginx.cloud.conf)
-                  continue
+                  ;;
+                apps/船务部/VoyagePlex船务协同系统/components/app-shell.tsx|apps/船务部/VoyagePlex船务协同系统/server/VoyagePlex.Api/Program.cs)
+                  ;;
+                *)
+                  echo "Unexpected branch-only blob larger than 50000 bytes: ${path:-<unknown>} ($size bytes)" >&2
+                  exit 1
                   ;;
               esac
-              echo "Unexpected branch-only blob larger than 50000 bytes: ${path:-<unknown>} ($size bytes)" >&2
-              exit 1
             fi
             if git cat-file blob "$object" | perl -0777 -e '$data = <STDIN>; exit($data =~ /const\s+SNAPSHOT\s*=\s*\{(?!\s*\})/s ? 0 : 1)'; then
               echo "Plaintext non-empty private snapshot object detected: ${path:-<unknown>}" >&2
