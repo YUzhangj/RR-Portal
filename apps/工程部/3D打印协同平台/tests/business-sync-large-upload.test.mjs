@@ -60,16 +60,44 @@ function inspectContainer(id) {
     '{"running":{{.State.Running}},"oom":{{.State.OOMKilled}},"restarts":{{.RestartCount}},"pid":{{.State.Pid}},"started":{{json .State.StartedAt}},"health":{{json .State.Health.Status}},"memory":{{.HostConfig.Memory}},"swap":{{.HostConfig.MemorySwap}}}', id]));
 }
 
-function appProcesses(id) {
-  const rows = docker(['top', id, '-eo', 'pid,ppid,comm']).split('\n').slice(1)
-    .map(line => line.trim().split(/\s+/)).filter(row => row[2] === 'node')
-    .map(row => ({pid: Number(row[0]), parent: Number(row[1])}));
-  // A concurrent healthcheck may add a transient Node process. Identify the
-  // supervisor and its two service children, rather than including that probe.
-  const supervisor = rows.find(row => rows.filter(child => child.parent === row.pid).length === 2);
-  return supervisor ? rows.filter(row => row.pid === supervisor.pid || row.parent === supervisor.pid)
-    .map(row => row.pid).sort((a, b) => a - b) : [];
+function parseAppProcesses(output) {
+  const files = {'start.mjs': 'supervisor', 'cloud/server.mjs': 'cloud', 'production/server.js': 'production'};
+  const roles = [];
+  for (const line of output.split('\n')) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(\S+)/);
+    if (!match || !/(^|\/)node$/.test(match[3])) continue;
+    const file = match[4].replace(/^\/app\//, '').replace(/^\.\//, '');
+    if (!Object.hasOwn(files, file)) continue;
+    // Keep only fixed synthetic service names, never the complete command or env.
+    roles.push({pid: Number(match[1]), ppid: Number(match[2]), file, role: files[file]});
+  }
+  const supervisor = roles.find(row => row.role === 'supervisor');
+  const valid = roles.length === 3 && new Set(roles.map(row => row.role)).size === 3 &&
+    roles.every(row => row === supervisor || row.ppid === supervisor.pid);
+  return {roles, pids: valid ? roles.map(row => row.pid).sort((a, b) => a - b) : []};
 }
+
+function appProcesses(id) {
+  // Linux Node 24 may name its comm MainThread. Match the known entry-point
+  // arguments instead, excluding concurrent healthcheck Node processes.
+  return parseAppProcesses(docker(['top', id, '-eo', 'pid,ppid,args']));
+}
+
+test('Docker process parsing identifies the three service roles and excludes healthchecks', () => {
+  const output = `PID PPID COMMAND
+200 1 node start.mjs --cloud-only
+201 200 /usr/local/bin/node /app/production/server.js
+202 200 /usr/local/bin/node cloud/server.mjs
+203 1 sh -c node -e healthcheck
+204 203 node -e fetch('http://127.0.0.1:3100/api/health')
+205 1 node -e start.mjs cloud/server.mjs production/server.js DO_NOT_OUTPUT_EXTRA_ARGS`;
+  const parsed = parseAppProcesses(output);
+  assert.deepEqual(parsed.pids, [200, 201, 202]);
+  assert.deepEqual(parsed.roles.map(row => row.role), ['supervisor', 'production', 'cloud']);
+  assert.ok(!JSON.stringify(parsed).includes('DO_NOT_OUTPUT_EXTRA_ARGS'));
+  assert.deepEqual(parseAppProcesses(output.replace('202 200', '202 999')).pids, []);
+  assert.deepEqual(parseAppProcesses(output.replace('202 200 /usr/local/bin/node cloud/server.mjs', '')).pids, []);
+});
 
 function watchRss(parentPid) {
   let peakKiB = 0, lastKiB = 0;
@@ -193,8 +221,9 @@ test('real three-process app preserves images through 21/42 MiB sync, conflicts,
     }
     assert.ok(ready, app.logs());
     const before = readState(dir), initialContainer = app.id ? app.state() : null;
-    const initialProcesses = app.id ? app.processes() : null;
-    if (app.id) {assert.equal(initialProcesses.length, 3); assert.equal(initialContainer.memory, 512 * MiB); assert.equal(initialContainer.swap, 512 * MiB);}
+    const initialProcessInfo = app.id ? app.processes() : null;
+    const initialProcesses = initialProcessInfo?.pids;
+    if (app.id) {assert.equal(initialProcesses.length, 3, JSON.stringify(initialProcessInfo.roles)); assert.equal(initialContainer.memory, 512 * MiB); assert.equal(initialContainer.swap, 512 * MiB);}
     app.rss?.sample();
     const beforeRss = app.rss?.read();
     const auth = {Authorization: 'Bearer ' + token};
@@ -281,7 +310,8 @@ test('real three-process app preserves images through 21/42 MiB sync, conflicts,
       const after = app.state();
       assert.equal(after.health, 'healthy'); assert.equal(after.running, true); assert.equal(after.oom, false); assert.equal(after.restarts, 0);
       assert.equal(after.pid, initialContainer.pid); assert.equal(after.started, initialContainer.started);
-      assert.deepEqual(app.processes(), initialProcesses);
+      const finalProcessInfo = app.processes();
+      assert.deepEqual(finalProcessInfo.pids, initialProcesses, JSON.stringify(finalProcessInfo.roles));
       const peak = app.peak(); assert.ok(peak > 0 && peak <= 512);
       t.diagnostic(JSON.stringify({mode: 'linux-cgroup', cloudSnapshotBytes: Buffer.byteLength(sourceText), requestBytes: Buffer.byteLength(exchangeBody),
         responseBytes: results[1].bytes, subsequentRequestBytes: subsequent.requestBytes, subsequentResponseBytes: subsequent.bytes,
@@ -296,7 +326,14 @@ test('real three-process app preserves images through 21/42 MiB sync, conflicts,
     }
     assert.ok(!/子服务退出|heap out of memory|FATAL ERROR/i.test(app.logs()), 'Unexpected child exit or V8 failure');
   } catch (error) {
-    if (app) {t.diagnostic(app.logs()); if (app.id) t.diagnostic(JSON.stringify(app.state()));}
+    if (app) {
+      t.diagnostic(app.logs());
+      if (app.id) {
+        const state = app.state();
+        t.diagnostic(JSON.stringify(state));
+        if (state.running) t.diagnostic(JSON.stringify({processRoles: app.processes().roles}));
+      }
+    }
     throw error;
   } finally {
     runner?.close();
