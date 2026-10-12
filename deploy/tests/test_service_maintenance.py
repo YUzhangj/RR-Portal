@@ -50,11 +50,11 @@ elif 'ps' in a:
     elif a[-1] in json.loads((p / 'states.json').read_text()): print(a[-1])
 elif 'build' in a:
     # Building must leave the old system accessible.
-    key = os.environ.get('EXPECTED_KEY', a[-1])
+    key = os.environ.get('EXPECTED_KEY', 'voyageplex' if a[-1].startswith('voyageplex-') else a[-1])
     assert not (p / 'flags/services' / key).exists(), 'maintenance started during build'
     if os.environ.get('FAIL_BUILD') == '1': sys.exit(2)
 elif 'up' in a:
-    key = os.environ.get('EXPECTED_KEY', a[-1])
+    key = os.environ.get('EXPECTED_KEY', 'voyageplex' if a[-1].startswith('voyageplex-') else a[-1])
     if a[-1] not in ('db', 'redis', 'nginx', 'autoheal'):
         assert (p / 'flags/services' / key).exists(), 'missing scoped maintenance flag'
         if os.environ.get('FULL_SCRIPT') == '1':
@@ -141,27 +141,38 @@ ensure_service_base_images() { :; }
         self.assertEqual([p.name for p in self.flags.iterdir()], ['paiji'])
 
 
-    @unittest.skipUnless(BASH_MAJOR >= 4, 'full server script requires Bash 4+; covered on Linux CI')
-    def test_full_compose_rollout_is_sequential_and_has_named_services(self):
+    def run_update_script(self, before_compose=b'services: {}\n', after_compose=b'services: {}\n',
+                          changed_files='docker-compose.cloud.yml', services_config=None,
+                          include_helper=True, force=False):
         install = self.path / 'install'
         (install / 'deploy').mkdir(parents=True)
         (install / 'apps').mkdir()
         (install / 'plugins').mkdir()
         (install / '.env.cloud.production').write_text('INTERNAL_QUOTE_SESSION_SECRET=fixture\n')
-        (install / 'docker-compose.cloud.yml').write_text('services: {}\n')
+        (install / 'docker-compose.cloud.yml').write_bytes(after_compose)
+        (self.path / 'before-compose.yml').write_bytes(before_compose)
+        (self.path / 'after-compose.yml').write_bytes(after_compose)
+        (self.path / 'changed-files').write_text(changed_files + '\n')
         shutil.copy(ROOT / 'deploy/service-maintenance.sh', install / 'deploy')
+        if include_helper:
+            shutil.copy(ROOT / 'deploy/compose-mailbox-only-change.py', install / 'deploy')
         script = (ROOT / 'deploy/update-server.sh').read_text().replace(
             'INSTALL_DIR="/opt/rr-portal"', 'INSTALL_DIR="' + str(install) + '"')
         (install / 'deploy/update-server.sh').write_text(script)
-        self.states.write_text(json.dumps({svc: 'running/0/unless-stopped/healthy'
-                                          for svc in ['db', 'paiji', 'peise', 'nginx']}))
-        (self.path / 'compose.json').write_text(json.dumps({'services': {
+        services_config = services_config or {
             'db': {}, 'paiji': {'depends_on': {'db': {}}}, 'peise': {}, 'nginx': {},
-        }}))
+        }
+        self.states.write_text(json.dumps({svc: 'running/0/unless-stopped/healthy'
+                                          for svc in services_config}))
+        (self.path / 'compose.json').write_text(json.dumps({'services': services_config}))
         git = self.path / 'git'
-        git.write_text("#!/usr/bin/env python3\nimport sys\na=sys.argv[1:]\n"
-                       "if 'rev-parse' in a: print('before' if a[-1] == 'before' else 'after')\n"
-                       "elif 'diff' in a: print('docker-compose.cloud.yml')\n")
+        git.write_text("#!/usr/bin/env python3\nimport os, pathlib, sys\na=sys.argv[1:]\n"
+                       "p=pathlib.Path(os.environ['FIXTURE_DIR'])\n"
+                       "if 'rev-parse' in a: print('1' * 40 if a[-1] == '1' * 40 else '2' * 40)\n"
+                       "elif 'diff' in a: print((p/'changed-files').read_text(), end='')\n"
+                       "elif 'show' in a:\n"
+                       "    filename='before-compose.yml' if a[-1].startswith('1' * 40 + ':') else 'after-compose.yml'\n"
+                       "    sys.stdout.buffer.write((p/filename).read_bytes())\n")
         git.chmod(0o755)
         curl = self.path / 'curl'
         curl.write_text('#!/usr/bin/env bash\nexit 0\n')
@@ -170,13 +181,75 @@ ensure_service_base_images() { :; }
         shutil.rmtree(install / 'deploy' / 'maintenance', ignore_errors=True)
         (install / 'deploy' / 'maintenance').symlink_to(self.path / 'flags', target_is_directory=True)
         result = self.run_shell('bash "' + str(install / 'deploy/update-server.sh') + '"',
-                                'db\npaiji\npeise\nnginx', BEFORE_COMMIT='before', FULL_SCRIPT='1', MAINT_HEALTH_TIMEOUT_SECONDS='2')
+                                '\n'.join(services_config), BEFORE_COMMIT='1' * 40, FULL_SCRIPT='1',
+                                FORCE_FULL_REBUILD='1' if force else '0', MAINT_HEALTH_TIMEOUT_SECONDS='2')
+        calls_path = self.path / 'calls'
+        calls = [json.loads(line) for line in calls_path.read_text().splitlines()] if calls_path.exists() else []
+        return result, calls
+
+    @unittest.skipUnless(BASH_MAJOR >= 4, 'full server script requires Bash 4+; covered on Linux CI')
+    def test_full_compose_rollout_is_sequential_and_has_named_services(self):
+        result, calls = self.run_update_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        calls = [json.loads(line) for line in (self.path / 'calls').read_text().splitlines()]
         updates = [a for a in calls if 'up' in a]
         self.assertEqual([a[-1] for a in updates], ['db', 'peise', 'paiji', 'nginx'])
         self.assertTrue(all('--no-deps' in a and '--no-build' in a for a in updates))
         self.assertEqual(list(self.flags.iterdir()), [])
+
+    def mailbox_compose_fixture(self):
+        before = b'services:\n  voyageplex-api:\n    environment:\n      ASPNETCORE_ENVIRONMENT: Production\n'
+        after = before + b'      VOYAGEPLEX_HUADENG_MAILBOXES_JSON: ${VOYAGEPLEX_HUADENG_MAILBOXES_JSON:-}\n'
+        services = {svc: {} for svc in ['db', 'paiji', 'peise', 'voyageplex-web',
+                                        'voyageplex-api', 'voyageplex-parser', 'nginx']}
+        return before, after, services
+
+    @unittest.skipUnless(BASH_MAJOR >= 4, 'full server script requires Bash 4+; covered on Linux CI')
+    def test_mailbox_compose_addition_deploys_only_api(self):
+        before, after, services = self.mailbox_compose_fixture()
+        result, calls = self.run_update_script(before, after, services_config=services)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('mailbox environment addition', result.stdout)
+        self.assertEqual([a[-1] for a in calls if 'up' in a], ['voyageplex-api'])
+        self.assertEqual([a[-1] for a in calls if 'build' in a], ['voyageplex-api'])
+        self.assertEqual(list(self.flags.iterdir()), [])
+
+    @unittest.skipUnless(BASH_MAJOR >= 4, 'full server script requires Bash 4+; covered on Linux CI')
+    def test_mailbox_addition_preserves_app_path_deployment_and_deduplicates_api(self):
+        before, after, services = self.mailbox_compose_fixture()
+        changed = ('docker-compose.cloud.yml\n'
+                   'apps/船务部/VoyagePlex船务协同系统/components/app-shell.tsx\n'
+                   'apps/生产部/注塑啤机排产系统/app.py')
+        result, calls = self.run_update_script(before, after, changed, services)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        updates = [a[-1] for a in calls if 'up' in a]
+        self.assertCountEqual(updates, ['voyageplex-api', 'voyageplex-web', 'voyageplex-parser', 'paiji'])
+        self.assertEqual(updates.count('voyageplex-api'), 1)
+        self.assertEqual(list(self.flags.iterdir()), [])
+
+    @unittest.skipUnless(BASH_MAJOR >= 4, 'full server script requires Bash 4+; covered on Linux CI')
+    def test_mailbox_addition_with_other_compose_change_uses_full_rollout(self):
+        before, after, services = self.mailbox_compose_fixture()
+        result, calls = self.run_update_script(before, after + b'networks:\n  extra:\n', services_config=services)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('FULL RECREATE', result.stdout)
+        self.assertCountEqual([a[-1] for a in calls if 'up' in a], services)
+        self.assertEqual(list(self.flags.iterdir()), [])
+
+    @unittest.skipUnless(BASH_MAJOR >= 4, 'full server script requires Bash 4+; covered on Linux CI')
+    def test_missing_helper_falls_back_to_full_rollout(self):
+        before, after, services = self.mailbox_compose_fixture()
+        result, calls = self.run_update_script(before, after, services_config=services, include_helper=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('FULL RECREATE', result.stdout)
+        self.assertCountEqual([a[-1] for a in calls if 'up' in a], services)
+
+    @unittest.skipUnless(BASH_MAJOR >= 4, 'full server script requires Bash 4+; covered on Linux CI')
+    def test_force_full_rebuild_overrides_mailbox_exception(self):
+        before, after, services = self.mailbox_compose_fixture()
+        result, calls = self.run_update_script(before, after, services_config=services, force=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('FULL RECREATE', result.stdout)
+        self.assertCountEqual([a[-1] for a in calls if 'up' in a], services)
 
 
 class Backend(BaseHTTPRequestHandler):

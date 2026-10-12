@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using VoyagePlex.Api.Entities;
 
 namespace VoyagePlex.Api.Services;
@@ -10,6 +12,17 @@ public static class ServerMailboxConfiguration
     public const string EnvironmentVariable = "VOYAGEPLEX_HUADENG_MAILBOXES_JSON";
 
     public static bool IsConfigured(AppUser user) => TryGet(user, out _, out _);
+
+    public static string MailboxIdentity(string address, string host, string folder) =>
+        Hash(JsonSerializer.Serialize(new { address = address.Trim().ToLowerInvariant(), host = host.Trim().ToLowerInvariant(), folder = folder.Trim() }));
+
+    public static string MailboxIdentity(ServerMailboxCredentials credentials) =>
+        MailboxIdentity(credentials.Address, credentials.Host, credentials.Folder);
+
+    public static string ConfigurationKey(ServerMailboxCredentials credentials) =>
+        Hash(JsonSerializer.Serialize(new { identity = MailboxIdentity(credentials), credentials.AuthCode }));
+
+    private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 
     public static bool TryGet(AppUser user, out ServerMailboxCredentials credentials, out string error)
     {

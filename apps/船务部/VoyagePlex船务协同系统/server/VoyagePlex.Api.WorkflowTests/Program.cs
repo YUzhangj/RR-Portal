@@ -8,6 +8,12 @@ Environment.SetEnvironmentVariable(ServerMailboxConfiguration.EnvironmentVariabl
 if (!ServerMailboxConfiguration.TryGet(mailboxOwner, out var mailboxCredentials, out _) ||
     mailboxCredentials.AuthCode != "test-code" || mailboxCredentials.Host != "imap.163.com")
     throw new InvalidOperationException("服务器邮箱配置没有按用户账号解析");
+var rotatedCredentials = mailboxCredentials with { AuthCode = "rotated-test-code" };
+if (ServerMailboxConfiguration.MailboxIdentity(mailboxCredentials) != ServerMailboxConfiguration.MailboxIdentity(rotatedCredentials) ||
+    ServerMailboxConfiguration.ConfigurationKey(mailboxCredentials) == ServerMailboxConfiguration.ConfigurationKey(rotatedCredentials) ||
+    ServerMailboxConfiguration.MailboxIdentity(mailboxCredentials) == ServerMailboxConfiguration.MailboxIdentity(mailboxCredentials with { Folder = "Archive" }) ||
+    ServerMailboxConfiguration.MailboxIdentity(mailboxCredentials) == ServerMailboxConfiguration.MailboxIdentity(mailboxCredentials with { Host = "other.example.com" }))
+    throw new InvalidOperationException("授权码轮换必须保持邮箱身份，服务器或文件夹变更必须隔离同步断点");
 mailboxOwner.MailboxAddress = "other@163.com";
 if (ServerMailboxConfiguration.IsConfigured(mailboxOwner))
     throw new InvalidOperationException("服务器邮箱配置与用户绑定地址不一致时必须拒绝连接");

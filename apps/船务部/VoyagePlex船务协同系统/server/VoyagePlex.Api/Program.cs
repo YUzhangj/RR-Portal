@@ -465,6 +465,7 @@ app.MapPut("/api/users/{id:long}", async (long id, JsonObject payload, HttpConte
             var state = await db.MailSyncStates.IgnoreQueryFilters().FirstOrDefaultAsync(value => value.Id == checked(1000 + (int)id), cancellationToken);
             if (state is not null) db.MailSyncStates.Remove(state);
             user.MailboxTestStatus = "Unknown"; user.MailboxTestedAt = null;
+            user.MailboxTestConfigurationKey = "";
         }
         user.MailboxAddress = address;
     }
@@ -481,6 +482,7 @@ app.MapPost("/api/users/{id:long}/mailbox-test", async (long id, AppDbContext db
     if (user is null) return Results.NotFound(new { error = "用户不存在" });
     if (!ServerMailboxConfiguration.TryGet(user, out var credentials, out var configurationError))
         return Results.BadRequest(new { error = configurationError });
+    var configurationKey = ServerMailboxConfiguration.ConfigurationKey(credentials);
     try
     {
         var response = await parser.TestMailboxAsync(credentials.Address, credentials.AuthCode, credentials.Host, credentials.Folder, cancellationToken);
@@ -488,8 +490,15 @@ app.MapPost("/api/users/{id:long}/mailbox-test", async (long id, AppDbContext db
         var result = JsonNode.Parse(response.Body)?.AsObject();
         if (result?["connected"] is null) return Results.Json(new { error = "邮箱测试服务返回异常，请稍后重试" }, statusCode: 502);
         var connected = result["connected"]!.GetValue<bool>(); var testedAt = DateTime.UtcNow;
-        user.MailboxTestStatus = connected ? "Connected" : "Failed"; user.MailboxTestedAt = testedAt;
-        await db.SaveChangesAsync(cancellationToken);
+        await db.Entry(user).ReloadAsync(cancellationToken);
+        if (!ServerMailboxConfiguration.TryGet(user, out var currentCredentials, out _) ||
+            ServerMailboxConfiguration.ConfigurationKey(currentCredentials) != configurationKey)
+            return Results.Conflict(new { error = "邮箱绑定或服务器配置已更改，请重新测试连接" });
+        var updated = await db.Users.Where(value => value.Id == id && value.MailboxAddress == user.MailboxAddress && value.UpdatedAt == user.UpdatedAt)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.MailboxTestStatus, connected ? "Connected" : "Failed")
+                .SetProperty(value => value.MailboxTestedAt, (DateTime?)testedAt)
+                .SetProperty(value => value.MailboxTestConfigurationKey, configurationKey), cancellationToken);
+        if (updated == 0) return Results.Conflict(new { error = "邮箱绑定已更改，请重新测试连接" });
         return Results.Ok(new { connected, testedAt, message = result["message"]?.ToString() ?? "连接测试完成" });
     }
     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -619,15 +628,21 @@ app.MapGet("/api/mail/settings", async (HttpContext context, AppDbContext db, Ca
     var setting = await db.MailSystemSettings.AsNoTracking().FirstAsync(value => value.Id == db.CompanySettingId, cancellationToken);
     var state = await db.MailSyncStates.AsNoTracking().FirstOrDefaultAsync(cancellationToken);
     var owner = db.Company == "Huadeng" && db.MailOwnerId > 0 ? await db.Users.AsNoTracking().FirstOrDefaultAsync(value => value.Id == db.MailOwnerId, cancellationToken) : null;
-    var configured = owner is not null ? ServerMailboxConfiguration.IsConfigured(owner) : !string.IsNullOrEmpty(state?.Address);
+    ServerMailboxCredentials credentials = new("", "", "", "");
+    var configured = owner is not null ? ServerMailboxConfiguration.TryGet(owner, out credentials, out _) : !string.IsNullOrEmpty(state?.Address);
+    var configurationKey = owner is not null && configured ? ServerMailboxConfiguration.ConfigurationKey(credentials) : "";
+    var currentTest = owner is not null && configured && owner.MailboxTestConfigurationKey == configurationKey;
+    var currentSync = owner is null || (configured && state?.ConfigurationKey == configurationKey);
     var connectionStatus = db.Company == "Huadeng" && db.MailOwnerId is null ? "SelectMailbox" : !configured ? "NotConfigured" :
-        !string.IsNullOrEmpty(state?.LastError) || owner?.MailboxTestStatus == "Failed" ? "SyncError" :
-        state?.LastSuccessAt is not null || owner?.MailboxTestStatus == "Connected" ? "Connected" : "PendingConnection";
+        (currentSync && !string.IsNullOrEmpty(state?.LastError)) || (currentTest && owner?.MailboxTestStatus == "Failed") ? "SyncError" :
+        (currentSync && state?.LastSuccessAt is not null) || (currentTest && owner?.MailboxTestStatus == "Connected") ? "Connected" : "PendingConnection";
 
     var mailCount = await db.ImportEmailItems.AsNoTracking().CountAsync(item => item.MailboxKey != "", cancellationToken);
     var failedCount = await db.ImportEmailItems.AsNoTracking().CountAsync(item => item.MailboxKey != "" && item.Error != "", cancellationToken);
     return Results.Ok(new { setting.SyncEnabled, setting.SyncIntervalMinutes, setting.RetentionDays, setting.StartDate, setting.UpdatedAt,
-        address = owner?.MailboxAddress ?? state?.Address ?? "", connectionStatus, testedAt = owner?.MailboxTestedAt, state?.LastSuccessAt, lastError = state?.LastError ?? (owner?.MailboxTestStatus == "Failed" ? "最近一次连接测试失败，请重新检查邮箱配置" : ""), mailCount, failedCount });
+        address = owner?.MailboxAddress ?? state?.Address ?? "", connectionStatus, testedAt = currentTest ? owner?.MailboxTestedAt : null,
+        lastSuccessAt = currentSync ? state?.LastSuccessAt : null,
+        lastError = currentSync && !string.IsNullOrEmpty(state?.LastError) ? state.LastError : currentTest && owner?.MailboxTestStatus == "Failed" ? "最近一次连接测试失败，请重新检查邮箱配置" : "", mailCount, failedCount });
 });
 
 app.MapPatch("/api/mail/settings", async (JsonObject payload, HttpContext context, AppDbContext db, CancellationToken cancellationToken) =>
