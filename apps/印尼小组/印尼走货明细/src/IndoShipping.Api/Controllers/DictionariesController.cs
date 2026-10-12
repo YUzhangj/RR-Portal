@@ -135,14 +135,7 @@ public class DictionariesController(ISqlConnectionFactory factory) : ControllerB
         if (saved is null) return NotFound();
         if (await SupplierNameExists(c, tx, keyword, id))
             return Conflict(new { error = "供应商显示名称已存在，请使用不同的显示名称；公司中文名称可以相同" });
-        // Shared company names do not identify an archive. Only synchronize references
-        // that unambiguously belonged to this archive before editing it.
-        var ownedNames = (await c.QueryAsync<string>(@"
-            SELECT DISTINCT n FROM unnest(@names::text[]) AS names(n)
-            WHERE n <> '' AND NOT EXISTS (
-                SELECT 1 FROM dict_supplier other WHERE other.id <> @id
-                AND (lower(trim(other.keyword))=lower(n) OR lower(trim(other.full_name))=lower(n)))",
-            new { id, names = new[] { (saved.keyword ?? "").Trim(), (saved.full ?? "").Trim() } }, tx)).ToArray();
+        // Editing this archive is not authorization to rewrite material or document snapshots.
         var updated = await c.ExecuteAsync(@"
             UPDATE dict_supplier SET keyword=@keyword, full_name=@full,
                 name_en=@nameEn, address_zh=@addressZh, address_en=@addressEn, phone=@phone,
@@ -151,40 +144,6 @@ public class DictionariesController(ISqlConnectionFactory factory) : ControllerB
                 nameEn = (item.nameEn ?? "").Trim(), addressZh = (item.addressZh ?? "").Trim(),
                 addressEn = (item.addressEn ?? "").Trim(), phone = (item.phone ?? "").Trim(),
                 email = (item.email ?? "").Trim(), contact = (item.contact ?? "").Trim() }, tx);
-        await c.ExecuteAsync(@"
-            UPDATE materials SET customs_company=@customs
-            WHERE lower(trim(COALESCE(supplier, ''))) = ANY(@ownedNames);
-            UPDATE shipment_items SET customs_company=@customs
-            WHERE lower(trim(COALESCE(supplier, ''))) = ANY(@ownedNames);",
-            new
-            {
-                customs,
-                ownedNames = ownedNames.Select(n => n.ToLowerInvariant()).ToArray(),
-            }, tx);
-        // Preserve references to an alias that is no longer a valid matching name.
-        // References to the unchanged company full name remain valid as-is.
-        var oldAlias = (saved.keyword ?? "").Trim();
-        if (ownedNames.Contains(oldAlias) &&
-            !string.Equals(oldAlias, keyword, StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(oldAlias, full, StringComparison.OrdinalIgnoreCase))
-        {
-            await c.ExecuteAsync(@"
-                UPDATE materials SET supplier=@keyword WHERE lower(trim(supplier))=lower(@oldAlias);
-                UPDATE shipment_items SET supplier=@keyword WHERE lower(trim(supplier))=lower(@oldAlias);
-                UPDATE purchase_orders SET supplier=@keyword WHERE lower(trim(supplier))=lower(@oldAlias);",
-                new { keyword, oldAlias }, tx);
-        }
-        var oldFull = (saved.full ?? "").Trim();
-        if (ownedNames.Contains(oldFull) &&
-            !string.Equals(oldFull, full, StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(oldFull, keyword, StringComparison.OrdinalIgnoreCase))
-        {
-            await c.ExecuteAsync(@"
-                UPDATE materials SET supplier=@keyword WHERE lower(trim(supplier))=lower(@oldFull);
-                UPDATE shipment_items SET supplier=@keyword WHERE lower(trim(supplier))=lower(@oldFull);
-                UPDATE purchase_orders SET supplier=@keyword WHERE lower(trim(supplier))=lower(@oldFull);",
-                new { keyword, oldFull }, tx);
-        }
         tx.Commit();
         return Ok(new { ok = updated > 0 });
     }

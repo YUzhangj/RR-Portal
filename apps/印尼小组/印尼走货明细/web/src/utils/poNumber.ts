@@ -37,10 +37,10 @@ export const PO_ENTITY_META: Record<PoEntity, PoEntityMeta> = {
 }
 
 export function poDetermineEntity(supplier?: string, customsCompany?: string, source?: string): PoEntity {
-  // 排期来源决定华登采购主体：RRM 必须使用全球单，避免生成 IRRI 实业单。
-  if ((source || '').trim().toUpperCase() === 'RRM') return 'HD_GLOBAL'
+  // 华胜益报关优先于排期来源；其余 RRM 仍使用华登全球采购主体。
   const customs = (customsCompany || '').trim()
   if (/华胜益/.test(customs)) return 'HSY'
+  if ((source || '').trim().toUpperCase() === 'RRM') return 'HD_GLOBAL'
   if (customs && customs === (supplier || '').trim()) {
     return 'HD_INDUSTRY'
   }
@@ -82,12 +82,35 @@ export function poGenContractNo(existing: string[], entity: PoEntity, wcode: str
   const prefix = poContractPrefix(entity, wcode)
   // 衔接线下已用编号；已有更大编号时继续递增，不修改历史订单。
   // 华胜益的基线仅适用于 2026 年，其他年份沿用原有年度编号规则。
-  const startSeq = prefix === 'IRRIHS' ? 402
+  // 已用末号：IRRIHS0404、IRRMHS0059、2026900170。
+  const startSeq = prefix === 'IRRIHS' ? 405
     : prefix === 'IRRMHS' ? 60
       : entity === 'HSY' && prefix === '2026' ? 900171 : 1
   const seq = Math.max(poNextSeq(existing, prefix), startSeq)
   const digits = entity === 'HSY' ? 6 : 4
   return prefix + String(seq).padStart(digits, '0')
+}
+
+export function poLineCurrency(currentNo: string, supplier?: string, customsCompany?: string, source?: string): string {
+  const number = currentNo.trim()
+  if (/^IRR[IM]/i.test(number)) return 'US$'
+  if (/^\d{10}$/.test(number)) return '¥'
+  return poDetermineEntity(supplier, customsCompany, source) === 'HSY' ? '¥' : 'US$'
+}
+
+// 仅供用户明确确认后修正旧单；不推断缺失的报关资料，也不重排其他订单。
+export function poCorrectHsyNumber(current: string, customsCompanies: (string | undefined)[], existing: string[]): string {
+  if (!customsCompanies.length || customsCompanies.some(company => !company?.trim())) {
+    throw new Error('存在未关联物料或缺少报关公司的明细，无法安全修正编号')
+  }
+  if (customsCompanies.some(company => !/华胜益/.test(company!))) {
+    throw new Error('只有全部明细均由华胜益报关的采购单才能修正；混合主体请先核对或拆单')
+  }
+  if (/^\d{10}$/.test(current)) return current
+  if (!/^IRR[IM][A-Z]+\d+$/i.test(current)) {
+    throw new Error('当前不是可识别的 RRI／RRM 旧编号，请先核对')
+  }
+  return poGenContractNo(existing, 'HSY', '')
 }
 
 // ============ 数字转中文金额 ============

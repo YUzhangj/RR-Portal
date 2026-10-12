@@ -12,6 +12,7 @@ import SupplierProfileEditor from '../components/SupplierProfileEditor'
 import {
   HUASHENGYI_FULL_NAME, linkedCustomsCompany,
   supplierCustomsCompany, supplierProfileForName,
+  supplierAutocompleteOptions, filterSupplierOption, supplierDisplayName,
 } from '../utils/supplierProfiles'
 
 interface ProductForm {
@@ -27,7 +28,7 @@ function translatedMaterialName(nameZh: string, dicts: Dictionaries): string {
 }
 
 function materialCustomsCompany(material: Material, dicts: Dictionaries): string {
-  return linkedCustomsCompany(material.supplier || '', dicts.suppliers, material.customs_company || '')
+  return material.customs_company ?? linkedCustomsCompany(material.supplier || '', dicts.suppliers)
 }
 
 export default function ProductsPage() {
@@ -111,8 +112,8 @@ export default function ProductsPage() {
           materialCode: m.material_code ?? '',
           hsCN: m.hs_cn ?? '',
           hsID: m.hs_id ?? '',
-          supplier: supplierProfileForName(m.supplier || '', dicts.suppliers)?.full || m.supplier || '',
-          customsCompany: materialCustomsCompany(m, dicts),
+          supplier: m.supplier || '',
+          customsCompany: m.customs_company || '',
           unitKg: m.unit_kg ?? 'KGM',
           grossPerPc: m.gross_per_pc ?? 0,
           netPerPc: m.net_per_pc ?? 0,
@@ -130,7 +131,8 @@ export default function ProductsPage() {
         .filter(m => m.id != null)
         .map(m => [Number(m.id), m]))
       const supplierSyncEntries = materials
-        .filter(m => String(m.supplier || '').trim())
+        .filter(m => String(m.supplier || '').trim() &&
+          (m.id == null || String(originalById.get(Number(m.id))?.supplier || '').trim() !== String(m.supplier).trim()))
         .map(m => {
           const previous = m.id != null ? originalById.get(Number(m.id)) : undefined
           return {
@@ -598,6 +600,8 @@ function MaterialsEditor({ rows, onChange, dicts, productCode, onSuppliersChange
   const { message } = App.useApp()
   const fileRef = useRef<HTMLInputElement>(null)
 
+  const supplierOptions = useMemo(() => supplierAutocompleteOptions(dicts.suppliers), [dicts.suppliers])
+
   function patch(i: number, k: keyof Material, v: any) {
     onChange(rows.map((m, idx) => idx === i ? { ...m, [k]: v } : m))
   }
@@ -611,10 +615,9 @@ function MaterialsEditor({ rows, onChange, dicts, productCode, onSuppliersChange
   }
   function patchSupplier(i: number, supplier: string) {
     const profile = supplierProfileForName(supplier, dicts.suppliers)
-    const full = profile?.full?.trim() || supplier
     onChange(rows.map((material, index) => index === i ? {
       ...material,
-      supplier: full,
+      supplier,
       customs_company: profile ? supplierCustomsCompany(profile) : '',
     } : material))
   }
@@ -735,7 +738,7 @@ function MaterialsEditor({ rows, onChange, dicts, productCode, onSuppliersChange
       }}).filter(m => m.name_zh || m.item_no || m.material_code)
         .map(material => ({
           ...material,
-          supplier: supplierProfileForName(material.supplier || '', dicts.suppliers)?.full || material.supplier,
+          supplier: material.supplier,
           customs_company: material.customs_company || (material.supplier ? materialCustomsCompany(material, dicts) : ''),
         }))
       if (!imported.length) { message.warning('没识别到有效行 (需含 中文名 / 料号 列)'); return }
@@ -795,16 +798,13 @@ function MaterialsEditor({ rows, onChange, dicts, productCode, onSuppliersChange
           { title: '物料编码', width: 130, render: (_v, r, i) => <Input size="small" value={r.material_code} onChange={(e) => patch(i, 'material_code', e.target.value)} /> },
           { title: '供应商', width: 220, render: (_v, r, i) => <><AutoComplete size="small" allowClear
             placeholder="选择或输入新供应商" style={{ width: '100%' }}
-            value={supplierProfileForName(r.supplier || '', dicts.suppliers)?.full || r.supplier || undefined}
-            options={dicts.suppliers.map(supplier => ({
-              value: supplier.full || supplier.keyword,
-              label: supplier.full || supplier.keyword,
-            }))}
+            value={supplierDisplayName(r.supplier || '', dicts.suppliers) || undefined}
+            options={supplierOptions}
+            filterOption={filterSupplierOption}
             onChange={(value) => patchSupplier(i, value || '')} />
-            <SupplierProfileEditor name={r.supplier || ''} onSaved={(profile, previous) => {
-              const oldNames = [previous.keyword, previous.full].filter(Boolean).map(n => n!.trim().toLowerCase())
-              onChange(rows.map((row, index) => index === i || oldNames.includes((row.supplier || '').trim().toLowerCase())
-                ? { ...row, supplier: profile.full || profile.keyword, customs_company: supplierCustomsCompany(profile) } : row))
+            <SupplierProfileEditor name={r.supplier || ''} onSaved={(profile) => {
+              onChange(rows.map((row, index) => index === i
+                ? { ...row, supplier: profile.keyword?.trim() || profile.full, customs_company: supplierCustomsCompany(profile) } : row))
               onSuppliersChanged()
             }} />
           </> },

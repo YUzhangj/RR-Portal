@@ -4,6 +4,8 @@ exports.init=function(store,now=Date.now()){
  store.prepare('INSERT OR IGNORE INTO source_inventory_config VALUES (1,?)').run(now);
 };
 exports.apply=function(store,data){
+ // Once two-way reconciliation starts, never replay historical source debits on rollback.
+ if(process.env.BUSINESS_SYNC_STATION||store.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='business_sync_state'").get()&&store.prepare("SELECT id FROM business_sync_state WHERE id=1 AND json_extract(value,'$.activated')=1").get())return;
  const config=store.prepare('SELECT since FROM source_inventory_config WHERE id=1').get();
  if(!config)return;
  for(const day of Object.values(data.records||{}))for(const item of day.items||[]){

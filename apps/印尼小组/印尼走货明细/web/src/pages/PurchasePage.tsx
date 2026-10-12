@@ -1,13 +1,15 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   App, Button, Card, Checkbox, Col, DatePicker, Drawer, Form, Input, InputNumber, Modal, Popconfirm,
   Row, Select, Space, Table, Tag, Typography,
 } from 'antd'
 import dayjs from 'dayjs'
 import { api, type Material } from '../api/client'
-import { numToChinese, poDetermineEntity, poGenContractNo, PO_ENTITY_META, type PoEntity } from '../utils/poNumber'
+import { numToChinese, poCorrectHsyNumber, poLineCurrency, poDetermineEntity, poGenContractNo, PO_ENTITY_META, type PoEntity } from '../utils/poNumber'
 import './PurchasePage.css'
 import { combinePurchaseContracts } from '../utils/purchaseContractWorkbook'
+import PurchaseMaterialPicker from '../components/PurchaseMaterialPicker'
+import { purchaseMaterialBucket, purchaseMaterialLine, purchaseSelectionSource, purchaseSelectionSupplier, type PurchaseMaterialChoice } from '../utils/purchaseMaterialSelection'
 
 interface SchedRow {
   source?: string
@@ -370,10 +372,17 @@ export default function PurchasePage() {
   const [productCodes, setProductCodes] = useState<string[]>([])
   const [placedTomyPos, setPlacedTomyPos] = useState<Set<string>>(new Set())
   const [schedPickerOpen, setSchedPickerOpen] = useState(false)
+  const [materialSelection, setMaterialSelection] = useState<{
+    mode: 'append' | 'generate' | 'separate'; schedules?: SchedRow[]
+  } | null>(null)
+  const materialGroups = useMemo(() => materialSelection?.schedules?.map((row, index) => ({
+    key: String(index), code: row.code || '', quantity: Number(row.qty) || 0,
+    label: [row.source, row.orderNo, row.productName].filter(Boolean).join(' · '),
+  })), [materialSelection])
   const [schedPickerFilter, setSchedPickerFilter] = useState('')
   const [pickerSelKeys, setPickerSelKeys] = useState<React.Key[]>([])
   const [placedSet, setPlacedSet] = useState<Set<string>>(new Set())  // 已下单(自动+手动) orderNo|code
-  const [hidePlaced, setHidePlaced] = useState(true)                  // 默认隐藏已下单
+  const [hidePlaced, setHidePlaced] = useState(false)                 // 部分物料下单后仍可补选剩余物料
   const [receiptItem, setReceiptItem] = useState<PurchaseItemRow | null>(null)
   const [receiptRows, setReceiptRows] = useState<ReceiptRecord[]>([])
   const [receiptLoading, setReceiptLoading] = useState(false)
@@ -497,7 +506,7 @@ export default function PurchasePage() {
     } catch {}
   }
   // 把带客户后缀的排期货号(如 47669TSCA)解析到货号库的基础货号(47669)
-  function resolveProductCode(code?: string): string {
+  const resolveProductCode = useCallback((code?: string): string => {
     const c = (code || '').trim()
     if (!c || productCodes.includes(c)) return c
     const noTail = c.replace(/[A-Za-z]+$/, '')
@@ -506,7 +515,7 @@ export default function PurchasePage() {
     if (digits && productCodes.includes(digits)) return digits
     const pre = productCodes.find(k => k && c.startsWith(k))
     return pre || c
-  }
+  }, [productCodes])
   async function loadLatestSchedule() {
     try {
       const { data: list } = await api.get<{ id: number }[]>('/schedules')
@@ -536,27 +545,7 @@ export default function PurchasePage() {
   useEffect(() => { load(); loadLatestSchedule(); loadProductCodes(); loadPlaced() }, [])
 
   function pickFromSchedule(r: SchedRow) {
-    // Single-row: auto-fill PO header + add an item line
-    form.setFieldsValue({
-      po_no: r.orderNo || form.getFieldValue('po_no'),
-      supplier: form.getFieldValue('supplier'),
-      status: form.getFieldValue('status') || 'draft',
-      order_date: form.getFieldValue('order_date') || dayjs().format('YYYY-MM-DD'),
-      notes: `关联排期 · ${r.source ?? ''} · ${r.code ?? ''} ${r.productName ?? ''} · 数量 ${r.qty ?? 0}`,
-    })
-    setItems(its => [
-      ...its,
-      {
-        product_code: r.code,
-        qty: r.qty,
-        price: r.unitPrice || 0,
-        currency: 'US$',
-        tomy_po: r.orderNo,
-        notes: `${r.productName ?? ''}${r.customerPO ? ' · CUST PO ' + r.customerPO : ''}`,
-      },
-    ])
-    setSchedPickerOpen(false)
-    message.success(`已关联 TOMY PO ${r.orderNo ?? ''}`)
+    setMaterialSelection({ mode: 'append', schedules: [r] })
   }
 
   function selectedSchedRows(): SchedRow[] {
@@ -566,25 +555,40 @@ export default function PurchasePage() {
   function mergeIntoCurrentPo() {
     const picks = selectedSchedRows()
     if (!picks.length) { message.warning('请先勾选排期行'); return }
-    setItems(its => [
-      ...its,
-      ...picks.map(r => ({
-        product_code: r.code,
-        qty: r.qty,
-        price: r.unitPrice || 0,
-        currency: 'US$',
-        tomy_po: r.orderNo,
-        notes: `${r.orderNo ? 'TOMY PO ' + r.orderNo + ' · ' : ''}${r.productName ?? ''}${r.customerPO ? ' · CUST PO ' + r.customerPO : ''}`,
-      })),
-    ])
-    // Update notes header to log multi-link
-    const tomyList = picks.map(r => r.orderNo).filter(Boolean).join(', ')
-    if (tomyList) {
-      const prev = form.getFieldValue('notes') || ''
-      form.setFieldsValue({ notes: prev ? `${prev}\n关联排期 TOMY PO: ${tomyList}` : `关联排期 TOMY PO: ${tomyList}` })
+    setMaterialSelection({ mode: 'append', schedules: picks })
+  }
+
+  async function confirmMaterials(choices: PurchaseMaterialChoice[]): Promise<boolean> {
+    if (!materialSelection) return false
+    if (materialSelection.mode !== 'append') return generateBySupplier(choices)
+    const currentSupplier = String(form.getFieldValue('supplier') || '').trim()
+    let supplier: string
+    try {
+      supplier = purchaseSelectionSupplier(choices, currentSupplier)
+      const existingSources = items.flatMap(item => String(item.tomy_po || '').split(/\s*[;；]\s*/).filter(Boolean).flatMap(orderNo => {
+        const codes = String(item.product_code || '').split(/\s*\/\s*/).filter(Boolean)
+        const matches = schedRows.filter(row => row.orderNo?.trim() === orderNo.trim()
+          && codes.some(code => resolveProductCode(row.code) === resolveProductCode(code)))
+        return matches.length ? matches.map(row => row.source?.trim() || 'RRI') : [undefined]
+      }))
+      purchaseSelectionSource(choices, Object.fromEntries((materialSelection.schedules || []).map((row, i) => [String(i), row.source])), String(form.getFieldValue('po_no') || ''), existingSources)
     }
+    catch (error) { message.warning((error as Error).message); return false }
+    const first = choices[0]
+    const source = first.groupKey == null ? undefined : materialSelection.schedules?.[Number(first.groupKey)]?.source
+    const currency = poLineCurrency(String(form.getFieldValue('po_no') || ''), supplier, first.material.customs_company, source)
+    const added = choices.map(choice => {
+      const schedule = choice.groupKey == null ? undefined : materialSelection.schedules?.[Number(choice.groupKey)]
+      return applyAutoSpoilage({ ...purchaseMaterialLine(choice, currency),
+        tomy_po: schedule?.orderNo, eta: schedule?.eta || '',
+        notes: schedule?.customerPO ? 'CUST PO ' + schedule.customerPO : '' })
+    })
+    setItems(current => [...current, ...added])
+    setMergeUndo(null)
+    if (!currentSupplier && supplier) form.setFieldValue('supplier', supplier)
     setSchedPickerOpen(false); setPickerSelKeys([])
-    message.success(`已合并 ${picks.length} 行到当前 PO 明细`)
+    message.success(`已加入 ${added.length} 条所选物料，请保存采购单`)
+    return true
   }
 
   // 旧系统逻辑：每批 PO 由用户输入一次「下单车间代号」(HS/HD/HB/HK)，整批共用作编号厂房码
@@ -598,40 +602,58 @@ export default function PurchasePage() {
     return v
   }
 
+  function confirmBatchOrder(suppliers: string[], orderCount: number, materialCount: number): Promise<string | null> {
+    let wcode = (localStorage.getItem('po_wcode') || '').toUpperCase()
+    return new Promise(resolve => {
+      Modal.confirm({
+        title: `确认批量下单：${orderCount} 张草稿采购单`,
+        content: <Space direction="vertical" style={{ width: '100%' }}>
+          <div>已选 {materialCount} 条物料，{suppliers.length} 家供应商：{suppliers.join('、')}。未勾选的物料不会下单。</div>
+          <div>下单车间代号（HS=兴信 / HD=华登 / HB=华登B / HK=华康）</div>
+          <Input aria-label="批量下单车间代号" defaultValue={wcode} onChange={e => { wcode = e.target.value }} />
+        </Space>,
+        okText: '确认生成', cancelText: '返回勾选',
+        onOk: () => {
+          const value = wcode.trim().toUpperCase()
+          if (!value) { message.warning('车间代号不能为空'); return Promise.reject(new Error('车间代号不能为空')) }
+          localStorage.setItem('po_wcode', value)
+          resolve(value)
+        },
+        onCancel: () => resolve(null),
+      })
+    })
+  }
+
   // 按物料供应商聚合：选 N 条排期 → 拉每个货号的物料 → 按 supplier 分桶 → 每个供应商一张 PO
-  async function generateBySupplier() {
-    const picks = selectedSchedRows()
-    if (!picks.length) { message.warning('请先勾选排期行'); return }
+  async function generateBySupplier(choices: PurchaseMaterialChoice[]): Promise<boolean> {
+    if (choices.some(c => !c.material.supplier?.trim())) {
+      message.warning('所选物料存在未填写供应商的记录，请先在货号库补齐。')
+      return false
+    }
     const orderDate = dayjs().format('YYYY-MM-DD')
     // bucket: 来源分区 + supplierName。RRI/RRM 不可因供应商相同而合并到同一张 PO。
     const buckets = new Map<string, { sched: SchedRow; mat: any }[]>()
-    let codeCount = 0
+    const codeCount = new Set(choices.map(c => c.productCode)).size
     let matCount = 0
-    for (const sr of picks) {
-      if (!sr.code) continue
-      codeCount++
-      try {
-        const { data } = await api.get<any[]>('/materials', { params: { code: resolveProductCode(sr.code) } })
-        const mats = Array.isArray(data) ? data : []
-        for (const m of mats) {
+    for (const choice of choices) {
+      const savedSchedule = materialSelection?.schedules?.[Number(choice.groupKey)]
+      {
+          const sr: SchedRow = { ...savedSchedule, code: choice.productCode, qty: choice.quantity }
+          const m = choice.material
           const sup = (m.supplier || '').trim() || '(无供应商)'
           if (m.active === false) continue
           matCount++
-          const sourcePartition = (sr.source || '').trim().toUpperCase() === 'RRM' ? 'RRM' : 'RRI'
-          const bucketKey = `${sourcePartition}\u0000${sup}`
+          const bucketKey = purchaseMaterialBucket(sr.source, sup, materialSelection?.mode === 'separate' ? choice.groupKey : undefined)
           if (!buckets.has(bucketKey)) buckets.set(bucketKey, [])
           buckets.get(bucketKey)!.push({ sched: sr, mat: m })
-        }
-      } catch (e: any) {
-        console.warn('load materials failed for', sr.code, e)
       }
     }
     if (!buckets.size) {
       message.warning('选中的排期对应的货号下没有物料，请先在货号库录入物料')
-      return
+      return false
     }
-    const wcode = askWcode()
-    if (wcode === null) return
+    const wcode = await confirmBatchOrder([...new Set(choices.map(c => c.material.supplier!.trim()))], buckets.size, matCount)
+    if (wcode === null) return false
     let autoQuotes: QuoteRow[] = []
     try {
       const { data } = await api.get<QuoteRow[]>('/quotes/blob', { skipErrorToast: true } as any)
@@ -653,7 +675,7 @@ export default function PurchasePage() {
       const merged = new Map<string, any>()
       for (const { sched, mat } of lines) {
         const k = `${sched.code ?? ''}|${(mat.name_zh ?? '').trim()}|${(mat.spec ?? '').trim()}`
-        const usage = Number(mat.usage_qty ?? 1) || 1
+        const usage = mat.usage_qty == null ? 1 : Math.max(0, Number(mat.usage_qty) || 0)
         const orderedQty = sched.qty ?? 0
         const matQty = orderedQty * usage
         const cur = merged.get(k)
@@ -718,50 +740,28 @@ export default function PurchasePage() {
           po_no, supplier,
           status: 'draft',
           order_date: orderDate,
-          notes: `从排期生成 · 货号: ${[...new Set(lines.map(l => l.sched.code))].join(', ')}`,
+          notes: `${materialSelection?.schedules?.length ? '从排期生成' : '从物料库生成'} · 货号: ${[...new Set(lines.map(l => l.sched.code))].join(', ')}`,
           items: priced.items,
         }, { skipErrorToast: true } as any)
         ok++; suppliers++
       } catch { fail++ }
     }
     setSchedPickerOpen(false); setPickerSelKeys([])
-    setEditing(null); setCreating(false); setDrawerFull(false)
+    // 从当前采购单打开批量下单时，另建采购单但保留当前未保存的编辑内容。
+    if (materialSelection?.mode !== 'append') {
+      setEditing(null); setCreating(false); setDrawerFull(false)
+    }
     const resultText = `已生成 ${ok} 张 PO（${suppliers} 个供应商 · 总 ${matCount} 行物料 · ${codeCount} 个货号）${quoteHits ? ` · 自动导入报价 ${quoteHits} 行` : ''}${fail ? ` · 失败 ${fail}` : ''}`
     if (fail) message.warning({ key: 'generate-po-result', content: resultText })
     else message.success({ key: 'generate-po-result', content: resultText })
     load()
+    return true
   }
 
-  async function createSeparatePos() {
+  function createSeparatePos() {
     const picks = selectedSchedRows()
     if (!picks.length) { message.warning('请先勾选排期行'); return }
-    const orderDate = dayjs().format('YYYY-MM-DD')
-    let ok = 0, fail = 0
-    for (const r of picks) {
-      try {
-        await api.post('/purchase', {
-          po_no: r.orderNo || '',
-          supplier: '',
-          status: 'draft',
-          order_date: orderDate,
-          notes: `关联排期 · ${r.source ?? ''} · ${r.code ?? ''} ${r.productName ?? ''}${r.customerPO ? ' · CUST PO ' + r.customerPO : ''}`,
-          items: [{
-            product_code: r.code,
-            qty: r.qty,
-            price: r.unitPrice || 0,
-            currency: 'US$',
-            tomy_po: r.orderNo,
-            notes: r.productName ?? '',
-          }],
-        })
-        ok++
-      } catch { fail++ }
-    }
-    setSchedPickerOpen(false); setPickerSelKeys([])
-    setEditing(null); setCreating(false); setDrawerFull(false)
-    if (fail) message.warning(`成功 ${ok} 单 · 失败 ${fail} 单`)
-    else message.success(`已建 ${ok} 个 PO`)
-    load()
+    setMaterialSelection({ mode: 'separate', schedules: picks })
   }
 
   function openCreate() {
@@ -808,6 +808,49 @@ export default function PurchasePage() {
       promptMaterialSync(items, materials)
     } catch (e: any) {
       message.error('检查货号库失败：' + (e?.message ?? e))
+    }
+  }
+  async function correctHsyNumber() {
+    if (!editing?.id || creating) return
+    const id = editing.id
+    const readPlan = async () => {
+      const [{ data: detail }, { data: all }] = await Promise.all([
+        api.get<PoDetail>(`/purchase/${id}`), api.get<PoSummary[]>('/purchase'),
+      ])
+      const savedItems = detail.items || []
+      const materials = await loadPurchaseMaterials(savedItems)
+      const oldNo = detail.po_no || ''
+      const newNo = poCorrectHsyNumber(oldNo, savedItems.map(item =>
+        item.material_id == null ? undefined : materials.get(Number(item.material_id))?.customs_company,
+      ), all.map(po => po.po_no || ''))
+      return { oldNo, newNo }
+    }
+    try {
+      const plan = await readPlan()
+      if (plan.oldNo === plan.newNo) { message.info('当前已是华胜益编号，无需修改'); return }
+      Modal.confirm({
+        title: '修正当前采购单为华胜益编号',
+        okText: '确认修改编号', cancelText: '取消',
+        content: <>
+          <p>{plan.oldNo} → {plan.newNo}</p>
+          <p>按已保存明细核对，仅修改这张采购单编号。供应商、物料、金额、入库记录及基础资料不变；当前其他未保存编辑不会写入。</p>
+          <p>合同将按新编号使用华胜益主体。现有币种和单价不自动换算，请核对报价后再导出。</p>
+        </>,
+        onOk: async () => {
+          const latest = await readPlan()
+          if (latest.oldNo !== plan.oldNo || latest.newNo !== plan.newNo) {
+            message.warning('订单或可用编号已变化，请取消后重新检查')
+            throw new Error('编号已变化')
+          }
+          await api.patch(`/purchase/${id}`, { po_no: plan.newNo })
+          form.setFieldsValue({ po_no: plan.newNo })
+          setEditing(current => current?.id === id ? { ...current, po_no: plan.newNo } : current)
+          message.success(`编号已修改：${plan.newNo}`)
+          load()
+        },
+      })
+    } catch (e: any) {
+      message.error(e?.message || '无法检查采购单编号')
     }
   }
   async function openEdit(p: PoSummary) {
@@ -1245,7 +1288,7 @@ export default function PurchasePage() {
   }
   function addItem() {
     const poNo = String(form.getFieldValue('po_no') || '')
-    const cur = /^\d{4}\d/.test(poNo) ? '¥' : 'US$'   // 年份号=华胜益→¥，否则默认美金
+    const cur = poLineCurrency(poNo)
     setItems(its => [...its, { product_code: '', qty: 0, price: 0, currency: cur, usage_qty: 1, ordered_qty: 0, material_qty: 0, spoilage_qty: 0, purchase_qty: 0, purchase_unit: '个', ship_unit: 'PCE', net_per_pc: 0, eta: '' }])
   }
   function delItem(i: number) { setItems(its => its.filter((_, idx) => idx !== i)) }
@@ -1539,15 +1582,18 @@ export default function PurchasePage() {
       </Card>
 
       <Drawer
+        rootClassName="purchase-editor-drawer"
         open={editing !== null}
         width={drawerFull ? '100vw' : '60vw'}
         title={creating ? '新建采购订单' : `编辑 PO — ${editing?.po_no || editing?.id}`}
         onClose={() => { setEditing(null); setCreating(false); setDrawerFull(false) }}
         destroyOnClose
         extra={
-          <Space>
+          <Space wrap>
             <Button onClick={() => setSchedPickerOpen(true)}>🔗 从排期选</Button>
+            <Button onClick={() => setMaterialSelection({ mode: 'append' })}>📦 从物料库选择</Button>
             {!creating && <Button onClick={checkMaterialSync}>🔄 检查货号库更新</Button>}
+            {!creating && <Button onClick={correctHsyNumber}>修正华胜益编号</Button>}
             <Button onClick={mergeSameName}>🔀 合并同名</Button>
             <Button onClick={undoMerge} disabled={!mergeUndo}>↩ 取消合并</Button>
             <Button onClick={applyQuotes}>💲 套用报价</Button>
@@ -1624,7 +1670,7 @@ export default function PurchasePage() {
               { title: '金额', width: 100, align: 'right', render: (_v, r) => <b style={{ color: '#c0392b' }}>{((r.purchase_qty ?? r.qty ?? 0) * (r.price ?? 0)).toFixed(2)}</b> },
               { title: '采购单位', width: 110, render: (_v, r, i) => fillable(i, 'purchase_unit',
                 <Select size="small" value={r.purchase_unit || '个'} style={{ width: '100%' }}
-                  options={['个', '只', '米'].map(x => ({ value: x, label: x }))}
+                  options={['个', '只', '米', '卷', '套'].map(x => ({ value: x, label: x }))}
                   onChange={(v) => patchItem(i, 'purchase_unit', v)} />
               ) },
               { title: '走货单位（货号库）', width: 150, render: (_v, r, i) => r.material_id ? (
@@ -1659,6 +1705,10 @@ export default function PurchasePage() {
           />
         </Card>
       </Drawer>
+
+      {materialSelection && <PurchaseMaterialPicker codes={productCodes} groups={materialGroups}
+        resolveCode={resolveProductCode} generate={materialSelection.mode !== 'append'}
+        onCancel={() => setMaterialSelection(null)} onConfirm={confirmMaterials} onBatchConfirm={generateBySupplier} />}
 
       <Modal
         open={bulkReceiptPo !== null}
@@ -1855,20 +1905,17 @@ export default function PurchasePage() {
         <Space style={{ marginBottom: 8 }} wrap>
           <Input.Search allowClear placeholder="搜索 货号/品名/TOMY PO/第三客户" style={{ width: 320 }}
             onSearch={setSchedPickerFilter} onChange={(e) => !e.target.value && setSchedPickerFilter('')} />
-          <Checkbox checked={hidePlaced} onChange={(e) => setHidePlaced(e.target.checked)}>隐藏已下单</Checkbox>
-          <Popconfirm title={`按物料供应商聚合：每个供应商生成一张 PO（包含他名下所有物料）？`} onConfirm={generateBySupplier} disabled={!pickerSelKeys.length}>
-            <Button type="primary" disabled={!pickerSelKeys.length}>
-              🏭 按物料供应商聚合生成 PO ({pickerSelKeys.length})
-            </Button>
-          </Popconfirm>
-          <Button onClick={mergeIntoCurrentPo} disabled={!pickerSelKeys.length}>
-            📥 合并 {pickerSelKeys.length || ''} 行到当前 PO 明细
+          <Checkbox checked={hidePlaced} onChange={(e) => setHidePlaced(e.target.checked)}>隐藏已有采购记录的排期（含部分下单）</Checkbox>
+          <Button type="primary" disabled={!pickerSelKeys.length}
+            onClick={() => setMaterialSelection({ mode: 'generate', schedules: selectedSchedRows() })}>
+            🏭 选物料后按供应商生成 PO ({pickerSelKeys.length})
           </Button>
-          <Popconfirm title={`一次性建 ${pickerSelKeys.length} 个采购单，每个对应一条排期行？`} onConfirm={createSeparatePos} disabled={!pickerSelKeys.length}>
-            <Button disabled={!pickerSelKeys.length}>📦 按选中行 · 各建一张 PO（不拆物料）</Button>
-          </Popconfirm>
+          <Button onClick={mergeIntoCurrentPo} disabled={!pickerSelKeys.length}>
+            📥 选物料加入当前 PO ({pickerSelKeys.length})
+          </Button>
+          <Button onClick={createSeparatePos} disabled={!pickerSelKeys.length}>📦 选物料后按排期分单</Button>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            🏭 = 按物料供应商聚合 (常用) · 📥 = 合并到当前 PO · 📦 = 一行一张 PO
+            均先勾选对应物料；按排期分单时，不同供应商仍分开下单。
           </Typography.Text>
         </Space>
         <Table
@@ -1877,7 +1924,6 @@ export default function PurchasePage() {
           rowSelection={{
             selectedRowKeys: pickerSelKeys,
             onChange: (keys) => setPickerSelKeys(keys),
-            getCheckboxProps: (r: any) => ({ disabled: !!(r.orderNo && placedTomyPos.has(r.orderNo)) }),
             preserveSelectedRowKeys: true,   // 跨搜索/翻页保留勾选，可一次选多个货号的行
           }}
           dataSource={schedRows.map((r, i) => ({ ...r, _origIdx: i })).filter(r => {
@@ -1893,7 +1939,7 @@ export default function PurchasePage() {
           columns={[
             {
               title: '操作', width: 60, fixed: 'left',
-              render: (_v, r) => <Button size="small" type="link" onClick={() => pickFromSchedule(r)} disabled={!!(r.orderNo && placedTomyPos.has(r.orderNo))}>➕</Button>,
+              render: (_v, r) => <Button size="small" type="link" onClick={() => pickFromSchedule(r)}>选物料</Button>,
             },
             { title: '来源', dataIndex: 'source', width: 70 },
             { title: '国家', dataIndex: 'country', width: 80 },
