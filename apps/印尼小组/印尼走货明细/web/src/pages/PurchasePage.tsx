@@ -4,7 +4,8 @@ import {
   Row, Select, Space, Table, Tag, Typography,
 } from 'antd'
 import dayjs from 'dayjs'
-import { api, type Material } from '../api/client'
+import { api, type Material, type Dictionaries } from '../api/client'
+import { purchaseItemCodes, resolvePurchaseCustoms } from '../utils/purchaseCustoms'
 import { numToChinese, poCorrectHsyNumber, poLineCurrency, poDetermineEntity, poGenContractNo, PO_ENTITY_META, type PoEntity } from '../utils/poNumber'
 import './PurchasePage.css'
 import { combinePurchaseContracts } from '../utils/purchaseContractWorkbook'
@@ -814,16 +815,24 @@ export default function PurchasePage() {
     if (!editing?.id || creating) return
     const id = editing.id
     const readPlan = async () => {
-      const [{ data: detail }, { data: all }] = await Promise.all([
+      const [{ data: detail }, { data: all }, { data: dictionaries }] = await Promise.all([
         api.get<PoDetail>(`/purchase/${id}`), api.get<PoSummary[]>('/purchase'),
+        api.get<Dictionaries>('/dictionaries'),
       ])
       const savedItems = detail.items || []
-      const materials = await loadPurchaseMaterials(savedItems)
+      const linked = await loadPurchaseMaterials(savedItems)
+      const fallbackCodes = [...new Set(savedItems.flatMap(item =>
+        item.material_id == null || !linked.has(Number(item.material_id)) || purchaseItemCodes(item.product_code).length > 1
+          ? purchaseItemCodes(item.product_code) : [],
+      ))]
+      const fallbackMaterials = (await Promise.all(fallbackCodes.map(code =>
+        api.get<Material[]>('/materials', { params: { code } }).then(r => r.data),
+      ))).flat()
+      const materials = [...new Map([...linked.values(), ...fallbackMaterials].map(m => [m.id, m])).values()]
+      const evidence = resolvePurchaseCustoms(savedItems, detail.supplier || '', materials, dictionaries.suppliers || [])
       const oldNo = detail.po_no || ''
-      const newNo = poCorrectHsyNumber(oldNo, savedItems.map(item =>
-        item.material_id == null ? undefined : materials.get(Number(item.material_id))?.customs_company,
-      ), all.map(po => po.po_no || ''))
-      return { oldNo, newNo }
+      const newNo = poCorrectHsyNumber(oldNo, evidence.map(row => row.company), all.map(po => po.po_no || ''))
+      return { oldNo, newNo, evidence }
     }
     try {
       const plan = await readPlan()
@@ -833,20 +842,26 @@ export default function PurchasePage() {
         okText: '确认修改编号', cancelText: '取消',
         content: <>
           <p>{plan.oldNo} → {plan.newNo}</p>
+          <div style={{ maxHeight: 180, overflow: 'auto' }}>{plan.evidence.map((row, i) => <p key={i}>{row.source}：{row.company}</p>)}</div>
           <p>按已保存明细核对，仅修改这张采购单编号。供应商、物料、金额、入库记录及基础资料不变；当前其他未保存编辑不会写入。</p>
           <p>合同将按新编号使用华胜益主体。现有币种和单价不自动换算，请核对报价后再导出。</p>
         </>,
         onOk: async () => {
-          const latest = await readPlan()
-          if (latest.oldNo !== plan.oldNo || latest.newNo !== plan.newNo) {
-            message.warning('订单或可用编号已变化，请取消后重新检查')
-            throw new Error('编号已变化')
+          try {
+            const latest = await readPlan()
+            if (latest.oldNo !== plan.oldNo || latest.newNo !== plan.newNo
+              || JSON.stringify(latest.evidence) !== JSON.stringify(plan.evidence)) {
+              throw new Error('订单、报关资料或可用编号已变化，请取消后重新检查')
+            }
+            await api.patch(`/purchase/${id}`, { po_no: plan.newNo })
+            form.setFieldsValue({ po_no: plan.newNo })
+            setEditing(current => current?.id === id ? { ...current, po_no: plan.newNo } : current)
+            message.success(`编号已修改：${plan.newNo}`)
+            load()
+          } catch (e: any) {
+            message.error(e?.message || '编号修改失败')
+            throw e
           }
-          await api.patch(`/purchase/${id}`, { po_no: plan.newNo })
-          form.setFieldsValue({ po_no: plan.newNo })
-          setEditing(current => current?.id === id ? { ...current, po_no: plan.newNo } : current)
-          message.success(`编号已修改：${plan.newNo}`)
-          load()
         },
       })
     } catch (e: any) {

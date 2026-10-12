@@ -35,9 +35,10 @@ function isHuashengyi(name: string): boolean {
 export function supplierProfileForName(name: string, profiles: SupplierDict[]): SupplierDict | undefined {
   const key = name.trim().toLocaleLowerCase()
   if (!key) return undefined
+  // 下拉选项使用 keyword 作为值；即使 keyword 与 full 相同，也必须优先
+  // 返回用户明确选中的档案，不能串到同公司全称的其他显示名称。
   const exactKeyword = profiles.find(profile =>
-    profile.keyword?.trim().toLocaleLowerCase() === key
-    && profile.full?.trim().toLocaleLowerCase() !== key)
+    profile.keyword?.trim().toLocaleLowerCase() === key)
   if (exactKeyword) return exactKeyword
 
   // An exact company name takes precedence over a longer fuzzy match. A shared
@@ -46,16 +47,14 @@ export function supplierProfileForName(name: string, profiles: SupplierDict[]): 
     && profile.keyword?.trim().toLocaleLowerCase() !== key)
   if (exactFull.length) return exactFull.length === 1 ? exactFull[0] : undefined
 
-  // 兼容旧资料：历史同步曾把简称另建成 full=keyword 的重复行。
-  // 当“港正”这类简称只对应一个包含它的公司全称时，优先使用公司全称资料。
+  // 仅在没有精确匹配时兼容旧简称，不覆盖已存在的显示名称。
   const containingFull = profiles.filter(profile => {
     const full = profile.full?.trim().toLocaleLowerCase() || ''
     return full !== key && full.includes(key)
   })
   if (containingFull.length === 1) return containingFull[0]
 
-  return profiles.find(profile => [profile.full, profile.keyword]
-    .some(candidate => candidate?.trim().toLocaleLowerCase() === key))
+  return undefined
 }
 
 // 汇总按档案逐条展示，不隐藏简称、同名或历史重复记录。
