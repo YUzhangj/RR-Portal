@@ -37,6 +37,7 @@ test('production: login, uploads, persistence, permissions and order workflow', 
     assert.equal((await post({...input,dueDate:'2026-02-30'})).res.status,400);
     assert.equal((await post({...input,printerType:'unknown'})).res.status,400);
     const created=await post(input);assert.equal(created.res.status,201);const id=created.data.id;
+    assert.equal(created.data.engineer,'hunan','engineer comes from authenticated account, not submitted name');
     assert.equal((await post(input)).res.status,400,'attached file cannot be reused');
     assert.equal((await request('/api/orders',{},hn)).data.length,1);
     assert.equal((await request('/api/orders',{},hn)).data[0].printerType,'光固化');
@@ -53,11 +54,13 @@ test('production: login, uploads, persistence, permissions and order workflow', 
     const colleague=await login('colleague','test1234');
     assert.equal((await editApplication(editInput,colleague)).res.status,403);
     const editedApplication=await editApplication(editInput);assert.equal(editedApplication.res.status,200);
+    assert.equal(editedApplication.data.engineer,'hunan','member cannot replace saved engineer');
     assert.equal(editedApplication.data.quantity,22);assert.equal(editedApplication.data.product,'修改后的模型');
     assert.equal(editedApplication.data.status,'待接单');assert.equal(editedApplication.data.number,created.data.number);assert.equal(editedApplication.data.created,created.data.created);
     assert.deepEqual(editedApplication.data.files,created.data.files);assert.ok(editedApplication.data.events.some(e=>e.text==='修改打印申请信息'));
     assert.equal((await editApplication({...editInput,updated:'stale'})).res.status,409);
     const adminEdit=await editApplication({...input,updated:editedApplication.data.updated},admin);assert.equal(adminEdit.res.status,200);
+    assert.equal(adminEdit.data.engineer,'hunan','admin editing an application preserves the original engineer');
     const sendFeedback=(auth, content='表面有层纹，希望改善打磨')=>request('/api/orders/'+id+'/feedback',{method:'POST',body:JSON.stringify({category:'质量问题',rating:'一般',content})},auth);
     assert.equal((await sendFeedback(hn)).res.status,400,'unfinished order cannot receive feedback');
     const update=d=>request('/api/orders/'+id,{method:'PATCH',body:JSON.stringify(d)},admin);
