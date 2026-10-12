@@ -12,9 +12,17 @@ describe('purchase material selection', () => {
     const choices = purchaseMaterialChoices(materials, '46510', { key: '0', code: '46510', label: 'PO', quantity: 100 })
     expect(() => purchaseSelectionSource(choices, { '0': 'RRM' }, 'IRRIHS0405')).toThrow('当前 RRI')
     expect(() => purchaseSelectionSource(choices, { '0': 'RRI' }, 'IRRMHS0060')).toThrow('当前 RRM')
-    expect(() => purchaseSelectionSource(choices, { '0': 'RRM' }, '2026900171')).toThrow('当前 RRI')
+    expect(purchaseSelectionSource(choices, { '0': 'RRM' }, '2026900171', ['RRM'])).toBe('RRM')
     expect(purchaseSelectionSource(choices, { '0': ' rrm ' }, ' irrmhs0060 ')).toBe('RRM')
     expect(purchaseSelectionSource(choices, { '0': 'RRM' })).toBe('RRM')
+  })
+  it('uses linked schedule origins for HSY and refuses unknown or mixed existing origins', () => {
+    const choices = purchaseMaterialChoices(materials, '46510', { key: '0', code: '46510', label: 'PO', quantity: 100 })
+    expect(purchaseSelectionSource(choices, { '0': 'RRM' }, '2026900171')).toBe('RRM')
+    expect(() => purchaseSelectionSource(choices, { '0': 'RRI' }, '2026900171', ['RRM'])).toThrow('当前 RRM')
+    expect(() => purchaseSelectionSource(choices, { '0': 'RRM' }, '2026900171', [undefined])).toThrow('未能确认')
+    expect(() => purchaseSelectionSource(choices, { '0': 'RRM' }, '2026900171', ['RRI', 'RRM'])).toThrow('来源不一致')
+    expect(() => purchaseSelectionSource(choices, { '0': 'RRI' }, 'IRRIHS0405', ['RRM'])).toThrow('来源不一致')
   })
   it('rejects mixed selected schedule sources before any line is appended', () => {
     const a = purchaseMaterialChoices(materials, '46510', { key: '0', code: '46510', label: 'RRI', quantity: 100 })

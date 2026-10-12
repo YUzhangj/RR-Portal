@@ -40,6 +40,12 @@ export function supplierProfileForName(name: string, profiles: SupplierDict[]): 
     && profile.full?.trim().toLocaleLowerCase() !== key)
   if (exactKeyword) return exactKeyword
 
+  // An exact company name takes precedence over a longer fuzzy match. A shared
+  // full name cannot identify which display-name archive the user intends.
+  const exactFull = profiles.filter(profile => profile.full?.trim().toLocaleLowerCase() === key
+    && profile.keyword?.trim().toLocaleLowerCase() !== key)
+  if (exactFull.length) return exactFull.length === 1 ? exactFull[0] : undefined
+
   // 兼容旧资料：历史同步曾把简称另建成 full=keyword 的重复行。
   // 当“港正”这类简称只对应一个包含它的公司全称时，优先使用公司全称资料。
   const containingFull = profiles.filter(profile => {

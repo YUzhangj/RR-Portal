@@ -16,6 +16,19 @@ const otherProfile = {
 }
 
 describe('supplier autocomplete options', () => {
+  it('prefers an exact company name over a longer similar company', () => {
+    const profiles = [{ keyword: '总公司', full: '兴信公司', customs: '报关一' },
+      { keyword: '分公司', full: '兴信公司分公司', customs: '报关二' }]
+    expect(supplierDisplayName('兴信公司', profiles)).toBe('总公司')
+    expect(linkedCustomsCompany('兴信公司', profiles)).toBe('报关一')
+  })
+  it('keeps an ambiguous company name without guessing a display-name archive', () => {
+    const profiles = [{ keyword: '胶袋', full: '兴信公司' }, { keyword: '吸塑', full: '兴信公司' }]
+    expect(supplierProfileForName('兴信公司', profiles)).toBeUndefined()
+    expect(supplierDisplayName('兴信公司', profiles)).toBe('兴信公司')
+    expect(supplierDisplayName('吸塑', profiles)).toBe('吸塑')
+  })
+
   it('displays existing company names as display names while retaining customs linkage', () => {
     expect(supplierDisplayName(otherProfile.full, [otherProfile])).toBe('星徽')
     expect(supplierDisplayName('未建档', [otherProfile])).toBe('未建档')

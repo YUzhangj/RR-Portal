@@ -5,7 +5,7 @@ import {
 } from 'antd'
 import dayjs from 'dayjs'
 import { api, type Material } from '../api/client'
-import { numToChinese, poCorrectHsyNumber, poDetermineEntity, poGenContractNo, PO_ENTITY_META, type PoEntity } from '../utils/poNumber'
+import { numToChinese, poCorrectHsyNumber, poLineCurrency, poDetermineEntity, poGenContractNo, PO_ENTITY_META, type PoEntity } from '../utils/poNumber'
 import './PurchasePage.css'
 import { combinePurchaseContracts } from '../utils/purchaseContractWorkbook'
 import PurchaseMaterialPicker from '../components/PurchaseMaterialPicker'
@@ -565,13 +565,18 @@ export default function PurchasePage() {
     let supplier: string
     try {
       supplier = purchaseSelectionSupplier(choices, currentSupplier)
-      purchaseSelectionSource(choices, Object.fromEntries((materialSelection.schedules || []).map((row, i) => [String(i), row.source])), String(form.getFieldValue('po_no') || ''))
+      const existingSources = items.flatMap(item => String(item.tomy_po || '').split(/\s*[;；]\s*/).filter(Boolean).flatMap(orderNo => {
+        const codes = String(item.product_code || '').split(/\s*\/\s*/).filter(Boolean)
+        const matches = schedRows.filter(row => row.orderNo?.trim() === orderNo.trim()
+          && codes.some(code => resolveProductCode(row.code) === resolveProductCode(code)))
+        return matches.length ? matches.map(row => row.source?.trim() || 'RRI') : [undefined]
+      }))
+      purchaseSelectionSource(choices, Object.fromEntries((materialSelection.schedules || []).map((row, i) => [String(i), row.source])), String(form.getFieldValue('po_no') || ''), existingSources)
     }
     catch (error) { message.warning((error as Error).message); return false }
     const first = choices[0]
     const source = first.groupKey == null ? undefined : materialSelection.schedules?.[Number(first.groupKey)]?.source
-    const currency = /^\d{4}\d/.test(String(form.getFieldValue('po_no') || ''))
-      || poDetermineEntity(supplier, first.material.customs_company, source) === 'HSY' ? '¥' : 'US$'
+    const currency = poLineCurrency(String(form.getFieldValue('po_no') || ''), supplier, first.material.customs_company, source)
     const added = choices.map(choice => {
       const schedule = choice.groupKey == null ? undefined : materialSelection.schedules?.[Number(choice.groupKey)]
       return applyAutoSpoilage({ ...purchaseMaterialLine(choice, currency),
@@ -1283,7 +1288,7 @@ export default function PurchasePage() {
   }
   function addItem() {
     const poNo = String(form.getFieldValue('po_no') || '')
-    const cur = /^\d{4}\d/.test(poNo) ? '¥' : 'US$'   // 年份号=华胜益→¥，否则默认美金
+    const cur = poLineCurrency(poNo)
     setItems(its => [...its, { product_code: '', qty: 0, price: 0, currency: cur, usage_qty: 1, ordered_qty: 0, material_qty: 0, spoilage_qty: 0, purchase_qty: 0, purchase_unit: '个', ship_unit: 'PCE', net_per_pc: 0, eta: '' }])
   }
   function delItem(i: number) { setItems(its => its.filter((_, idx) => idx !== i)) }

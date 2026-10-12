@@ -50,14 +50,24 @@ export function purchaseMaterialBucket(source: string | undefined, supplier: str
   return [(source || '').trim().toUpperCase() === 'RRM' ? 'RRM' : 'RRI', supplier, groupKey ?? ''].join('\u0000')
 }
 
-export function purchaseSelectionSource(choices: PurchaseMaterialChoice[], sources: Record<string, string | undefined>, currentPoNo = '') {
+export function purchaseSelectionSource(choices: PurchaseMaterialChoice[], sources: Record<string, string | undefined>, currentPoNo = '', existingSources: (string | undefined)[] = []) {
   const selected = new Set(choices.filter(c => c.groupKey != null).map(c =>
     (sources[c.groupKey!] || '').trim().toUpperCase() === 'RRM' ? 'RRM' : 'RRI'))
   if (selected.size > 1) throw new Error('RRI 与 RRM 排期请分开下单，或使用按供应商生成采购单。')
   const source = [...selected][0]
+  if (!source) return undefined
   const number = currentPoNo.trim().toUpperCase()
-  const current = number.startsWith('IRRM') ? 'RRM'
-    : number.startsWith('IRRI') || /^\d{5,}$/.test(number) ? 'RRI' : undefined
+  const prefix = number.startsWith('IRRM') ? 'RRM' : number.startsWith('IRRI') ? 'RRI' : undefined
+  // HSY numbers identify the contract entity, not RRI/RRM schedule origin.
+  const known = new Set(existingSources.filter(s => s?.trim()).map(s =>
+    s!.trim().toUpperCase() === 'RRM' ? 'RRM' : 'RRI'))
+  if (known.size > 1 || (prefix && known.size && !known.has(prefix))) {
+    throw new Error('当前采购单的排期来源不一致，请核对后分开下单。')
+  }
+  if (/^\d{10}$/.test(number) && existingSources.some(s => !s?.trim())) {
+    throw new Error('当前华胜益采购单已有排期的来源未能确认，请使用批量下单另建采购单。')
+  }
+  const current = prefix || [...known][0]
   if (source && current && source !== current) {
     throw new Error(`所选 ${source} 排期与当前 ${current} 采购单不一致，请使用批量下单另建采购单。`)
   }

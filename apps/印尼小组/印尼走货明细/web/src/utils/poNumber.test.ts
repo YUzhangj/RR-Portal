@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { poCorrectHsyNumber, poDetermineEntity, poGenContractNo, PO_ENTITY_META } from './poNumber'
+import { poCorrectHsyNumber, poDetermineEntity, poLineCurrency, poGenContractNo, PO_ENTITY_META } from './poNumber'
 
 describe('排期来源对应采购主体', () => {
   it('非华胜益报关的 RRM 排期使用全球采购单', () => {
@@ -99,5 +99,14 @@ describe('采购订单衔接线下编号', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(2027, 0, 1))
     expect(poGenContractNo(['2026900170'], 'HSY', 'HS')).toBe('2027000001')
+  })
+})
+
+describe('采购单追加明细币种', () => {
+  it('keeps the existing contract currency until its entity number is explicitly corrected', () => {
+    expect(poLineCurrency('IRRMHS0060', '供应商', '华胜益', 'RRM')).toBe('US$')
+    expect(poLineCurrency('IRRIHS0405', '供应商', '华胜益', 'RRI')).toBe('US$')
+    expect(poLineCurrency('2026900171', '供应商', '华胜益', 'RRM')).toBe('¥')
+    expect(poLineCurrency('', '供应商', '华胜益', 'RRM')).toBe('¥')
   })
 })

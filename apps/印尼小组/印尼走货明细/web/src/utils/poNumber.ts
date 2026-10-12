@@ -91,6 +91,13 @@ export function poGenContractNo(existing: string[], entity: PoEntity, wcode: str
   return prefix + String(seq).padStart(digits, '0')
 }
 
+export function poLineCurrency(currentNo: string, supplier?: string, customsCompany?: string, source?: string): string {
+  const number = currentNo.trim()
+  if (/^IRR[IM]/i.test(number)) return 'US$'
+  if (/^\d{10}$/.test(number)) return '¥'
+  return poDetermineEntity(supplier, customsCompany, source) === 'HSY' ? '¥' : 'US$'
+}
+
 // 仅供用户明确确认后修正旧单；不推断缺失的报关资料，也不重排其他订单。
 export function poCorrectHsyNumber(current: string, customsCompanies: (string | undefined)[], existing: string[]): string {
   if (!customsCompanies.length || customsCompanies.some(company => !company?.trim())) {
