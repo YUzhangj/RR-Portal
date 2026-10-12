@@ -36,6 +36,35 @@ def incremental_service(before: bytes, after: bytes):
     return None
 
 
+def _is_single_line_environment_value(value: bytes) -> bool:
+    value = value.lstrip(b" \t")
+    # Block/flow collections, anchors, aliases and tags need a YAML parser to
+    # determine their extent. They are outside this deliberately narrow exception.
+    if not value or value[:1] in b">|&*![{":
+        return False
+    quote = value[:1]
+    if quote not in (b"'", b'"'):
+        return True
+
+    offset = 1
+    while offset < len(value):
+        character = value[offset:offset + 1]
+        if quote == b'"' and character == b"\\":
+            offset += 2  # Double quotes escape the following character.
+            continue
+        if character == quote:
+            if quote == b"'" and value[offset + 1:offset + 2] == b"'":
+                offset += 2  # YAML single quotes escape a quote by doubling it.
+                continue
+            tail = value[offset + 1:]
+            return (not tail.strip(b" \t") or
+                    (tail.startswith((b" ", b"\t")) and tail.lstrip(b" \t").startswith(b"#")))
+        offset += 1
+    # An open quoted scalar may continue over the next apparently mapped line;
+    # the whitelisted addition would be literal text rather than an env variable.
+    return False
+
+
 def _is_environment_only_addition(before: bytes, after: bytes, target: bytes,
                                   key: bytes, added_line: bytes) -> bool:
     # No removals, edits, duplicate definitions, line-ending changes, or changes
@@ -81,15 +110,13 @@ def _is_environment_only_addition(before: bytes, after: bytes, target: bytes,
             environments_seen += int(section == b"environment")
             continue
         if section == b"environment":
+            # Only a simple mapping with complete single-line scalar values is
+            # understood here. Validate quotes before considering an added line.
+            entry = re.fullmatch(rb"      [A-Za-z_][A-Za-z0-9_]*: ([^\r\n]+)\n", line)
+            if not entry or not _is_single_line_environment_value(entry.group(1)):
+                return False
             if line == added_line:
                 eligible = True
-            # Only plain, one-line environment map entries are understood here.
-            # This excludes multiline values, anchors and nested structures that
-            # could make an apparently indented variable be literal data instead.
-            elif not re.fullmatch(rb"      [A-Za-z_][A-Za-z0-9_]*: [^\r\n]+\n", line):
-                return False
-            elif re.search(rb": [>|&*!]", line):
-                return False
     return eligible and services_seen == target_seen == environments_seen == 1
 
 

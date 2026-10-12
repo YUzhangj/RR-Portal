@@ -153,6 +153,52 @@ class ComposeMailboxOnlyTests(unittest.TestCase):
                         self.assertEqual(named.stderr, b"")
 
 
+class ComposeQuotedValueTests(unittest.TestCase):
+    TARGETS = [(b"voyageplex-api", ADDED_LINE), (b"printlink", STATION_LINE)]
+
+    def test_multiline_single_and_double_quoted_text_is_never_an_environment_addition(self):
+        for target, added_line in self.TARGETS:
+            for quote in [b"'", b'"']:
+                with self.subTest(target=target, quote=quote):
+                    before = (b"services:\n  " + target + b":\n    environment:\n"
+                              + b"      DESCRIPTION: " + quote + b"hello\n"
+                              + b"      WORLD: bye" + quote + b"\n")
+                    after = before.replace(b"      WORLD:", added_line + b"      WORLD:")
+                    self.assertIsNone(compose_change.incremental_service(before, after))
+
+    def test_complete_single_line_quotes_and_escapes_allow_the_real_addition(self):
+        values = [b'"false"', b"'false'", b'""', b"''", rb'"say \"hello\""',
+                  rb'"C:\\runtime\\data"', b"'it''s complete'",
+                  b'"colon: [|* literal" # fixture', b"'it''s complete'  # fixture",
+                  b'  \t"false"']
+        for target, added_line in self.TARGETS:
+            for value in values:
+                with self.subTest(target=target, value=value):
+                    before = (b"services:\n  " + target + b":\n    environment:\n"
+                              + b"      DESCRIPTION: " + value + b"\n")
+                    after = before + added_line
+                    self.assertEqual(compose_change.incremental_service(before, after), target.decode())
+
+    def test_unclosed_escaped_closing_quote_and_trailing_content_fail_closed(self):
+        values = [b'"unterminated', b"'unterminated", rb'"escaped closing quote\"',
+                  b'"complete" trailing', b"'complete' trailing", b'"complete"#no separator']
+        for target, added_line in self.TARGETS:
+            for value in values:
+                with self.subTest(target=target, value=value):
+                    before = (b"services:\n  " + target + b":\n    environment:\n"
+                              + b"      DESCRIPTION: " + value + b"\n")
+                    self.assertIsNone(compose_change.incremental_service(before, before + added_line))
+
+    def test_flow_collections_and_indented_block_scalar_values_fail_closed(self):
+        values = [b"[", b"{", b"  [", b"  {", b"  |", b"  >", b"  &anchor", b"  *alias"]
+        for target, added_line in self.TARGETS:
+            for value in values:
+                with self.subTest(target=target, value=value):
+                    before = (b"services:\n  " + target + b":\n    environment:\n"
+                              + b"      DESCRIPTION: " + value + b"\n")
+                    self.assertIsNone(compose_change.incremental_service(before, before + added_line))
+
+
 class ComposeStationOnlyTests(unittest.TestCase):
     def assert_rejected(self, before, after):
         self.assertFalse(compose_change.is_station_only_addition(before, after))
