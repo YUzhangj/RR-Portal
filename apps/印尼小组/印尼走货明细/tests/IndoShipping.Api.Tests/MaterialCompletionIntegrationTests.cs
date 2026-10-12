@@ -12,6 +12,79 @@ namespace IndoShipping.Api.Tests;
 public class MaterialCompletionIntegrationTests
 {
     [Fact]
+    public async Task Completed_old_orders_do_not_make_new_orders_overdue()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.AddLeadProfiles();
+        await f.Upload("10-01", """[{"code":"A","orderNo":"PO1","orderDate":"2026-03-18","qty":10}]""");
+        await f.Acknowledge();
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO2","orderDate":"2026-10-10","qty":5}]""");
+        foreach (var item in (await f.Read()).EnumerateArray())
+        {
+            Assert.Equal("2026-10-10", item.GetProperty("accepted_date").GetString());
+            Assert.Equal("2026-10-25", item.GetProperty("due_date").GetString());
+            Assert.Equal((new DateTime(2026, 10, 25) - DateTime.Today).Days, item.GetProperty("days_remaining").GetInt32());
+            Assert.Equal(2, item.GetProperty("order_count").GetInt32());
+            Assert.Equal("2026-03-18", item.GetProperty("order_details")[0].GetProperty("accepted_date").GetString());
+        }
+        // Future pending orders must produce a normal risk regardless of old completed dates.
+        var futureDate = DateTime.Today.AddDays(10).ToString("yyyy-MM-dd");
+        await f.Upload("10-10", JsonSerializer.Serialize(new[] { new { code = "A", orderNo = "PO2", orderDate = futureDate, qty = 5 } }));
+        Assert.All((await f.Read()).EnumerateArray(), x => Assert.Equal("normal", x.GetProperty("status").GetString()));
+        await f.Acknowledge();
+        foreach (var item in (await f.Read()).EnumerateArray())
+        {
+            Assert.Equal("covered", item.GetProperty("status").GetString());
+            Assert.Equal("", item.GetProperty("accepted_date").GetString());
+            Assert.Equal(JsonValueKind.Null, item.GetProperty("due_date").ValueKind);
+            Assert.Equal(JsonValueKind.Null, item.GetProperty("days_remaining").ValueKind);
+            Assert.Equal(2, item.GetProperty("order_details").GetArrayLength());
+        }
+    }
+
+    [Fact]
+    public async Task Actual_deliveries_exclude_old_order_but_partial_delivery_keeps_its_deadline()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.AddLeadProfiles();
+        await f.Upload("10-01", """[{"code":"A","orderNo":"PO1","orderDate":"2026-03-18","qty":10}]""");
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO2","orderDate":"2026-10-10","qty":5}]""");
+        await f.Db.ExecuteAsync("INSERT INTO po_items VALUES(1,1,20,20); INSERT INTO po_receipts VALUES(1,20); INSERT INTO outbound VALUES(1,20)");
+        var item = Purchase(await f.Read());
+        Assert.Equal("2026-10-10", item.GetProperty("accepted_date").GetString());
+        Assert.Equal("2026-10-25", item.GetProperty("due_date").GetString());
+        Assert.Equal(10, item.GetProperty("shortage_qty").GetDecimal());
+        await f.Db.ExecuteAsync("UPDATE outbound SET qty=19");
+        item = Purchase(await f.Read());
+        Assert.Equal("2026-03-18", item.GetProperty("accepted_date").GetString());
+        Assert.Equal("2026-04-02", item.GetProperty("due_date").GetString());
+        Assert.Equal(11, item.GetProperty("shortage_qty").GetDecimal());
+    }
+
+    [Fact]
+    public async Task Partial_manual_confirmation_keeps_old_deadline_and_only_remaining_capacity()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.AddLeadProfiles();
+        await f.Upload("10-01", """[{"code":"A","orderNo":"PO1","orderDate":"2026-03-18","qty":10}]""");
+        await f.Acknowledge();
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","orderDate":"2026-03-18","qty":15},{"code":"A","orderNo":"PO2","orderDate":"2026-10-10","qty":5}]""");
+        await f.Db.ExecuteAsync("UPDATE material_lead_profiles SET lead_days=0,capacity_per_day=10");
+        foreach (var item in (await f.Read()).EnumerateArray())
+        {
+            Assert.Equal("2026-03-18", item.GetProperty("accepted_date").GetString());
+            // Purchase: 20 outstanding / 10 per day; plastic: 10 outstanding / 10.
+            Assert.Equal(item.GetProperty("tracking_type").GetString() == "purchase" ? "2026-03-20" : "2026-03-19",
+                item.GetProperty("due_date").GetString());
+        }
+        await f.Db.ExecuteAsync("DELETE FROM material_lead_profiles");
+        Assert.All((await f.Read()).EnumerateArray(), item => {
+            Assert.Equal("unconfigured", item.GetProperty("status").GetString());
+            Assert.Equal(JsonValueKind.Null, item.GetProperty("due_date").ValueKind);
+        });
+    }
+
+    [Fact]
     public async Task New_week_keeps_completion_without_duplicate_demand_or_fake_stock()
     {
         await using var f = await Fixture.Create(); if (f is null) return;
@@ -222,6 +295,7 @@ public class MaterialCompletionIntegrationTests
     public async Task Small_extra_requirement_does_not_become_complete_when_display_quantities_round_to_zero()
     {
         await using var f = await Fixture.Create(); if (f is null) return;
+        await f.AddLeadProfiles();
         await f.Db.ExecuteAsync("UPDATE materials SET usage_qty=0.000001");
         await f.Upload("10-01", """[{"code":"A","orderNo":"PO1","qty":11}]""");
         await f.Acknowledge();
@@ -229,6 +303,8 @@ public class MaterialCompletionIntegrationTests
         var item = Purchase(await f.Read());
         Assert.False(item.GetProperty("manual_completed").GetBoolean());
         Assert.NotEqual("covered", item.GetProperty("status").GetString());
+        Assert.Equal("2026-10-10", item.GetProperty("accepted_date").GetString());
+        Assert.Equal("2026-10-25", item.GetProperty("due_date").GetString());
     }
 
     private static JsonElement Purchase(JsonElement items) => items.EnumerateArray()
@@ -238,6 +314,11 @@ public class MaterialCompletionIntegrationTests
     {
         public NpgsqlConnection Db => db;
         public MaterialAlertsController Alerts { get; } = new(new SqlConnectionFactory(connection));
+        public async Task AddLeadProfiles() => await db.ExecuteAsync("""
+            INSERT INTO material_lead_profiles VALUES
+                ('A','测试产品','五金','',15,0,true),
+                ('A','测试产品','塑胶','',15,0,true)
+            """);
         public async Task<JsonElement> Read(long? revision = null) => JsonSerializer.SerializeToElement(
             Assert.IsType<OkObjectResult>(await Alerts.List(revision)).Value).GetProperty("items");
         public async Task Acknowledge() => await db.ExecuteAsync("""

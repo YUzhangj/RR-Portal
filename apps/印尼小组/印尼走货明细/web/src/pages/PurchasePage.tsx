@@ -5,7 +5,7 @@ import {
 } from 'antd'
 import dayjs from 'dayjs'
 import { api, type Material } from '../api/client'
-import { numToChinese, poDetermineEntity, poGenContractNo, PO_ENTITY_META, type PoEntity } from '../utils/poNumber'
+import { numToChinese, poCorrectHsyNumber, poLineCurrency, poDetermineEntity, poGenContractNo, PO_ENTITY_META, type PoEntity } from '../utils/poNumber'
 import './PurchasePage.css'
 import { combinePurchaseContracts } from '../utils/purchaseContractWorkbook'
 import PurchaseMaterialPicker from '../components/PurchaseMaterialPicker'
@@ -565,13 +565,18 @@ export default function PurchasePage() {
     let supplier: string
     try {
       supplier = purchaseSelectionSupplier(choices, currentSupplier)
-      purchaseSelectionSource(choices, Object.fromEntries((materialSelection.schedules || []).map((row, i) => [String(i), row.source])), String(form.getFieldValue('po_no') || ''))
+      const existingSources = items.flatMap(item => String(item.tomy_po || '').split(/\s*[;；]\s*/).filter(Boolean).flatMap(orderNo => {
+        const codes = String(item.product_code || '').split(/\s*\/\s*/).filter(Boolean)
+        const matches = schedRows.filter(row => row.orderNo?.trim() === orderNo.trim()
+          && codes.some(code => resolveProductCode(row.code) === resolveProductCode(code)))
+        return matches.length ? matches.map(row => row.source?.trim() || 'RRI') : [undefined]
+      }))
+      purchaseSelectionSource(choices, Object.fromEntries((materialSelection.schedules || []).map((row, i) => [String(i), row.source])), String(form.getFieldValue('po_no') || ''), existingSources)
     }
     catch (error) { message.warning((error as Error).message); return false }
     const first = choices[0]
     const source = first.groupKey == null ? undefined : materialSelection.schedules?.[Number(first.groupKey)]?.source
-    const currency = /^\d{4}\d/.test(String(form.getFieldValue('po_no') || ''))
-      || poDetermineEntity(supplier, first.material.customs_company, source) === 'HSY' ? '¥' : 'US$'
+    const currency = poLineCurrency(String(form.getFieldValue('po_no') || ''), supplier, first.material.customs_company, source)
     const added = choices.map(choice => {
       const schedule = choice.groupKey == null ? undefined : materialSelection.schedules?.[Number(choice.groupKey)]
       return applyAutoSpoilage({ ...purchaseMaterialLine(choice, currency),
@@ -803,6 +808,49 @@ export default function PurchasePage() {
       promptMaterialSync(items, materials)
     } catch (e: any) {
       message.error('检查货号库失败：' + (e?.message ?? e))
+    }
+  }
+  async function correctHsyNumber() {
+    if (!editing?.id || creating) return
+    const id = editing.id
+    const readPlan = async () => {
+      const [{ data: detail }, { data: all }] = await Promise.all([
+        api.get<PoDetail>(`/purchase/${id}`), api.get<PoSummary[]>('/purchase'),
+      ])
+      const savedItems = detail.items || []
+      const materials = await loadPurchaseMaterials(savedItems)
+      const oldNo = detail.po_no || ''
+      const newNo = poCorrectHsyNumber(oldNo, savedItems.map(item =>
+        item.material_id == null ? undefined : materials.get(Number(item.material_id))?.customs_company,
+      ), all.map(po => po.po_no || ''))
+      return { oldNo, newNo }
+    }
+    try {
+      const plan = await readPlan()
+      if (plan.oldNo === plan.newNo) { message.info('当前已是华胜益编号，无需修改'); return }
+      Modal.confirm({
+        title: '修正当前采购单为华胜益编号',
+        okText: '确认修改编号', cancelText: '取消',
+        content: <>
+          <p>{plan.oldNo} → {plan.newNo}</p>
+          <p>按已保存明细核对，仅修改这张采购单编号。供应商、物料、金额、入库记录及基础资料不变；当前其他未保存编辑不会写入。</p>
+          <p>合同将按新编号使用华胜益主体。现有币种和单价不自动换算，请核对报价后再导出。</p>
+        </>,
+        onOk: async () => {
+          const latest = await readPlan()
+          if (latest.oldNo !== plan.oldNo || latest.newNo !== plan.newNo) {
+            message.warning('订单或可用编号已变化，请取消后重新检查')
+            throw new Error('编号已变化')
+          }
+          await api.patch(`/purchase/${id}`, { po_no: plan.newNo })
+          form.setFieldsValue({ po_no: plan.newNo })
+          setEditing(current => current?.id === id ? { ...current, po_no: plan.newNo } : current)
+          message.success(`编号已修改：${plan.newNo}`)
+          load()
+        },
+      })
+    } catch (e: any) {
+      message.error(e?.message || '无法检查采购单编号')
     }
   }
   async function openEdit(p: PoSummary) {
@@ -1240,7 +1288,7 @@ export default function PurchasePage() {
   }
   function addItem() {
     const poNo = String(form.getFieldValue('po_no') || '')
-    const cur = /^\d{4}\d/.test(poNo) ? '¥' : 'US$'   // 年份号=华胜益→¥，否则默认美金
+    const cur = poLineCurrency(poNo)
     setItems(its => [...its, { product_code: '', qty: 0, price: 0, currency: cur, usage_qty: 1, ordered_qty: 0, material_qty: 0, spoilage_qty: 0, purchase_qty: 0, purchase_unit: '个', ship_unit: 'PCE', net_per_pc: 0, eta: '' }])
   }
   function delItem(i: number) { setItems(its => its.filter((_, idx) => idx !== i)) }
@@ -1545,6 +1593,7 @@ export default function PurchasePage() {
             <Button onClick={() => setSchedPickerOpen(true)}>🔗 从排期选</Button>
             <Button onClick={() => setMaterialSelection({ mode: 'append' })}>📦 从物料库选择</Button>
             {!creating && <Button onClick={checkMaterialSync}>🔄 检查货号库更新</Button>}
+            {!creating && <Button onClick={correctHsyNumber}>修正华胜益编号</Button>}
             <Button onClick={mergeSameName}>🔀 合并同名</Button>
             <Button onClick={undoMerge} disabled={!mergeUndo}>↩ 取消合并</Button>
             <Button onClick={applyQuotes}>💲 套用报价</Button>
@@ -1621,7 +1670,7 @@ export default function PurchasePage() {
               { title: '金额', width: 100, align: 'right', render: (_v, r) => <b style={{ color: '#c0392b' }}>{((r.purchase_qty ?? r.qty ?? 0) * (r.price ?? 0)).toFixed(2)}</b> },
               { title: '采购单位', width: 110, render: (_v, r, i) => fillable(i, 'purchase_unit',
                 <Select size="small" value={r.purchase_unit || '个'} style={{ width: '100%' }}
-                  options={['个', '只', '米'].map(x => ({ value: x, label: x }))}
+                  options={['个', '只', '米', '卷', '套'].map(x => ({ value: x, label: x }))}
                   onChange={(v) => patchItem(i, 'purchase_unit', v)} />
               ) },
               { title: '走货单位（货号库）', width: 150, render: (_v, r, i) => r.material_id ? (

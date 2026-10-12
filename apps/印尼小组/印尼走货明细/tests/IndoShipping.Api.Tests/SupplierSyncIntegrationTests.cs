@@ -10,7 +10,7 @@ namespace IndoShipping.Api.Tests;
 public class SupplierSyncIntegrationTests
 {
     [Fact]
-    public async Task Renaming_unique_full_names_preserves_cross_name_ambiguity()
+    public async Task Renaming_archive_preserves_all_material_and_document_snapshots()
     {
         await using var fixture = await Fixture.Create();
         if (fixture is null) return;
@@ -34,10 +34,12 @@ public class SupplierSyncIntegrationTests
                 $"SELECT customs_company FROM {table} WHERE supplier=' aLpHa '"));
             Assert.Equal("Customs B", await c.ExecuteScalarAsync<string>(
                 $"SELECT customs_company FROM {table} WHERE supplier='Shared Company'"));
-            Assert.Equal("New Customs A", await c.ExecuteScalarAsync<string>(
-                $"SELECT customs_company FROM {table} WHERE supplier='New Alpha'"));
+            Assert.Equal("Customs A", await c.ExecuteScalarAsync<string>(
+                $"SELECT customs_company FROM {table} WHERE supplier=' UNIQUE COMPANY '"));
+            Assert.Equal(0, await c.ExecuteScalarAsync<int>($"SELECT count(*) FROM {table} WHERE supplier='New Alpha'"));
         }
-        Assert.Equal(1, await c.ExecuteScalarAsync<int>("SELECT count(*) FROM purchase_orders WHERE supplier='New Alpha'"));
+        Assert.Equal(1, await c.ExecuteScalarAsync<int>("SELECT count(*) FROM purchase_orders WHERE supplier=' UNIQUE COMPANY '"));
+        Assert.Equal("New Alpha", await c.ExecuteScalarAsync<string>("SELECT keyword FROM dict_supplier WHERE id=@id", new { id }));
         Assert.Equal(1, await c.ExecuteScalarAsync<int>("SELECT count(*) FROM purchase_orders WHERE supplier=' aLpHa '"));
         Assert.Equal(1, await c.ExecuteScalarAsync<int>("SELECT count(*) FROM purchase_orders WHERE supplier='Shared Company'"));
         Assert.Equal("Alpha", await c.ExecuteScalarAsync<string>("SELECT full_name FROM dict_supplier WHERE keyword='Gamma'"));
@@ -73,7 +75,7 @@ public class SupplierSyncIntegrationTests
         {
             Assert.Equal("报关A", await c.ExecuteScalarAsync<string>($"SELECT customs_company FROM {table} WHERE supplier='供应商A'"));
             Assert.Equal("历史报关", await c.ExecuteScalarAsync<string>($"SELECT customs_company FROM {table} WHERE supplier='共同公司'"));
-            Assert.Equal("新报关C", await c.ExecuteScalarAsync<string>($"SELECT customs_company FROM {table} WHERE supplier='新供应商C'"));
+            Assert.Equal("报关C", await c.ExecuteScalarAsync<string>($"SELECT customs_company FROM {table} WHERE supplier='供应商C'"));
         }
         Assert.Equal(1, await c.ExecuteScalarAsync<int>("SELECT count(*) FROM purchase_orders WHERE supplier='共同公司'"));
         Assert.Equal("共同公司", await c.ExecuteScalarAsync<string>("SELECT full_name FROM dict_supplier WHERE keyword='供应商A'"));
@@ -104,7 +106,7 @@ public class SupplierSyncIntegrationTests
             addressZh = "地址", addressEn = "Address", phone = "123", email = "a@example.com", contact = "联系人" }));
         Assert.Equal("新全称A", await c.ExecuteScalarAsync<string>("SELECT full_name FROM dict_supplier WHERE id=@id", new { id }));
         foreach (var table in new[] { "materials", "shipment_items", "purchase_orders" })
-            Assert.Equal("简称A", await c.ExecuteScalarAsync<string>($"SELECT supplier FROM {table}"));
+            Assert.Equal("公司A", await c.ExecuteScalarAsync<string>($"SELECT supplier FROM {table}"));
         Assert.Equal("地址", await c.ExecuteScalarAsync<string>("SELECT address_zh FROM dict_supplier WHERE id=@id", new { id }));
         await controller.SyncSuppliers(new() { entries = [new() { supplier = "简称A" }, new() { supplier = "新全称A" }] });
         Assert.Equal(2, await c.ExecuteScalarAsync<int>("SELECT count(*) FROM dict_supplier"));
@@ -112,7 +114,7 @@ public class SupplierSyncIntegrationTests
     }
 
     [Fact]
-    public async Task Concurrent_renames_keep_references_on_the_final_supplier()
+    public async Task Concurrent_archive_edits_do_not_rewrite_references()
     {
         await using var fixture = await Fixture.Create();
         if (fixture is null) return;
@@ -129,9 +131,24 @@ public class SupplierSyncIntegrationTests
         await Task.Delay(30);
         var second = controller.UpdateSupplier(id, new() { keyword = "Second", full = "Second Company" });
         foreach (var result in await Task.WhenAll(first, second)) Assert.IsType<OkObjectResult>(result);
-        var names = (await c.QueryAsync<string>("SELECT keyword FROM dict_supplier UNION SELECT full_name FROM dict_supplier")).ToArray();
         foreach (var table in new[] { "materials", "shipment_items", "purchase_orders" })
-            Assert.Contains(await c.ExecuteScalarAsync<string>($"SELECT supplier FROM {table}"), names);
+            Assert.Equal("Old", await c.ExecuteScalarAsync<string>($"SELECT supplier FROM {table}"));
+    }
+
+    [Fact]
+    public async Task Selecting_existing_supplier_cannot_overwrite_its_base_profile()
+    {
+        await using var fixture = await Fixture.Create(); if (fixture is null) return;
+        var c = fixture.Connection;
+        var controller = new DictionariesController(fixture.Factory);
+        await controller.CreateSupplier(new() { keyword = "显示名", full = "公司全称", customs = "原报关",
+            nameEn = "Original Company", addressZh = "原地址", phone = "123", email = "old@example.com" });
+        var before = await c.ExecuteScalarAsync<string>("SELECT row_to_json(d)::text FROM dict_supplier d");
+        foreach (var name in new[] { "显示名", "公司全称" })
+            Assert.IsType<OkObjectResult>(await controller.SyncSuppliers(new() {
+                confirmChanges = true, entries = [new() { supplier = name, previousSupplier = "其他供应商", customs = "不同报关" }] }));
+        Assert.Equal(before, await c.ExecuteScalarAsync<string>("SELECT row_to_json(d)::text FROM dict_supplier d"));
+        Assert.Equal(1, await c.ExecuteScalarAsync<int>("SELECT count(*) FROM dict_supplier"));
     }
 
     [Fact]
