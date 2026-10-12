@@ -295,6 +295,7 @@ public class MaterialCompletionIntegrationTests
     public async Task Small_extra_requirement_does_not_become_complete_when_display_quantities_round_to_zero()
     {
         await using var f = await Fixture.Create(); if (f is null) return;
+        await f.AddLeadProfiles();
         await f.Db.ExecuteAsync("UPDATE materials SET usage_qty=0.000001");
         await f.Upload("10-01", """[{"code":"A","orderNo":"PO1","qty":11}]""");
         await f.Acknowledge();
@@ -302,6 +303,8 @@ public class MaterialCompletionIntegrationTests
         var item = Purchase(await f.Read());
         Assert.False(item.GetProperty("manual_completed").GetBoolean());
         Assert.NotEqual("covered", item.GetProperty("status").GetString());
+        Assert.Equal("2026-10-10", item.GetProperty("accepted_date").GetString());
+        Assert.Equal("2026-10-25", item.GetProperty("due_date").GetString());
     }
 
     private static JsonElement Purchase(JsonElement items) => items.EnumerateArray()

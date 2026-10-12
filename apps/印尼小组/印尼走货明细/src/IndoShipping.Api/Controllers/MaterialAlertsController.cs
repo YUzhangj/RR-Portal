@@ -577,7 +577,7 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
         // Manual confirmation and real movements cover the same quantity, never add them.
         var pending = details.Select(x => new {
             accepted = DateTime.ParseExact(x.accepted_date, "yyyy-MM-dd", CultureInfo.InvariantCulture),
-            remaining = Math.Max(x.required_qty - Math.Max(x.manual_qty, Math.Min(x.received_qty, x.outbound_qty)), 0),
+            remaining = Math.Max(x.receipt_shortage_exact, x.outbound_shortage_exact),
         }).Where(x => x.remaining > 0).ToList();
         if (pending.Count == 0) return (null, null);
         var accepted = pending.Min(x => x.accepted);
