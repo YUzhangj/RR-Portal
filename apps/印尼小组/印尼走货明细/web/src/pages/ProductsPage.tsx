@@ -28,7 +28,7 @@ function translatedMaterialName(nameZh: string, dicts: Dictionaries): string {
 }
 
 function materialCustomsCompany(material: Material, dicts: Dictionaries): string {
-  return linkedCustomsCompany(material.supplier || '', dicts.suppliers, material.customs_company || '')
+  return material.customs_company ?? linkedCustomsCompany(material.supplier || '', dicts.suppliers)
 }
 
 export default function ProductsPage() {
@@ -113,7 +113,7 @@ export default function ProductsPage() {
           hsCN: m.hs_cn ?? '',
           hsID: m.hs_id ?? '',
           supplier: m.supplier || '',
-          customsCompany: materialCustomsCompany(m, dicts),
+          customsCompany: m.customs_company || '',
           unitKg: m.unit_kg ?? 'KGM',
           grossPerPc: m.gross_per_pc ?? 0,
           netPerPc: m.net_per_pc ?? 0,
@@ -131,7 +131,8 @@ export default function ProductsPage() {
         .filter(m => m.id != null)
         .map(m => [Number(m.id), m]))
       const supplierSyncEntries = materials
-        .filter(m => String(m.supplier || '').trim())
+        .filter(m => String(m.supplier || '').trim() &&
+          (m.id == null || String(originalById.get(Number(m.id))?.supplier || '').trim() !== String(m.supplier).trim()))
         .map(m => {
           const previous = m.id != null ? originalById.get(Number(m.id)) : undefined
           return {
@@ -801,9 +802,8 @@ function MaterialsEditor({ rows, onChange, dicts, productCode, onSuppliersChange
             options={supplierOptions}
             filterOption={filterSupplierOption}
             onChange={(value) => patchSupplier(i, value || '')} />
-            <SupplierProfileEditor name={r.supplier || ''} onSaved={(profile, previous) => {
-              const oldNames = [previous.keyword, previous.full].filter(Boolean).map(n => n!.trim().toLowerCase())
-              onChange(rows.map((row, index) => index === i || oldNames.includes((row.supplier || '').trim().toLowerCase())
+            <SupplierProfileEditor name={r.supplier || ''} onSaved={(profile) => {
+              onChange(rows.map((row, index) => index === i
                 ? { ...row, supplier: profile.keyword?.trim() || profile.full, customs_company: supplierCustomsCompany(profile) } : row))
               onSuppliersChanged()
             }} />

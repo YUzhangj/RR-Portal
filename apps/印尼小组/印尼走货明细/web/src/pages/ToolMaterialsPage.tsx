@@ -82,7 +82,8 @@ export default function ToolMaterialsPage() {
       })))
       try {
         await api.post('/dictionaries/suppliers/sync', { entries: materials
-          .filter(m => m.supplier?.trim())
+          .filter(m => m.supplier?.trim() &&
+            (m.id == null || rows.find(row => row.id === m.id)?.supplier?.trim() !== m.supplier.trim()))
           .map(m => ({ supplier: m.supplier!.trim(), customs: m.customs_company || '' })) })
       } catch {
         message.warning('物料已保存，但供应商汇总同步失败；请重试保存')
