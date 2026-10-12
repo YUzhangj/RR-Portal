@@ -31,3 +31,25 @@ test('Windows adapter + collector: credentials, CAS, restart, lost response, fai
  const stale=await fetch(config.url+'/api/business-sync',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Basic '+Buffer.from('user:pass').toString('base64')},body:JSON.stringify({expected:'stale',data:core.project(windows)})});assert.equal(stale.status,409);
  const bad=await fetch(config.url+'/api/business-sync');assert.equal(bad.status,401);
 });
+
+test('Windows CAS rejects a disk-only edit made after the initial read',async t=>{
+ const dir=mkdtempSync(path.join(tmpdir(),'printlink-disk-cas-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+ copyFileSync(new URL('../legacy/business-sync-adapter.cjs',import.meta.url),path.join(dir,'adapter.cjs'));
+ copyFileSync(new URL('../shared/business-sync.cjs',import.meta.url),path.join(dir,'business-sync-core.cjs'));
+ const adapter=createRequire(import.meta.url)(path.join(dir,'adapter.cjs')),file=path.join(dir,'data.json');
+ let memory=data(),writes=0;writeFileSync(file,JSON.stringify(memory));
+ const server=http.createServer((req,res)=>{
+  if(req.headers.authorization!=='Basic '+Buffer.from('user:pass').toString('base64')){res.writeHead(401);res.end('{}');return;}
+  adapter(req,res,{enabled:true,load:()=>structuredClone(memory),readDisk:()=>JSON.parse(readFileSync(file,'utf8')),
+   save:x=>{writes++;memory=x;writeFileSync(file,JSON.stringify(x));}});
+ });
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>{server.closeAllConnections();server.close();});
+ const url=`http://127.0.0.1:${server.address().port}/api/business-sync`,headers={Authorization:'Basic '+Buffer.from('user:pass').toString('base64'),'Content-Type':'application/json'};
+ const baseline=await (await fetch(url,{headers})).json();
+ const disk=data();disk.products[0].name='磁盘独立修改';writeFileSync(file,JSON.stringify(disk));
+ const proposal=core.project(memory);proposal.records.r1.qty=2;
+ const result=await fetch(url,{method:'POST',headers,body:JSON.stringify({expected:baseline.fingerprint,data:proposal})});
+ assert.equal(result.status,409);assert.equal(writes,0);
+ assert.equal(JSON.parse(readFileSync(file,'utf8')).products[0].name,'磁盘独立修改');
+ assert.equal(memory.records['2026-10-10'].items[0].qty,1);
+});

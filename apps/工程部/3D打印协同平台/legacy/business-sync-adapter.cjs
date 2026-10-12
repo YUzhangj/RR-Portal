@@ -11,7 +11,7 @@ module.exports=async function(req,res,{load,save,readDisk,enabled}){
   if(!String(req.headers['content-type']||'').includes('application/json'))return send(415,{error:'需要 JSON 请求'});
   let size=0;const chunks=[];for await(const c of req){size+=c.length;if(size>128*1024*1024)return send(413,{error:'业务资料超过 128MB'});chunks.push(c);}
   const input=JSON.parse(Buffer.concat(chunks)),original=load();
-  if(core.fingerprint(core.project(original))!==input.expected)return send(409,{error:'原系统资料已变化，保留双方版本，稍后重新对账'});
+  if(core.fingerprint(core.project(original))!==input.expected||core.fingerprint(core.project(readDisk()))!==input.expected)return send(409,{error:'原系统资料已变化，保留双方版本，稍后重新对账'});
   const next=core.apply(original,input.data);await save(next);
   if(core.fingerprint(core.project(readDisk()))!==core.fingerprint(input.data))throw Error('原系统落盘校验未通过；未确认同步，稍后重新对账');
   send(200,{ok:true});
