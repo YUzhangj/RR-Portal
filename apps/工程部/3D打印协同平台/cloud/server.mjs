@@ -1,3 +1,4 @@
+import {parseItems,itemSummary} from './order-items.mjs';
 import {integration} from './integration.mjs';
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
@@ -98,12 +99,12 @@ function requestedFactories(data,role) {
 }
 function allowed(user, order) { return userFactories(user).includes(order.factory); }
 function getOrder(user,id) { const o=db.prepare('SELECT * FROM orders WHERE id=?').get(id); if (!o || !allowed(user,o)) fail(404,'订单不存在或无访问权限'); return o; }
-function orderJSON(o) { const job=db.prepare('SELECT id,status,synced FROM production_jobs WHERE order_id=?').get(o.id); return { production:job?{id:job.id,status:job.status,synced:!!job.synced}:null, ...JSON.parse(o.payload), id:o.id, owner:o.owner, number:o.number, factory:o.factory, status:o.status, created:o.created, updated:o.updated, feedback:db.prepare('SELECT f.*, u.name AS authorName FROM feedback f JOIN users u ON u.id=f.author WHERE order_id=? ORDER BY created DESC').all(o.id), files:db.prepare('SELECT id,name,size FROM files WHERE order_id=?').all(o.id), events:db.prepare('SELECT actor,text,created FROM events WHERE order_id=? ORDER BY id DESC').all(o.id) }; }
+function orderJSON(o) { const linked=db.prepare('SELECT id,item_id,status,synced FROM production_jobs WHERE order_id=? ORDER BY created').all(o.id),job=linked[0]; return { production:job?{id:job.id,count:linked.length,status:linked.length===1?job.status:o.status,synced:linked.every(j=>!!j.synced)}:null, ...JSON.parse(o.payload), id:o.id, owner:o.owner, number:o.number, factory:o.factory, status:o.status, created:o.created, updated:o.updated, feedback:db.prepare('SELECT f.*, u.name AS authorName FROM feedback f JOIN users u ON u.id=f.author WHERE order_id=? ORDER BY created DESC').all(o.id), files:db.prepare('SELECT id,name,size FROM files WHERE order_id=?').all(o.id), events:db.prepare('SELECT actor,text,created FROM events WHERE order_id=? ORDER BY id DESC').all(o.id) }; }
 function field(data,key,required=false,max=120) { const v=data[key]; if (v!==undefined && typeof v!=='string') fail(400,`${key} 格式不正确`); const value=(v||'').trim(); if (required && !value) fail(400,`请填写 ${labels[key]||key}`); if(value.length>max) fail(400,`${labels[key]||key} 内容过长`); return value; }
 const labels={factory:'厂区',workshop:'车间',customer:'客名',sku:'货号',product:'产品名称',engineer:'跟进工程师',material:'耗材',color:'颜色',dueDate:'需交板时间'};
 function date(value,required=false) { if (!value && !required) return ''; if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0,10)!==value) fail(400,'请填写有效日期'); return value; }
 const attempts = new Map();
-const staticFiles = { '/mobile-order.png':'mobile-order.png','/mobile-order.html':'mobile-order.html', '/':'index.html','/app.js':'app.js','/style.css':'style.css','/favicon.svg':'favicon.svg','/manifest.webmanifest':'manifest.webmanifest','/platform':'platform.html','/platform.js':'platform.js','/platform.css':'platform.css' };
+const staticFiles = { '/business-sync':'business-sync.html','/business-sync.js':'business-sync.js', '/mobile-order.png':'mobile-order.png','/mobile-order.html':'mobile-order.html', '/':'index.html','/app.js':'app.js','/style.css':'style.css','/favicon.svg':'favicon.svg','/manifest.webmanifest':'manifest.webmanifest','/platform':'platform.html','/platform.js':'platform.js','/platform.css':'platform.css' };
 const mime = {'.png':'image/png','.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.webmanifest':'application/manifest+json'};
 const integrate=integration({db,body,json,fail,recordEvent,DEMO,ROOT});
 const server = http.createServer(async (req,res) => {
@@ -207,11 +208,10 @@ const server = http.createServer(async (req,res) => {
     }
     if(route==='/api/orders' && req.method==='POST') {
       const d=await body(req), factory=field(d,'factory',true); if(!factories.includes(factory) || !userFactories(u).includes(factory)) fail(403,'不能向该厂区下单');
-      const p={}; for(const key of ['workshop','customer','sku','product','material','color','engineer']) p[key]=field(d,key,true);
-      p.printerType=field(d,'printerType'); if(p.printerType && !['光固化','FDM'].includes(p.printerType)) fail(400,'打印机器只能选择光固化或 FDM');
-      p.follower=field(d,'follower'); p.notes=field(d,'notes',false,2000); p.dueDate=date(field(d,'dueDate'),true); p.replyDate=date(field(d,'replyDate'));
+      const p={}; for(const key of ['workshop','customer','engineer']) p[key]=field(d,key,true);
+      p.follower=field(d,'follower');  p.replyDate=date(field(d,'replyDate'));
       p.priority=field(d,'priority')||'普通'; if(!['普通','加急'].includes(p.priority)) fail(400,'优先级无效');
-      p.quantity=Number(d.quantity); if(!Number.isSafeInteger(p.quantity) || p.quantity<1 || p.quantity>100000) fail(400,'数量需为 1–100000 的整数');
+      Object.assign(p,itemSummary(parseItems(d,{field,date,fail},p)));
       if(!Array.isArray(d.fileIds) || !d.fileIds.length || d.fileIds.length>10 || new Set(d.fileIds).size!==d.fileIds.length || d.fileIds.some(x=>typeof x!=='string')) fail(400,'请上传 1–10 个附件');
       const files=d.fileIds.map(id=>db.prepare('SELECT * FROM files WHERE id=?').get(id)); if(files.some(f=>!f || f.owner!==u.id || f.order_id)) fail(400,'附件已使用或无访问权限'); if(files.reduce((a,f)=>a+f.size,0)>500*1024*1024) fail(400,'每单附件总大小不能超过 500 MB');
       const id=randomUUID(), created=now(), number='3DP-'+created.slice(0,10).replaceAll('-','')+'-'+randomBytes(3).toString('hex').toUpperCase();
@@ -256,11 +256,10 @@ const server = http.createServer(async (req,res) => {
       if(o.status!=='待接单' || db.prepare('SELECT id FROM production_jobs WHERE order_id=?').get(o.id)) fail(409,'订单已接单或关联生产，请刷新后联系管理员处理');
       if(d.updated!==o.updated) fail(409,'申请已被其他人修改，请重新打开订单后再编辑');
       const factory=field(d,'factory',true); if(!factories.includes(factory)||!userFactories(u).includes(factory)) fail(403,'不能向该厂区下单');
-      const p={...JSON.parse(o.payload)}; for(const key of ['workshop','customer','sku','product','material','color','engineer']) p[key]=field(d,key,true);
-      p.printerType=field(d,'printerType'); if(p.printerType && !['光固化','FDM'].includes(p.printerType)) fail(400,'打印机器只能选择光固化或 FDM');
-      p.follower=field(d,'follower'); p.notes=field(d,'notes',false,2000); p.dueDate=date(field(d,'dueDate'),true);
+      const p={...JSON.parse(o.payload)}; for(const key of ['workshop','customer','engineer']) p[key]=field(d,key,true);
+      p.follower=field(d,'follower');
       p.priority=field(d,'priority')||'普通'; if(!['普通','加急'].includes(p.priority)) fail(400,'优先级无效');
-      p.quantity=Number(d.quantity); if(!Number.isSafeInteger(p.quantity) || p.quantity<1 || p.quantity>100000) fail(400,'数量需为 1–100000 的整数');
+      Object.assign(p,itemSummary(parseItems(d,{field,date,fail},p)));
       db.exec('BEGIN IMMEDIATE'); try {
         db.prepare('UPDATE orders SET factory=?,payload=?,updated=? WHERE id=?').run(factory,JSON.stringify(p),now(),o.id);
         recordEvent(o.id,u.name,'修改打印申请信息'); db.exec('COMMIT');

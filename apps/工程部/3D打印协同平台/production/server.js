@@ -162,8 +162,18 @@ const handleProductFiles = createProductFileHandler({
   getProducts: () => loadData().products
 });
 
+const businessSync=require('./business-sync.cjs')(store,{
+ load:()=>dataImages.restore(loadData()),
+ write:data=>{store.prepare('UPDATE snapshot SET value=? WHERE id=1').run(JSON.stringify(data));_cachedData=null;dataVersion=Math.max(Date.now(),dataVersion+1);}
+});
 const server = http.createServer((req, res) => {
   if (!requireAuth(req,res)) return;
+  if(req.url==='/bridge/business-sync'&&req.method==='POST'){
+    const chunks=[];let size=0,tooLarge=false;
+    req.on('data',c=>{size+=c.length;if(size>128*1024*1024){tooLarge=true;chunks.length=0;}else if(!tooLarge)chunks.push(c);});
+    req.on('end',()=>{try{if(tooLarge)throw Error('同步资料超过 128MB');const value=businessSync(JSON.parse(Buffer.concat(chunks)));res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(value));}catch(e){res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:e.message}));}});return;
+  }
+
   if(req.url==='/api/legacy-import/limits'&&req.method==='GET'){res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({maxBytes:businessLimitBytes,maxMB:businessLimitMB}));return;}
   if(['/api/legacy-import/preview','/api/legacy-import/apply'].includes(req.url)&&req.method==='POST'){
     const chunks=[];let size=0,aborted=false;
@@ -180,6 +190,7 @@ const server = http.createServer((req, res) => {
     }catch(e){res.writeHead(400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:e.message}));}});return;
   }
   if(req.url==='/bridge/records'&&req.method==='POST'){
+    if(process.env.BUSINESS_SYNC_STATION){res.writeHead(409,{'Content-Type':'application/json'});res.end(JSON.stringify({error:'已启用双向同步，请更新 Windows 桥接并启用 businessSync'}));return;}
     let raw='';req.on('data',c=>{raw+=c;if(raw.length>1024*1024)req.destroy();});
     req.on('end',()=>{try{const {station,records}=JSON.parse(raw);if(typeof station!=='string'||!Array.isArray(records)||records.length>20)throw Error('记录格式无效');
       store.exec('BEGIN IMMEDIATE');let result;
@@ -190,10 +201,11 @@ const server = http.createServer((req, res) => {
   if (req.url === '/bridge/jobs' && req.method==='POST') {
     let raw=''; req.on('data',c=>{raw+=c;if(raw.length>65536) req.destroy();});
     req.on('end',()=>{try {
-      const job=JSON.parse(raw), data=loadData(); data.schedules ||= [];
+      const job=JSON.parse(raw), data=loadData();
+      data.schedules ||= [];
       const old=data.schedules.find(x=>x.cloudJobId===job.cloudJobId);
       if(old) Object.assign(old,job); else data.schedules.push({...job,id:Math.max(0,...data.schedules.map(x=>Number(x.id)||0))+1});
-      if(job.completion){
+      if(job.completion&&!process.env.BUSINESS_SYNC_STATION){
         const q=job.completion;
         const attemptRecords=Object.values(data.records||{}).flatMap(day=>day.items||[]).filter(i=>i.cloudJobId===job.cloudJobId&&(i.cloudAttempt||1)===(job.attempt||1)).sort((a,b)=>(a.printStartTime||'').localeCompare(b.printStartTime||''));
         // An already-posted record wins over a newer provisional batch arriving late.
