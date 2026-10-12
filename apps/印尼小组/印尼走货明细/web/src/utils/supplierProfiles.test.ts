@@ -29,6 +29,28 @@ describe('supplier autocomplete options', () => {
     expect(supplierDisplayName('吸塑', profiles)).toBe('吸塑')
   })
 
+  it('keeps the selected display name and its customs company when another archive shares its full name', () => {
+    const plastics = { id: 1, keyword: '保士特(东莞)塑胶制品有限公司', full: '保士特(东莞)科技有限公司', customs: '塑胶报关公司' }
+    const technology = { id: 2, keyword: '保士特(东莞)科技有限公司', full: '保士特(东莞)科技有限公司', customs: HUASHENGYI_FULL_NAME }
+    for (const profiles of [[plastics, technology], [technology, plastics]]) {
+      const before = JSON.stringify(profiles)
+      for (const selected of profiles) {
+        expect(supplierProfileForName(selected.keyword, profiles)).toBe(selected)
+        expect(supplierDisplayName(selected.keyword, profiles)).toBe(selected.keyword)
+        expect(linkedCustomsCompany(selected.keyword, profiles)).toBe(selected.customs)
+      }
+      expect(supplierSummaryRows(profiles)).toHaveLength(2)
+      expect(JSON.stringify(profiles)).toBe(before)
+    }
+  })
+
+  it('matches exact display names before full names with trimming and case normalization', () => {
+    const alias = { keyword: 'Other', full: 'ACME', customs: '其他报关' }
+    const selected = { keyword: ' ACME ', full: 'ACME', customs: '指定报关' }
+    expect(supplierProfileForName(' acme ', [alias, selected])).toBe(selected)
+    expect(supplierDisplayName('acme', [alias, selected])).toBe('ACME')
+    expect(linkedCustomsCompany('acme', [alias, selected])).toBe('指定报关')
+  })
   it('displays existing company names as display names while retaining customs linkage', () => {
     expect(supplierDisplayName(otherProfile.full, [otherProfile])).toBe('星徽')
     expect(supplierDisplayName('未建档', [otherProfile])).toBe('未建档')
@@ -104,11 +126,18 @@ describe('supplier customs-company linkage', () => {
     expect(linkedCustomsCompany(otherProfile.full, [customProfile])).toBe(customs)
   })
 
-  it('resolves legacy abbreviations but keeps every archive visible in the summary', () => {
+  it('preserves exact legacy display names and only resolves abbreviations without an exact archive', () => {
     const legacyAlias = { keyword: '星徽', full: '星徽' }
     const company = { ...otherProfile, keyword: otherProfile.full }
-    expect(supplierProfileForName('星徽', [company, legacyAlias])).toEqual(company)
+    expect(supplierProfileForName('星徽', [company, legacyAlias])).toEqual(legacyAlias)
+    expect(supplierProfileForName('星徽', [company])).toEqual(company)
     expect(supplierSummaryRows([company, legacyAlias]).map(row => row.seller)).toEqual([company, legacyAlias])
+  })
+
+  it('prefers an exact full name over a longer company containing that name', () => {
+    const exact = { keyword: '甲供应商', full: '星徽公司' }
+    const longer = { keyword: '乙供应商', full: '星徽公司分公司' }
+    expect(supplierProfileForName('星徽公司', [longer, exact])).toBe(exact)
   })
 
   it('preserves distinct IDs and each archive’s fields when names collide', () => {
