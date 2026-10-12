@@ -14,6 +14,7 @@ export function validateConfig(config) {
  if(typeof config.token!=='string'||config.token.length<32||placeholder(config.token))errors.push('请配置至少 32 位的本站专用令牌');
  if(config.consolePort!==undefined&&(!Number.isInteger(config.consolePort)||config.consolePort<1024||config.consolePort>65535))errors.push('consolePort 必须是 1024–65535 的整数');
  if(config.allowInsecureHttp!==undefined&&typeof config.allowInsecureHttp!=='boolean')errors.push('allowInsecureHttp 必须是布尔值');
+ if(config.businessSync!==undefined&&(typeof config.businessSync!=='boolean'||config.businessSync&&config.mode!=='bridge'))errors.push('businessSync 仅支持桥接模式布尔值');
  const ids=new Set();let total=0;
  for(const [key,credential]of [['bambuPrinters','accessCode'],['flashForgePrinters','checkCode']]){
   if(config[key]!==undefined&&!Array.isArray(config[key])){errors.push(key+' 必须是数组');continue;}
