@@ -18,10 +18,10 @@ public sealed class MailboxSyncService(IServiceScopeFactory scopeFactory, ILogge
             using (var inventoryScope = scopeFactory.CreateScope())
             {
                 var inventoryDb = inventoryScope.ServiceProvider.GetRequiredService<AppDbContext>();
-                var owners = await inventoryDb.Users.AsNoTracking().Where(value => value.IsActive && value.MailboxAddress != "" && value.MailboxSecretProtected != "" && (value.CompanyAccess == "Huadeng" || value.CompanyAccess == "Both" || value.Role == "admin"))
-                    .Select(value => value.Id).ToListAsync(stoppingToken);
+                var owners = await inventoryDb.Users.AsNoTracking().Where(value => value.IsActive && value.MailboxAddress != "" && (value.CompanyAccess == "Huadeng" || value.CompanyAccess == "Both" || value.Role == "admin"))
+                    .ToListAsync(stoppingToken);
                 var mailboxes = new List<(string Company, long? Owner)> { ("Xingxin", null) };
-                mailboxes.AddRange(owners.Select(id => ("Huadeng", (long?)id)));
+                mailboxes.AddRange(owners.Where(ServerMailboxConfiguration.IsConfigured).Select(user => ("Huadeng", (long?)user.Id)));
                 foreach (var mailbox in mailboxes)
                 {
                     using var scope = scopeFactory.CreateScope();
@@ -54,11 +54,15 @@ public sealed class MailboxSyncService(IServiceScopeFactory scopeFactory, ILogge
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             db.Company = company; db.MailOwnerId = ownerId;
             AppUser? owner = null;
+            ServerMailboxCredentials? credentials = null;
+            var configurationError = "";
             if (company == "Huadeng")
             {
                 if (ownerId is null or <= 0) return new { configured = false, imported = 0, error = "请先选择船务员邮箱" };
                 owner = await db.Users.AsNoTracking().FirstOrDefaultAsync(value => value.Id == ownerId && value.IsActive && (value.CompanyAccess == "Huadeng" || value.CompanyAccess == "Both" || value.Role == "admin"), cancellationToken);
-                if (owner is null || owner.MailboxAddress == "" || owner.MailboxSecretProtected == "") return new { configured = false, imported = 0 };
+                if (owner is null || !ServerMailboxConfiguration.TryGet(owner, out var resolvedCredentials, out configurationError))
+                    return new { configured = false, imported = 0, error = configurationError };
+                credentials = resolvedCredentials;
             }
             var parser = scope.ServiceProvider.GetRequiredService<EmailParserClient>();
             var setting = await db.MailSystemSettings.AsNoTracking().FirstAsync(value => value.Id == db.CompanySettingId, cancellationToken);
@@ -70,7 +74,7 @@ public sealed class MailboxSyncService(IServiceScopeFactory scopeFactory, ILogge
             if (db.Entry(state).State == EntityState.Detached) db.MailSyncStates.Add(state);
             try
             {
-                var response = await parser.PollMailboxAsync(state.LastUid, startDate, cancellationToken, company, owner);
+                var response = await parser.PollMailboxAsync(state.LastUid, startDate, cancellationToken, company, credentials);
                 if (response.StatusCode is < 200 or >= 300)
                     throw new InvalidOperationException("邮箱连接或读取失败");
                 var payload = JsonNode.Parse(response.Body)?.AsObject()
@@ -88,7 +92,7 @@ public sealed class MailboxSyncService(IServiceScopeFactory scopeFactory, ILogge
                     state.LastUid = 0;
                     if (hadCursor)
                     {
-                        response = await parser.PollMailboxAsync(0, startDate, cancellationToken, company, owner);
+                        response = await parser.PollMailboxAsync(0, startDate, cancellationToken, company, credentials);
                         if (response.StatusCode is < 200 or >= 300) throw new InvalidOperationException("邮箱读取失败");
                         payload = JsonNode.Parse(response.Body)?.AsObject()
                             ?? throw new InvalidOperationException("邮箱服务返回了无效数据");

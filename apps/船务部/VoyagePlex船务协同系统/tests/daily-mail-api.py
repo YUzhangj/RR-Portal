@@ -74,6 +74,10 @@ def run():
             env = dict(os.environ, ConnectionStrings__Default=f"Data Source={db_path}",
                        ASPNETCORE_URLS=base, EmailParser__BaseUrl=f"http://127.0.0.1:{parser_stub.server_port}",
                        DOTNET_CLI_TELEMETRY_OPTOUT="1")
+            env["VOYAGEPLEX_HUADENG_MAILBOXES_JSON"] = json.dumps([
+                {"username":"huadengtest","address":"a@example.com","authCode":"isolated-test-auth","host":"imap.example.com","folder":"INBOX"},
+                {"username":"华登乙","address":"b@example.com","authCode":"isolated-test-auth","host":"imap.example.com","folder":"INBOX"},
+            ])
             env["Logging__LogLevel__Microsoft.EntityFrameworkCore.Database.Command"] = "Information"
             process = subprocess.Popen(["dotnet", str(DLL)], cwd=ROOT / "server/VoyagePlex.Api",
                                        env=env, stdout=log, stderr=log)
@@ -271,18 +275,16 @@ def run():
             request("/api/auth/login", {"username":"mailtest","password":password})
             owner_b = request("/api/users", {"username":"华登乙","displayName":"华登乙","role":"shipping","companyAccess":"Huadeng","password":password}, expected=201)["id"]
             for owner_id, display_name, address in [(owner_a,"华登测试","a@example.com"),(owner_b,"华登乙","b@example.com")]:
-                result = request(f"/api/users/{owner_id}", {"displayName":display_name,"role":"shipping","companyAccess":"Huadeng","isActive":True,"mailboxAddress":address,"mailboxHost":"imap.example.com","mailboxFolder":"INBOX","mailboxAuthCode":"isolated-test-auth"}, method="PUT")
+                result = request(f"/api/users/{owner_id}", {"displayName":display_name,"role":"shipping","companyAccess":"Huadeng","isActive":True,"mailboxAddress":address}, method="PUT")
                 assert result["mailboxConfigured"] and "mailboxSecretProtected" not in result
             test_before_calls=len(ParserStub.calls)
-            assert request(f"/api/users/{owner_a}/mailbox-test",{})["connected"], "Reuse encrypted saved authorization code"
-            assert request(f"/api/users/{owner_a}/mailbox-test",{"mailboxAddress":"new@example.com","mailboxHost":"imap.example.com","mailboxFolder":"INBOX","mailboxAuthCode":"isolated-test-auth"})["connected"], "Unsaved form can be tested"
-            request(f"/api/users/{owner_a}/mailbox-test",{"mailboxAddress":"new@example.com"},expected=400)
+            assert request(f"/api/users/{owner_a}/mailbox-test",{})["connected"], "Server mailbox configuration can be tested"
             assert len(ParserStub.calls)==test_before_calls, "Test connection must not poll or import mail"
-            assert next(value for value in request("/api/users") if value["id"]==owner_a)["mailboxAddress"]=="a@example.com", "Testing must not save form edits"
-            request(f"/api/users/{owner_b}", {"displayName":"华登乙","role":"shipping","companyAccess":"Huadeng","mailboxAddress":"a@example.com","mailboxHost":"imap.example.com","mailboxFolder":"INBOX","mailboxAuthCode":"isolated-test-auth"}, method="PUT", expected=409)
+            assert next(value for value in request("/api/users") if value["id"]==owner_a)["mailboxAddress"]=="a@example.com", "Testing must not change the user binding"
+            request(f"/api/users/{owner_b}", {"displayName":"华登乙","role":"shipping","companyAccess":"Huadeng","mailboxAddress":"a@example.com"}, method="PUT", expected=409)
             with sqlite3.connect(db_path) as connection:
                 encrypted = connection.execute("SELECT MailboxSecretProtected FROM Users WHERE Id=?",(owner_a,)).fetchone()[0]
-                assert encrypted and "isolated-test-auth" not in encrypted
+                assert encrypted == "", "Authorization codes must stay in the server configuration"
                 own_mails=[]
                 for owner_id,day,so in [(owner_a,"2026-10-11","PRIVATE-A"),(owner_b,"2026-10-12","PRIVATE-B")]:
                     batch_id=insert(connection,"ImportBatches",{"Company":"Huadeng","MailOwnerId":owner_id,"Kind":"Email","Status":"PendingConfirmation"})
@@ -330,13 +332,10 @@ def run():
             assert request("/api/mail/settings")["retentionDays"]==180, "Personal settings must be independent"
             assert request("/api/mail/settings")["address"]=="a@example.com"
             assert request("/api/mail/settings")["connectionStatus"]=="Connected", "Saved test result must persist"
-            request(f"/api/users/{owner_a}",{"displayName":"华登测试","role":"shipping","companyAccess":"Huadeng","mailboxAddress":"a@example.com","mailboxHost":"imap.example.com","mailboxFolder":"INBOX","mailboxAuthCode":"isolated-test-auth"},method="PUT")
-            assert request("/api/mail/settings")["connectionStatus"]=="PendingConnection", "Changed credentials must invalidate test evidence"
-            request(f"/api/users/{owner_a}",{"displayName":"华登测试","role":"shipping","companyAccess":"Huadeng","mailboxAddress":"a@example.com","mailboxHost":"imap.example.com","mailboxFolder":"INBOX","mailboxAuthCode":"wrong-code"},method="PUT")
-            assert request(f"/api/users/{owner_a}/mailbox-test",{})["connected"] is False
-            assert request("/api/mail/settings")["connectionStatus"]=="SyncError", "Failed saved connection must show abnormal status"
-            draft_test=request(f"/api/users/{owner_a}/mailbox-test",{"mailboxAddress":"a@example.com","mailboxHost":"imap.example.com","mailboxFolder":"INBOX","mailboxAuthCode":"isolated-test-auth"})
-            request(f"/api/users/{owner_a}",{"displayName":"华登测试","role":"shipping","companyAccess":"Huadeng","mailboxAddress":"a@example.com","mailboxHost":"imap.example.com","mailboxFolder":"INBOX","mailboxAuthCode":"isolated-test-auth","mailboxTestToken":draft_test["testToken"]},method="PUT")
+            request(f"/api/users/{owner_a}",{"displayName":"华登测试","role":"shipping","companyAccess":"Huadeng","mailboxAddress":"other@example.com"},method="PUT")
+            request(f"/api/users/{owner_a}/mailbox-test",{},expected=400)
+            request(f"/api/users/{owner_a}",{"displayName":"华登测试","role":"shipping","companyAccess":"Huadeng","mailboxAddress":"a@example.com"},method="PUT")
+            assert request(f"/api/users/{owner_a}/mailbox-test",{})["connected"]
             status=request("/api/mail/settings")
             assert status["connectionStatus"]=="Connected" and status["testedAt"]
 
@@ -408,7 +407,7 @@ def run():
                 assert all(item["order_total_pieces"]==1668 for task in tasks for item in task["items"])
             print("Multi-container: seven linked tasks, company-neutral rules, carton/quantity conservation and PO totals passed.")
             print("Role permissions: supervisors scoped to company, user grants protected, warehouse company isolation passed.")
-            print("Personal mail: encrypted binding, duplicate binding rejection, owner isolation, cookie tamper rejection, shared tasks, private source redaction and independent settings passed.")
+            print("Personal mail: server-managed credentials, duplicate binding rejection, owner isolation, cookie tamper rejection, shared tasks, private source redaction and independent settings passed.")
             print("Company isolation: same-SO tasks, shared products, independent settings, scoped IDs and user permissions passed.")
             print("Daily mail API: date isolation, cleanup, source preservation, automatic categories, no-task acknowledgement,")
             print("duplicate/failed rejection, batch rollback, grouped task updates, confirmed-only sources and zero task mail queries passed.")

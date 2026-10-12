@@ -6,6 +6,9 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../VoyagePlex.Api/Services/ServerMailboxConfiguration.cs" Link="ServerMailboxConfiguration.cs" />
+    <Compile Include="../VoyagePlex.Api/Entities/AppUser.cs" Link="AppUser.cs" />
+    <Compile Include="../VoyagePlex.Api/Entities/UserSession.cs" Link="UserSession.cs" />
     <Compile Include="../VoyagePlex.Api/Services/CargoNotificationRules.cs" Link="CargoNotificationRules.cs" />
     <Compile Include="../VoyagePlex.Api/Services/ExportTemplateRules.cs" Link="ExportTemplateRules.cs" />
     <Compile Include="../VoyagePlex.Api/Entities/ExportTemplate.cs" Link="ExportTemplate.cs" />
