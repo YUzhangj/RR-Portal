@@ -96,7 +96,11 @@ def _quoted_scalars_complete_on_their_line(blob: bytes) -> bool:
     for line in blob.splitlines():
         if not line.strip() or line.lstrip().startswith(b"#"):
             continue
-        mapping = re.fullmatch(rb"[ \t]*(?:[A-Za-z0-9_.-]+|<<):[ \t]+(.*)", line)
+        # Quoted/complex/tagged mapping keys are outside this small parser's
+        # grammar. Plain keys may be Unicode, including in another service.
+        if line.lstrip()[:1] in (b"'", b'"', b"?", b"!", b"&", b"*"):
+            return False
+        mapping = re.fullmatch(rb"[ \t]*[^:\r\n]+:[ \t]+(.*)", line)
         sequence = re.fullmatch(rb"[ \t]*-[ \t]+(.*)", line)
         if not mapping and not sequence:
             continue
