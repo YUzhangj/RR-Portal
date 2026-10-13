@@ -803,7 +803,10 @@ public class MaterialCompletionIntegrationTests
             var schema = "tracking_test_" + Guid.NewGuid().ToString("N");
             var admin = new NpgsqlConnection(connection); await admin.OpenAsync();
             await admin.ExecuteAsync($"CREATE SCHEMA {schema}");
-            var scoped = new NpgsqlConnectionStringBuilder(connection) { SearchPath = schema }.ConnectionString;
+            // Every fixture has a unique search path. Pooling would leave an
+            // idle pool per dropped schema until its timeout, exhausting CI's
+            // PostgreSQL connection limit as coverage grows.
+            var scoped = new NpgsqlConnectionStringBuilder(connection) { SearchPath = schema, Pooling = false }.ConnectionString;
             var db = new NpgsqlConnection(scoped); await db.OpenAsync();
             var fixture = new Fixture(admin, db, schema, scoped);
             try
