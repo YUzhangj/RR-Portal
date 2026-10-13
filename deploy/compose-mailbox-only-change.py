@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Accept one of two exact, single-line Compose environment additions.
+"""Accept exact Compose environment additions or the Peise OCR model update.
 
 Exit 0 means update-server.sh may deploy the matching service incrementally. All other
 changes and read failures exit 1, preserving the full Compose rollout fallback.
@@ -18,6 +18,10 @@ MAILBOX_KEY = b"VOYAGEPLEX_HUADENG_MAILBOXES_JSON"
 ADDED_LINE = b"      " + MAILBOX_KEY + b": ${" + MAILBOX_KEY + b":-}\n"
 STATION_KEY = b"BUSINESS_SYNC_STATION"
 STATION_LINE = b"      " + STATION_KEY + b": ${" + STATION_KEY + b":-}\n"
+PEISE_MODEL_BEFORE = ("      # 注意: 阿里云已关闭 -latest 别名模型的访问权限(403 access_denied), 必须用稳定版模型名\n"
+                      "      - BAILIAN_MODEL=${PEISE_BAILIAN_MODEL:-qwen-vl-max}\n").encode()
+PEISE_MODEL_AFTER = ("      # 使用已验证可访问的视觉模型；API Key 所属地域与模型权限需匹配\n"
+                     "      - BAILIAN_MODEL=${PEISE_BAILIAN_MODEL:-qwen3-vl-plus}\n").encode()
 
 
 def is_mailbox_only_addition(before: bytes, after: bytes) -> bool:
@@ -33,7 +37,117 @@ def incremental_service(before: bytes, after: bytes):
         return "voyageplex-api"
     if is_station_only_addition(before, after):
         return "printlink"
+    if is_peise_model_only_change(before, after):
+        return "peise"
     return None
+
+
+def is_peise_model_only_change(before: bytes, after: bytes) -> bool:
+    # Only the reviewed model/comment pair changes, with every other byte exact.
+    # Do not accept arbitrary env replacements, credentials, or other services.
+    if (before.count(PEISE_MODEL_BEFORE) != 1 or after.count(PEISE_MODEL_AFTER) != 1
+            or after.replace(PEISE_MODEL_AFTER, PEISE_MODEL_BEFORE, 1) != before):
+        return False
+    if not _quoted_scalars_complete_on_their_line(after):
+        return False
+    in_services = False
+    service = section = None
+    services_seen = target_seen = environments_seen = 0
+    eligible = False
+    environment_keys = set()
+    model_line = PEISE_MODEL_AFTER.splitlines(keepends=True)[1]
+    for line in after.splitlines(keepends=True):
+        if not line.strip() or line.lstrip().startswith(b"#"):
+            continue
+        if not line.startswith(b" "):
+            in_services = line == b"services:\n"
+            services_seen += int(in_services)
+            service = section = None
+            continue
+        if not in_services:
+            continue
+        if line.startswith(b"  ") and not line.startswith(b"   "):
+            if not re.fullmatch(rb"  [A-Za-z0-9_-]+:\n", line):
+                return False
+            service = line[2:-2]
+            target_seen += int(service == b"peise")
+            section = None
+            continue
+        if service != b"peise":
+            continue
+        if line.startswith(b"    ") and not line.startswith(b"     "):
+            section = b"environment" if line == b"    environment:\n" else None
+            environments_seen += int(section == b"environment")
+            continue
+        if section == b"environment":
+            entry = re.fullmatch(rb"      - ([A-Za-z_][A-Za-z0-9_]*)=([^\r\n]+)\n", line)
+            if (not entry or entry.group(1) in environment_keys
+                    or not _is_single_line_environment_value(entry.group(2))):
+                return False
+            environment_keys.add(entry.group(1))
+            if line == model_line:
+                eligible = True
+    return eligible and services_seen == target_seen == environments_seen == 1
+
+
+def _quoted_scalars_complete_on_their_line(blob: bytes) -> bool:
+    # A quoted value in any other service may legally span apparently mapped
+    # lines at a lower indent. Never mistake its text for the target service.
+    for line in blob.splitlines():
+        if not line.strip() or line.lstrip().startswith(b"#"):
+            continue
+        # Quoted/complex/tagged mapping keys are outside this small parser's
+        # grammar. Plain keys may be Unicode, including in another service.
+        if line.lstrip()[:1] in (b"'", b'"', b"?", b"!", b"&", b"*"):
+            return False
+        mapping = re.fullmatch(rb"[ \t]*.+?:[ \t]+(.*)", line)
+        sequence = re.fullmatch(rb"[ \t]*-[ \t]+(.*)", line)
+        if not mapping and not sequence:
+            continue
+        value = (sequence or mapping).group(1).lstrip(b" \t")
+        if sequence and value[:1] not in (b"'", b'"', b"[", b"{"):
+            inline_mapping = re.fullmatch(rb".+?:[ \t]+(.*)", value)
+            if inline_mapping:
+                value = inline_mapping.group(1).lstrip(b" \t")
+        # The actual Compose has single-line anchors for shared environment.
+        anchor = re.match(rb"&[A-Za-z0-9_-]+(?:[ \t]+|$)", value)
+        if anchor:
+            value = value[anchor.end():].lstrip(b" \t")
+        if value[:1] in (b"'", b'"'):
+            if not _is_single_line_environment_value(value):
+                return False
+        elif value.startswith(b"!"):
+            return False
+        elif value[:1] in (b"[", b"{"):
+            # Allow the existing single-line healthcheck/command arrays, but
+            # reject a flow collection or quoted flow value continuing below.
+            stack = []
+            quote = None
+            offset = 0
+            while offset < len(value):
+                char = value[offset:offset + 1]
+                if quote:
+                    if quote == b'"' and char == b"\\":
+                        offset += 2
+                        continue
+                    if char == quote:
+                        if quote == b"'" and value[offset + 1:offset + 2] == b"'":
+                            offset += 2
+                            continue
+                        quote = None
+                elif char in (b"'", b'"'):
+                    quote = char
+                elif char in (b"[", b"{"):
+                    stack.append(char)
+                elif char in (b"]", b"}"):
+                    if not stack or (stack.pop(), char) not in [(b"[", b"]"), (b"{", b"}")]:
+                        return False
+                elif char == b"#":
+                    break
+                offset += 1
+            if quote or stack:
+                return False
+    return True
 
 
 def _is_single_line_environment_value(value: bytes) -> bool:
