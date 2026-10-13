@@ -207,6 +207,31 @@ def run():
             assert {source["id"] for source in task["sourceEmails"]} == {new, change}
             assert task["plannedShipDate"] == "2026-10-16", "Confirmed changes must update actual task fields"
             with sqlite3.connect(db_path) as connection:
+                delivery = mail(connection, "2026-10-09", "送丹尼送货任务", so="SO-DELIVERY", mode="Delivery")
+                payload = json.loads(connection.execute("SELECT ResultJson FROM ImportEmailItems WHERE Id=?", (delivery,)).fetchone()[0])
+                payload["fields"].update(task_type="Delivery", ship_date="2026-07-30", pickup_date="2026-07-31", delivery_factory="丹尼", dispatch_date_source="explicit", container_type="", delivery_time="11:00")
+                connection.execute("UPDATE ImportEmailItems SET ResultJson=? WHERE Id=?", (json.dumps(payload), delivery))
+                shared = mail(connection, "2026-10-09", "同仓不同SO交仓", so="SO-W1", mode="Warehouse")
+                payload = json.loads(connection.execute("SELECT ResultJson FROM ImportEmailItems WHERE Id=?", (shared,)).fetchone()[0])
+                payload["fields"]["separate_warehouse_so"] = "true"
+                cargo = [{"product_code":"P1","source_row":1,"source_file":"PL.xlsx","quantity":12}, {"product_code":"P2","source_row":2,"source_file":"PL.xlsx","quantity":24}]
+                payload["items"] = cargo
+                payload["warehouse_groups"] = [{"warehouse":"同一仓库","so_number":"SO-W1","items":[cargo[0]]}, {"warehouse":"同一仓库","so_number":"SO-W2","items":[cargo[1]]}]
+                connection.execute("UPDATE ImportEmailItems SET ResultJson=? WHERE Id=?", (json.dumps(payload), shared))
+            delivery_id = request("/api/mail/candidates/batch/confirm", {"ids":[delivery]})["taskIds"][0]
+            delivered = request(f"/api/shipments/{delivery_id}")
+            assert delivered["plannedShipDate"] == "2026-07-30"
+            assert delivered["exportDetails"]["shipmentMode"] == "Delivery"
+            assert delivered["exportDetails"]["pickupDate"] == "2026-07-31"
+            assert delivered["exportDetails"]["deliveryTime"] == "11:00"
+            request(f"/api/shipments/{delivery_id}", {"exportDetails":delivered["exportDetails"]}, method="PATCH")
+            assert request(f"/api/shipments/{delivery_id}")["exportDetails"]["deliveryFactory"] == "丹尼"
+            warehouse_ids = request("/api/mail/candidates/batch/confirm", {"ids":[shared]})["taskIds"]
+            warehouse_tasks = [request(f"/api/shipments/{id}") for id in warehouse_ids]
+            assert sorted(t["soNumber"] for t in warehouse_tasks) == ["SO-W1","SO-W2"]
+            assert sorted(t["items"][0]["quantity"] for t in warehouse_tasks) == [12,24]
+            print("Delivery dates and separate warehouse SO task creation passed.")
+            with sqlite3.connect(db_path) as connection:
                 grouped = mail(connection, "2026-10-09", "新增整柜 SO-GROUP", so="SO-GROUP")
                 grouped_change = mail(connection, "2026-10-09", "变更整柜 SO-GROUP", category="Change", so="SO-GROUP")
                 for item_id in (grouped, grouped_change):

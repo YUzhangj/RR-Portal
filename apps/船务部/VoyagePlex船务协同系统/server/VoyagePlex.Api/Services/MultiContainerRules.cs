@@ -8,6 +8,8 @@ public static class MultiContainerRules
     private const int MeasurementPrecision = 6;
     public static List<(string GroupKey, JsonObject Payload)> Split(JsonObject stored)
     {
+        if (stored["fields"]?["explicit_container_allocation"]?.ToString() == "true")
+            return SplitExplicit(stored);
         var groups = stored["shipment_groups"]?.AsArray() ?? [];
         if (groups.Count < 2 || groups.Count > 100) throw new InvalidOperationException("多柜安排须包含2至100个柜");
         if (stored["fields"] is not JsonObject || groups.Any(g => g is not JsonObject ||
@@ -85,6 +87,32 @@ public static class MultiContainerRules
                 result[cabinet].Payload["items"]!.AsArray().Add(copy);
                 left -= boxes; targets[cabinet] -= boxes;
             }
+        }
+        return result;
+    }
+
+    private static List<(string GroupKey, JsonObject Payload)> SplitExplicit(JsonObject stored)
+    {
+        var groups = stored["shipment_groups"]?.AsArray() ?? [];
+        var items = stored["items"]?.AsArray() ?? [];
+        if (groups.Count is < 1 or > 100 || groups.Any(group => group is not JsonObject || string.IsNullOrWhiteSpace(group["group_key"]?.ToString())))
+            throw new InvalidOperationException("附件分柜信息无效");
+        var keys = groups.Select(group => group!["group_key"]!.ToString()).ToHashSet(StringComparer.Ordinal);
+        if (keys.Count != groups.Count || items.Any(item => item is not JsonObject || !keys.Contains(item["container_assignment"]?.ToString() ?? "")))
+            throw new InvalidOperationException("附件柜归属重复或产品未完整分配，不能确认");
+        var result = new List<(string, JsonObject)>();
+        foreach (var group in groups.OfType<JsonObject>())
+        {
+            var key = group["group_key"]!.ToString();
+            var payload = stored.DeepClone().AsObject();
+            var fields = payload["fields"]?.AsObject() ?? new JsonObject();
+            fields["so_number"] = group["so_number"]?.DeepClone();
+            fields["container_type"] = group["container_type"]?.DeepClone();
+            payload["fields"] = fields;
+            payload["so_numbers"] = new JsonArray(group["so_number"]?.DeepClone());
+            payload["items"] = new JsonArray(items.Where(item => item?["container_assignment"]?.ToString() == key).Select(item => item!.DeepClone()).ToArray());
+            payload["warehouse_groups"] = new JsonArray();
+            result.Add((key, payload));
         }
         return result;
     }

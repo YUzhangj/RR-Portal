@@ -27,6 +27,18 @@ foreach (var invalidConfiguration in new[] { "invalid", "[null]", "{}", "[{\"use
 }
 Environment.SetEnvironmentVariable(ServerMailboxConfiguration.EnvironmentVariable, null);
 Console.WriteLine("Server-managed mailbox configuration tests passed.");
+var explicitCabinets = JsonNode.Parse("""
+{"fields":{"explicit_container_allocation":"true"},"shipment_groups":[{"group_key":"C1","so_number":"SO1","container_type":"45HQ"},{"group_key":"C2","so_number":"SO1","container_type":"40HQ"}],"items":[{"product_code":"A","container_assignment":"C1","quantity":12,"pieces":3},{"product_code":"A","container_assignment":"C2","quantity":24,"pieces":6}]}
+""")!.AsObject();
+var explicitTasks = MultiContainerRules.Split(explicitCabinets);
+if (explicitTasks.Count != 2 || explicitTasks[0].Payload["items"]![0]!["quantity"]!.GetValue<int>() != 12 ||
+    explicitTasks[1].Payload["items"]![0]!["quantity"]!.GetValue<int>() != 24 ||
+    explicitTasks[1].Payload["fields"]!["container_type"]!.ToString() != "40HQ")
+    throw new InvalidOperationException("附件明确分柜必须保留原始数量及柜型，不得重新平均分配");
+explicitCabinets["items"]![0]!["container_assignment"] = "UNKNOWN";
+try { MultiContainerRules.Split(explicitCabinets); throw new Exception("应拒绝未分配货物"); }
+catch (InvalidOperationException) { }
+Console.WriteLine("Explicit cabinet assignment tests passed.");
 
 if (MailboxDateRules.ReceivedDate("2026-09-17T15:59:00+00:00") != "2026-09-17" ||
     MailboxDateRules.ReceivedDate("2026-09-17T16:00:00+00:00") != "2026-09-18" ||
@@ -315,3 +327,11 @@ if (MultiContainerRules.Split(emptyPlan).Any(c => c.Payload["fields"]?["export_t
 var invalidPlan = multiPlan.DeepClone().AsObject(); invalidPlan["items"]![0]!["pieces"] = 1.5;
 try { MultiContainerRules.Split(invalidPlan); throw new Exception("不应允许小数箱数"); } catch (InvalidOperationException) { }
 Console.WriteLine("Multi-container carton/weight conservation, PO context and no-cargo rules passed.");
+
+var sharedWarehouse = JsonNode.Parse("""{"fields":{"separate_warehouse_so":"true"},"items":[{"product_code":"A","source_row":1,"quantity":12},{"product_code":"B","source_row":2,"quantity":24}],"warehouse_groups":[{"warehouse":"同一仓库","so_number":"SO1","items":[{"product_code":"A","source_row":1}]},{"warehouse":"同一仓库","so_number":"SO2","items":[{"product_code":"B","source_row":2}]}]}""")!.AsObject();
+var warehouseTasks = WarehouseSoRules.Split(sharedWarehouse);
+if (warehouseTasks.Count != 2 || warehouseTasks[0].Payload["fields"]!["so_number"]!.ToString() != "SO1" || warehouseTasks[1].Payload["items"]![0]!["quantity"]!.GetValue<int>() != 24)
+    throw new InvalidOperationException("同仓不同SO必须分别建任务，保留对应货物数量");
+sharedWarehouse["warehouse_groups"]!.AsArray().RemoveAt(1);
+try { WarehouseSoRules.Split(sharedWarehouse); throw new Exception("必须拒绝遗漏货物"); } catch (InvalidOperationException) { }
+Console.WriteLine("Warehouse SO isolation tests passed.");

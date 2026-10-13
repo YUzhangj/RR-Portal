@@ -66,7 +66,7 @@ async def poll_mailbox(after_uid: int = 0, start_date: str = "2026-10-08", compa
             return {"configured": False, "items": []}
         entries = [{"filename": f'mail-{entry["uid"]}.eml', "raw": entry["raw"]}
                    for entry in mailbox["messages"] if entry["raw"]]
-        parsed = await asyncio.to_thread(parse_email_entries, entries) if entries else {"items": []}
+        parsed = await asyncio.to_thread(parse_email_entries, entries, *([] if company == "Xingxin" else [company])) if entries else {"items": []}
         parsed_by_uid = {int(item["filename"][5:-4]): item for item in parsed["items"]}
         items = []
         for entry in mailbox["messages"]:
@@ -103,15 +103,15 @@ def build_warehouse_groups(parsed_attachments: list[dict]) -> list[dict]:
     for attachment in parsed_attachments:
         fields = attachment.get("fields", {})
         attachment_items = attachment.get("items", [])
-        if not fields.get("delivery_address") and not attachment_items:
+        if not fields.get("delivery_address") and not fields.get("warehouse") and not attachment_items:
             continue
         filename = attachment["filename"]
         match = re.search(r"\b(\d{7,})\b", filename)
         reference = match.group(1) if match else Path(filename).stem
         entry = by_reference.setdefault(reference, {"reference": reference, "warehouse": "", "items": [], "source_files": []})
         entry["source_files"].append(filename)
-        if fields.get("delivery_address"):
-            entry["warehouse"] = fields["delivery_address"]
+        if fields.get("warehouse") or fields.get("delivery_address"):
+            entry["warehouse"] = fields.get("warehouse") or fields["delivery_address"]
         entry["items"].extend(attachment_items)
 
     grouped: dict[str, dict] = {}
@@ -360,12 +360,12 @@ async def export_completed_shipment_summary(payload: dict):
 
 
 @app.post("/v1/email-batches/parse")
-async def parse_email_batch(files: list[UploadFile] = File(...)):
+async def parse_email_batch(files: list[UploadFile] = File(...), company: str = "Xingxin"):
     entries = [{"filename": file.filename, "raw": await file.read()} for file in files]
-    return await asyncio.to_thread(parse_email_entries, entries)
+    return await asyncio.to_thread(parse_email_entries, entries, company)
 
 
-def parse_email_entries(entries: list[dict]) -> dict:
+def parse_email_entries(entries: list[dict], company: str = "Xingxin") -> dict:
     batch_id = str(uuid.uuid4())
     results = []
     with tempfile.TemporaryDirectory(prefix=f"voyageplex-{batch_id}-") as root:
@@ -415,15 +415,10 @@ def parse_email_entries(entries: list[dict]) -> dict:
                         continue
                     if is_supported:
                         successful_attachment_count += 1
-                    if parsed_attachment["kind"] != "amazon_allocation":
-                        parsed_attachment["items"] = filter_items_for_email(
-                            parsed_attachment["items"], shipment_type,
-                            str(parsed_attachment["fields"].get("loading_factory", "")) or loading_factory,
-                        )
                     if parsed_attachment["kind"] == "packing_list":
                         parsed_attachment["items"] = [{
                             **cargo,
-                            "loading_factory": cargo.get("loading_factory") or
+                            "loading_factory": cargo.get("factory_remark") or cargo.get("loading_factory") or
                                 parsed_attachment["fields"].get("loading_factory") or
                                 loading_factory or cargo.get("factory_remark", ""),
                         } for cargo in parsed_attachment["items"]]
@@ -457,11 +452,6 @@ def parse_email_entries(entries: list[dict]) -> dict:
                             fields[target_key] = value
                 # Target carrier schedules expose the secondary SO as booking_number
                 # in the attached booking sheet; keep it beside the current order SO.
-                if re.search(r"CYO[23].*target PO", message["subject"], re.I) and fields.get("booking_number"):
-                    numbers = fields.get("so_number", "").split(",")
-                    booking = str(fields["booking_number"]).strip()
-                    if re.fullmatch(r"[A-Za-z0-9-]{6,}", booking) and booking not in numbers:
-                        fields["so_number"] = ",".join([*numbers, booking])
                 for key, values in attachment_date_candidates.items():
                     used_attachment = bool(values) and not fields.get(key)
                     if used_attachment:
@@ -477,6 +467,19 @@ def parse_email_entries(entries: list[dict]) -> dict:
                         fields[key] = value
                 if supported_attachment_count > 0 and successful_attachment_count == 0:
                     raise ValueError("邮件中的业务附件均无法解析")
+                from .parsing_policy import apply_policies, POLICY_VERSION
+                if fields.get("warehouse"):
+                    shipment_type = "warehouse"
+                policy = apply_policies(message, fields, attachment_details, shipment_type, company)
+                shipment_type = policy["shipment_type"]
+                for detail in attachment_details:
+                    detail["items"] = [{**cargo, "source_file": detail["filename"]} for cargo in detail["items"]]
+                items = [{**cargo, "source_file": detail["filename"]} for detail in attachment_details for cargo in detail["items"]]
+                warnings.extend(policy["review"])
+                for result in attachment_results:
+                    matched = next((d for d in attachment_details if d["filename"] == result["filename"]), None)
+                    if matched is not None:
+                        result["item_count"] = len(matched["items"])
                 shipment_groups = build_amazon_shipment_groups(
                     message["subject"], message["body_text"], attachment_details)
                 if shipment_groups:
@@ -497,6 +500,22 @@ def parse_email_entries(entries: list[dict]) -> dict:
                     } for group in shipment_groups]
                 else:
                     warehouse_groups = build_warehouse_groups(attachment_details)
+                    body_warehouse = parse_body(f'{message["subject"]}\n{message["body_text"]}').get("warehouse", "")
+                    if body_warehouse:
+                        for group in warehouse_groups:
+                            if group["warehouse"] == "待确认仓库":
+                                group["warehouse"] = body_warehouse
+                            elif re.search(r"STORAGE|FLOW", group["warehouse"], re.I):
+                                group["destination_dc"] = group["warehouse"]
+                                group["warehouse"] = body_warehouse
+                    local_names = {d["fields"].get("warehouse") for d in attachment_details if d["fields"].get("warehouse")}
+                    if shipment_type == "warehouse" and len(local_names) == 1:
+                        local_name = next(iter(local_names))
+                        # A single explicit local warehouse applies to the paired cargo
+                        # even when the carrier's PDF and PL use different identifiers.
+                        warehouse_groups = [{"warehouse": local_name, "references": [d["filename"] for d in attachment_details if d["items"]], "items": items, "source_files": [d["filename"] for d in attachment_details if d["items"]]}] if items else []
+                if fields.get("warehouse"):
+                    shipment_type = "warehouse"
                 fields["destination_country"] = infer_destination_country(
                     f'{message["subject"]}\n{message["body_text"]}', attachment_details)
                 if requires_cargo_split(f'{message["subject"]}\n{message["body_text"]}'):
@@ -517,6 +536,27 @@ def parse_email_entries(entries: list[dict]) -> dict:
                     if fields["export_template"]:
                         fields["customer"] = "Sky Castle"
                     warnings.append("已识别多柜安排；请核对整批产品和箱数，相同产品优先集中装柜。")
+                if policy["cabinet_groups"]:
+                    shipment_groups = policy["cabinet_groups"]
+                    warehouse_groups = []
+                elif shipment_type != "warehouse":
+                    warehouse_groups = []
+                if shipment_type == "delivery":
+                    shipment_groups = []
+                    fields["explicit_container_allocation"] = "false"
+                    fields["multi_container"] = "false"
+                    fields["container_type"] = ""
+                if shipment_type == "warehouse":
+                    regrouped = []
+                    for group in warehouse_groups:
+                        by_so = {}
+                        for cargo in group["items"]:
+                            so = str(cargo.get("carrier_so") or fields.get("so_number", ""))
+                            by_so.setdefault(so, []).append(cargo)
+                        for so, cargo in by_so.items():
+                            regrouped.append({**group, "so_number": so, "items": cargo})
+                    warehouse_groups = regrouped
+                    fields["separate_warehouse_so"] = "true"
                 item.update({
                     "status": "parsed",
                     "fingerprint": message["fingerprint"],
@@ -531,6 +571,9 @@ def parse_email_entries(entries: list[dict]) -> dict:
                     "shipment_groups": shipment_groups,
                     "so_numbers": fields["so_number"].split(",") if "," in fields.get("so_number", "") else [reference for group in warehouse_groups for reference in group["references"]],
                     "warnings": warnings,
+                    "rule_version": POLICY_VERSION,
+                    "rule_trace": policy["trace"],
+                    "review_reasons": policy["review"],
                 })
             except Exception as exc:
                 item.update({"status": "failed", "error": str(exc)})

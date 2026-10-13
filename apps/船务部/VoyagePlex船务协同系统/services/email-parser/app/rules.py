@@ -2,6 +2,7 @@
 
 import re
 from datetime import datetime
+from .warehouse_name import warehouse_name
 
 PORTS = {
     "盐田": "盐田", "蛇口": "蛇口", "南沙": "南沙", "黄埔": "黄埔", "赤湾": "赤湾",
@@ -41,7 +42,7 @@ def parse_body(body: str) -> dict:
             r"^S/O[ \t]+([A-Z0-9]+(?:/[A-Z0-9-]+)+)",
             r"<SO>\s*([A-Z0-9]{6,})",
             r"\bSO\s*[#:]\s*(?!SO\b)([A-Z0-9]{6,})",
-            r"S/O\.?[ \t]*NO\.?[ \t]*[：:]?[ \t]+([A-Z0-9]{6,})",
+            r"S/O\.?[ \t]*NO\.?[ \t]*[：:]?[ \t]*([A-Z0-9]{6,})",
             r"Booking[ \t]*(?:No|Number)[ \t]*[：:.]?[ \t]+([A-Z0-9]{6,})",
             r"订舱号[：:\s]*([A-Z0-9]{6,})",
             r"\b(BN\d{6,})\b",
@@ -56,6 +57,7 @@ def parse_body(body: str) -> dict:
         "ship_date": _ship_date(body),
         "port": _port(body),
         "special_requirements": _requirements(body),
+        "warehouse": warehouse_name(body),
     }
 
 

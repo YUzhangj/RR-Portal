@@ -31,9 +31,9 @@ public static class MailClassificationRules
             category = ("Shipment", ParsedShipmentConfidence, "ParsedRule", false);
         if (category.Category == "Unclassified" && Regex.IsMatch(text, @"船期资讯|收件回执|已收到.{0,10}谢谢|仅供参考"))
             category = ("Other", ParsedShipmentConfidence, "ParsedRule", false);
-        var warehouse = Regex.IsMatch(text, @"交仓|入仓|散货收货站|\bCFS\b", RegexOptions.IgnoreCase);
+        var warehouse = parsed["shipment_type"]?.ToString() == "warehouse" || !string.IsNullOrWhiteSpace(fields?["warehouse"]?.ToString()) || Regex.IsMatch(text, @"交仓|入仓|散货收货站|\bCFS\b", RegexOptions.IgnoreCase);
         var container = Regex.IsMatch(text + "\n" + fields?["container_type"], @"整柜|装柜|\b(?:20|40|45)\s*(?:HQ|HC|GP|FT)\b", RegexOptions.IgnoreCase);
-        var mode = warehouse ? "Warehouse" : container ? "Container" : "Unknown";
+        var mode = fields?["task_type"]?.ToString() == "Delivery" ? "Delivery" : warehouse ? "Warehouse" : container ? "Container" : "Unknown";
         return (category.Category, category.Confidence, "ParsedRule", category.NeedsReview, mode);
     }
 

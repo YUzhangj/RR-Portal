@@ -1871,6 +1871,21 @@ static void ApplyReviewedEmailToTask(ShipmentTask task, JsonObject stored, bool 
     task.DestinationCountry = fields["destination_country"]?.ToString() ?? string.Empty;
     task.SpecialRequirements = fields["special_requirements"]?.ToString() ?? string.Empty;
     task.WarehouseGroupsJson = stored["warehouse_groups"]?.ToJsonString() ?? "[]";
+    if (fields["task_type"]?.ToString() == "Delivery")
+        task.ExportDetailsJson = new JsonObject { ["shipmentMode"] = "Delivery", ["deliveryFactory"] = fields["delivery_factory"]?.DeepClone(), ["pickupDate"] = fields["pickup_date"]?.DeepClone(), ["dispatchDateSource"] = fields["dispatch_date_source"]?.DeepClone() }.ToJsonString();
+    else if (MailClassificationRules.ClassifyParsed(subject, stored).Mode == "Warehouse")
+    {
+        var groups = stored["warehouse_groups"]?.AsArray();
+        var warehouse = groups?.Count == 1 ? groups[0]?["warehouse"]?.ToString() : fields["warehouse"]?.ToString();
+        if (groups?.Count > 1) warehouse = "";
+        task.ExportDetailsJson = new JsonObject { ["shipmentMode"] = "Warehouse", ["warehouse"] = warehouse ?? "" }.ToJsonString();
+    }
+    if (!string.IsNullOrWhiteSpace(fields["delivery_time"]?.ToString()))
+    {
+        var deliveryDetails = JsonNode.Parse(task.ExportDetailsJson)?.AsObject() ?? new JsonObject();
+        deliveryDetails["deliveryTime"] = fields["delivery_time"]?.DeepClone();
+        task.ExportDetailsJson = deliveryDetails.ToJsonString();
+    }
     if (fields["export_template"]?.ToString() == "sky-castle-multi")
         task.ExportDetailsJson = new JsonObject { ["templateKey"] = "sky-castle-multi", ["vesselName"] = fields["vessel_name"]?.DeepClone() }.ToJsonString();
     task.ItemsJson = SanitizeShipmentItems(stored["items"]?.AsArray() ?? new JsonArray()).ToJsonString();
@@ -1879,18 +1894,23 @@ static void ApplyReviewedEmailToTask(ShipmentTask task, JsonObject stored, bool 
         task.CutoffDate,
         task.SiDeadline,
         message["received_at"]?.ToString());
+    if (fields["task_type"]?.ToString() == "Delivery")
+        task.PlannedShipDate = DateOnly.TryParse(fields["ship_date"]?.ToString(), out var deliveryDate) ? deliveryDate : null;
     if (initializeStatus) task.Status = fields["waiting_notification"]?.ToString() == "true" ? "WaitingNotification" : "PendingReview";
     if (task.Status == "WaitingNotification")
     {
         task.PlannedShipDate = null;
-        task.ExportDetailsJson = new JsonObject { ["shipmentMode"] = "Warehouse" }.ToJsonString();
+        var details = JsonNode.Parse(task.ExportDetailsJson)?.AsObject() ?? new JsonObject();
+        if (details["shipmentMode"]?.ToString() != "Delivery") details["shipmentMode"] = "Warehouse";
+        task.ExportDetailsJson = details.ToJsonString();
     }
     task.UpdatedAt = DateTime.UtcNow;
 }
 
 static List<(string GroupKey, JsonObject Payload)> ShipmentTaskPayloads(JsonObject stored)
 {
-    if (stored["fields"]?["multi_container"]?.ToString() == "true") return MultiContainerRules.Split(stored);
+    if (stored["fields"]?["separate_warehouse_so"]?.ToString() == "true") return WarehouseSoRules.Split(stored);
+    if (stored["fields"]?["multi_container"]?.ToString() == "true" || stored["fields"]?["explicit_container_allocation"]?.ToString() == "true") return MultiContainerRules.Split(stored);
     var groups = stored["shipment_groups"]?.AsArray();
     if (groups is null || groups.Count == 0) return CargoNotificationRules.Split(string.Empty, stored);
     var result = new List<(string, JsonObject)>();

@@ -1,5 +1,6 @@
 """Read the provided Huadeng cabinet/delivery forms, including merged mixed cartons."""
 import re
+from .warehouse_name import warehouse_name
 from .attachments import _number, _text, _product_name_and_spec
 
 
@@ -39,6 +40,9 @@ def parse_huadeng_form(rows, merges):
     so = re.search(r'SO\s*#\s*([A-Z0-9-]+)', flat, re.I)
     country = next((_text(row[6]) for row in rows[header+1:] if len(row)>7 and _text(row[0])=='华登'), '')
     fields = {'destination_country': country}
+    warehouse = warehouse_name('\n'.join(' '.join(_text(v) for v in row) for row in rows[:header]))
+    if warehouse:
+        fields.update(warehouse=warehouse, delivery_address=warehouse)
     if so:
         fields['so_number'] = so.group(1)
     return {'kind':'huadeng_shipment_form', 'fields':fields, 'items':items, 'warnings':[] if items else ['华登表格没有识别到货物明细']}
