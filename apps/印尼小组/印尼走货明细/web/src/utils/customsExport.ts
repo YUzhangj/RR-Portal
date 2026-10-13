@@ -10,6 +10,7 @@ import type { Material, SupplierDict } from '../api/client'
 import { documentSellerForLine, supplierForLine } from './supplierProfiles'
 import { deliveryDeadline, syncedShipmentDeadline } from './shipmentDeadline'
 import { isPaperRope, shipmentGrossPerPc, shipmentPackingAverageQty, shipmentWeightQuantity } from './shipmentWeight'
+import { bindInvoiceLookupSerial, documentRow, rebindDocumentFormula, type DocumentTableLayout } from './documentTemplateFormula'
 
 import { CUSTOMS_FIXED, effectiveCustomsCompany, sortShipmentItems, cartonLayout } from './shipmentOrder'
 export { CUSTOMS_FIXED, effectiveCustomsCompany } from './shipmentOrder'
@@ -468,6 +469,25 @@ function collectLinkedDocumentGroups(
   return groups
 }
 
+// RRM header and detail coordinates, shared by population and formula recovery.
+const RRM_DOCUMENT_SLOTS = [
+  [5, 9, 24, 37, 9, 11, 13, 32, 45, 9, 24, 37],
+  [56, 60, 75, 75, 62, 64, 66, 83, 83, 49, 64, 64],
+  [97, 101, 116, 116, 97, 99, 101, 118, 118, 79, 94, 94],
+  [139, 143, 158, 158, 138, 140, 142, 160, 160, 109, 124, 124],
+  [180, 184, 199, 207, 177, 179, 181, 199, 207, 140, 155, 163],
+  [227, 231, 246, 258, 218, 220, 222, 240, 252, 174, 189, 201],
+  [276, 280, 295, 307, 264, 266, 268, 286, 298, 213, 228, 240],
+  [326, 330, 345, 357, 311, 313, 315, 333, 345, 252, 267, 279],
+  [376, 380, 395, 407, 358, 360, 362, 380, 392, 291, 306, 318],
+  [426, 430, 445, 457, 405, 407, 409, 427, 439, 330, 345, 357],
+  [476, 480, 495, 507, 452, 454, 456, 474, 486, 369, 384, 396],
+  [525, 529, 544, 552, 498, 500, 502, 519, 527, 408, 423, 431],
+  [570, 574, 589, 596, 540, 542, 544, 561, 568, 443, 458, 465],
+  [614, 618, 633, 641, 580, 582, 584, 601, 609, 477, 492, 500],
+  [660, 664, 679, 686, 622, 624, 626, 643, 650, 512, 527, 534],
+]
+
 function populateLinkedDocuments(
   wb: XLSX.WorkBook,
   mainName: string,
@@ -513,23 +533,7 @@ function populateLinkedDocuments(
       packingHeader: '', packingRows: [0, 0] as [number, number],
     })),
   ] : [
-    ...[
-      [5, 9, 24, 37, 9, 11, 13, 32, 45, 9, 24, 37],
-      [56, 60, 75, 75, 62, 64, 66, 83, 83, 49, 64, 64],
-      [97, 101, 116, 116, 97, 99, 101, 118, 118, 79, 94, 94],
-      [139, 143, 158, 158, 138, 140, 142, 160, 160, 109, 124, 124],
-      [180, 184, 199, 207, 177, 179, 181, 199, 207, 140, 155, 163],
-      [227, 231, 246, 258, 218, 220, 222, 240, 252, 174, 189, 201],
-      [276, 280, 295, 307, 264, 266, 268, 286, 298, 213, 228, 240],
-      [326, 330, 345, 357, 311, 313, 315, 333, 345, 252, 267, 279],
-      [376, 380, 395, 407, 358, 360, 362, 380, 392, 291, 306, 318],
-      [426, 430, 445, 457, 405, 407, 409, 427, 439, 330, 345, 357],
-      [476, 480, 495, 507, 452, 454, 456, 474, 486, 369, 384, 396],
-      [525, 529, 544, 552, 498, 500, 502, 519, 527, 408, 423, 431],
-      [570, 574, 589, 596, 540, 542, 544, 561, 568, 443, 458, 465],
-      [614, 618, 633, 641, 580, 582, 584, 601, 609, 477, 492, 500],
-      [660, 664, 679, 686, 622, 624, 626, 643, 650, 512, 527, 534],
-    ].map(v => ({
+    ...RRM_DOCUMENT_SLOTS.map(v => ({
       contractHeader: `H${v[0]}`, contractDate: `H${v[1]}`, contractRows: [v[2], v[3]] as [number, number],
       invoiceHeader: `J${v[4]}`, invoiceDate: `J${v[5]}`, invoiceContract: `J${v[6]}`, invoiceRows: [v[7], v[8]] as [number, number],
       packingHeader: `D${v[9]}`, packingRows: [v[10], v[11]] as [number, number],
@@ -1164,6 +1168,15 @@ export async function buildCustomsWorkbook(input: CustomsExportInput): Promise<B
     attachIndonesiaDocumentSheets(wbObj, input.indonesiaTemplateBuffer, newName)
   }
 
+  // Capture formulas before the population pipeline replaces sample cells. Never
+  // use an already-populated sheet as the source of the template's calculations.
+  const documentTemplates = Object.fromEntries(Object.entries(wbObj.Sheets)
+    .filter(([name]) => /合同|发票|装箱单/.test(name))
+    .map(([name, sheet]) => [name, cloneTemplateValue(sheet)]))
+  if (!legacyDocuments && !form.customer?.toUpperCase().includes('RRI')) {
+    completeRrmTemplateFormulas(documentTemplates, newName)
+  }
+
   // 旧版单模板（含印尼合同/发票）走供应商单据管线：卖方资料、贸易术语、
   // RRI 主体替换和 OOXML 动态扩行都基于该模板；RRI/RRM 模板走统一栏位管线。
   if (!input.mainOnly) {
@@ -1470,6 +1483,7 @@ export async function buildCustomsWorkbook(input: CustomsExportInput): Promise<B
   const out = XLSX.write(wbObj, { type: 'array', bookType: 'xlsx' })
   const generatedZip = await JSZip.loadAsync(out)
   let outZip: JSZip
+  let documentPlans: LinkedDocumentPlan[] = []
   if (input.mainOnly) {
     outZip = generatedZip
   } else if (legacyDocuments) {
@@ -1477,15 +1491,16 @@ export async function buildCustomsWorkbook(input: CustomsExportInput): Promise<B
     // 客户端会把合同页显示成整片黑底）。正式单据必须以原模板压缩包为底稿，仅把生成后的
     // 单元格内容和公式合并进去，才能完整保留模板版式和打印设置。
     outZip = await mergeGeneratedValuesIntoTemplate(templateBuffer, generatedZip, wbObj.SheetNames, mainTotalRow)
-    await resizeLinkedDocumentTables(outZip, newName, sorted)
+    documentPlans = await resizeLinkedDocumentTables(outZip, newName, sorted)
   } else {
     outZip = generatedZip
     await restoreTemplateDocumentStyles(templateBuffer, outZip, oldName, newName, sorted.map(effCustoms), sorted.map(item => item.currency || '¥'))
     if (!embeddedIndonesiaDocuments && input.indonesiaTemplateBuffer && sorted.some(item => isIndonesiaBlHead(item.bl_head))) {
       await restoreIndonesiaDocumentStyles(input.indonesiaTemplateBuffer, outZip)
     }
-    await resizeModernLinkedDocumentTables(outZip, newName, linkedDocumentGroups, String(form.customer || '').toUpperCase().includes('RRI'))
+    documentPlans = await resizeModernLinkedDocumentTables(outZip, newName, linkedDocumentGroups, String(form.customer || '').toUpperCase().includes('RRI'))
   }
+  if (!input.mainOnly) await restoreLinkedTemplateFormulas(outZip, documentTemplates, documentPlans, newName)
   await ensureMainTableGrid(outZip, newName, mainTotalRow)
   await mergeMainCartonCells(outZip, newName, cartonRows)
   if (!input.mainOnly) await groupGenericInvoice(outZip, newName, sorted.map(effCustoms), ws, wbObj.Sheets['商品汇总表'])
@@ -1496,6 +1511,15 @@ export async function buildCustomsWorkbook(input: CustomsExportInput): Promise<B
     const mainSheetIdx = wbObj.SheetNames.indexOf(newName) + 1
     await injectOoxmlImages(outZip, mainSheetIdx, floatImages)
   }
+  // Force Excel/WPS to calculate preserved formulas, not display old template caches.
+  const calculationDoc = new DOMParser().parseFromString(await outZip.file('xl/workbook.xml')!.async('string'), 'application/xml')
+  let calc = directChild(calculationDoc.documentElement as XmlElement, 'calcPr')
+  if (!calc) {
+    calc = calculationDoc.createElementNS(SPREADSHEET_NS, 'calcPr') as XmlElement
+    calculationDoc.documentElement!.appendChild(calc)
+  }
+  for (const [key, value] of Object.entries({ calcMode: 'auto', fullCalcOnLoad: '1', forceFullCalc: '1' })) calc.setAttribute(key, value)
+  outZip.file('xl/workbook.xml', new XMLSerializer().serializeToString(calculationDoc))
   return await outZip.generateAsync({ type: 'blob' })
 }
 
@@ -2726,6 +2750,125 @@ async function applyGeneratedMainFormats(templateZip: JSZip, generatedZip: JSZip
 }
 
 type LinkedTableKind = 'contract' | 'invoice' | 'packing'
+type LinkedDocumentPlan = {
+  sheetName: string
+  path: string
+  kind: LinkedTableKind
+  sections: Array<{ start: number; end: number; totalRow: number; group?: DocumentGroup }>
+}
+
+function completeRrmTemplateFormulas(templates: Record<string, XLSX.WorkSheet>, mainName: string) {
+  // The bundled RRM workbook has blank detail cells. Recover the LOOKUP rules
+  // from template-customs.xlsx's 全球合同/全球发票/装箱单, using RRM's own
+  // header positions. Existing template expressions (including custom rounding)
+  // always win. Only the export's formula snapshot is changed, never source data.
+  const main = `'${mainName.replace(/'/g, "''")}'!`
+  const range = (column: string) => `${main}${column}:${column}`
+  const description = `${range('G')}&${range('F')}`
+  const lookup = (conditions: string, result: string) => `LOOKUP(1,0/(${conditions}),${result})`
+  const fill = (sheet: string, row: number, formulas: Record<string, string>) => {
+    const ws = templates[sheet]
+    if (!ws) return
+    for (const [column, formula] of Object.entries(formulas)) {
+      const address = `${column}${row}`
+      if (!ws[address]?.f) ws[address] = {
+        ...ws[address], t: 'n', f: formula,
+        ...(/^LOOKUP\(/i.test(formula) ? { F: address } : {}),
+      }
+    }
+  }
+  RRM_DOCUMENT_SLOTS.forEach((slot, index) => {
+    for (let row = slot[2]; row < RRM_TABLE_COORDINATES.contractTotals[index]; row++) {
+      const conditions = `(${range('V')}=$H$${slot[0]})*(${range('A')}=A${row})`
+      fill('全球合同', row, {
+        ...Object.fromEntries(Object.entries({ B: 'D', D: 'K', E: 'J', F: 'Z' })
+          .map(([column, source]) => [column, lookup(conditions, range(source))])),
+        C: lookup(conditions, description), G: `F${row}*D${row}`,
+      })
+    }
+    for (let row = slot[7]; row < RRM_TABLE_COORDINATES.invoiceTotals[index]; row++) {
+      const conditions = `(${range('V')}=$J$${slot[6]})*(${range('X')}=$J$${slot[4]})*(${range('A')}=A${row})`
+      const material = `(${range('D')}=B${row})*(${description}=C${row})`
+      fill('全球发票', row, {
+        B: lookup(conditions, range('D')), C: lookup(conditions, description),
+        ...Object.fromEntries(Object.entries({ D: 'L', E: 'M', F: 'C', G: 'K', H: 'J', I: 'Z' })
+          .map(([column, source]) => [column, lookup(material, range(source))])),
+        J: `I${row}*G${row}`,
+      })
+    }
+    for (let row = slot[10]; row < RRM_TABLE_COORDINATES.packingTotals[index]; row++) {
+      const conditions = `(${range('X')}=$D$${slot[9]})*(${range('A')}=A${row})`
+      fill('装箱单', row, {
+        ...Object.fromEntries(Object.entries({ B: 'D', D: 'K', E: 'J', F: 'L', G: 'M', H: 'P', I: 'Q', J: 'AT', K: 'S' })
+          .map(([column, source]) => [column, lookup(conditions, range(source))])),
+        C: lookup(conditions, description),
+      })
+    }
+  })
+}
+
+async function restoreLinkedTemplateFormulas(
+  zip: JSZip,
+  templates: Record<string, XLSX.WorkSheet>,
+  plans: LinkedDocumentPlan[],
+  mainName: string,
+) {
+  const layouts = new Map<string, DocumentTableLayout[]>()
+  for (const plan of plans) {
+    let offset = 0
+    layouts.set(plan.sheetName, plan.sections.map(section => {
+      const finalStart = section.start + offset
+      const desired = desiredLinkedTableRows(plan.kind, section.group, section.end - section.start + 1)
+      offset += desired - (section.end - section.start + 1)
+      return { start: section.start, end: section.end, finalStart, finalTotal: finalStart + desired }
+    }))
+  }
+  for (const plan of plans) {
+    const template = templates[plan.sheetName] || templates[plan.sheetName.replace('实业', '全球')]
+    if (!template) continue
+    const doc = new DOMParser().parseFromString(await zip.file(plan.path)!.async('string'), 'application/xml')
+    const rows = new Map(directChildren(directChild(doc.documentElement as XmlElement, 'sheetData')!, 'row').map(row => [rowNumber(row), row]))
+    const tables = layouts.get(plan.sheetName)!
+    const context = { sheet: plan.sheetName, main: mainName, layouts }
+    // Totals and surviving linked footer cells keep their own template expression.
+    // Explicitly populated headers (contract number, seller, date) remain untouched.
+    for (const [address, cell] of Object.entries(template)) {
+      if (address.startsWith('!') || !cell?.f) continue
+      const sourceRow = Number(address.match(/\d+$/)?.[0])
+      if (plan.sections.some(section => sourceRow >= section.start && sourceRow <= section.end)) continue
+      const row = rows.get(documentRow(sourceRow, tables))
+      const column = cellColumn(address)
+      const target = row && directChildren(row, 'c').find(c => cellColumn(c.getAttribute('r') || '') === column)
+      if (row && target && directChild(target, 'f')) setXmlFormula(doc, row, column,
+        rebindDocumentFormula(cell.f, context), Boolean(cell.F))
+    }
+    plan.sections.forEach((section, index) => {
+      if (!section.group) return
+      const table = tables[index]
+      section.group.indices.forEach((serial, offset) => {
+        const targetRow = table.finalStart + offset
+        const row = rows.get(targetRow)
+        if (!row) return
+        const sourceRow = offset <= section.end - section.start ? section.start + offset : section.start
+        for (const cell of directChildren(row, 'c')) {
+          const column = cellColumn(cell.getAttribute('r') || '')
+          const source = template[`${column}${sourceRow}`]
+          if (!source?.f) continue
+          let formula = rebindDocumentFormula(source.f, {
+            ...context, detail: { sourceRow, targetRow, mainRow: serial + 3 },
+          })
+          // Product codes and descriptions can repeat within and across invoices.
+          // Keep the template's lookup rule, but retain this exported line's identity.
+          if (plan.kind === 'invoice' && ['D', 'E', 'F', 'G', 'H', 'I'].includes(column)) {
+            formula = bindInvoiceLookupSerial(formula, mainName, targetRow)
+          }
+          setXmlFormula(doc, row, column, formula, Boolean(source.F))
+        }
+      })
+    })
+    zip.file(plan.path, new XMLSerializer().serializeToString(doc))
+  }
+}
 const desiredLinkedTableRows = (
   kind: LinkedTableKind,
   group: DocumentGroup | undefined,
@@ -2785,11 +2928,15 @@ function setXmlNumber(doc: XmlDocument, row: XmlElement, column: string, value: 
   cell.appendChild(node)
 }
 
-function setXmlFormula(doc: XmlDocument, row: XmlElement, column: string, formula: string | null) {
+function setXmlFormula(doc: XmlDocument, row: XmlElement, column: string, formula: string | null, array = false) {
   const cell = ensureXmlCell(doc, row, column)
   clearXmlCell(cell)
   if (!formula) return
   const f = doc.createElementNS(SPREADSHEET_NS, 'f')
+  if (array) {
+    f.setAttribute('t', 'array')
+    f.setAttribute('ref', `${column}${rowNumber(row)}`)
+  }
   f.appendChild(doc.createTextNode(formula))
   const v = doc.createElementNS(SPREADSHEET_NS, 'v')
   v.appendChild(doc.createTextNode('0'))
@@ -3402,6 +3549,8 @@ async function resizeLinkedDocumentTables(zip: JSZip, mainName: string, sorted: 
     zip.file(task.path, resizeLinkedTableXml(await file.async('string'), task.sections, task.kind, mainName))
     await ensureLinkedTableGrid(zip, task.path, task.sections, task.kind)
   }
+  const parts = await workbookSheetParts(zip)
+  return tasks.map(task => ({ ...task, sheetName: [...parts].find(([, path]) => path === task.path)?.[0] || '' }))
 }
 
 type ModernTableCoordinates = {
@@ -3511,6 +3660,7 @@ async function resizeModernLinkedDocumentTables(
       ),
     },
   ]
+  const plans: LinkedDocumentPlan[] = []
   for (const task of tasks) {
     if (!task.sections.length) continue
     const path = parts.get(task.sheetName)
@@ -3518,7 +3668,9 @@ async function resizeModernLinkedDocumentTables(
     if (!path || !file) continue
     zip.file(path, resizeLinkedTableXml(await file.async('string'), task.sections, task.kind, mainName))
     await ensureLinkedTableGrid(zip, path, task.sections, task.kind)
+    plans.push({ ...task, path })
   }
+  return plans
 }
 
 async function mergeGeneratedValuesIntoTemplate(
