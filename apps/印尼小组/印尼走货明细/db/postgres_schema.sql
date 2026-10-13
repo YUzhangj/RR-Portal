@@ -180,7 +180,7 @@ CREATE TABLE IF NOT EXISTS po_items (
     material_id     INT          NULL,
     material_name   VARCHAR(256) NULL,
     qty             DECIMAL(18,4) NULL,
-    price           DECIMAL(18,4) NULL,
+    price           DECIMAL(22,8) NULL,
     currency        VARCHAR(8)   NOT NULL DEFAULT '¥',
     notes           TEXT         NULL,
     category        VARCHAR(64)  NULL,

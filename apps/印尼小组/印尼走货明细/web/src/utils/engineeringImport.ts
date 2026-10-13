@@ -448,7 +448,7 @@ export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDict
     const cCat      = colOf('类别', 'Jenis')
     const cName     = colOf('物料名称', 'MaterialName')
     const cEn       = colOf('英文名', 'Englishname')
-    const cMaterialCode = colOf('物料编码', 'MaterialCode', 'KodeMaterial')
+    const cMaterialCode = colOf('物料编码', '物料编号', 'MaterialCode', 'KodeMaterial')
     const cSpec     = colOf('规格', 'Spesifikasi')
     const cSupplier = colOf('供应商', 'Supplier')
     const cWt       = colOf('单重', 'Berat')

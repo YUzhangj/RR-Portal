@@ -4,6 +4,7 @@ using IndoShipping.Api.Controllers;
 using IndoShipping.Api.Features.Bootstrap;
 using IndoShipping.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Http;
 using Npgsql;
 using Xunit;
 
@@ -11,6 +12,265 @@ namespace IndoShipping.Api.Tests;
 
 public class MaterialCompletionIntegrationTests
 {
+    [Theory]
+    [InlineData("text")]
+    [InlineData("json")]
+    [InlineData("jsonb")]
+    public async Task History_capture_supports_legacy_schedule_storage_and_preserves_completion_hash(string storageType)
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.Db.ExecuteAsync($"ALTER TABLE schedules ALTER COLUMN raw_rows TYPE {storageType} USING raw_rows::{storageType}");
+        await f.Acknowledge();
+        var original = await f.Db.ExecuteScalarAsync<string>("SELECT raw_rows::text FROM schedules WHERE id=1");
+        await using (var tx = await f.Db.BeginTransactionAsync())
+        {
+            await MaterialTrackingHistory.CaptureAsync(f.Db, tx);
+            await tx.CommitAsync();
+        }
+        Assert.Equal(original, await f.Db.ExecuteScalarAsync<string>("SELECT raw_rows::text FROM schedules WHERE id=1"));
+        Assert.True(await f.Db.ExecuteScalarAsync<bool>("SELECT acknowledged FROM material_tracking_history WHERE schedule_id=1 ORDER BY id DESC LIMIT 1"));
+        Assert.Equal(await f.Db.ExecuteScalarAsync<string>("SELECT md5(raw_rows::text) FROM schedules WHERE id=1"),
+            await f.Db.ExecuteScalarAsync<string>("SELECT rows_hash FROM material_tracking_history WHERE schedule_id=1 ORDER BY id DESC LIMIT 1"));
+    }
+
+    [Fact]
+    public async Task Quantity_corrections_follow_actual_increases_decreases_and_reediting_without_compounding()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":500}]""");
+        var body = await f.Adjustment(Purchase(await f.Read()));
+        body.ordered_qty = 100; body.received_qty = 100; body.outbound_qty = 100;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        await f.Db.ExecuteAsync("INSERT INTO po_items VALUES(1,1,50,50); INSERT INTO po_receipts VALUES(1,50); INSERT INTO outbound VALUES(1,50)");
+        var item = Purchase(await f.Read());
+        foreach (var field in new[] { "ordered_qty", "received_qty", "outbound_qty" })
+        {
+            Assert.Equal(150, item.GetProperty(field).GetDecimal());
+            Assert.Equal(150, item.GetProperty("order_details")[0].GetProperty(field).GetDecimal());
+        }
+        Assert.Equal(850, item.GetProperty("shortage_qty").GetDecimal());
+        // Resaving the displayed total retains +100, it must not add another +150.
+        body = await f.Adjustment(item); body.ordered_qty = 150; body.received_qty = 150; body.outbound_qty = 150;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        await f.Db.ExecuteAsync("UPDATE po_items SET purchase_qty=75, qty=75; UPDATE po_receipts SET qty=75; UPDATE outbound SET qty=75");
+        item = Purchase(await f.Read());
+        Assert.Equal(175, item.GetProperty("received_qty").GetDecimal());
+        await f.Db.ExecuteAsync("UPDATE po_items SET purchase_qty=25, qty=25; UPDATE po_receipts SET qty=25; UPDATE outbound SET qty=25");
+        item = Purchase(await f.Read());
+        Assert.Equal(125, item.GetProperty("received_qty").GetDecimal());
+        Assert.Equal(125, item.GetProperty("ordered_qty").GetDecimal());
+        Assert.Equal(125, item.GetProperty("outbound_qty").GetDecimal());
+        Assert.Equal(25, await f.Db.ExecuteScalarAsync<decimal>("SELECT SUM(qty) FROM po_receipts"));
+        body = await f.Adjustment(item); body.reset = true;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        Assert.Equal(25, Purchase(await f.Read()).GetProperty("received_qty").GetDecimal());
+    }
+
+    [Fact]
+    public async Task Negative_correction_and_explicit_zero_follow_future_actuals_without_negative_tracking()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":500}]""");
+        await f.Db.ExecuteAsync("INSERT INTO po_items VALUES(1,1,100,100); INSERT INTO po_receipts VALUES(1,100)");
+        var body = await f.Adjustment(Purchase(await f.Read())); body.received_qty = 0;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        await f.Db.ExecuteAsync("UPDATE po_receipts SET qty=150");
+        Assert.Equal(50, Purchase(await f.Read()).GetProperty("received_qty").GetDecimal());
+        await f.Db.ExecuteAsync("UPDATE po_receipts SET qty=25");
+        Assert.Equal(0, Purchase(await f.Read()).GetProperty("received_qty").GetDecimal());
+        // Clamping display to zero must not discard the persisted -100 correction.
+        await f.Db.ExecuteAsync("UPDATE po_receipts SET qty=175");
+        Assert.Equal(75, Purchase(await f.Read()).GetProperty("received_qty").GetDecimal());
+    }
+
+    [Fact]
+    public async Task Changed_actual_allocation_rejects_stale_correction_baseline()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        var body = await f.Adjustment(Purchase(await f.Read())); body.received_qty = 100;
+        await f.Db.ExecuteAsync("INSERT INTO po_items VALUES(1,1,5,5); INSERT INTO po_receipts VALUES(1,5)");
+        Assert.IsType<ConflictObjectResult>(await f.Alerts.SaveAdjustment(body));
+        Assert.Equal(0, await f.Db.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM audit_logs"));
+    }
+
+    [Fact]
+    public async Task Adjustment_history_preserves_actor_reason_snapshots_and_reset_without_cross_order_leakage()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        f.Alerts.HttpContext.User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+            new[] { new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Name, "测试操作员") }, "test"));
+        var body = await f.Adjustment(Purchase(await f.Read())); body.received_qty = 100; body.note = "补录历史收货";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        var reset = await f.Adjustment(Purchase(await f.Read())); reset.reset = true; reset.note = "恢复原始统计";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(reset));
+        var history = JsonSerializer.SerializeToElement(Assert.IsType<OkObjectResult>(await f.Alerts.AdjustmentHistory(body.order_key)).Value);
+        Assert.Equal(2, history.GetProperty("total").GetInt32());
+        var rows = history.GetProperty("items");
+        Assert.Equal("reset-adjustment", rows[0].GetProperty("action").GetString());
+        Assert.Equal(100, rows[0].GetProperty("details").GetProperty("previous").GetProperty("received_qty").GetDecimal());
+        Assert.Equal(0, rows[0].GetProperty("details").GetProperty("current").GetProperty("received_qty").GetDecimal());
+        Assert.Equal("测试操作员", rows[1].GetProperty("username").GetString());
+        Assert.Equal("补录历史收货", rows[1].GetProperty("details").GetProperty("after").GetProperty("note").GetString());
+        Assert.Equal(100, rows[1].GetProperty("details").GetProperty("current").GetProperty("received_qty").GetDecimal());
+        Assert.Equal(0, rows[1].GetProperty("details").GetProperty("source").GetProperty("received_qty").GetDecimal());
+        Assert.False(string.IsNullOrEmpty(rows[1].GetProperty("occurred_at").GetString()));
+        history = JsonSerializer.SerializeToElement(Assert.IsType<OkObjectResult>(await f.Alerts.AdjustmentHistory("other-order")).Value);
+        Assert.Equal(0, history.GetProperty("total").GetInt32());
+        history = JsonSerializer.SerializeToElement(Assert.IsType<OkObjectResult>(await f.Alerts.AdjustmentHistory(body.order_key, 2)).Value);
+        Assert.Empty(history.GetProperty("items").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task Tracking_quantities_are_persisted_separately_and_do_not_change_business_records()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.AddLeadProfiles();
+        var before = Purchase(await f.Read());
+        var body = await f.Adjustment(before);
+        body.required_qty = 30; body.ordered_qty = 25; body.received_qty = 15; body.outbound_qty = 12; body.manual_qty = 10;
+        body.status = "部分入库";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        var item = Purchase(await f.Read());
+        Assert.True(item.GetProperty("has_adjustments").GetBoolean());
+        Assert.Equal(30, item.GetProperty("required_qty").GetDecimal());
+        Assert.Equal(25, item.GetProperty("ordered_qty").GetDecimal());
+        Assert.Equal(15, item.GetProperty("received_qty").GetDecimal());
+        Assert.Equal(12, item.GetProperty("outbound_qty").GetDecimal());
+        Assert.Equal(18, item.GetProperty("shortage_qty").GetDecimal());
+        Assert.Equal(20, item.GetProperty("source_required_qty").GetDecimal());
+        Assert.Equal(0, item.GetProperty("source_received_qty").GetDecimal());
+        Assert.Equal("部分入库(手动)", item.GetProperty("order_details")[0].GetProperty("status").GetString());
+        foreach (var table in new[] { "po_items", "po_receipts", "outbound" })
+            Assert.Equal(0, await f.Db.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM {table}"));
+        Assert.Equal(2, await f.Db.ExecuteScalarAsync<decimal>("SELECT usage_qty FROM materials WHERE id=1"));
+        Assert.Equal(1, await f.Db.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM audit_logs"));
+        Assert.False((await f.Read())[1].GetProperty("has_adjustments").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Manual_completion_stops_risk_but_new_demand_stays_open_and_history_is_unchanged()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.AddLeadProfiles();
+        var revision = await f.Db.ExecuteScalarAsync<long>("SELECT MAX(id) FROM material_tracking_history");
+        var body = await f.Adjustment(Purchase(await f.Read())); body.status = "已送完";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        var item = Purchase(await f.Read());
+        Assert.Equal("covered", item.GetProperty("status").GetString());
+        Assert.Equal(0, item.GetProperty("shortage_qty").GetDecimal());
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("due_date").ValueKind);
+        Assert.Equal(0, item.GetProperty("received_qty").GetDecimal());
+        Assert.False(Purchase(await f.Read(revision)).GetProperty("has_adjustments").GetBoolean());
+        Assert.Equal(20, Purchase(await f.Read(revision)).GetProperty("shortage_qty").GetDecimal());
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":15}]""");
+        item = Purchase(await f.Read());
+        Assert.NotEqual("covered", item.GetProperty("status").GetString());
+        Assert.Equal(10, item.GetProperty("shortage_qty").GetDecimal());
+        Assert.Equal("部分已送完(手动)", item.GetProperty("order_details")[0].GetProperty("status").GetString());
+        var restore = await f.Adjustment(item); restore.reset = true;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(restore));
+        item = Purchase(await f.Read());
+        Assert.False(item.GetProperty("has_adjustments").GetBoolean());
+        Assert.Equal(30, item.GetProperty("shortage_qty").GetDecimal());
+        Assert.Equal(2, item.GetProperty("order_details")[0].GetProperty("adjustment_version").GetInt64());
+        Assert.IsType<ConflictObjectResult>(await f.Alerts.SaveAdjustment(body));
+    }
+
+    [Fact]
+    public async Task Demand_correction_is_relative_and_status_only_does_not_fake_stock_or_complete()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        var body = await f.Adjustment(Purchase(await f.Read())); body.required_qty = 25; body.status = "已入库";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":15}]""");
+        var item = Purchase(await f.Read());
+        Assert.Equal(35, item.GetProperty("required_qty").GetDecimal());
+        Assert.Equal(35, item.GetProperty("shortage_qty").GetDecimal());
+        Assert.Equal(0, item.GetProperty("received_qty").GetDecimal());
+        Assert.NotEqual("covered", item.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Adjusting_one_order_does_not_change_other_orders_fifo_allocation()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":10},{"code":"A","orderNo":"PO2","qty":10}]""");
+        await f.Db.ExecuteAsync("INSERT INTO po_items VALUES(1,1,25,25); INSERT INTO po_receipts VALUES(1,25); INSERT INTO outbound VALUES(1,22)");
+        var before = Purchase(await f.Read());
+        var second = before.GetProperty("order_details")[1].GetRawText();
+        var body = await f.Adjustment(before); body.required_qty = 30; body.outbound_qty = 0;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        var after = Purchase(await f.Read());
+        Assert.Equal(second, after.GetProperty("order_details")[1].GetRawText());
+        Assert.Equal(22, after.GetProperty("source_outbound_qty").GetDecimal());
+        Assert.Equal(22, await f.Db.ExecuteScalarAsync<decimal>("SELECT SUM(qty) FROM outbound"));
+    }
+
+    [Fact]
+    public async Task Adjustment_validation_rejects_invalid_stale_or_missing_targets()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        var item = Purchase(await f.Read());
+        var body = await f.Adjustment(item); body.ordered_qty = -1;
+        Assert.IsType<BadRequestObjectResult>(await f.Alerts.SaveAdjustment(body));
+        body = await f.Adjustment(item); body.status = "不存在";
+        Assert.IsType<BadRequestObjectResult>(await f.Alerts.SaveAdjustment(body));
+        body = await f.Adjustment(item); body.status = "部分已送完"; body.manual_qty = 20;
+        Assert.IsType<BadRequestObjectResult>(await f.Alerts.SaveAdjustment(body));
+        body = await f.Adjustment(item); body.status = "已排产";
+        Assert.IsType<BadRequestObjectResult>(await f.Alerts.SaveAdjustment(body));
+        body = await f.Adjustment(item); body.order_key = "missing";
+        Assert.IsType<NotFoundObjectResult>(await f.Alerts.SaveAdjustment(body));
+        body = await f.Adjustment(item); body.expected_source_required = 999;
+        Assert.IsType<ConflictObjectResult>(await f.Alerts.SaveAdjustment(body));
+        body = await f.Adjustment(item);
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":15}]""");
+        Assert.IsType<ConflictObjectResult>(await f.Alerts.SaveAdjustment(body));
+    }
+
+    [Fact]
+    public async Task Production_status_and_explicit_zero_can_be_adjusted_and_restored()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.Acknowledge();
+        var item = (await f.Read()).EnumerateArray().Single(x => x.GetProperty("tracking_type").GetString() == "plastic");
+        var body = await f.Adjustment(item); body.status = "未排产"; body.manual_qty = 0; body.ordered_qty = 0;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        item = (await f.Read()).EnumerateArray().Single(x => x.GetProperty("tracking_type").GetString() == "plastic");
+        Assert.NotEqual("covered", item.GetProperty("status").GetString());
+        Assert.Equal(10, item.GetProperty("shortage_qty").GetDecimal());
+        Assert.Equal("未排产(手动)", item.GetProperty("order_details")[0].GetProperty("status").GetString());
+        body = await f.Adjustment(item); body.reset = true;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        Assert.All((await f.Read()).EnumerateArray(), row => Assert.Equal("covered", row.GetProperty("status").GetString()));
+    }
+
+    [Fact]
+    public async Task Concurrent_adjustments_conflict_instead_of_overwriting_each_other()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        var item = Purchase(await f.Read());
+        var first = await f.Adjustment(item); first.ordered_qty = 3;
+        var second = await f.Adjustment(item); second.ordered_qty = 7;
+        var results = await Task.WhenAll(f.Alerts.SaveAdjustment(first), f.Alerts.SaveAdjustment(second));
+        Assert.Single(results.OfType<OkObjectResult>());
+        Assert.Single(results.OfType<ConflictObjectResult>());
+        Assert.Equal(1, await f.Db.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM audit_logs"));
+    }
+
+    [Fact]
+    public async Task Manual_completion_uses_exact_quantity_and_does_not_hide_small_extra_demand()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.AddLeadProfiles();
+        await f.Db.ExecuteAsync("UPDATE materials SET usage_qty=0.000001");
+        var body = await f.Adjustment(Purchase(await f.Read())); body.status = "已送完";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        Assert.Equal("covered", Purchase(await f.Read()).GetProperty("status").GetString());
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":11}]""");
+        Assert.NotEqual("covered", Purchase(await f.Read()).GetProperty("status").GetString());
+    }
+
     [Fact]
     public async Task Completed_old_orders_do_not_make_new_orders_overdue()
     {
@@ -313,7 +573,24 @@ public class MaterialCompletionIntegrationTests
     private sealed class Fixture(NpgsqlConnection admin, NpgsqlConnection db, string schema, string connection) : IAsyncDisposable
     {
         public NpgsqlConnection Db => db;
-        public MaterialAlertsController Alerts { get; } = new(new SqlConnectionFactory(connection));
+        public MaterialAlertsController Alerts { get; } = new(new SqlConnectionFactory(connection)) {
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
+        };
+        public async Task<MaterialAlertsController.AdjustmentBody> Adjustment(JsonElement item)
+        {
+            var detail = item.GetProperty("order_details")[0];
+            return new() {
+                order_key = detail.GetProperty("key").GetString()!,
+                expected_version = detail.GetProperty("adjustment_version").GetInt64(),
+                expected_source_required = detail.GetProperty("source_required_qty").GetDecimal(),
+                expected_source_ordered = detail.GetProperty("source_ordered_qty").GetDecimal(),
+                expected_source_received = detail.GetProperty("source_received_qty").GetDecimal(),
+                expected_source_outbound = detail.GetProperty("source_outbound_qty").GetDecimal(),
+                expected_source_manual = detail.GetProperty("source_manual_qty").GetDecimal(),
+                expected_revision_id = await db.ExecuteScalarAsync<long>("SELECT MAX(id) FROM material_tracking_history"),
+                note = "测试追踪调整",
+            };
+        }
         public async Task AddLeadProfiles() => await db.ExecuteAsync("""
             INSERT INTO material_lead_profiles VALUES
                 ('A','测试产品','五金','',15,0,true),
@@ -346,6 +623,9 @@ public class MaterialCompletionIntegrationTests
                     CREATE TABLE schedules(id int GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, week_label text UNIQUE,
                         upload_date timestamp, raw_rows jsonb, diff_from_prev jsonb);
                     CREATE TABLE settings(key text PRIMARY KEY, value text);
+                    CREATE TABLE audit_logs(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, occurred_at timestamptz DEFAULT now(),
+                        user_id int, username text, module text, action text, entity_type text,
+                        entity_id text, summary text, details jsonb, ip_address text);
                     CREATE TABLE material_lead_profiles(product_code text, product_name text, category text,
                         component_name text, lead_days int, capacity_per_day numeric, active boolean);
                     CREATE TABLE materials(id int, product_code text, item_no text, name_zh text, category text,

@@ -28,6 +28,8 @@ public static class DataMigrations
         if (connection.State != ConnectionState.Open)
             await connection.OpenAsync();
 
+        await connection.ExecuteAsync(PurchasePricePrecision.SchemaSql);
+
         // Bootstrap existing schedules once, then retain each subsequent upload's BOM.
         await connection.ExecuteAsync(MaterialTrackingHistory.SchemaSql);
         await using (var historyTx = await connection.BeginTransactionAsync())

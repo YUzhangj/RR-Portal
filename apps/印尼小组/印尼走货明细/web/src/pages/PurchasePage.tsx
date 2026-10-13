@@ -11,6 +11,8 @@ import './PurchasePage.css'
 import { combinePurchaseContracts } from '../utils/purchaseContractWorkbook'
 import PurchaseMaterialPicker from '../components/PurchaseMaterialPicker'
 import { purchaseMaterialBucket, purchaseMaterialLine, purchaseSelectionSource, purchaseSelectionSupplier, type PurchaseMaterialChoice } from '../utils/purchaseMaterialSelection'
+import { linkPurchaseLine, matchingLineSchedules } from '../utils/purchaseScheduleLink'
+import { autoLinkPurchaseMaterials, planPurchaseNetWeight } from '../utils/purchaseNetWeight'
 
 interface SchedRow {
   source?: string
@@ -373,6 +375,12 @@ export default function PurchasePage() {
   const [productCodes, setProductCodes] = useState<string[]>([])
   const [placedTomyPos, setPlacedTomyPos] = useState<Set<string>>(new Set())
   const [schedPickerOpen, setSchedPickerOpen] = useState(false)
+  const [lineScheduleLink, setLineScheduleLink] = useState<{ index: number; original: PoItem } | null>(null)
+  const [lineLinkRows, setLineLinkRows] = useState<SchedRow[]>([])
+  const [lineLinkLoading, setLineLinkLoading] = useState(false)
+  const [lineLinkSelection, setLineLinkSelection] = useState<number | null>(null)
+  const [lineLinkSearch, setLineLinkSearch] = useState('')
+  const [lineLinkRevision, setLineLinkRevision] = useState('')
   const [materialSelection, setMaterialSelection] = useState<{
     mode: 'append' | 'generate' | 'separate'; schedules?: SchedRow[]
   } | null>(null)
@@ -547,6 +555,35 @@ export default function PurchasePage() {
 
   function pickFromSchedule(r: SchedRow) {
     setMaterialSelection({ mode: 'append', schedules: [r] })
+  }
+
+  async function openLineScheduleLink(index: number) {
+    const original = items[index]
+    if (!original?.product_code?.trim()) { message.warning('请先填写该行货号'); return }
+    if (original.product_code.includes('/')) { message.warning('多货号合并行请先拆分，再分别关联排期'); return }
+    setLineScheduleLink({ index, original }); setLineLinkSelection(null); setLineLinkSearch('')
+    setLineLinkRows([]); setLineLinkRevision(''); setLineLinkLoading(true)
+    try {
+      const { data: list } = await api.get<{ id: number; week_label?: string }[]>('/schedules')
+      if (!list.length) { message.info('暂无排期可关联'); return }
+      const { data } = await api.get<{ raw_rows?: string | SchedRow[] }>(`/schedules/${list[0].id}`)
+      const parsed = typeof data.raw_rows === 'string' ? JSON.parse(data.raw_rows) : data.raw_rows
+      if (!Array.isArray(parsed)) throw new Error('排期数据格式无效')
+      setLineLinkRows(parsed); setLineLinkRevision(list[0].week_label || String(list[0].id))
+    } catch { message.error('排期加载失败，请关闭后重试'); }
+    finally { setLineLinkLoading(false) }
+  }
+
+  function applyLineScheduleLink() {
+    if (!lineScheduleLink || lineLinkSelection == null) return
+    const { index, original } = lineScheduleLink
+    if (items[index] !== original) { message.warning('明细已变化，请重新打开关联排期'); return }
+    try {
+      const linked = linkPurchaseLine(original, lineLinkRows[lineLinkSelection], lineLinkRows, items, String(form.getFieldValue('po_no') || ''))
+      setItems(current => current.map((item, i) => i === index ? linked : item))
+      setMergeUndo(null); setLineScheduleLink(null)
+      message.success('已关联排期并带入走货期，数量和单价未改变；请保存采购单')
+    } catch (error) { message.warning((error as Error).message) }
   }
 
   function selectedSchedRows(): SchedRow[] {
@@ -776,6 +813,15 @@ export default function PurchasePage() {
     const { data } = await api.get<Material[]>('/materials/by-ids', { params: { ids: ids.join(',') } })
     return new Map(data.filter(m => m.id != null).map(m => [Number(m.id), m]))
   }
+  async function loadPurchaseMaterialCandidates(poItems: PoItem[]) {
+    const linked = await loadPurchaseMaterials(poItems)
+    const codes = [...new Set(poItems.filter(it => !linked.has(Number(it.material_id)))
+      .flatMap(it => purchaseItemCodes(it.product_code)))]
+    const fallback = (await Promise.all(codes.map(code =>
+      api.get<Material[]>('/materials', { params: { code } }).then(r => r.data)))).flat()
+    const profiles = codes.length ? (await api.get<Dictionaries>('/dictionaries')).data.suppliers || [] : []
+    return { materials: [...linked.values(), ...fallback], profiles }
+  }
   function promptMaterialSync(poItems: PoItem[], materials: Map<number, Material>) {
     const changes = materialChanges(poItems, materials)
     if (!changes.length) { message.info('已与货号库一致，没有需要同步的资料'); return }
@@ -880,9 +926,17 @@ export default function PurchasePage() {
         delivery_date: data.delivery_date ? dayjs(data.delivery_date).format('YYYY-MM-DD') : '',
         notes: data.notes,
       })
-      const rawItems = Array.isArray(data.items) ? data.items : []
+      let rawItems = Array.isArray(data.items) ? data.items : []
       // 货号库无法读取时仍可打开采购单，保留已经保存的订单原值。
-      const materials = await loadPurchaseMaterials(rawItems)
+      let materials = new Map<number, Material>()
+      try {
+        const candidates = await loadPurchaseMaterialCandidates(rawItems)
+        const associated = autoLinkPurchaseMaterials(rawItems, candidates.materials, data.supplier || '', candidates.profiles)
+        rawItems = associated.items
+        materials = new Map(candidates.materials.map(m => [Number(m.id), m]))
+        if (associated.linked) message.info(`已自动补齐 ${associated.linked} 行物料关联，请保存采购单`)
+        if (associated.issues.length) message.warning('部分物料暂未关联，可点击“回填净重”查看逐行原因')
+      } catch { message.warning('货号库暂时无法读取，保留采购单原值；请稍后重试关联') }
       const openedItems = rawItems.map(it => {
         const mat = it.material_id == null ? undefined : materials.get(Number(it.material_id))
         const wasLegacyUnitLayout = !it.ship_unit && !!mat?.unit_kg && it.purchase_unit === mat.unit_kg
@@ -914,11 +968,21 @@ export default function PurchasePage() {
     }
     let saveItems = items
     let quoteHits = 0
+    try {
+      const candidates = await loadPurchaseMaterialCandidates(saveItems)
+      const associated = autoLinkPurchaseMaterials(saveItems, candidates.materials, v.supplier || '', candidates.profiles)
+      saveItems = associated.items
+      if (associated.linked) {
+        setItems(saveItems)
+        message.info(`已自动补齐 ${associated.linked} 行物料关联，数量、单价和基础资料未改动`)
+      }
+      if (associated.issues.length) message.warning('部分行无法唯一关联，已保留原值；请点击“回填净重”核对')
+    } catch { message.error('物料关联检查失败，尚未保存，请稍后重试'); return }
     // 已下单采购单的既有单价不因本次同步/保存被最新报价悄悄覆盖。
     if (creating && v.supplier) {
       try {
         const { data: quotes } = await api.get<QuoteRow[]>('/quotes/blob', { skipErrorToast: true } as any)
-        const priced = applyQuotePrices(items, Array.isArray(quotes) ? quotes : [], v.supplier, false)
+        const priced = applyQuotePrices(saveItems, Array.isArray(quotes) ? quotes : [], v.supplier, false)
         saveItems = priced.items
         quoteHits = priced.hit
         if (quoteHits) setItems(saveItems)
@@ -1137,7 +1201,7 @@ export default function PurchasePage() {
     for (const m of mergedRows) {
       const shipUnitPrice = m.totalShipQty > 0 ? m.totalAmount / m.totalShipQty : 0
       const contractUnit = contractUnitLabel(m.unit)
-      rows.push([m.code, m.matName, m.spec, Number(m.totalShipQty.toFixed(shipQuantityDigits(m.unit))), contractUnit, Number(shipUnitPrice.toFixed(4)), Number(m.totalAmount.toFixed(2)), '数量：' + Number(m.totalPurchaseQty.toFixed(2)) + 'pcs', m.nameEn, m.materialCode])
+      rows.push([m.code, m.matName, m.spec, Number(m.totalShipQty.toFixed(shipQuantityDigits(m.unit))), contractUnit, shipUnitPrice, Number(m.totalAmount.toFixed(2)), '数量：' + Number(m.totalPurchaseQty.toFixed(2)) + 'pcs', m.nameEn, m.materialCode])
     }
     rows.push(['以下空白！', '按工程签板生产！', '', '', '', '', '', ''])
     const sumRow = rows.length
@@ -1167,6 +1231,8 @@ export default function PurchasePage() {
     const lastItemExcelRow = itemStart + mergedRows.length
     for (let r = itemStart; r < itemStart + mergedRows.length; r++) {
       const excelRow = r + 1
+      // Keep the calculated price in the cell; formatting must not round the stored value.
+      ws[XLSX.utils.encode_cell({ r, c: 5 })].z = '0.00######'
       const amountAddr = XLSX.utils.encode_cell({ r, c: 6 })
       ;(ws as any)[amountAddr] = {
         t: 'n',
@@ -1377,21 +1443,34 @@ export default function PurchasePage() {
 
   // 回填单个净重和走货单位，用于计算 KGM 走货数量。
   async function backfillNetWeight() {
-    let hit = 0
-    const materialMap = await loadPurchaseMaterials(items)
-    const next = await Promise.all(items.map(async (it) => {
-      if (!it.material_id) return it
-      try {
-        const mat = materialMap.get(it.material_id)
-        if (!mat) return it
-        const netPerPc = Number(mat.net_per_pc) || 0
-        if (netPerPc <= 0) return it
-        hit++
-        return { ...it, net_per_pc: netPerPc, ship_unit: mat.unit_kg || 'KGM' }
-      } catch { return it }
-    }))
-    setItems(next)
-    message.success(`已回填净重：${hit}/${items.length} 行`)
+    if (!items.length) { message.info('请先添加采购明细'); return }
+    const snapshot = items
+    const supplier = String(form.getFieldValue('supplier') || '')
+    try {
+      const candidates = await loadPurchaseMaterialCandidates(snapshot)
+      const plan = planPurchaseNetWeight(snapshot, candidates.materials, supplier, candidates.profiles)
+      const ready = plan.filter(row => row.ready)
+      const content = <>
+        <p>仅回填当前采购单的物料关联、单件净重（kg/件）及走货单位，不修改货号库、数量或单价；确认后仍需保存采购单。</p>
+        <div style={{ maxHeight: 360, overflow: 'auto' }}>{plan.map(row => <div key={row.index} style={{ padding: 8, borderBottom: '1px solid #eee' }}>
+          <b>第 {row.index + 1} 行 · {row.original.product_code} · {row.original.material_name || '未命名物料'}</b>
+          <div>{row.ready ? <><Tag color="green">可回填</Tag>{row.matchedBy}；单件净重 {row.original.net_per_pc || 0} → {row.next.net_per_pc} kg/件；走货单位 {row.next.ship_unit}</>
+            : <><Tag color="orange">未回填</Tag>{row.reason}（本行保持原值）</>}</div>
+        </div>)}</div>
+      </>
+      if (!ready.length) { Modal.warning({ title: '没有可回填的净重，请核对以下明细', width: 800, content }); return }
+      Modal.confirm({ title: `净重回填核对：可回填 ${ready.length}/${snapshot.length} 行`, width: 800,
+        okText: `回填 ${ready.length} 行`, cancelText: '取消', content,
+        onOk: () => {
+          setItems(current => current.map((item, index) => {
+            const row = plan[index]
+            return row?.ready && item === row.original ? row.next : item
+          }))
+          setMergeUndo(null)
+          message.info('已应用回填；核对期间发生变化的行保持原值，请检查后保存采购单')
+        },
+      })
+    } catch (error: any) { message.error('净重资料加载失败，未回填，请重试：' + (error?.message || error)) }
   }
 
   const filtered = useMemo(() => rows.filter(r => {
@@ -1669,7 +1748,7 @@ export default function PurchasePage() {
             pagination={false}
             dataSource={items}
             sticky={{ offsetHeader: 47 }}
-            scroll={{ x: 2500, y: 'calc(100vh - 330px)' }}
+            scroll={{ x: 2700, y: 'calc(100vh - 330px)' }}
             columns={[
               { title: '#', width: 40, fixed: 'left', render: (_v, _r, i) => i + 1 },
               { title: '货号', width: 120, fixed: 'left', render: (_v, r, i) => fillable(i, 'product_code', <Input size="small" value={r.product_code} onChange={(e) => patchItem(i, 'product_code', e.target.value)} />) },
@@ -1681,7 +1760,7 @@ export default function PurchasePage() {
               { title: '物料量', width: 100, align: 'right', render: (_v, r) => Number(r.material_qty ?? 0).toFixed(2) },
               { title: '损耗量', width: 110, render: (_v, r, i) => fillable(i, 'spoilage_qty', <InputNumber size="small" min={0} value={r.spoilage_qty} onChange={(v) => patchItem(i, 'spoilage_qty', v ?? 0)} style={{ width: '100%' }} />) },
               { title: '采购量', width: 100, align: 'right', render: (_v, r) => <b style={{ color: '#1677ff' }}>{Number(r.purchase_qty ?? r.qty ?? 0).toFixed(2)}</b> },
-              { title: '单价', width: 130, render: (_v, r, i) => fillable(i, 'price', <InputNumber size="small" min={0} step={0.0001} value={r.price} onChange={(v) => patchItem(i, 'price', v ?? 0)} style={{ width: '100%' }} />) },
+              { title: '单价', width: 150, render: (_v, r, i) => fillable(i, 'price', <InputNumber size="small" min={0} precision={8} step={0.00000001} value={r.price} onChange={(v) => patchItem(i, 'price', v ?? 0)} style={{ width: '100%' }} />) },
               { title: '金额', width: 100, align: 'right', render: (_v, r) => <b style={{ color: '#c0392b' }}>{((r.purchase_qty ?? r.qty ?? 0) * (r.price ?? 0)).toFixed(2)}</b> },
               { title: '采购单位', width: 110, render: (_v, r, i) => fillable(i, 'purchase_unit',
                 <Select size="small" value={r.purchase_unit || '个'} style={{ width: '100%' }}
@@ -1702,9 +1781,13 @@ export default function PurchasePage() {
               { title: '走货单价', width: 100, align: 'right', render: (_v, r) => {
                 const shipQty = shipQuantity(r)
                 const amount = Number(r.purchase_qty ?? r.qty ?? 0) * Number(r.price ?? 0)
-                return <b style={{ color: '#2878c8' }}>{shipQty > 0 ? (amount / shipQty).toFixed(4) : '0.0000'}</b>
+                return <b style={{ color: '#2878c8' }}>{shipQty > 0 ? Number((amount / shipQty).toFixed(8)).toString() : '0'}</b>
               } },
               { title: '交货时间', width: 110, render: () => deliveryDate || '' },
+              { title: '关联排期订单', width: 190, render: (_v, r, i) => <Space direction="vertical" size={0}>
+                <Typography.Text style={{ whiteSpace: 'normal' }}>{r.tomy_po || '未关联'}</Typography.Text>
+                <Button type="link" size="small" onClick={() => openLineScheduleLink(i)}>关联排期</Button>
+              </Space> },
               { title: '走货期', width: 130, render: (_v, r, i) => fillable(i, 'eta', <Input size="small" value={r.eta} onChange={(e) => patchItem(i, 'eta', e.target.value)} />) },
               { title: '币种', width: 120, render: (_v, r, i) => fillable(i, 'currency', <Select size="small" value={r.currency || '¥'} options={CURR} onChange={(v) => patchItem(i, 'currency', v)} style={{ width: '100%' }} />) },
               { title: '备注', width: 200, render: (_v, r, i) => fillable(i, 'notes', <Input size="small" value={r.notes} onChange={(e) => patchItem(i, 'notes', e.target.value)} />) },
@@ -1972,6 +2055,27 @@ export default function PurchasePage() {
           ]}
         />
         <style>{`.po-row-done td { background: #fafafa !important; color: #999 !important; }`}</style>
+      </Modal>
+
+      <Modal open={Boolean(lineScheduleLink)} title={`关联排期 · 第 ${(lineScheduleLink?.index ?? 0) + 1} 行 · ${lineScheduleLink?.original.product_code || ''}`}
+        width={1000} onCancel={() => { if (!lineLinkLoading) setLineScheduleLink(null) }} onOk={applyLineScheduleLink}
+        okText="确认关联" cancelText="取消" okButtonProps={{ disabled: lineLinkLoading || lineLinkSelection == null }}>
+        <Typography.Paragraph>最新排期：{lineLinkRevision || '—'}。只显示与该行货号一致的订单，已下单订单也可选择。</Typography.Paragraph>
+        <Typography.Paragraph type="warning">确认后替换本行当前关联（{lineScheduleLink?.original.tomy_po || '未关联'}），并带入所选走货期；排期未填走货期则保留原值。采购数量、单价和交货日期不变，最后仍需保存采购单。</Typography.Paragraph>
+        <Input.Search placeholder="搜索订单号、客户、走货期" value={lineLinkSearch} onChange={e => setLineLinkSearch(e.target.value)} allowClear style={{ marginBottom: 12 }} />
+        <Table size="small" rowKey="_linkIndex" loading={lineLinkLoading} scroll={{ x: 800 }}
+          pagination={{ pageSize: 10, showSizeChanger: false }}
+          rowSelection={{ type: 'radio', selectedRowKeys: lineLinkSelection == null ? [] : [lineLinkSelection],
+            onChange: keys => setLineLinkSelection(keys.length ? Number(keys[0]) : null), preserveSelectedRowKeys: true }}
+          dataSource={lineLinkRows.map((row, index) => ({ ...row, _linkIndex: index })).filter(row =>
+            lineScheduleLink && matchingLineSchedules(lineScheduleLink.original, [row]).length > 0
+            && `${row.orderNo || ''} ${row.customer || ''} ${row.eta || ''}`.toLowerCase().includes(lineLinkSearch.trim().toLowerCase()))}
+          columns={[
+            { title: '来源', dataIndex: 'source', width: 70 }, { title: '客户', dataIndex: 'customer', width: 100 },
+            { title: '货号', dataIndex: 'code', width: 120 }, { title: '排期订单号', dataIndex: 'orderNo', width: 150 },
+            { title: '品名', dataIndex: 'productName' }, { title: '排期数量（参考）', dataIndex: 'qty', width: 140 },
+            { title: '走货期', dataIndex: 'eta', width: 120 },
+          ]} />
       </Modal>
 
       <Modal

@@ -697,13 +697,15 @@ function MaterialsEditor({ rows, onChange, dicts, productCode, onSuppliersChange
       const ws = wb.Sheets[wb.SheetNames[0]]
       if (!ws) { message.error('Excel 无数据'); return }
       const arr = XLSX.utils.sheet_to_json<any>(ws, { defval: '' })
+      // Only identifiers use Excel's displayed text; keep raw numeric values for weights and quantities.
+      const displayedRows = XLSX.utils.sheet_to_json<any>(ws, { defval: '', raw: false })
       const norm = (k: string) => k.replace(/\s+/g, '').toLowerCase()
       const pick = (row: any, names: string[]) => {
         for (const n of names) for (const k of Object.keys(row))
           if (norm(k) === norm(n)) return row[k]
         return undefined
       }
-      const imported: Material[] = arr.map((r) => {
+      const imported: Material[] = arr.map((r, rowIndex) => {
         const number = (names: string[]) => {
           const value = pick(r, names)
           if (value == null || String(value).trim() === '') return undefined
@@ -720,7 +722,7 @@ function MaterialsEditor({ rows, onChange, dicts, productCode, onSuppliersChange
         name_en:        importedNameEn,
         spec:           String(pick(r, ['规格', 'spec']) ?? ''),
         category:       String(pick(r, ['类别', 'category']) ?? ''),
-        material_code:  String(pick(r, ['物料编码', 'materialcode', 'material_code']) ?? ''),
+        material_code:  String(pick(displayedRows[rowIndex] || r, ['物料编码', '物料编号', 'materialcode', 'material_code']) ?? '').trim(),
         supplier:       String(pick(r, ['供应商', 'supplier']) ?? ''),
         customs_company:String(pick(r, ['报关公司', 'customs', 'customscompany', 'customs_company']) ?? ''),
         hs_cn:          String(pick(r, ['HSCN', '中国HS', 'hs_cn']) ?? ''),
