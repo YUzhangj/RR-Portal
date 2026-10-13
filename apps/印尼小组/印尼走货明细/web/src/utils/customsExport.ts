@@ -10,7 +10,7 @@ import type { Material, SupplierDict } from '../api/client'
 import { documentSellerForLine, supplierForLine } from './supplierProfiles'
 import { deliveryDeadline, syncedShipmentDeadline } from './shipmentDeadline'
 import { isPaperRope, shipmentGrossPerPc, shipmentPackingAverageQty, shipmentWeightQuantity } from './shipmentWeight'
-import { documentRow, rebindDocumentFormula, type DocumentTableLayout } from './documentTemplateFormula'
+import { bindInvoiceLookupSerial, documentRow, rebindDocumentFormula, type DocumentTableLayout } from './documentTemplateFormula'
 
 import { CUSTOMS_FIXED, effectiveCustomsCompany, sortShipmentItems, cartonLayout } from './shipmentOrder'
 export { CUSTOMS_FIXED, effectiveCustomsCompany } from './shipmentOrder'
@@ -2854,9 +2854,15 @@ async function restoreLinkedTemplateFormulas(
           const column = cellColumn(cell.getAttribute('r') || '')
           const source = template[`${column}${sourceRow}`]
           if (!source?.f) continue
-          setXmlFormula(doc, row, column, rebindDocumentFormula(source.f, {
+          let formula = rebindDocumentFormula(source.f, {
             ...context, detail: { sourceRow, targetRow, mainRow: serial + 3 },
-          }), Boolean(source.F))
+          })
+          // Product codes and descriptions can repeat within and across invoices.
+          // Keep the template's lookup rule, but retain this exported line's identity.
+          if (plan.kind === 'invoice' && ['D', 'E', 'F', 'G', 'H', 'I'].includes(column)) {
+            formula = bindInvoiceLookupSerial(formula, mainName, targetRow)
+          }
+          setXmlFormula(doc, row, column, formula, Boolean(source.F))
         }
       })
     })

@@ -4,6 +4,7 @@ import * as XLSX from 'xlsx-js-style'
 import JSZip from 'jszip'
 import { DOMParser } from '@xmldom/xmldom'
 import { buildCustomsWorkbook, customsFileName } from './customsExport'
+import { bindInvoiceLookupSerial } from './documentTemplateFormula'
 
 const SPREADSHEET_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 
@@ -144,13 +145,49 @@ describe('supplier document export', () => {
           const address = `${col}${row}`
           const original = template.Sheets[sheet][address]
           if (!original?.f?.startsWith('LOOKUP(')) continue
+          const rebound = original.f.replaceAll(`${originalMain}!`, "'CURRENT-CONTAINER'!")
           expect(exported.Sheets[sheet][address].f, `${sheet}!${address}`)
-            .toBe(original.f.replaceAll(`${originalMain}!`, "'CURRENT-CONTAINER'!"))
+            .toBe(/发票/.test(sheet) && ['D', 'E', 'F', 'G', 'H', 'I'].includes(col)
+              ? bindInvoiceLookupSerial(rebound, 'CURRENT-CONTAINER', row) : rebound)
           expect(exported.Sheets[sheet][address].F).toBe(address)
         }
         const serial = exported.Sheets[sheet][`A${row}`].v
         expect(exported.Sheets['CURRENT-CONTAINER'][`A${Number(serial) + 3}`].v).toBe(serial)
       }
+    }
+  })
+
+  it.each(['legacy', 'RRI', 'RRM'])('keeps repeated invoice material lines bound to their own serial (%s)', async variant => {
+    const buffer = variant === 'legacy' ? templateBuffer : variant === 'RRI' ? rriTemplateBuffer : rrmTemplateBuffer
+    const items = [
+      { material_id: 1, supplier: seller.keyword, kg: 10, qty: 100, price: 1, contract_no: 'C-FIRST', invoice_no: 'I-FIRST' },
+      { material_id: 1, supplier: seller.keyword, kg: 30, qty: 300, price: 3, contract_no: 'C-FIRST', invoice_no: 'I-FIRST' },
+      { material_id: 1, supplier: seller.keyword, kg: 20, qty: 200, price: 2, contract_no: 'C-SECOND', invoice_no: 'I-SECOND' },
+    ]
+    const blob = await buildCustomsWorkbook({ templateBuffer: buffer, seller, items,
+      materials: new Map([[1, { id: 1, product_code: 'SAME', name_zh: '同名物料', name_en: 'Same material', spec: 'SAME', supplier: seller.keyword }]]),
+      productHs: new Map(), images: new Map(), form: { customer: variant === 'RRI' ? 'RRI' : 'RRM', containerNo: 'UNIQUE-LINES' } })
+    const wb = XLSX.read(await blob.arrayBuffer(), { type: 'array' })
+    const invoice = wb.Sheets[variant === 'RRI' ? '实业发票' : '全球发票']
+    const main = wb.Sheets['UNIQUE-LINES']
+    const invoiceRows = Object.entries(invoice).filter(([address, cell]) => /^A\d+$/.test(address)
+      && typeof cell.v === 'number' && invoice[`G${address.slice(1)}`]?.f?.startsWith('LOOKUP('))
+    expect(invoiceRows).toHaveLength(3)
+    for (const [address, cell] of invoiceRows) {
+      const row = Number(address.slice(1))
+      const serial = Number(cell.v)
+      // Each repeated name must still select just its unique main-table serial,
+      // keeping the lookup correct even when the main table is reordered.
+      for (const column of ['D', 'E', 'F', 'G', 'H', 'I']) {
+        expect(invoice[`${column}${row}`].f).toContain(`'UNIQUE-LINES'!A:A=A${row}`)
+        expect(invoice[`${column}${row}`].F).toBe(`${column}${row}`)
+      }
+      expect(invoice[`G${row}`].f).toContain("'UNIQUE-LINES'!K:K")
+      expect(invoice[`I${row}`].f).toContain("'UNIQUE-LINES'!Z:Z")
+      expect(invoice[`J${row}`].f).toBe(`I${row}*G${row}`)
+      expect(main[`A${serial + 3}`].v).toBe(serial)
+      expect([10, 20, 30]).toContain(main[`K${serial + 3}`].v)
+      expect(main[`Z${serial + 3}`].v).toBe(Number(main[`K${serial + 3}`].v) / 10)
     }
   })
 

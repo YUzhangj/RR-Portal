@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { documentRow, rebindDocumentFormula } from './documentTemplateFormula'
+import { bindInvoiceLookupSerial, documentRow, rebindDocumentFormula } from './documentTemplateFormula'
 
 const layouts = new Map([
   ['合同', [
@@ -49,5 +49,88 @@ describe('template formula reference binding', () => {
     expect(rebindDocumentFormula('IF(A1="SUM(G24:G37)",SUM(G24:G37),"H56")', {
       ...context, layouts: new Map([['合同', tables]]),
     })).toBe('IF(A1="SUM(G24:G37)",SUM(G24:G33),"H56")')
+  })
+})
+
+describe('invoice lookup serial binding', () => {
+  const vector = "0/(('MAIN'!D:D=B32)*('MAIN'!G:G&'MAIN'!F:F=C32))"
+  const lookup = `LOOKUP(1,${vector},'MAIN'!Z:Z)`
+  const bound = `LOOKUP(1,(${vector})/('MAIN'!A:A=A32),'MAIN'!Z:Z)`
+
+  it('retains all material conditions and the result expression inside outer rounding', () => {
+    expect(bindInvoiceLookupSerial(`ROUND(${lookup}*G32, 2)`, 'MAIN', 32)).toBe(`ROUND(${bound}*G32, 2)`)
+    expect(bindInvoiceLookupSerial(bound, 'MAIN', 32)).toBe(bound)
+  })
+
+  it('reads final row anchors after the document formula has been rebound', () => {
+    const rebound = rebindDocumentFormula(lookup, {
+      sheet: '发票', main: 'MAIN', layouts,
+      detail: { sourceRow: 32, targetRow: 48, mainRow: 15 },
+    })
+    expect(bindInvoiceLookupSerial(rebound, 'MAIN', 48)).toBe(
+      "LOOKUP(1,(0/(('MAIN'!D:D=B48)*('MAIN'!G:G&'MAIN'!F:F=C48)))/('MAIN'!A:A=A48),'MAIN'!Z:Z)",
+    )
+  })
+
+  it('skips literal LOOKUP text and doubled double quotes while binding a real call', () => {
+    const literal = `"LOOKUP(1,${vector},'MAIN'!Z:Z), say ""LOOKUP"""`
+    expect(bindInvoiceLookupSerial(`IF(A32=${literal}, ${lookup}, ${literal})`, 'MAIN', 32))
+      .toBe(`IF(A32=${literal}, ${bound}, ${literal})`)
+  })
+
+  it('handles escaped apostrophes, commas and LOOKUP text in quoted sheet names', () => {
+    const name = "柜'号,LOOKUP(1)"
+    const prefix = "'柜''号,LOOKUP(1)'!"
+    const formula = `LOOKUP(1,0/(${prefix}D:D=B48),${prefix}G:G&${prefix}F:F)`
+    expect(bindInvoiceLookupSerial(formula, name, 48)).toBe(
+      `LOOKUP(1,(0/(${prefix}D:D=B48))/(${prefix}A:A=A48),${prefix}G:G&${prefix}F:F)`,
+    )
+  })
+
+  it('accepts unquoted sheet names case insensitively and preserves whitespace', () => {
+    expect(bindInvoiceLookupSerial('lookup ( 1 , 0 / (Main!D:D=B7) , Main!Z:Z )', 'MAIN', 7))
+      .toBe("lookup ( 1 ,( 0 / (Main!D:D=B7) )/('MAIN'!A:A=A7), Main!Z:Z )")
+  })
+
+  it('does not mistake nested function or array commas for LOOKUP arguments', () => {
+    const vector = `0/(('MAIN'!D:D=B32)*ISNUMBER(MATCH('MAIN'!F:F,{"A","B"},0)))`
+    const result = `IF(B32="A,B",'MAIN'!Z:Z,ROUND('MAIN'!Z:Z,2))`
+    expect(bindInvoiceLookupSerial(`LOOKUP(1,${vector},${result})`, 'MAIN', 32))
+      .toBe(`LOOKUP(1,(${vector})/('MAIN'!A:A=A32),${result})`)
+  })
+
+  it('binds multiple and nested real calls without corrupting their offsets', () => {
+    const other = "LOOKUP(1,0/('OTHER'!D:D=B32),'OTHER'!Z:Z)"
+    const nested = `LOOKUP(1,${vector},IF(A32,${lookup},${other}))`
+    expect(bindInvoiceLookupSerial(`${lookup}+${other}+${nested}`, 'MAIN', 32))
+      .toBe(`${bound}+${other}+${nested.replace(lookup, bound)}`)
+    const nestedCurrent = `LOOKUP(1,${vector},IF(A32,${lookup},'MAIN'!Z:Z))`
+    expect(bindInvoiceLookupSerial(nestedCurrent, 'MAIN', 32))
+      .toBe(`LOOKUP(1,(${vector})/('MAIN'!A:A=A32),IF(A32,${bound},'MAIN'!Z:Z))`)
+  })
+
+  it.each([
+    "LOOKUP(1,0/('OTHER'!D:D=B32),'OTHER'!Z:Z)",
+    "LOOKUP(1,0/('MAIN-OTHER'!D:D=B32),'MAIN-OTHER'!Z:Z)",
+    'LOOKUP(1,0/(D:D="MAIN!A:A"),Z:Z)',
+    "LOOKUP(1,'MAIN'!D:D,'MAIN'!Z:Z)",
+    "LOOKUP(2,0/('MAIN'!D:D=B32),'MAIN'!Z:Z)",
+    "LOOKUP(1,0/('MAIN'!D:D=B32))",
+    "LOOKUP(1,0/('MAIN'!D:D=B32),'MAIN'!Z:Z,2)",
+    "LOOKUP(1,0/(('MAIN'!D:D=B32)*('OTHER'!A:A=A32)),'MAIN'!Z:Z)",
+    "LOOKUP(1,0/('MAIN'!D:D=B32),'OTHER'!Z:Z)",
+    'LOOKUP(1,0/([Book.xlsx]MAIN!D:D=B32),[Book.xlsx]MAIN!Z:Z)',
+    "NOTLOOKUP(1,0/('MAIN'!D:D=B32),'MAIN'!Z:Z)",
+    "_xlfn.LOOKUP(1,0/('MAIN'!D:D=B32),'MAIN'!Z:Z)",
+    "LOOKUP(1,0/('MAIN'!D:D=B32),'MAIN'!Z:Z",
+    "LOOKUP(1,0/('MAIN'!D:D=B32),'MAIN!Z:Z)",
+    "ROUND(LOOKUP(1,0/('MAIN'!D:D=B32),'MAIN'!Z:Z)",
+    'LOOKUP(1,0/(\'MAIN\'!D:D=B32),\'MAIN\'!Z:Z)+"unfinished',
+  ])('leaves unsupported or non-current-table expressions intact: %s', formula => {
+    expect(bindInvoiceLookupSerial(formula, 'MAIN', 32)).toBe(formula)
+  })
+
+  it.each([0, -1, 1.5, NaN, 1_048_577])('does not write an invalid target row %s', row => {
+    expect(bindInvoiceLookupSerial(lookup, 'MAIN', row)).toBe(lookup)
   })
 })
