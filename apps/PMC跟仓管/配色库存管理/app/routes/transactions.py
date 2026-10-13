@@ -218,19 +218,22 @@ def _ocr_upload(tx_type: str):
         data = request.files["file"].read()
         lookup = build_pigment_lookup()
         rows = None
+        llm_error = LLMOCRError()
         try:
             rows = parse_image_llm(data, lookup)
         except LLMOCRError as e:
-            current_app.logger.warning("LLM OCR 失败, 回退 Paddle: %s", e)
-        except Exception as e:
-            current_app.logger.warning("LLM OCR 异常, 回退 Paddle: %s", e)
+            llm_error = e
+            current_app.logger.warning("百炼 OCR 失败: code=%s http_status=%s", e.code, e.status)
+        except Exception:
+            current_app.logger.warning("百炼 OCR 失败: code=unexpected")
         fallback_used = False
         if rows is None:
             fallback_used = True
             try:
                 rows = parse_image(data, lookup)
-            except Exception as e:
-                flash(f"识别失败:{e}", "danger")
+            except Exception:
+                current_app.logger.warning("本地 OCR 备用识别失败")
+                flash(f"识别失败:{llm_error} 本地备用识别也未完成，请稍后重试。", "danger")
                 return render_template(template, rows=None, pigments=_pigments())
         code_map = {p.id: p.code for p in Pigment.query.filter_by(is_archived=False).all()}
         for r in rows:

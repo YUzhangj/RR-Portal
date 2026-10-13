@@ -166,12 +166,12 @@ while IFS= read -r file; do
       continue ;;
   esac
 
-  # 只豁免 voyageplex-api 邮箱或 printlink station 的指定单行新增；其他字节必须完全一致。
+  # 只豁免指定的邮箱/station 新增或 peise OCR 模型更新；其他字节必须完全一致。
   # helper 直接读取两个 Git blob，不解析/展开生产 .env，也不输出 compose 内容。
   # helper 缺失、读取失败或任意其他 compose 变动都回到保守全量。
   if [[ "$file" == "docker-compose.cloud.yml" ]]; then
     if COMPOSE_INCREMENTAL_SERVICE=$(python3 "$INSTALL_DIR/deploy/compose-mailbox-only-change.py" --service "$BEFORE_HEAD" "$AFTER_HEAD") &&
-       [[ "$COMPOSE_INCREMENTAL_SERVICE" == voyageplex-api || "$COMPOSE_INCREMENTAL_SERVICE" == printlink ]]; then
+       [[ "$COMPOSE_INCREMENTAL_SERVICE" == voyageplex-api || "$COMPOSE_INCREMENTAL_SERVICE" == printlink || "$COMPOSE_INCREMENTAL_SERVICE" == peise ]]; then
       if [[ ! " ${AFFECTED_SERVICES[*]} " =~ " $COMPOSE_INCREMENTAL_SERVICE " ]]; then
         AFFECTED_SERVICES+=("$COMPOSE_INCREMENTAL_SERVICE")
       fi
