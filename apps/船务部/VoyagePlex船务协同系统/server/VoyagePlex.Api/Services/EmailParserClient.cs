@@ -36,7 +36,7 @@ public sealed class EmailParserClient(HttpClient httpClient, VoyagePlex.Api.Data
             form.Add(content, "files", file.FileName);
         }
 
-        using var response = await httpClient.PostAsync("/v1/email-batches/parse", form, cancellationToken);
+        using var response = await httpClient.PostAsync($"/v1/email-batches/parse?company={db.Company}", form, cancellationToken);
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
         var contentType = response.Content.Headers.ContentType?.ToString() ?? "application/json";
         return new ParserResponse((int)response.StatusCode, contentType, body);

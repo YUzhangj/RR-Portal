@@ -27,6 +27,18 @@ foreach (var invalidConfiguration in new[] { "invalid", "[null]", "{}", "[{\"use
 }
 Environment.SetEnvironmentVariable(ServerMailboxConfiguration.EnvironmentVariable, null);
 Console.WriteLine("Server-managed mailbox configuration tests passed.");
+var explicitCabinets = JsonNode.Parse("""
+{"fields":{"explicit_container_allocation":"true"},"shipment_groups":[{"group_key":"C1","so_number":"SO1","container_type":"45HQ"},{"group_key":"C2","so_number":"SO1","container_type":"40HQ"}],"items":[{"product_code":"A","container_assignment":"C1","quantity":12,"pieces":3},{"product_code":"A","container_assignment":"C2","quantity":24,"pieces":6}]}
+""")!.AsObject();
+var explicitTasks = MultiContainerRules.Split(explicitCabinets);
+if (explicitTasks.Count != 2 || explicitTasks[0].Payload["items"]![0]!["quantity"]!.GetValue<int>() != 12 ||
+    explicitTasks[1].Payload["items"]![0]!["quantity"]!.GetValue<int>() != 24 ||
+    explicitTasks[1].Payload["fields"]!["container_type"]!.ToString() != "40HQ")
+    throw new InvalidOperationException("附件明确分柜必须保留原始数量及柜型，不得重新平均分配");
+explicitCabinets["items"]![0]!["container_assignment"] = "UNKNOWN";
+try { MultiContainerRules.Split(explicitCabinets); throw new Exception("应拒绝未分配货物"); }
+catch (InvalidOperationException) { }
+Console.WriteLine("Explicit cabinet assignment tests passed.");
 
 if (MailboxDateRules.ReceivedDate("2026-09-17T15:59:00+00:00") != "2026-09-17" ||
     MailboxDateRules.ReceivedDate("2026-09-17T16:00:00+00:00") != "2026-09-18" ||
@@ -315,3 +327,120 @@ if (MultiContainerRules.Split(emptyPlan).Any(c => c.Payload["fields"]?["export_t
 var invalidPlan = multiPlan.DeepClone().AsObject(); invalidPlan["items"]![0]!["pieces"] = 1.5;
 try { MultiContainerRules.Split(invalidPlan); throw new Exception("不应允许小数箱数"); } catch (InvalidOperationException) { }
 Console.WriteLine("Multi-container carton/weight conservation, PO context and no-cargo rules passed.");
+
+var sharedWarehouse = JsonNode.Parse("""{"fields":{"separate_warehouse_so":"true"},"items":[{"product_code":"A","source_row":1,"quantity":12},{"product_code":"B","source_row":2,"quantity":24}],"warehouse_groups":[{"warehouse":"同一仓库","so_number":"SO1","items":[{"product_code":"A","source_row":1}]},{"warehouse":"同一仓库","so_number":"SO2","items":[{"product_code":"B","source_row":2}]}]}""")!.AsObject();
+var warehouseTasks = WarehouseSoRules.Split(sharedWarehouse);
+if (warehouseTasks.Count != 2 || warehouseTasks[0].Payload["fields"]!["so_number"]!.ToString() != "SO1" || warehouseTasks[1].Payload["items"]![0]!["quantity"]!.GetValue<int>() != 24)
+    throw new InvalidOperationException("同仓不同SO必须分别建任务，保留对应货物数量");
+sharedWarehouse["warehouse_groups"]!.AsArray().RemoveAt(1);
+try { WarehouseSoRules.Split(sharedWarehouse); throw new Exception("必须拒绝遗漏货物"); } catch (InvalidOperationException) { }
+Console.WriteLine("Warehouse SO isolation tests passed.");
+
+var warehouseScopes = JsonNode.Parse("""
+{"fields":{"separate_warehouse_so":"true","cargo_split_required":"true","ship_date":"2026-10-26","cutoff_date":"2026-10-30T12:00"},"items":[{"source_file":"fake.xlsx","source_row":1,"product_code":"A","quantity":10,"shipment_scope":"current"},{"source_file":"fake.xlsx","source_row":2,"product_code":"B","quantity":20,"shipment_scope":"waiting"},{"source_file":"fake.xlsx","source_row":3,"product_code":"C","quantity":30,"shipment_scope":"current"},{"source_file":"fake.xlsx","source_row":4,"product_code":"D","quantity":40,"shipment_scope":"waiting"}],"warehouse_groups":[{"warehouse":"同一仓库","so_number":"SO1","items":[{"source_file":"fake.xlsx","source_row":1,"product_code":"A"},{"source_file":"fake.xlsx","source_row":2,"product_code":"B"}]},{"warehouse":"同一仓库","so_number":"SO2","items":[{"source_file":"fake.xlsx","source_row":3,"product_code":"C"},{"source_file":"fake.xlsx","source_row":4,"product_code":"D"}]}]}
+""")!.AsObject();
+var originalWarehouseScopes = warehouseScopes.ToJsonString();
+var scopedWarehouseTasks = WarehouseSoRules.Split(warehouseScopes);
+if (scopedWarehouseTasks.Count != 4 || scopedWarehouseTasks.Select(task => task.GroupKey).Distinct().Count() != 4 ||
+    warehouseScopes.ToJsonString() != originalWarehouseScopes ||
+    scopedWarehouseTasks.Sum(task => task.Payload["items"]!.AsArray().Sum(item => item!["quantity"]!.GetValue<int>())) != 100)
+    throw new InvalidOperationException("同仓不同SO及本次/等待范围必须独立，保留来源及货物总量");
+foreach (var task in scopedWarehouseTasks)
+{
+    var cargo = task.Payload["items"]!.AsArray().Single()!;
+    var waiting = cargo["shipment_scope"]!.ToString() == "waiting";
+    var so = task.Payload["fields"]!["so_number"]!.ToString();
+    var product = cargo["product_code"]!.ToString();
+    if ((so == "SO1" ? product is not ("A" or "B") : product is not ("C" or "D")) ||
+        !task.GroupKey.EndsWith(waiting ? ":waiting-notification" : ":current", StringComparison.Ordinal) ||
+        task.Payload["warehouse_groups"]!.AsArray().Count != 1 ||
+        task.Payload["warehouse_groups"]![0]!["items"]!.AsArray().Single()!["product_code"]!.ToString() != product ||
+        task.Payload["fields"]!["cutoff_date"]!.ToString() != "2026-10-30T12:00" ||
+        (waiting ? task.Payload["fields"]!["waiting_notification"]?.ToString() != "true" || task.Payload["fields"]!["ship_date"]!.ToString() != ""
+            : task.Payload["fields"]!["waiting_notification"]?.ToString() == "true" || task.Payload["fields"]!["ship_date"]!.ToString() != "2026-10-26"))
+        throw new InvalidOperationException("仓库SO或等待状态、日期及货物明细被交叉覆盖");
+}
+warehouseScopes["items"]![0]!["shipment_scope"] = "unassigned";
+try { WarehouseSoRules.Split(warehouseScopes); throw new Exception("应拒绝未核对的交仓范围"); }
+catch (InvalidOperationException) { }
+Console.WriteLine("Warehouse SO/current-waiting composition and quantity conservation tests passed.");
+
+var previewDates = JsonNode.Parse("""
+{"items":[{"fields":{"task_type":"Delivery","ship_date":"","cutoff_date":"2026-10-30T12:00","si_deadline":"2026-10-29T10:00"}},{"fields":{"task_type":"Delivery","ship_date":"2026-10-26","cutoff_date":"2026-10-30T12:00"}},{"fields":{"ship_date":"","cutoff_date":"2026-10-30T12:00"}},{"fields":{"multi_container":"true","ship_date":"","cutoff_date":"2026-10-30T12:00"}}]}
+""")!.AsObject();
+MailClassificationRules.PopulatePreviewPlannedShipDates(previewDates);
+if (previewDates["items"]![0]!["fields"]!["ship_date"]!.ToString() != "" ||
+    previewDates["items"]![1]!["fields"]!["ship_date"]!.ToString() != "2026-10-26" ||
+    previewDates["items"]![2]!["fields"]!["ship_date"]!.ToString() != "2026-10-29" ||
+    previewDates["items"]![3]!["fields"]!["ship_date"]!.ToString() != "")
+    throw new InvalidOperationException("Delivery预览不能按截期捏造送货日期，明确日期及普通邮件原推算规则应保留");
+Console.WriteLine("Preview Delivery unknown/explicit dates and standard fallback tests passed.");
+
+var correctedWarehouseSo = JsonNode.Parse("""
+{"fields":{"separate_warehouse_so":"true","so_number":" SO123 "},"so_numbers":["SO123"],"items":[{"source_file":"fake.xlsx","source_row":1,"product_code":"A","quantity":12},{"source_file":"fake.xlsx","source_row":2,"product_code":"B","quantity":24}],"warehouse_groups":[{"warehouse":"仓库一","so_number":"","items":[{"source_file":"fake.xlsx","source_row":1,"product_code":"A"}]},{"warehouse":"仓库二","so_number":"","items":[{"source_file":"fake.xlsx","source_row":2,"product_code":"B"}]}]}
+""")!.AsObject();
+var originalCorrectedWarehouseSo = correctedWarehouseSo.ToJsonString();
+var correctedWarehouseTasks = WarehouseSoRules.Split(correctedWarehouseSo);
+if (correctedWarehouseTasks.Count != 2 || correctedWarehouseTasks.Select(task => task.GroupKey).Distinct().Count() != 2 ||
+    correctedWarehouseTasks.Sum(task => task.Payload["items"]!.AsArray().Sum(item => item!["quantity"]!.GetValue<int>())) != 36 ||
+    correctedWarehouseTasks.Any(task => task.Payload["fields"]!["so_number"]!.ToString() != "SO123" ||
+        task.Payload["warehouse_groups"]![0]!["so_number"]!.ToString() != "SO123") ||
+    correctedWarehouseSo.ToJsonString() != originalCorrectedWarehouseSo)
+    throw new InvalidOperationException("唯一人工SO应补齐缺号仓库分组，保留各仓货物总量且不修改候选来源");
+var singleWarehouseSo = correctedWarehouseSo.DeepClone().AsObject();
+singleWarehouseSo["items"]!.AsArray().RemoveAt(1);
+singleWarehouseSo["warehouse_groups"]!.AsArray().RemoveAt(1);
+if (WarehouseSoRules.Split(singleWarehouseSo).Single().Payload["items"]![0]!["quantity"]!.GetValue<int>() != 12)
+    throw new InvalidOperationException("单仓邮件的人工SO修正不能丢失货物");
+correctedWarehouseSo["warehouse_groups"]![0]!["so_number"] = " SO456 ";
+var preservedWarehouseTasks = WarehouseSoRules.Split(correctedWarehouseSo);
+if (preservedWarehouseTasks[0].Payload["fields"]!["so_number"]!.ToString() != "SO456" ||
+    preservedWarehouseTasks[0].Payload["warehouse_groups"]![0]!["so_number"]!.ToString() != "SO456" ||
+    preservedWarehouseTasks[1].Payload["fields"]!["so_number"]!.ToString() != "SO123")
+    throw new InvalidOperationException("明确分组SO不能被总SO修正覆盖");
+foreach (var unresolvedSo in new[] { "", "SO1,SO2", "SO1，SO2" })
+{
+    singleWarehouseSo["fields"]!["so_number"] = unresolvedSo;
+    try { WarehouseSoRules.Split(singleWarehouseSo); throw new Exception("缺分组SO时不能用未知或多号总SO确认"); }
+    catch (InvalidOperationException) { }
+}
+foreach (var unresolvedSo in new[] { "SO1,SO2", "SO1，SO2" })
+{
+    singleWarehouseSo["fields"]!["so_number"] = "SO123";
+    singleWarehouseSo["warehouse_groups"]![0]!["so_number"] = unresolvedSo;
+    try { WarehouseSoRules.Split(singleWarehouseSo); throw new Exception("多号分组SO不能被唯一总SO替代"); }
+    catch (InvalidOperationException) { }
+}
+Console.WriteLine("Warehouse reviewed single-SO fallback, existing assignments and ambiguity rejection tests passed.");
+
+var explicitSchedules = JsonNode.Parse("""
+{"fields":{"explicit_container_allocation":"true","multi_container":"true","si_deadline":"","cutoff_date":"","vessel_name":""},"shipment_groups":[{"group_key":"C1","so_number":"SO1","container_type":"40HQ","si_deadline":"2026-10-25T10:00","cutoff_date":"2026-10-27T12:00","vessel_name":"VESSEL-ONE"},{"group_key":"C2","so_number":"SO2","container_type":"40HQ","si_deadline":"2026-10-28T11:00","cutoff_date":"2026-10-30T13:00","vessel_name":"VESSEL-TWO"}],"items":[{"product_code":"A","container_assignment":"C1","quantity":12},{"product_code":"B","container_assignment":"C2","quantity":24}]}
+""")!.AsObject();
+var originalExplicitSchedules = explicitSchedules.ToJsonString();
+var scheduledCabinets = MultiContainerRules.Split(explicitSchedules);
+if (scheduledCabinets.Count != 2 || scheduledCabinets.Sum(task => task.Payload["items"]!.AsArray().Sum(item => item!["quantity"]!.GetValue<int>())) != 36 ||
+    explicitSchedules.ToJsonString() != originalExplicitSchedules)
+    throw new InvalidOperationException("明确分柜船期复制不能改变货物分配或原邮件");
+for (var index = 0; index < scheduledCabinets.Count; index++)
+{
+    var expectedGroup = explicitSchedules["shipment_groups"]![index]!;
+    if (scheduledCabinets[index].GroupKey != expectedGroup["group_key"]!.ToString() ||
+        new[] { "so_number", "container_type", "si_deadline", "cutoff_date", "vessel_name" }.Any(key =>
+            scheduledCabinets[index].Payload["fields"]![key]!.ToString() != expectedGroup[key]!.ToString()))
+        throw new InvalidOperationException("各柜SO、SI、截期和船名应保留各自安排，不得混用");
+}
+var commonExplicitSchedule = JsonNode.Parse("""
+{"fields":{"explicit_container_allocation":"true","multi_container":"false","si_deadline":"2026-10-25T10:00","cutoff_date":"2026-10-27T12:00","vessel_name":"COMMON-VESSEL"},"shipment_groups":[{"group_key":"C1","so_number":"SO1","container_type":"40HQ"}],"items":[{"product_code":"A","container_assignment":"C1","quantity":12}]}
+""")!.AsObject();
+var commonScheduleTask = MultiContainerRules.Split(commonExplicitSchedule).Single();
+if (new[] { "si_deadline", "cutoff_date", "vessel_name" }.Any(key =>
+    commonScheduleTask.Payload["fields"]![key]!.ToString() != commonExplicitSchedule["fields"]![key]!.ToString()))
+    throw new InvalidOperationException("单柜附件未提供船期字段时应保留公共船期");
+commonExplicitSchedule["shipment_groups"]![0]!["si_deadline"] = null;
+commonExplicitSchedule["shipment_groups"]![0]!["cutoff_date"] = "";
+var explicitlyClearedSchedule = MultiContainerRules.Split(commonExplicitSchedule).Single();
+if (explicitlyClearedSchedule.Payload["fields"]!["si_deadline"] is not null ||
+    explicitlyClearedSchedule.Payload["fields"]!["cutoff_date"]!.ToString() != "" ||
+    explicitlyClearedSchedule.Payload["fields"]!["vessel_name"]!.ToString() != "COMMON-VESSEL")
+    throw new InvalidOperationException("分柜明确空船期应覆盖公共值，缺失字段才沿用公共值");
+Console.WriteLine("Explicit cabinet per-group schedules and absent/common metadata tests passed.");

@@ -73,6 +73,14 @@ def apply_carrier_schedule(fields: dict, tables: list) -> None:
     for table in tables:
         for index, header in enumerate(table):
             keys = [re.sub(r"[^a-z]", "", value.lower()) for value in header]
+            if "siandvgmcutoff" in keys and "cycutoff" in keys:
+                rows = [row for row in table[index + 1:] if len(row) == len(keys)]
+                if len(rows) == 1:
+                    values = dict(zip(keys, rows[0]))
+                    for column, target in (("siandvgmcutoff", "si_deadline"), ("cycutoff", "cutoff_date")):
+                        date = normalize_deadline(values.get(column, ""))
+                        if date:
+                            fields[target] = date
             if "carrierso" not in keys or "so" not in keys:
                 continue
             for row in table[index + 1:]:

@@ -329,6 +329,7 @@ main { min-width: 0; }
 .shipment-fields small { display:block; margin-top:5px; color:var(--muted); font-size:13px; }
 .shipment-actions { display:flex; flex-direction:column; align-items:flex-end; justify-content:flex-end; gap:12px; }
 .shipment-actions.field-actions { grid-column:3; }
+.shipment-fields.has-warehouse .field-actions { grid-column:1 / -1; }
 .shipment-actions.warehouse-actions { margin-top:18px; padding-top:18px; border-top:1px solid var(--line); }
 .shipment-action-buttons { display:flex; align-items:center; gap:8px; }
 .shipment-action-buttons > a,.shipment-action-buttons > button { display:inline-flex; align-items:center; justify-content:center; text-align:center; white-space:nowrap; }

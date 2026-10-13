@@ -207,6 +207,31 @@ def run():
             assert {source["id"] for source in task["sourceEmails"]} == {new, change}
             assert task["plannedShipDate"] == "2026-10-16", "Confirmed changes must update actual task fields"
             with sqlite3.connect(db_path) as connection:
+                delivery = mail(connection, "2026-10-09", "送丹尼送货任务", so="SO-DELIVERY", mode="Delivery")
+                payload = json.loads(connection.execute("SELECT ResultJson FROM ImportEmailItems WHERE Id=?", (delivery,)).fetchone()[0])
+                payload["fields"].update(task_type="Delivery", ship_date="2026-07-30", pickup_date="2026-07-31", delivery_factory="丹尼", dispatch_date_source="explicit", container_type="", delivery_time="11:00")
+                connection.execute("UPDATE ImportEmailItems SET ResultJson=? WHERE Id=?", (json.dumps(payload), delivery))
+                shared = mail(connection, "2026-10-09", "同仓不同SO交仓", so="SO-W1", mode="Warehouse")
+                payload = json.loads(connection.execute("SELECT ResultJson FROM ImportEmailItems WHERE Id=?", (shared,)).fetchone()[0])
+                payload["fields"]["separate_warehouse_so"] = "true"
+                cargo = [{"product_code":"P1","source_row":1,"source_file":"PL.xlsx","quantity":12}, {"product_code":"P2","source_row":2,"source_file":"PL.xlsx","quantity":24}]
+                payload["items"] = cargo
+                payload["warehouse_groups"] = [{"warehouse":"同一仓库","so_number":"SO-W1","items":[cargo[0]]}, {"warehouse":"同一仓库","so_number":"SO-W2","items":[cargo[1]]}]
+                connection.execute("UPDATE ImportEmailItems SET ResultJson=? WHERE Id=?", (json.dumps(payload), shared))
+            delivery_id = request("/api/mail/candidates/batch/confirm", {"ids":[delivery]})["taskIds"][0]
+            delivered = request(f"/api/shipments/{delivery_id}")
+            assert delivered["plannedShipDate"] == "2026-07-30"
+            assert delivered["exportDetails"]["shipmentMode"] == "Delivery"
+            assert delivered["exportDetails"]["pickupDate"] == "2026-07-31"
+            assert delivered["exportDetails"]["deliveryTime"] == "11:00"
+            request(f"/api/shipments/{delivery_id}", {"exportDetails":delivered["exportDetails"]}, method="PATCH")
+            assert request(f"/api/shipments/{delivery_id}")["exportDetails"]["deliveryFactory"] == "丹尼"
+            warehouse_ids = request("/api/mail/candidates/batch/confirm", {"ids":[shared]})["taskIds"]
+            warehouse_tasks = [request(f"/api/shipments/{id}") for id in warehouse_ids]
+            assert sorted(t["soNumber"] for t in warehouse_tasks) == ["SO-W1","SO-W2"]
+            assert sorted(t["items"][0]["quantity"] for t in warehouse_tasks) == [12,24]
+            print("Delivery dates and separate warehouse SO task creation passed.")
+            with sqlite3.connect(db_path) as connection:
                 grouped = mail(connection, "2026-10-09", "新增整柜 SO-GROUP", so="SO-GROUP")
                 grouped_change = mail(connection, "2026-10-09", "变更整柜 SO-GROUP", category="Change", so="SO-GROUP")
                 for item_id in (grouped, grouped_change):
@@ -395,6 +420,26 @@ def run():
                 plan={"status":"parsed","fingerprint":"multi-"+scope,"fields":{"multi_container":"true","export_template":"sky-castle-multi","customer":"Sky Castle"},"items":[{"product_code":"MULTI-SKU","spec":12,"quantity":20016,"pieces":1668,"net_net_weight":7806.24,"order_total_pieces":1668}],"shipment_groups":[{"group_key":"container-"+str(i+1),"so_number":"MULTI-SO-"+str(i+1),"container_type":"40HQ","si_deadline":"2026-09-24T10:00" if i<2 else "2026-09-29T15:00","cutoff_date":"2026-09-27T09:00" if i<2 else "2026-10-02T12:00"} for i in range(7)],"so_numbers":["MULTI-SO-"+str(i+1) for i in range(7)]}
                 preview=request("/api/imports/email/split-preview",plan)["cabinets"]
                 assert len(preview)==7 and sum(int(item["pieces"]) for cabinet in preview for item in cabinet["items"])==1668
+                explicit={"status":"parsed","fingerprint":"explicit-"+scope,"fields":{"multi_container":"false","explicit_container_allocation":"true","si_deadline":"2026-10-20T10:00"},"items":[{"product_code":"EXPLICIT-SKU","quantity":12,"pieces":2,"container_assignment":"C1"}],"shipment_groups":[{"group_key":"C1","so_number":"EXPLICIT-SO","container_type":"40HQ"}]}
+                one=request("/api/imports/email/split-preview",explicit)["cabinets"]
+                assert len(one)==1 and one[0]["items"][0]["quantity"]==12
+                assert one[0]["fields"]["si_deadline"]=="2026-10-20T10:00"
+                explicit["fields"]["multi_container"]="true"
+                explicit["shipment_groups"]=[{"group_key":"C1","so_number":"EXPLICIT-SO-A","container_type":"40HQ","si_deadline":"2026-10-21T10:00","cutoff_date":"2026-10-23T12:00","vessel_name":"Vessel-A"},{"group_key":"C2","so_number":"EXPLICIT-SO-B","container_type":"40HQ","si_deadline":"2026-10-22T11:00","cutoff_date":"2026-10-24T13:00","vessel_name":"Vessel-B"}]
+                explicit["items"].append({"product_code":"EXPLICIT-SKU","quantity":24,"pieces":4,"container_assignment":"C2"})
+                two=request("/api/imports/email/split-preview",explicit)["cabinets"]
+                assert [(g["fields"]["si_deadline"],g["fields"]["cutoff_date"],g["fields"]["vessel_name"]) for g in two]==[("2026-10-21T10:00","2026-10-23T12:00","Vessel-A"),("2026-10-22T11:00","2026-10-24T13:00","Vessel-B")]
+                request("/api/imports/email/confirm",{"items":[explicit],"total":1,"parsed":1})
+                explicit_tasks={t["soNumber"]:t for t in request("/api/shipments") if (t.get("soNumber") or "").startswith("EXPLICIT-SO-")}
+                assert set(explicit_tasks)=={"EXPLICIT-SO-A","EXPLICIT-SO-B"}
+                assert explicit_tasks["EXPLICIT-SO-A"]["siDeadline"]=="2026-10-21T10:00" and explicit_tasks["EXPLICIT-SO-B"]["siDeadline"]=="2026-10-22T11:00"
+                assert explicit_tasks["EXPLICIT-SO-A"]["cutoffDate"]=="2026-10-23T12:00" and explicit_tasks["EXPLICIT-SO-B"]["cutoffDate"]=="2026-10-24T13:00"
+                assert sum(float(item["quantity"]) for task in explicit_tasks.values() for item in task["items"])==36
+                delivery={"status":"parsed","fingerprint":"delivery-priority-"+scope,"fields":{"task_type":"Delivery","so_number":"DELIVERY-PRIORITY","delivery_factory":"泰亨","ship_date":"2026-10-31","export_template":"sky-castle-multi"},"items":[{"product_code":"DELIVERY-SKU","quantity":12,"pieces":1}]}
+                request("/api/imports/email/confirm",{"items":[delivery],"total":1,"parsed":1})
+                delivery_task=next(t for t in request("/api/shipments") if t["soNumber"]=="DELIVERY-PRIORITY")
+                assert delivery_task["exportDetails"]["shipmentMode"]=="Delivery" and delivery_task["exportDetails"]["deliveryFactory"]=="泰亨"
+                assert delivery_task["plannedShipDate"]=="2026-10-31"
                 request("/api/imports/email/split-preview",{"fields":{"multi_container":"true"},"shipment_groups":[None,None]},expected=400)
                 request("/api/imports/email/confirm",{"items":[plan],"total":1,"parsed":1})
                 tasks=[task for task in request("/api/shipments") if (task.get("soNumber") or "").startswith("MULTI-SO-")]

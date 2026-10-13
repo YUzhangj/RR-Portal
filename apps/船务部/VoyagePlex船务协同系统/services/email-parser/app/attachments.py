@@ -6,6 +6,7 @@ This module owns its contracts and has no runtime dependency on the legacy tree.
 import re
 from pathlib import Path
 from typing import Optional
+from .warehouse_name import warehouse_name
 
 import openpyxl
 import pdfplumber
@@ -26,6 +27,9 @@ HEADER_ALIASES = {
     "net_weight": ("net weight", "n.w", "nw", "净重"),
     "supplier": ("actual factory", "supplier", "factory", "工厂"),
     "factory_remark": ("main assembly factory", "factory remark", "装配工厂"),
+    "container_assignment": ("container no. loading", "container no loading", "分柜号", "柜次"),
+    "container_type": ("container type loding", "container type loading", "柜型"),
+    "carrier_so": ("carrier so number",),
     "pallet_count": ("no of pallet", "no. of pallets", "pallet qty", "卡板数"),
     "cargo_receipt": ("cargo receipt", "receipt no", "落货纸"),
     "length": ("length", "长", "l"),
@@ -110,6 +114,9 @@ def parse_excel(path: Path) -> dict:
             "net_weight": _number(_value(values, columns.get("net_weight"))),
             "supplier": _text(_value(values, columns.get("supplier"))),
             "factory_remark": _text(_value(values, columns.get("factory_remark"))),
+            "container_assignment": _text(_value(values, columns.get("container_assignment"))),
+            "container_type": _text(_value(values, columns.get("container_type"))),
+            "carrier_so": _text(_value(values, columns.get("carrier_so"))),
             "pallet_count": _number(_value(values, columns.get("pallet_count"))),
             "cargo_receipt": _text(_value(values, columns.get("cargo_receipt"))),
             "source_row": row_index,
@@ -119,6 +126,7 @@ def parse_excel(path: Path) -> dict:
         items.append(item)
     warnings = [] if items else [f"工作表“{sheet_title}”未识别到Packing List明细"]
     fields = {"loading_factory": "兴信"} if _xingxin_is_loading_factory(rows) else {}
+    fields["warehouse"] = warehouse_name("\n".join(" ".join(_text(value) for value in row) for row in rows[:12]))
     return {"kind": "packing_list", "fields": fields, "items": items, "warnings": warnings}
 
 
@@ -171,15 +179,25 @@ def parse_xls(path: Path) -> dict:
             "contract_number": _text(_value(values, columns.get("contract_number"))),
             "source_row": row_index,
         })
-    return {"kind": "packing_list_xls", "fields": {}, "items": items,
+    warehouse = warehouse_name('\n'.join(' '.join(_text(value) for value in row) for row in rows[:header_index]))
+    return {"kind": "packing_list_xls", "fields": {"warehouse": warehouse, "delivery_address": warehouse} if warehouse else {}, "items": items,
             "warnings": [] if items else ["旧版XLS未识别到货物明细，已保留表单字段供人工确认"]}
 
 
 def parse_pdf(path: Path) -> dict:
     pages = []
+    local_warehouse = ""
     with pdfplumber.open(path) as document:
         for page in document.pages[:8]:
             pages.append(page.extract_text() or "")
+            for label in page.search(r"CFS Cargo Delivery Address(?:仓库地址)?") or []:
+                following = [hit["top"] for hit in page.search(r"Warehouse") or [] if hit["top"] > label["bottom"]]
+                bottom = min([page.height, label["bottom"] + 100, *following])
+                local_warehouse = page.crop((label["x0"], label["bottom"], page.width, bottom)).extract_text() or ""
+                local_warehouse = re.sub(r"\s+", "", local_warehouse).strip()
+                local_warehouse = re.split(r"Warehouse|Phone#|Email:", local_warehouse)[0]
+                chinese = re.search(r"[\u4e00-\u9fff].*", local_warehouse)
+                local_warehouse = chinese[0] if chinese else local_warehouse
     text = "\n".join(pages)
     delivery_address = _clean_address(_first(text, [
             r"PLACE\s*OF\s*DELIVERY\s*(?:\([^)]*\))?\s*[：:]\s*(.+?)(?:\n|$)",
@@ -188,6 +206,7 @@ def parse_pdf(path: Path) -> dict:
             r"(?:送货地址|交货地址|收货地址)[：:\s]*(.+?)(?:\n|$)",
         ]))
     fields = {
+        "warehouse": local_warehouse,
         "delivery_address": delivery_address,
         "customs_cutoff": _near_date(text, r"(?:Port\s*Cargo\s*Cut[\s-]*Off|VGM\s*Cut[\s-]*Off|CY\s*Closing|截重柜时间|截关时间)"),
         "si_deadline": _near_date(text, r"(?:Shipping\s*Instruction|SI\s*Cut[\s-]*Off|截补料时间)"),
