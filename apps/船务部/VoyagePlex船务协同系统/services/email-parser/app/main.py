@@ -365,6 +365,37 @@ async def parse_email_batch(files: list[UploadFile] = File(...), company: str = 
     return await asyncio.to_thread(parse_email_entries, entries, company)
 
 
+def merge_cabinet_schedules(cabinets, schedules, review):
+    merged, bindings = [], []
+    for cabinet in cabinets:
+        so = str(cabinet.get("so_number") or "").strip()
+        matches = [schedule for schedule in schedules if
+                   (so and "," not in so and so == str(schedule.get("so_number") or "").strip()) or
+                   cabinet["group_key"] == schedule.get("group_key")]
+        group = dict(cabinet)
+        if len(matches) == 1:
+            schedule = matches[0]
+            if so and schedule.get("so_number") and so != schedule["so_number"]:
+                review.append(f"分柜{cabinet['group_key']}的SO与船期表不一致，需人工核对")
+            else:
+                if not so:
+                    group["so_number"] = schedule.get("so_number", "")
+                for key in ("vessel_name", "si_deadline", "cutoff_date"):
+                    value = schedule.get(key)
+                    if value and group.get(key) and value != group[key]:
+                        review.append(f"分柜{cabinet['group_key']}的{key}存在冲突，需人工核对")
+                    elif value:
+                        group[key] = value
+                if schedule.get("container_type") and schedule["container_type"] != group.get("container_type"):
+                    review.append(f"分柜{cabinet['group_key']}的柜型与船期表不一致，需人工核对")
+        elif schedules:
+            review.append(f"分柜{cabinet['group_key']}无法唯一匹配船期表，需人工核对各柜SO和截期")
+        bindings.append({"group_key": group["group_key"], "so_number": group.get("so_number", ""),
+                         "matches": len(matches), **{key: group.get(key, "") for key in ("vessel_name", "si_deadline", "cutoff_date")}})
+        merged.append(group)
+    return merged, bindings
+
+
 def parse_email_entries(entries: list[dict], company: str = "Xingxin") -> dict:
     batch_id = str(uuid.uuid4())
     results = []
@@ -467,15 +498,30 @@ def parse_email_entries(entries: list[dict], company: str = "Xingxin") -> dict:
                         fields[key] = value
                 if supported_attachment_count > 0 and successful_attachment_count == 0:
                     raise ValueError("邮件中的业务附件均无法解析")
-                from .parsing_policy import apply_policies, POLICY_VERSION
+                from .parsing_policy import apply_policies, is_auxiliary_attachment, POLICY_VERSION
+                container_plan = multi_container_plan(fields, message.get("body_tables", []),
+                    f'{message["subject"]}\n{message["body_text"]}', message.get("received_at", ""))
+                original_contracts = {str(cargo.get("contract_number", ""))
+                                      for detail in attachment_details for cargo in detail["items"]}
+                body_cargo = order_cargo(message.get("body_tables", [])) if container_plan else []
+                explicit_attachment = any(cargo.get("container_assignment") and cargo.get("container_type")
+                    for detail in attachment_details if not is_auxiliary_attachment(detail["filename"])
+                    for cargo in detail["items"])
+                if body_cargo and (company == "Huadeng" or not explicit_attachment):
+                    # Pick the cargo source before executing policies. Body tables
+                    # cannot restore rows that the company policy later excludes.
+                    for detail in attachment_details:
+                        detail["items"] = []
+                    attachment_details.append({"filename": "email-body.html", "kind": "order_table",
+                                               "fields": {}, "items": body_cargo})
                 if fields.get("warehouse"):
                     shipment_type = "warehouse"
-                policy = apply_policies(message, fields, attachment_details, shipment_type, company)
+                policy = apply_policies(message, fields, attachment_details, shipment_type, company,
+                                        original_contracts=original_contracts)
                 shipment_type = policy["shipment_type"]
                 for detail in attachment_details:
                     detail["items"] = [{**cargo, "source_file": detail["filename"]} for cargo in detail["items"]]
                 items = [{**cargo, "source_file": detail["filename"]} for detail in attachment_details for cargo in detail["items"]]
-                warnings.extend(policy["review"])
                 for result in attachment_results:
                     matched = next((d for d in attachment_details if d["filename"] == result["filename"]), None)
                     if matched is not None:
@@ -522,12 +568,7 @@ def parse_email_entries(entries: list[dict], company: str = "Xingxin") -> dict:
                     fields["cargo_split_required"] = "true"
                     items = [{**cargo, "shipment_scope": "unassigned"} for cargo in items]
                     warnings.append("邮件说明剩余货物等待另行通知，请逐行选择本次出运或等待客户通知；未分配完不能确认。体积仅作核对，不自动分柜。")
-                container_plan = multi_container_plan(fields, message.get("body_tables", []),
-                    f'{message["subject"]}\n{message["body_text"]}', message.get("received_at", ""))
                 if container_plan:
-                    real_items = [cargo for cargo in items if not re.search(r"模[板版]|template", str(cargo.get("source_file", "")), re.I)
-                                  and str(cargo.get("product_code", "")).upper() not in {"CTN#", "SEAL#"}]
-                    items = order_cargo(message.get("body_tables", [])) or real_items
                     shipment_groups = container_plan
                     fields["si_deadline"] = ""
                     fields["cutoff_date"] = ""
@@ -537,7 +578,9 @@ def parse_email_entries(entries: list[dict], company: str = "Xingxin") -> dict:
                         fields["customer"] = "Sky Castle"
                     warnings.append("已识别多柜安排；请核对整批产品和箱数，相同产品优先集中装柜。")
                 if policy["cabinet_groups"]:
-                    shipment_groups = policy["cabinet_groups"]
+                    shipment_groups, bindings = merge_cabinet_schedules(policy["cabinet_groups"], container_plan, policy["review"])
+                    split_trace = next(trace for trace in policy["trace"] if trace["rule_id"] == "COMMON-SPLIT-001")
+                    split_trace["result"]["schedule_bindings"] = bindings
                     warehouse_groups = []
                 elif shipment_type != "warehouse":
                     warehouse_groups = []
@@ -546,6 +589,7 @@ def parse_email_entries(entries: list[dict], company: str = "Xingxin") -> dict:
                     fields["explicit_container_allocation"] = "false"
                     fields["multi_container"] = "false"
                     fields["container_type"] = ""
+                    fields["export_template"] = ""
                 if shipment_type == "warehouse":
                     regrouped = []
                     for group in warehouse_groups:
@@ -557,6 +601,7 @@ def parse_email_entries(entries: list[dict], company: str = "Xingxin") -> dict:
                             regrouped.append({**group, "so_number": so, "items": cargo})
                     warehouse_groups = regrouped
                     fields["separate_warehouse_so"] = "true"
+                warnings.extend(policy["review"])
                 item.update({
                     "status": "parsed",
                     "fingerprint": message["fingerprint"],

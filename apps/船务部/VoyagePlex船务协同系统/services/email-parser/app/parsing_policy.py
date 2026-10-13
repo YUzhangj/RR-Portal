@@ -4,7 +4,16 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from .rules import normalize_deadline, _split_current_message
 
-POLICY_VERSION = "2026-10-13.2"
+POLICY_VERSION = "2026-10-13.3"
+
+
+def _xingxin_factory(name):
+    return bool(re.search(r"兴信|新信|hanson", str(name or ""), re.I))
+
+
+def _assembly_factory(item, detail, fields):
+    return str(item.get("factory_remark") or item.get("loading_factory") or
+               detail.get("fields", {}).get("loading_factory") or fields.get("loading_factory") or "").strip()
 
 
 def shipping_field_evidence(context):
@@ -12,7 +21,7 @@ def shipping_field_evidence(context):
     current, _ = _split_current_message(context["message"]["subject"] + "\n" + context["message"]["body_text"])
     year = int(re.search(r"20\d{2}", context["message"].get("received_at", "") or str(datetime.now().year))[0])
     contracts = context["original_contracts"]
-    if fields.get("so_number") in contracts:
+    if fields.get("so_number") and fields["so_number"] in contracts:
         fields["so_number"] = ""
         context["review"].append("合同号不能作为SO，本票SO待确认")
     for detail in context["details"]:
@@ -46,23 +55,35 @@ def external_delivery(context):
     fields = context["fields"]
     current, _ = _split_current_message(context["message"]["body_text"])
     cargo = [i for d in context["details"] for i in d["items"]]
-    factories = {str(i.get("factory_remark", "")).strip() for i in cargo if i.get("factory_remark")}
+    factories = {_assembly_factory(item, detail, fields)
+                 for detail in context["details"] for item in detail["items"]}
+    factories.discard("")
     from .factory_mapping import FACTORY_MAPPINGS
     names = {row["chinese_short_name"] for row in FACTORY_MAPPINGS} | factories
     factory_pattern = "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True) if name)
     target = re.search(r"(?:送到|送往|在)\s*(" + factory_pattern + r")(?:工厂)?(?:提货|[，,。]|\s|$)", current)
-    factory = target[1].removesuffix("工厂") if target else fields.get("loading_factory", "")
-    other = lambda name: bool(name) and not re.search(r"兴信|新信|hanson", name, re.I)
+    factory = target[1].removesuffix("工厂") if target else ""
+    other = lambda name: bool(name) and not _xingxin_factory(name)
     # Assembly ownership distinguishes outward delivery from external cargo
     # arriving at Xingxin. CFS delivery stays a warehouse task.
     external = context["shipment_type"] != "warehouse" and bool(cargo) and (
         (factories and all(other(name) for name in factories)) or
-        (other(factory) and re.search(r"做柜|提货|送到|送往", current)))
+        (not factories and other(factory) and re.search(r"做柜|提货|送到|送往", current)))
     if not external:
+        if any(_xingxin_factory(name) for name in factories) and any(other(name) for name in factories):
+            context["review"].append("保留货物同时涉及兴信做柜与外厂装配，需人工核对任务类型及各厂归属")
         return {"delivery": False}
     context["shipment_type"] = "delivery"
     fields["task_type"] = "Delivery"
-    fields["delivery_factory"] = factory or next(iter(sorted(factories)), "")
+    if factory and other(factory):
+        fields["delivery_factory"] = factory
+        if factories and factory not in factories:
+            context["review"].append("正文送货目标与保留货物装配工厂不同，需人工核对送货目的地")
+    elif len(factories) == 1:
+        fields["delivery_factory"] = next(iter(factories))
+    else:
+        fields["delivery_factory"] = ""
+        context["review"].append("保留货物涉及多个外厂且正文未明确送货目标，需人工确认目的地")
     fields["pickup_date"] = fields.get("ship_date", "")
     date = r"(?:20\d{2}[/.-])?\d{1,2}[/月.-]\d{1,2}日?号?"
     year = int(re.search(r"20\d{2}", context["message"].get("received_at", "") or str(datetime.now().year))[0])
@@ -160,11 +181,15 @@ def dated_instructions(context):
     return {"ship_date": fields.get("ship_date", ""), "window_end": fields.get("delivery_window_end", ""), "waiting": bool(waiting)}
 
 
+def is_auxiliary_attachment(filename):
+    return bool(re.search(r"(?:例子|示例|模板|template|操作指引|指南|报备表|Application report|检查表|Check.List|Charges|收费|注意事项|通知|目录)", filename, re.I))
+
+
 def attachment_roles(context):
     removed = []
     for detail in context["details"]:
         name = detail["filename"]
-        if re.search(r"(?:例子|示例|模板|template|操作指引|指南|报备表|Application report|检查表|Check.List|Charges|收费|注意事项|通知|目录)", name, re.I):
+        if is_auxiliary_attachment(name):
             if detail["items"]:
                 removed.append(name)
             detail["items"] = []
@@ -177,26 +202,28 @@ def attachment_roles(context):
 
 
 def xingxin_filter(context):
-    xingxin = lambda name: bool(re.search(r"兴信|新信|hanson", str(name or ""), re.I))
     before = sum(len(d["items"]) for d in context["details"])
     excluded = []
-    external = False
     for detail in context["details"]:
         if detail.get("kind") == "amazon_allocation":
             continue
         cargo = detail["items"]
-        if context["shipment_type"] in {"warehouse", "delivery"}:
-            selected = [i for i in cargo if xingxin(i.get("supplier"))]
-        elif any(xingxin(i.get("factory_remark")) for i in cargo):
-            selected = [i for i in cargo if xingxin(i.get("factory_remark"))]
-        elif any(i.get("factory_remark") for i in cargo):
-            selected = [i for i in cargo if xingxin(i.get("supplier"))]
-            external = external or bool(selected)
-        else:
-            selected = [i for i in cargo if xingxin(i.get("supplier"))]
-            if not any(i.get("supplier") for i in cargo):
-                selected = cargo
-                if cargo: context["review"].append("走柜货物缺少生产及做柜工厂，需人工核对归属")
+        selected = []
+        for item in cargo:
+            supplier = str(item.get("supplier") or "").strip()
+            assembly = _assembly_factory(item, detail, context["fields"])
+            if context["shipment_type"] in {"warehouse", "delivery"}:
+                keep = _xingxin_factory(supplier)
+            else:
+                # An explicit row assembly wins over a message-wide loading site.
+                # Incoming external production remains our loading work; our own
+                # production assembled elsewhere remains an outward delivery.
+                keep = _xingxin_factory(assembly) or _xingxin_factory(supplier)
+                if not assembly and not supplier:
+                    keep = True
+                    context["review"].append("走柜货物缺少生产及做柜工厂，需人工核对归属")
+            if keep:
+                selected.append(item)
         excluded.extend({"file": detail["filename"], "row": i.get("source_row"), "product": i.get("product_code")} for i in cargo if i not in selected)
         detail["items"] = selected
     if before and not any(d["items"] for d in context["details"]):
@@ -217,7 +244,11 @@ def explicit_cabinets(context):
     for (key, kind, so), items in buckets.items():
         if kind == "40NOR" and re.search(r"NOR.{0,30}改为.{0,15}40GP", current, re.I):
             kind = "40GP"
-        groups.append({"group_key": key, "container_type": kind, "so_number": so or context["fields"].get("so_number", ""), "items": items})
+        fallback_so = str(context["fields"].get("so_number", ""))
+        own_so = so or (fallback_so if "," not in fallback_so else "")
+        if not own_so:
+            context["review"].append("明确分柜缺少可唯一归属的SO，需人工核对，不能套用整封邮件的合并SO")
+        groups.append({"group_key": key, "container_type": kind, "so_number": own_so, "items": items})
     if groups:
         context["cabinet_groups"] = groups
         context["fields"]["explicit_container_allocation"] = "true"
@@ -233,7 +264,9 @@ def explicit_cabinets(context):
 def huadeng_compatibility(context):
     from .rules import filter_items_for_email
     for detail in context["details"]:
-        if detail["kind"] != "amazon_allocation":
+        # Multi-container body order tables historically supplied their full cargo;
+        # common role/valid-row checks still run before this compatibility rule.
+        if detail["kind"] not in {"amazon_allocation", "order_table"}:
             detail["items"] = filter_items_for_email(detail["items"], context["shipment_type"], context["fields"].get("loading_factory", ""))
     return {"mode": "existing_company_behavior"}
 
@@ -242,8 +275,8 @@ RULES = [
     {"id": "COMMON-ATT-001", "name": "附件角色与有效货物行", "scope": "common", "handler": "attachment_roles", "status": "implemented", "samples": ["8.eml", "21.eml", "22.eml", "23.eml"]},
     {"id": "COMMON-DATE-001", "name": "业务日期范围取结束日及待通知", "scope": "common", "handler": "dated_instructions", "status": "implemented", "samples": ["1.eml", "2.eml", "6.eml", "8.eml", "13.eml", "22.eml", "27.eml"]},
     {"id": "COMMON-WAREHOUSE-001", "name": "明确本地仓库证据与缺失提示", "scope": "common", "handler": "warehouse_evidence", "status": "implemented", "samples": ["6.eml", "22.eml"]},
-    {"id": "XINGXIN-EXTERNAL-001", "name": "送外厂建立送货任务及送货日期", "scope": "Xingxin", "handler": "external_delivery", "status": "implemented", "samples": ["16.eml", "18.eml", "26.eml"]},
     {"id": "XINGXIN-CARGO-001", "name": "兴信交仓按生产工厂、做柜按装配工厂筛选", "scope": "Xingxin", "handler": "xingxin_filter", "status": "implemented", "samples": ["4.eml", "22.eml", "23.eml"]},
+    {"id": "XINGXIN-EXTERNAL-001", "name": "送外厂建立送货任务及送货日期", "scope": "Xingxin", "handler": "external_delivery", "status": "implemented", "samples": ["16.eml", "18.eml", "26.eml"]},
     {"id": "HUADENG-COMPAT-001", "name": "保留华登原有筛选，差异另行审核", "scope": "Huadeng", "handler": "huadeng_compatibility", "status": "implemented", "samples": ["company-isolation"]},
     {"id": "COMMON-FIELDS-001", "name": "编号角色、截期及交仓时间核对", "scope": "common", "handler": "shipping_field_evidence", "status": "implemented", "samples": ["4.eml", "18.eml", "19.eml", "20.eml", "23.eml"]},
     {"id": "COMMON-SO-001", "name": "交仓逐行SO归属及同仓不同SO分任务", "scope": "common", "handler": "warehouse_so_ownership", "status": "implemented", "samples": ["1.eml", "23.eml", "warehouse-so-isolation"]},
@@ -252,12 +285,13 @@ RULES = [
 ]
 
 
-def apply_policies(message, fields, details, shipment_type, company):
+def apply_policies(message, fields, details, shipment_type, company, original_contracts=None):
     if company not in {"Xingxin", "Huadeng"}:
         raise ValueError("公司板块无效")
     context = {"message": message, "fields": fields, "details": details, "shipment_type": shipment_type,
                "review": [], "cabinet_groups": [], "trace": [],
-               "original_contracts": {str(i.get("contract_number", "")) for d in details for i in d["items"]}}
+               "original_contracts": set(original_contracts) if original_contracts is not None else
+                   {str(i.get("contract_number", "")) for d in details for i in d["items"]}}
     for rule in RULES:
         if rule["scope"] not in {"common", company} or not rule["handler"]:
             continue

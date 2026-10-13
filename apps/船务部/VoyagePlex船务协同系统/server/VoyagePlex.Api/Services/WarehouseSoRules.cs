@@ -9,8 +9,11 @@ public static class WarehouseSoRules
         var assigned = new HashSet<int>();
         foreach (var group in stored["warehouse_groups"]?.AsArray().OfType<JsonObject>() ?? [])
         {
-            var so = group["so_number"]?.ToString() ?? "";
-            if (string.IsNullOrWhiteSpace(so) || so.Contains(',')) throw new InvalidOperationException("交仓分组缺少明确SO号，请核对货物与SO归属");
+            var so = group["so_number"]?.ToString().Trim() ?? "";
+            // Candidate review edits the overall SO field. Use its single SO only
+            // for unassigned groups; explicit group assignments remain authoritative.
+            if (so == "") so = stored["fields"]?["so_number"]?.ToString().Trim() ?? "";
+            if (so == "" || so.Contains(',') || so.Contains('，')) throw new InvalidOperationException("交仓分组缺少明确SO号，请核对货物与SO归属");
             var selected = new JsonArray();
             foreach (var item in group["items"]?.AsArray() ?? [])
             {
@@ -26,9 +29,17 @@ public static class WarehouseSoRules
             payload["fields"]!["so_number"] = so;
             payload["so_numbers"] = new JsonArray(so);
             payload["items"] = selected;
-            var copy = group.DeepClone().AsObject(); copy["items"] = selected.DeepClone();
+            var copy = group.DeepClone().AsObject(); copy["so_number"] = so; copy["items"] = selected.DeepClone();
             payload["warehouse_groups"] = new JsonArray(copy);
-            result.Add(($"warehouse:{group["warehouse"]}:{so}", payload));
+            var groupKey = $"warehouse:{group["warehouse"]}:{so}";
+            // SO isolation and current/waiting allocation are independent. Retain
+            // the existing notification rules after selecting this warehouse's SO.
+            foreach (var scope in CargoNotificationRules.Split(groupKey, payload))
+            {
+                var key = payload["fields"]?["cargo_split_required"]?.ToString() == "true" && scope.GroupKey == groupKey
+                    ? groupKey + ":current" : scope.GroupKey;
+                result.Add((key, scope.Payload));
+            }
         }
         if (assigned.Count != cargo.Count) throw new InvalidOperationException("交仓货物尚未完整分配SO，不能确认");
         return result;

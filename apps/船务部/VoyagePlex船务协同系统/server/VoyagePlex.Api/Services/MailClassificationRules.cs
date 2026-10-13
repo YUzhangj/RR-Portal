@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Text.Json.Nodes;
 using VoyagePlex.Api.Entities;
@@ -13,6 +14,23 @@ public static class MailClassificationRules
 
     private const int ParsedShipmentConfidence = 90;
     private const int ParsedChangeConfidence = 92;
+
+    public static void PopulatePreviewPlannedShipDates(JsonObject parsed)
+    {
+        foreach (var node in parsed["items"]?.AsArray() ?? [])
+        {
+            if (node is not JsonObject item || item["fields"] is not JsonObject fields) continue;
+            if (fields["multi_container"]?.ToString() == "true" || fields["task_type"]?.ToString() == "Delivery") continue;
+            if (!string.IsNullOrWhiteSpace(fields["ship_date"]?.ToString())) continue;
+            var message = item["message"]?.AsObject();
+            var resolved = ShipmentWorkflowRules.ResolvePlannedShipDate(
+                string.Empty,
+                fields["cutoff_date"]?.ToString() ?? string.Empty,
+                fields["si_deadline"]?.ToString() ?? string.Empty,
+                message?["received_at"]?.ToString());
+            if (resolved.HasValue) fields["ship_date"] = resolved.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+    }
 
     public static (string Category, int Confidence, string Source, bool NeedsReview, string Mode) ClassifyParsed(string subject, JsonObject parsed)
     {

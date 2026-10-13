@@ -555,7 +555,7 @@ app.MapPost("/api/imports/email", async (HttpRequest request, EmailParserClient 
     if (parsed is null)
         return Results.Problem("解析服务返回了无效结果");
 
-    PopulatePreviewPlannedShipDates(parsed);
+    MailClassificationRules.PopulatePreviewPlannedShipDates(parsed);
     await EnrichEmailProducts(parsed, db, false, cancellationToken);
     // 解析结果仅返回浏览器预览；用户确认前不创建任何数据库记录。
     return Results.Json(parsed);
@@ -1009,8 +1009,9 @@ app.MapPost("/api/imports/email/split-preview", (JsonObject payload) =>
 {
     try
     {
-        if (payload["fields"]?["multi_container"]?.ToString() != "true")
-            return Results.BadRequest(new { error = "当前邮件没有多柜安排" });
+        if (payload["fields"]?["multi_container"]?.ToString() != "true"
+            && payload["fields"]?["explicit_container_allocation"]?.ToString() != "true")
+            return Results.BadRequest(new { error = "当前邮件没有分柜安排" });
         var cabinets = MultiContainerRules.Split(payload);
         return Results.Ok(new { cabinets = cabinets.Select(c => new { fields = c.Payload["fields"], items = c.Payload["items"] }) });
     }
@@ -1886,7 +1887,7 @@ static void ApplyReviewedEmailToTask(ShipmentTask task, JsonObject stored, bool 
         deliveryDetails["deliveryTime"] = fields["delivery_time"]?.DeepClone();
         task.ExportDetailsJson = deliveryDetails.ToJsonString();
     }
-    if (fields["export_template"]?.ToString() == "sky-castle-multi")
+    if (fields["task_type"]?.ToString() != "Delivery" && fields["export_template"]?.ToString() == "sky-castle-multi")
         task.ExportDetailsJson = new JsonObject { ["templateKey"] = "sky-castle-multi", ["vesselName"] = fields["vessel_name"]?.DeepClone() }.ToJsonString();
     task.ItemsJson = SanitizeShipmentItems(stored["items"]?.AsArray() ?? new JsonArray()).ToJsonString();
     task.PlannedShipDate = ShipmentWorkflowRules.ResolvePlannedShipDate(
@@ -1909,6 +1910,7 @@ static void ApplyReviewedEmailToTask(ShipmentTask task, JsonObject stored, bool 
 
 static List<(string GroupKey, JsonObject Payload)> ShipmentTaskPayloads(JsonObject stored)
 {
+    // Warehouse splitting also preserves the independently reviewed current/waiting scopes.
     if (stored["fields"]?["separate_warehouse_so"]?.ToString() == "true") return WarehouseSoRules.Split(stored);
     if (stored["fields"]?["multi_container"]?.ToString() == "true" || stored["fields"]?["explicit_container_allocation"]?.ToString() == "true") return MultiContainerRules.Split(stored);
     var groups = stored["shipment_groups"]?.AsArray();
@@ -1961,23 +1963,6 @@ static string CustomerName(string? parsedCustomer, string sender, string subject
     if (matched is not null) return matched;
     var displayName = Regex.Match(sender, @"^\s*([^<]+)").Groups[1].Value.Trim(' ', '\'', '"');
     return string.IsNullOrWhiteSpace(displayName) ? "待确认客户" : displayName;
-}
-
-static void PopulatePreviewPlannedShipDates(JsonObject parsed)
-{
-    foreach (var node in parsed["items"]?.AsArray() ?? [])
-    {
-        if (node is not JsonObject item || item["fields"] is not JsonObject fields) continue;
-        if (fields["multi_container"]?.ToString() == "true") continue;
-        if (!string.IsNullOrWhiteSpace(fields["ship_date"]?.ToString())) continue;
-        var message = item["message"]?.AsObject();
-        var resolved = ShipmentWorkflowRules.ResolvePlannedShipDate(
-            string.Empty,
-            fields["cutoff_date"]?.ToString() ?? string.Empty,
-            fields["si_deadline"]?.ToString() ?? string.Empty,
-            message?["received_at"]?.ToString());
-        if (resolved.HasValue) fields["ship_date"] = resolved.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-    }
 }
 
 static async Task EnrichSpecialExportProducts(JsonObject payload, AppDbContext db, CancellationToken cancellationToken)

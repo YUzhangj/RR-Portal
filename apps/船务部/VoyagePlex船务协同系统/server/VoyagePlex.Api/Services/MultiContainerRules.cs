@@ -108,6 +108,8 @@ public static class MultiContainerRules
             var fields = payload["fields"]?.AsObject() ?? new JsonObject();
             fields["so_number"] = group["so_number"]?.DeepClone();
             fields["container_type"] = group["container_type"]?.DeepClone();
+            foreach (var scheduleKey in new[] { "si_deadline", "cutoff_date", "vessel_name" })
+                if (group.ContainsKey(scheduleKey)) fields[scheduleKey] = group[scheduleKey]?.DeepClone();
             payload["fields"] = fields;
             payload["so_numbers"] = new JsonArray(group["so_number"]?.DeepClone());
             payload["items"] = new JsonArray(items.Where(item => item?["container_assignment"]?.ToString() == key).Select(item => item!.DeepClone()).ToArray());
