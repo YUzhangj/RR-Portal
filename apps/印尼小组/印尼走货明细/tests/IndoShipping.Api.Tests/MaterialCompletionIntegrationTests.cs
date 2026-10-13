@@ -84,6 +84,180 @@ public class MaterialCompletionIntegrationTests
     }
 
     [Fact]
+    public async Task Clamped_negative_corrections_survive_note_edits_and_still_allow_changes_clearing_and_reset()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":50}]""");
+        await f.Acknowledge();
+        await f.Db.ExecuteAsync("INSERT INTO po_items VALUES(1,1,100,100); INSERT INTO po_receipts VALUES(1,100); INSERT INTO outbound VALUES(1,100)");
+        var body = await f.Adjustment(Purchase(await f.Read()));
+        body.required_qty = 0; body.ordered_qty = 0; body.received_qty = 0; body.outbound_qty = 0; body.manual_qty = 0;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":12.5}]""");
+        await f.Acknowledge();
+        await f.Db.ExecuteAsync("UPDATE po_items SET purchase_qty=25,qty=25; UPDATE po_receipts SET qty=25; UPDATE outbound SET qty=25");
+        var item = Purchase(await f.Read());
+        body = await f.FormAdjustment(item); body.note = "只补充原因，不改变数量";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        item = Purchase(await f.Read());
+        var adjustment = item.GetProperty("order_details")[0].GetProperty("adjustment");
+        Assert.Equal(-100, adjustment.GetProperty("required_delta").GetDecimal());
+        foreach (var field in new[] { "ordered_base", "received_base", "outbound_base", "manual_base" })
+            Assert.Equal(100, adjustment.GetProperty(field).GetDecimal());
+
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":87.5}]""");
+        await f.Acknowledge();
+        await f.Db.ExecuteAsync("UPDATE po_items SET purchase_qty=175,qty=175; UPDATE po_receipts SET qty=175; UPDATE outbound SET qty=175");
+        item = Purchase(await f.Read());
+        Assert.Equal(75, item.GetProperty("required_qty").GetDecimal());
+        foreach (var field in new[] { "ordered_qty", "received_qty", "outbound_qty", "manual_qty" })
+            Assert.Equal(75, item.GetProperty("order_details")[0].GetProperty(field).GetDecimal());
+        Assert.Equal(175, await f.Db.ExecuteScalarAsync<decimal>("SELECT SUM(qty) FROM po_receipts"));
+
+        // A changed number establishes a new baseline; untouched numbers keep
+        // their original -100 correction, including the clamped demand field.
+        body = await f.FormAdjustment(item); body.received_qty = 80;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":100}]""");
+        await f.Acknowledge();
+        await f.Db.ExecuteAsync("UPDATE po_items SET purchase_qty=200,qty=200; UPDATE po_receipts SET qty=200; UPDATE outbound SET qty=200");
+        item = Purchase(await f.Read());
+        Assert.Equal(100, item.GetProperty("required_qty").GetDecimal());
+        Assert.Equal(105, item.GetProperty("received_qty").GetDecimal());
+        body = await f.FormAdjustment(item); body.received_qty = null;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        item = Purchase(await f.Read());
+        Assert.Equal(200, item.GetProperty("received_qty").GetDecimal());
+        Assert.Equal(100, item.GetProperty("required_qty").GetDecimal());
+        body = await f.FormAdjustment(item); body.required_qty = null;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        item = Purchase(await f.Read());
+        Assert.Equal(200, item.GetProperty("required_qty").GetDecimal());
+        var version = item.GetProperty("order_details")[0].GetProperty("adjustment_version").GetInt64();
+        body = await f.FormAdjustment(item); body.reset = true;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        item = Purchase(await f.Read());
+        Assert.False(item.GetProperty("has_adjustments").GetBoolean());
+        Assert.Equal(version + 1, item.GetProperty("order_details")[0].GetProperty("adjustment_version").GetInt64());
+        Assert.Equal(200, item.GetProperty("required_qty").GetDecimal());
+        Assert.Equal(200, item.GetProperty("received_qty").GetDecimal());
+    }
+
+    [Fact]
+    public async Task Completed_status_note_edits_do_not_confirm_new_demand_and_audit_effective_quantities()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        var body = await f.Adjustment(Purchase(await f.Read())); body.status = "已送完";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":15}]""");
+        var item = Purchase(await f.Read());
+        body = await f.FormAdjustment(item); body.note = "需求增加后仅修改备注";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        item = Purchase(await f.Read());
+        Assert.Equal(20, item.GetProperty("order_details")[0].GetProperty("manual_qty").GetDecimal());
+        Assert.Equal(10, item.GetProperty("shortage_qty").GetDecimal());
+        Assert.NotEqual("covered", item.GetProperty("status").GetString());
+
+        // A source confirmation adds 30 to the original +20 correction. The
+        // audit must record the displayed 50, not the stored override of 20.
+        await f.Acknowledge();
+        item = Purchase(await f.Read());
+        body = await f.FormAdjustment(item); body.note = "仅修改备注，保留已有确认修正";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        using (var audit = JsonDocument.Parse((await f.Db.ExecuteScalarAsync<string>("SELECT details::text FROM audit_logs ORDER BY id DESC LIMIT 1"))!))
+        {
+            Assert.Equal(20, audit.RootElement.GetProperty("after").GetProperty("manual_qty").GetDecimal());
+            Assert.Equal(50, audit.RootElement.GetProperty("current").GetProperty("manual_qty").GetDecimal());
+        }
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":40}]""");
+        item = Purchase(await f.Read());
+        body = await f.FormAdjustment(item); body.note = "再次增加需求仍仅补充备注";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        item = Purchase(await f.Read());
+        Assert.Equal(50, item.GetProperty("order_details")[0].GetProperty("manual_qty").GetDecimal());
+        Assert.Equal(30, item.GetProperty("shortage_qty").GetDecimal());
+
+        // A genuine transition to completion still confirms the current demand.
+        body = await f.FormAdjustment(item); body.status = "部分已送完";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        body = await f.FormAdjustment(Purchase(await f.Read())); body.status = "已送完";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        item = Purchase(await f.Read());
+        Assert.Equal(80, item.GetProperty("order_details")[0].GetProperty("manual_qty").GetDecimal());
+        Assert.Equal("covered", item.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Legacy_fixed_quantity_keeps_null_baseline_on_note_edit_and_audits_after_rebasing()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":500}]""");
+        await f.Db.ExecuteAsync("INSERT INTO po_items VALUES(1,1,25,25); INSERT INTO po_receipts VALUES(1,25)");
+        var body = await f.Adjustment(Purchase(await f.Read()));
+        var value = JsonSerializer.Serialize(new Dictionary<string, MaterialAlertsController.TrackingAdjustment> {
+            [body.order_key] = new() { version = 1, active = true, received_qty = 100, note = "旧版固定数量" }
+        });
+        await f.Db.ExecuteAsync("INSERT INTO settings VALUES('material_tracking_order_adjustments',@value)", new { value });
+        body = await f.FormAdjustment(Purchase(await f.Read())); body.note = "仅修改旧版备注";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        Assert.Equal(JsonValueKind.Null, Purchase(await f.Read()).GetProperty("order_details")[0]
+            .GetProperty("adjustment").GetProperty("received_base").ValueKind);
+        await f.Db.ExecuteAsync("UPDATE po_receipts SET qty=175");
+        Assert.Equal(100, Purchase(await f.Read()).GetProperty("received_qty").GetDecimal());
+
+        body = await f.FormAdjustment(Purchase(await f.Read())); body.received_qty = 120;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        await f.Db.ExecuteAsync("UPDATE po_receipts SET qty=200");
+        var item = Purchase(await f.Read());
+        Assert.Equal(145, item.GetProperty("received_qty").GetDecimal());
+        body = await f.FormAdjustment(item); body.note = "只补备注，审计记录有效数量";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        using (var audit = JsonDocument.Parse((await f.Db.ExecuteScalarAsync<string>("SELECT details::text FROM audit_logs ORDER BY id DESC LIMIT 1"))!))
+        {
+            Assert.Equal(120, audit.RootElement.GetProperty("after").GetProperty("received_qty").GetDecimal());
+            Assert.Equal(145, audit.RootElement.GetProperty("current").GetProperty("received_qty").GetDecimal());
+        }
+    }
+
+    [Fact]
+    public async Task Existing_partial_label_allows_note_edits_after_demand_drops_but_new_changes_are_validated()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":50}]""");
+        var body = await f.Adjustment(Purchase(await f.Read())); body.status = "部分已送完"; body.manual_qty = 50;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":20}]""");
+        var item = Purchase(await f.Read());
+        body = await f.FormAdjustment(item); body.note = "需求下降后只补充备注";
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        item = Purchase(await f.Read());
+        Assert.Equal("covered", item.GetProperty("status").GetString());
+        Assert.Equal(50, item.GetProperty("order_details")[0].GetProperty("manual_qty").GetDecimal());
+        Assert.Equal("部分已送完", item.GetProperty("order_details")[0].GetProperty("adjustment").GetProperty("status").GetString());
+        body = await f.FormAdjustment(item); body.manual_qty = 60;
+        Assert.IsType<BadRequestObjectResult>(await f.Alerts.SaveAdjustment(body));
+        body = await f.FormAdjustment(item); body.required_qty = 30;
+        Assert.IsType<BadRequestObjectResult>(await f.Alerts.SaveAdjustment(body));
+        body = await f.FormAdjustment(item); body.status = null;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        body = await f.FormAdjustment(Purchase(await f.Read())); body.status = "部分已送完";
+        Assert.IsType<BadRequestObjectResult>(await f.Alerts.SaveAdjustment(body));
+        body.manual_qty = 20;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        Assert.NotEqual("covered", Purchase(await f.Read()).GetProperty("status").GetString());
+
+        await f.Upload("10-10", """[{"code":"A","orderNo":"PO1","qty":5}]""");
+        item = Purchase(await f.Read());
+        body = await f.FormAdjustment(item); body.reset = true;
+        Assert.IsType<OkObjectResult>(await f.Alerts.SaveAdjustment(body));
+        item = Purchase(await f.Read());
+        Assert.False(item.GetProperty("has_adjustments").GetBoolean());
+        Assert.Equal(10, item.GetProperty("required_qty").GetDecimal());
+        Assert.Equal(0, item.GetProperty("order_details")[0].GetProperty("manual_qty").GetDecimal());
+    }
+
+    [Fact]
     public async Task Changed_actual_allocation_rejects_stale_correction_baseline()
     {
         await using var f = await Fixture.Create(); if (f is null) return;
@@ -590,6 +764,21 @@ public class MaterialCompletionIntegrationTests
                 expected_revision_id = await db.ExecuteScalarAsync<long>("SELECT MAX(id) FROM material_tracking_history"),
                 note = "测试追踪调整",
             };
+        }
+        public async Task<MaterialAlertsController.AdjustmentBody> FormAdjustment(JsonElement item)
+        {
+            var body = await Adjustment(item);
+            var detail = item.GetProperty("order_details")[0];
+            var adjustment = detail.GetProperty("adjustment");
+            static bool Has(JsonElement adjustment, string field) => adjustment.TryGetProperty(field, out var value)
+                && value.ValueKind != JsonValueKind.Null;
+            body.required_qty = Has(adjustment, "required_delta") ? detail.GetProperty("required_qty").GetDecimal() : null;
+            body.ordered_qty = Has(adjustment, "ordered_qty") ? detail.GetProperty("ordered_qty").GetDecimal() : null;
+            body.received_qty = Has(adjustment, "received_qty") ? detail.GetProperty("received_qty").GetDecimal() : null;
+            body.outbound_qty = Has(adjustment, "outbound_qty") ? detail.GetProperty("outbound_qty").GetDecimal() : null;
+            body.manual_qty = Has(adjustment, "manual_qty") ? detail.GetProperty("manual_qty").GetDecimal() : null;
+            body.status = adjustment.GetProperty("status").GetString();
+            return body;
         }
         public async Task AddLeadProfiles() => await db.ExecuteAsync("""
             INSERT INTO material_lead_profiles VALUES

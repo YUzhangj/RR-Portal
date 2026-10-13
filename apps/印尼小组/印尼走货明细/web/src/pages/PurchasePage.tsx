@@ -977,7 +977,13 @@ export default function PurchasePage() {
         message.info(`已自动补齐 ${associated.linked} 行物料关联，数量、单价和基础资料未改动`)
       }
       if (associated.issues.length) message.warning('部分行无法唯一关联，已保留原值；请点击“回填净重”核对')
-    } catch { message.error('物料关联检查失败，尚未保存，请稍后重试'); return }
+    } catch (error: any) {
+      if (error?.response?.status === 403) {
+        message.warning('没有货号库访问权限，本次保留现有物料关联；数量、单价及资料未改动')
+      } else {
+        message.error('物料关联检查失败，尚未保存，请稍后重试'); return
+      }
+    }
     // 已下单采购单的既有单价不因本次同步/保存被最新报价悄悄覆盖。
     if (creating && v.supplier) {
       try {

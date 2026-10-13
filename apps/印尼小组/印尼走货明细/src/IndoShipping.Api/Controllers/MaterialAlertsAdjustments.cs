@@ -60,6 +60,11 @@ public partial class MaterialAlertsController
     private static decimal AdjustedQuantity(decimal source, decimal? quantity, decimal? baseline) =>
         quantity.HasValue ? Math.Max(0, source + quantity.Value - (baseline ?? source)) : source;
 
+    private static (decimal? quantity, decimal? baseline) PreserveOrRebaseQuantity(bool active,
+        decimal source, decimal effective, decimal? submitted, decimal? previous, decimal? baseline) =>
+        active && previous.HasValue && submitted.HasValue && submitted.Value == effective
+            ? (previous, baseline) : (submitted, source);
+
     [HttpGet("adjustment-history")]
     public async Task<IActionResult> AdjustmentHistory([FromQuery] string order_key, [FromQuery] int page = 1)
     {
@@ -92,7 +97,7 @@ public partial class MaterialAlertsController
             || quantities.Any(q => q is < 0 or > 1_000_000_000_000m)
             || body.expected_version < 0 || (body.note?.Length ?? 0) > 500)
             return BadRequest(new { message = "数量须为 0 至 1 万亿，备注最多 500 字，订单标识不能为空" });
-        var status = string.IsNullOrWhiteSpace(body.status) ? null : body.status.Trim();
+        var status = body.reset || string.IsNullOrWhiteSpace(body.status) ? null : body.status.Trim();
         if (status != null && !ManualStatuses.Contains(status)) return BadRequest(new { message = "不支持的追踪状态" });
         if (string.IsNullOrWhiteSpace(body.note)) return BadRequest(new { message = "请填写手动调整或恢复原因" });
 
@@ -114,17 +119,37 @@ public partial class MaterialAlertsController
             return Conflict(new { message = "采购、入出库或送完确认已变化，请刷新后重新核对" });
         if (item!.tracking_type == "purchase" ? status is "未排产" or "已排产" or "欠排产" : status is "未下单" or "已下单" or "欠采购")
             return BadRequest(new { message = "状态与外购/生产类型不符" });
-        var required = body.required_qty ?? detail.source_required_qty;
-        var manual = status == "已送完" ? required : body.manual_qty;
-        if (status == "部分已送完" && !(manual > 0 && manual < required))
+        var preserve = before?.active == true;
+        decimal? requiredDelta = body.required_qty == null ? null
+            : preserve && before!.required_delta.HasValue && body.required_qty.Value == detail.required_qty_exact
+                ? before.required_delta : body.required_qty.Value - detail.source_required_qty;
+        var required = Math.Max(0, detail.source_required_qty + (requiredDelta ?? 0));
+        // A real transition confirms the current demand. Keeping an existing
+        // completion label while editing its note must not confirm later demand.
+        var confirmCompletion = status == "已送完" && (!preserve || before!.status != "已送完");
+        var manual = confirmCompletion ? required : body.manual_qty;
+        var unchangedPartial = preserve && status == "部分已送完" && before!.status == status
+            && requiredDelta == before.required_delta && before.manual_qty.HasValue
+            && body.manual_qty.HasValue && body.manual_qty.Value == detail.manual_qty_exact;
+        if (status == "部分已送完" && !unchangedPartial && !(manual > 0 && manual < required))
             return BadRequest(new { message = "部分送完须填写大于 0 且小于需求的确认量" });
+        var ordered = PreserveOrRebaseQuantity(preserve, detail.source_ordered_qty, detail.ordered_qty,
+            body.ordered_qty, before?.ordered_qty, before?.ordered_base);
+        var received = PreserveOrRebaseQuantity(preserve, detail.source_received_qty, detail.received_qty,
+            body.received_qty, before?.received_qty, before?.received_base);
+        var outbound = PreserveOrRebaseQuantity(preserve, detail.source_outbound_qty, detail.outbound_qty,
+            body.outbound_qty, before?.outbound_qty, before?.outbound_base);
+        var completed = PreserveOrRebaseQuantity(preserve && !confirmCompletion, detail.source_manual_qty, detail.manual_qty_exact,
+            manual, before?.manual_qty, before?.manual_base);
         var after = new TrackingAdjustment {
             version = (before?.version ?? 0) + 1, active = !body.reset,
-            required_delta = body.reset || body.required_qty == null ? null : required - detail.source_required_qty,
-            ordered_qty = body.reset ? null : body.ordered_qty, received_qty = body.reset ? null : body.received_qty,
-            outbound_qty = body.reset ? null : body.outbound_qty, manual_qty = body.reset ? null : manual,
-            ordered_base = detail.source_ordered_qty, received_base = detail.source_received_qty,
-            outbound_base = detail.source_outbound_qty, manual_base = detail.source_manual_qty,
+            required_delta = body.reset ? null : requiredDelta,
+            ordered_qty = body.reset ? null : ordered.quantity, received_qty = body.reset ? null : received.quantity,
+            outbound_qty = body.reset ? null : outbound.quantity, manual_qty = body.reset ? null : completed.quantity,
+            ordered_base = body.reset ? detail.source_ordered_qty : ordered.baseline,
+            received_base = body.reset ? detail.source_received_qty : received.baseline,
+            outbound_base = body.reset ? detail.source_outbound_qty : outbound.baseline,
+            manual_base = body.reset ? detail.source_manual_qty : completed.baseline,
             status = body.reset ? null : status, note = body.note!.Trim(),
             updated_by = User.Identity?.Name ?? "", updated_at = DateTime.UtcNow,
         };
@@ -138,11 +163,11 @@ public partial class MaterialAlertsController
                     received_qty = detail.source_received_qty, outbound_qty = detail.source_outbound_qty, manual_qty = detail.source_manual_qty },
                 previous = new { required_qty = detail.required_qty_exact, detail.ordered_qty, detail.received_qty,
                     detail.outbound_qty, manual_qty = detail.manual_qty_exact, detail.status },
-                current = new { required_qty = body.reset ? detail.source_required_qty : required,
-                    ordered_qty = after.ordered_qty ?? detail.source_ordered_qty,
-                    received_qty = after.received_qty ?? detail.source_received_qty,
-                    outbound_qty = after.outbound_qty ?? detail.source_outbound_qty,
-                    manual_qty = after.manual_qty ?? detail.source_manual_qty, status = after.status ?? "自动计算" },
+                current = new { required_qty = Math.Max(0, detail.source_required_qty + (after.required_delta ?? 0)),
+                    ordered_qty = AdjustedQuantity(detail.source_ordered_qty, after.ordered_qty, after.ordered_base),
+                    received_qty = AdjustedQuantity(detail.source_received_qty, after.received_qty, after.received_base),
+                    outbound_qty = AdjustedQuantity(detail.source_outbound_qty, after.outbound_qty, after.outbound_base),
+                    manual_qty = AdjustedQuantity(detail.source_manual_qty, after.manual_qty, after.manual_base), status = after.status ?? "自动计算" },
             });
         tx.Commit();
         return Ok(new { ok = true, version = after.version });
