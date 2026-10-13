@@ -59,6 +59,13 @@ class PeiseComposeOnlyTests(unittest.TestCase):
         for key in [b'"NOTE"',b"'NOTE'",'说明'.encode(),b'!!str NOTE',b'? NOTE',b'NOTE:INNER']:
             before=(b'services:\n  other:\n    environment:\n      '+key+b': "synthetic\n'
                     b'  peise:\n    environment:\n'+guard.PEISE_MODEL_BEFORE+b'    dummy: end"\n')
+            with self.subTest(key=key):
+                self.assertIsNone(guard.incremental_service(before,before.replace(guard.PEISE_MODEL_BEFORE,guard.PEISE_MODEL_AFTER)))
+
+    def test_sequence_quoted_colons_and_inline_mapping_values_fail_closed(self):
+        for item in [b'"NOTE=http: synthetic',b'NOTE: "synthetic',b'"NOTE": "synthetic']:
+            before=(b'services:\n  other:\n    environment:\n      - '+item+b'\n'
+                    b'  peise:\n    environment:\n'+guard.PEISE_MODEL_BEFORE+b'    dummy: end"\n')
             self.assertIsNone(guard.incremental_service(before,before.replace(guard.PEISE_MODEL_BEFORE,guard.PEISE_MODEL_AFTER)))
 
 if __name__ == '__main__':

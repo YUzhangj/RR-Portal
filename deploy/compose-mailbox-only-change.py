@@ -100,11 +100,15 @@ def _quoted_scalars_complete_on_their_line(blob: bytes) -> bool:
         # grammar. Plain keys may be Unicode, including in another service.
         if line.lstrip()[:1] in (b"'", b'"', b"?", b"!", b"&", b"*"):
             return False
-        mapping = re.fullmatch(rb"[ \t]*[^:\r\n]+:[ \t]+(.*)", line)
+        mapping = re.fullmatch(rb"[ \t]*.+?:[ \t]+(.*)", line)
         sequence = re.fullmatch(rb"[ \t]*-[ \t]+(.*)", line)
         if not mapping and not sequence:
             continue
-        value = (mapping or sequence).group(1).lstrip(b" \t")
+        value = (sequence or mapping).group(1).lstrip(b" \t")
+        if sequence and value[:1] not in (b"'", b'"', b"[", b"{"):
+            inline_mapping = re.fullmatch(rb".+?:[ \t]+(.*)", value)
+            if inline_mapping:
+                value = inline_mapping.group(1).lstrip(b" \t")
         # The actual Compose has single-line anchors for shared environment.
         anchor = re.match(rb"&[A-Za-z0-9_-]+(?:[ \t]+|$)", value)
         if anchor:
