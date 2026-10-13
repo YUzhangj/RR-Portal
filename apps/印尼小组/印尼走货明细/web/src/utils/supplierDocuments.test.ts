@@ -122,6 +122,137 @@ async function worksheetXml(zip: JSZip, sheetName: string) {
 }
 
 describe('supplier document export', () => {
+  it.each(['legacy', 'RRI'])('keeps original full-column lookup expressions and array metadata (%s)', async variant => {
+    const buffer = variant === 'RRI' ? rriTemplateBuffer : templateBuffer
+    const template = XLSX.read(buffer, { type: 'array' })
+    const originalMain = template.SheetNames[1]
+    const blob = await buildCustomsWorkbook({
+      templateBuffer: buffer, seller,
+      items: [1, 2].map(id => ({ material_id: id, supplier: seller.keyword, kg: id,
+        qty: id * 10, price: id, contract_no: 'C-ORIGINAL', invoice_no: 'I-ORIGINAL' })),
+      materials: new Map([1, 2].map(id => [id, { id, product_code: `P${id}`,
+        name_zh: `物料${id}`, name_en: `Material ${id}`, supplier: seller.keyword }])),
+      productHs: new Map(), images: new Map(),
+      form: { customer: variant === 'RRI' ? 'RRI' : 'RRM', containerNo: 'CURRENT-CONTAINER' },
+    })
+    const exported = XLSX.read(await blob.arrayBuffer(), { type: 'array' })
+    for (const [sheet, start] of (variant === 'RRI'
+      ? [['实业合同', 24], ['实业发票', 28], ['装箱单', 25]]
+      : [['全球合同', 24], ['全球发票', 32], ['装箱单', 24]]) as [string, number][]) {
+      for (const row of [start, start + 1]) {
+        for (const col of ['B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K']) {
+          const address = `${col}${row}`
+          const original = template.Sheets[sheet][address]
+          if (!original?.f?.startsWith('LOOKUP(')) continue
+          expect(exported.Sheets[sheet][address].f, `${sheet}!${address}`)
+            .toBe(original.f.replaceAll(`${originalMain}!`, "'CURRENT-CONTAINER'!"))
+          expect(exported.Sheets[sheet][address].F).toBe(address)
+        }
+        const serial = exported.Sheets[sheet][`A${row}`].v
+        expect(exported.Sheets['CURRENT-CONTAINER'][`A${Number(serial) + 3}`].v).toBe(serial)
+      }
+    }
+  })
+
+  it.each([2, 18])('recovers RRM blank detail formulas with %i lines, including the reported F24 price', async count => {
+    const items = Array.from({ length: count + 1 }, (_, index) => ({
+      material_id: index + 1, supplier: seller.keyword, kg: index + 1, qty: 20,
+      price: 0.00529, contract_no: index < count ? 'C-FIRST' : 'C-SECOND',
+      invoice_no: index < count ? 'I-FIRST' : 'I-SECOND',
+    }))
+    const materials = new Map(items.map(item => [item.material_id, {
+      id: item.material_id, product_code: '46720J', name_zh: '同名物料', name_en: 'Same material',
+      spec: 'same', supplier: seller.keyword,
+    }]))
+    const blob = await buildCustomsWorkbook({ templateBuffer: rrmTemplateBuffer, seller, items, materials,
+      productHs: new Map(), images: new Map(), form: { customer: 'RRM', containerNo: '123' } })
+    const wb = XLSX.read(await blob.arrayBuffer(), { type: 'array' })
+    const contract = wb.Sheets['全球合同']
+    const invoice = wb.Sheets['全球发票']
+    const packing = wb.Sheets['装箱单']
+    expect(contract.F24.f).toBe("LOOKUP(1,0/(('123'!V:V=$H$5)*('123'!A:A=A24)),'123'!Z:Z)")
+    for (let index = 0; index < count; index++) {
+      for (const [sheet, start, column, source] of [
+        [contract, 24, 'D', 'K'], [contract, 24, 'F', 'Z'],
+        [invoice, 32, 'G', 'K'], [invoice, 32, 'I', 'Z'],
+        [packing, 24, 'H', 'P'], [packing, 24, 'I', 'Q'],
+      ] as const) {
+        const formula = sheet[`${column}${start + index}`].f!
+        expect(formula).toMatch(/^LOOKUP\(/)
+        expect(formula).toContain(`'123'!${source}:${source}`)
+        expect(sheet[`${column}${start + index}`].F).toBe(`${column}${start + index}`)
+      }
+      expect(contract[`G${24 + index}`].f).toBe(`F${24 + index}*D${24 + index}`)
+      expect(invoice[`J${32 + index}`].f).toBe(`I${32 + index}*G${32 + index}`)
+    }
+    const delta = Math.max(10, count) - 14
+    const packingDelta = Math.max(7, count) - 14
+    expect(contract[`F${75 + delta}`].f).toContain(`$H$${56 + delta}`)
+    expect(contract[`F${75 + delta}`].f).toContain("'123'!Z:Z")
+    expect(contract[`F${75 + delta}`].F).toBe(`F${75 + delta}`)
+    expect(invoice[`B${83 + delta}`].f).toContain(`$J$${62 + delta}`)
+    expect(invoice[`B${83 + delta}`].f).toContain(`$J$${66 + delta}`)
+    expect(packing[`H${64 + packingDelta}`].f).toContain(`$D$${49 + packingDelta}`)
+    expect(contract[`G${38 + delta}`].f).toBe(`SUM(G24:G${37 + delta})`)
+    expect(invoice[`I${46 + delta}`].f).toBe(`SUM(J32:J${45 + delta})`)
+  })
+
+  it.each(['RRI', 'RRM'])('uses that template’s expressions after expanding and shrinking groups (%s)', async customer => {
+    const isRri = customer === 'RRI'
+    const source = XLSX.read(isRri ? rriTemplateBuffer : rrmTemplateBuffer, { type: 'array', cellStyles: true })
+    const contractName = isRri ? '实业合同' : '全球合同'
+    const invoiceName = isRri ? '实业发票' : '全球发票'
+    const invoiceStart = isRri ? 28 : 32
+    const packingStart = isRri ? 25 : 24
+    const contractTotal = isRri ? 31 : 38
+    const invoiceTotal = isRri ? 35 : 46
+    const mainName = source.SheetNames[1]
+    source.Sheets[contractName].G24 = { t: 'n', v: 999, f: 'ROUND(F24*D24,2)' }
+    source.Sheets[contractName][`G${contractTotal}`].f = `ROUND(SUM(G24:G${contractTotal - 1}),2)`
+    source.Sheets[invoiceName][`J${invoiceStart}`] = { t: 'n', v: 999, f: `ROUND(I${invoiceStart}*G${invoiceStart},2)` }
+    source.Sheets[invoiceName][`I${invoiceTotal}`].f = `ROUND(SUM(J${invoiceStart}:J${invoiceTotal - 1}),2)`
+    source.Sheets['装箱单'][`H${packingStart}`] = { t: 'n', v: 999, f: `ROUND('${mainName}'!P4,3)` }
+    const modifiedTemplate = XLSX.write(source, { type: 'array', bookType: 'xlsx' })
+    const items = Array.from({ length: 19 }, (_, i) => ({
+      material_id: i + 1, supplier: seller.keyword, kg: i + 1, qty: i + 2,
+      price: 0.00529, contract_no: i < 18 ? 'C-FIRST' : 'C-SECOND',
+      invoice_no: i < 18 ? 'I-FIRST' : 'I-SECOND',
+    }))
+    // Preserve the template's criteria even when its material names repeat.
+    const materials = new Map(items.map(item => [item.material_id, {
+      id: item.material_id, product_code: 'SAME', name_zh: '同名物料', name_en: 'Same material',
+      spec: 'SAME', supplier: seller.keyword, material_code: `M${item.material_id}`,
+    }]))
+    const blob = await buildCustomsWorkbook({
+      templateBuffer: modifiedTemplate, seller, items, materials, productHs: new Map(), images: new Map(),
+      form: { customer, containerNo: 'TEMPLATE-CALC' },
+    })
+    const workbook = XLSX.read(await blob.arrayBuffer(), { type: 'array' })
+    const contract = workbook.Sheets[contractName]
+    const invoice = workbook.Sheets[invoiceName]
+    expect(contract.G24.f).toBe('ROUND(F24*D24,2)')
+    expect(contract.G41.f).toBe('ROUND(F41*D41,2)')
+    expect(contract.G42.f).toBe('ROUND(SUM(G24:G41),2)')
+    expect(invoice[`J${invoiceStart + 17}`].f).toBe(`ROUND(I${invoiceStart + 17}*G${invoiceStart + 17},2)`)
+    expect(invoice[`I${invoiceStart + 18}`].f).toBe(`ROUND(SUM(J${invoiceStart}:J${invoiceStart + 17}),2)`)
+    expect(workbook.Sheets['装箱单'][`H${packingStart + 17}`].f).toBe("ROUND('TEMPLATE-CALC'!P21,3)")
+    if (isRri) {
+      expect(invoice[`G${invoiceStart}`].f).toContain("'TEMPLATE-CALC'!K:K")
+      expect(invoice[`G${invoiceStart + 17}`].f).toContain("'TEMPLATE-CALC'!K:K")
+      // The second contract’s absolute header moves by the first table’s expansion.
+      expect(contract.B79.f).toContain('$H$60')
+      expect(contract.B79.f).toContain("'TEMPLATE-CALC'!D:D")
+    }
+    expect(workbook.Sheets['TEMPLATE-CALC'].AO4.v).toBe(0.00529)
+    expect(workbook.Sheets['TEMPLATE-CALC'].K21.v).toBe(18)
+    const zip = await JSZip.loadAsync(await blob.arrayBuffer())
+    expect(await zip.file('xl/workbook.xml')!.async('string')).toContain('fullCalcOnLoad="1"')
+    for (const name of [contractName, invoiceName, '装箱单']) {
+      expect(Object.values(workbook.Sheets[name]).some((cell: any) => cell?.f?.includes(mainName))).toBe(false)
+      expect(Object.values(workbook.Sheets[name]).some((cell: any) => cell?.f?.includes('#REF!'))).toBe(false)
+    }
+  })
+
   it.each(['RRI', 'RRM'])('keeps column formats consistent across many customs companies (%s)', async customer => {
     const items = Array.from({ length: 10 }, (_, i) => ({
       material_id: i + 1, supplier: seller.keyword, customs_company: `公司${i}`,
@@ -528,6 +659,7 @@ describe('supplier document export', () => {
     expect(borderStyle(outputStyles, packingXml, 'A24', 'bottom')).toBe('thin')
     expect(borderStyle(outputStyles, packingXml, 'K30', 'bottom')).toBe('thin')
     expect(borderStyle(outputStyles, packingXml, 'D31', 'bottom')).toBe(null)
+    expect(borderStyle(outputStyles, packingXml, 'K31', 'bottom')).toBe(null)
     expect(borderStyle(outputStyles, packingXml, 'A24', 'bottom', true)).toBe('FFE0E0E0')
     expect(borderStyle(outputStyles, packingXml, 'K30', 'right', true)).toBe('FF000000')
     expect(borderStyle(outputStyles, packingXml, 'K32', 'bottom')).toBe('medium')
@@ -602,7 +734,7 @@ describe('supplier document export', () => {
     expect(countCellValue(wb, '实业合同', '购销合同\nPurchase Contract')).toBe(2)
     expect(wb.Sheets['实业合同'].G34.f).toBe('SUM(G24:G33)')
     expect(wb.Sheets['实业合同'].G81.f).toBe('SUM(G71:G80)')
-    expect(wb.Sheets['实业发票'].B28.f).toBe("'ONE-WORKBOOK'!D4")
+    expect(wb.Sheets['实业发票'].B28.f).toBe("LOOKUP(1,0/(('ONE-WORKBOOK'!V:V=$J$13)*('ONE-WORKBOOK'!X:X=$J$9)*('ONE-WORKBOOK'!A:A=A28)),'ONE-WORKBOOK'!D:D)")
     expect(wb.Sheets['实业发票'].A29?.v).toBeUndefined()
     expect(wb.Sheets['实业发票'].I38.f).toBe('SUM(J28:J37)')
     expect(wb.Sheets['装箱单'].D32.f).toBe('SUM(D25:D31)')
@@ -783,6 +915,7 @@ describe('supplier document export', () => {
     expect(borderStyle(outputStyles, packingXml, 'A25', 'bottom')).toBe('thin')
     expect(borderStyle(outputStyles, packingXml, 'K31', 'bottom')).toBe('thin')
     expect(borderStyle(outputStyles, packingXml, 'D32', 'bottom')).toBe(null)
+    expect(borderStyle(outputStyles, packingXml, 'K32', 'bottom')).toBe(null)
     expect(borderStyle(outputStyles, packingXml, 'A25', 'bottom', true)).toBe('FFE0E0E0')
     expect(borderStyle(outputStyles, packingXml, 'K31', 'bottom', true)).toBe('FFE0E0E0')
     expect(borderStyle(outputStyles, packingXml, 'A25', 'right', true)).toBe('FF000000')
@@ -819,7 +952,7 @@ describe('supplier document export', () => {
     const packingBuyerTitles = Object.values(wb.Sheets['装箱单'])
       .filter((cell: any) => cell?.v === 'Royal Regent Products Industries Limited')
     expect(packingBuyerTitles.length).toBeGreaterThanOrEqual(2)
-    expect(wb.Sheets['实业合同'].B24.f).toBe("'RRI-TEST'!D4")
+    expect(wb.Sheets['实业合同'].B24.f).toBe("LOOKUP(1,0/(('RRI-TEST'!V:V=$H$5)*('RRI-TEST'!A:A=A24)),'RRI-TEST'!D:D)")
     expect(wb.Sheets['实业合同'].B25?.v).toBeUndefined()
     expect(wb.Sheets['实业合同'].B33?.v).toBeUndefined()
     expect(wb.Sheets['实业合同'].G34.f).toBe('SUM(G24:G33)')
@@ -846,7 +979,7 @@ describe('supplier document export', () => {
       productHs: new Map(), images: new Map(), form: { containerNo: 'LONG-TEST' },
     })
     const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' })
-    expect(wb.Sheets['全球合同'].B35.f).toBe("'LONG-TEST'!D15")
+    expect(wb.Sheets['全球合同'].B35.f).toBe("LOOKUP(1,0/(('LONG-TEST'!V:V=$H$5)*('LONG-TEST'!A:A=A35)),'LONG-TEST'!D:D)")
     expect(wb.Sheets['全球合同'].G36.f).toBe('SUM(G24:G35)')
     expect(wb.Sheets['全球发票'].I44.f).toBe('SUM(J32:J43)')
     expect(wb.Sheets['装箱单'].D36.f).toBe('SUM(D24:D35)')
@@ -871,7 +1004,7 @@ describe('supplier document export', () => {
       productHs: new Map(), images: new Map(), form: { customer: 'RRI', containerNo: 'RRI-LONG-TEST' },
     })
     const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' })
-    expect(wb.Sheets['实业合同'].B35.f).toBe("'RRI-LONG-TEST'!D15")
+    expect(wb.Sheets['实业合同'].B35.f).toBe("LOOKUP(1,0/(('RRI-LONG-TEST'!V:V=$H$5)*('RRI-LONG-TEST'!A:A=A35)),'RRI-LONG-TEST'!D:D)")
     expect(wb.Sheets['实业合同'].G36.f).toBe('SUM(G24:G35)')
     expect(wb.Sheets['实业发票'].I40.f).toBe('SUM(J28:J39)')
     expect(wb.Sheets['装箱单'].D37.f).toBe('SUM(D25:D36)')
