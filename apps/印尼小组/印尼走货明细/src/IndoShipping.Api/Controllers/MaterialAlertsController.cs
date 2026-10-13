@@ -10,7 +10,7 @@ namespace IndoShipping.Api.Controllers;
 
 [ApiController]
 [Route("api/material-alerts")]
-public class MaterialAlertsController(ISqlConnectionFactory factory) : ControllerBase
+public partial class MaterialAlertsController(ISqlConnectionFactory factory) : ControllerBase
 {
     private static readonly Dictionary<string, string> CategoryAliases = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -347,7 +347,7 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
             var purchaseShortage = Math.Max(agg.required_qty - ordered, 0);
             var receiptShortage = Math.Max(agg.required_qty - received, 0);
             var outboundShortage = Math.Max(agg.required_qty - outbound, 0);
-            var orderDetails = ToOrderDetails(agg.order_details, received, outbound);
+            var orderDetails = ToOrderDetails(agg.order_details, received, outbound, ordered);
             var timing = OutstandingTiming(orderDetails, profile);
             var completed = timing.accepted is null;
             DateTime? due = timing.due;
@@ -402,7 +402,7 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
             var part = agg.part;
             var profile = ResolveProfile(profileMap, part.product_code, part.category, part.name);
             productionPlan.TryGetValue(part.key, out var planned);
-            var orderDetails = ToOrderDetails(agg.order_details, 0, 0);
+            var orderDetails = ToOrderDetails(agg.order_details, 0, 0, planned);
             var timing = OutstandingTiming(orderDetails, profile);
             DateTime? due = timing.due;
             var estimatedDays = due.HasValue ? (due.Value.Date - timing.accepted!.Value.Date).Days : 0;
@@ -470,6 +470,12 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
             else item.workflow_status = "部分已送完(手动)·" + item.workflow_status;
         }
 
+        // Manual tracking adjustments are separate from business/stock records and
+        // are never applied retrospectively to a historical schedule view.
+        var adjustments = revisionId.HasValue ? new Dictionary<string, TrackingAdjustment>()
+            : ReadAdjustments(await c.ExecuteScalarAsync<string?>("SELECT value FROM settings WHERE key=@AdjustmentKey", new { AdjustmentKey }));
+        ApplyTrackingAdjustments(items, adjustments, profileMap, today);
+
         var statusOrder = new Dictionary<string, int>
         {
             ["critical"] = 0, ["warning"] = 1, ["normal"] = 2,
@@ -484,6 +490,7 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
         {
             schedule_id = schedule.schedule_id,
             revision_id = revisionId,
+            latest_revision_id = schedule.id,
             schedule_label = schedule.week_label ?? "",
             schedule_upload_date = schedule.upload_date?.ToString("yyyy-MM-dd"),
             order_count = scheduleOrderNos.Count,
@@ -605,16 +612,20 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
     private static List<OrderDetail> ToOrderDetails(
         IReadOnlyDictionary<string, OrderDemand> source,
         decimal receivedQty,
-        decimal outboundQty)
+        decimal outboundQty,
+        decimal orderedQty)
     {
         var receivedRemaining = Math.Max(receivedQty, 0);
         var outboundRemaining = Math.Max(outboundQty, 0);
+        var orderedRemaining = Math.Max(orderedQty, 0);
         return source.Values.OrderBy(x => x.accepted_date).ThenBy(x => x.order_no).Select(x =>
         {
             var received = Math.Min(x.required_qty, receivedRemaining);
             var outbound = Math.Min(x.required_qty, outboundRemaining);
+            var ordered = Math.Min(x.required_qty, orderedRemaining);
             receivedRemaining -= received;
             outboundRemaining -= outbound;
+            orderedRemaining -= ordered;
             return new OrderDetail
             {
                 key = x.key,
@@ -624,6 +635,12 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
                 schedule_label = x.schedule_label,
                 manual_qty = decimal.Round(x.manual_qty, 4),
                 required_qty_exact = x.required_qty,
+                ordered_qty = ordered,
+                source_required_qty = x.required_qty,
+                source_ordered_qty = ordered,
+                source_received_qty = received,
+                source_outbound_qty = outbound,
+                source_manual_qty = x.manual_qty,
                 manual_qty_exact = x.manual_qty,
                 manually_covered = x.manual_qty >= x.required_qty,
                 receipt_shortage_exact = Math.Max(x.required_qty - Math.Max(x.manual_qty, received), 0),
@@ -904,6 +921,14 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
 
     private sealed class OrderDetail
     {
+        public decimal source_required_qty { get; set; }
+        public decimal source_ordered_qty { get; set; }
+        public decimal source_received_qty { get; set; }
+        public decimal source_outbound_qty { get; set; }
+        public decimal source_manual_qty { get; set; }
+        public decimal ordered_qty { get; set; }
+        public long adjustment_version { get; set; }
+        public TrackingAdjustment? adjustment { get; set; }
         [JsonIgnore] public decimal required_qty_exact { get; set; }
         [JsonIgnore] public decimal manual_qty_exact { get; set; }
         [JsonIgnore] public bool manually_covered { get; set; }
@@ -924,6 +949,7 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
 
     private sealed class AlertResponse
     {
+        public long? latest_revision_id { get; set; }
         public long? revision_id { get; set; }
         public int? schedule_id { get; set; }
         public string schedule_label { get; set; } = "";
@@ -946,6 +972,11 @@ public class MaterialAlertsController(ISqlConnectionFactory factory) : Controlle
 
     private sealed class AlertItem
     {
+        public bool has_adjustments { get; set; }
+        public decimal source_required_qty { get; set; }
+        public decimal source_ordered_qty { get; set; }
+        public decimal source_received_qty { get; set; }
+        public decimal source_outbound_qty { get; set; }
         public string key { get; set; } = "";
         public string product_code { get; set; } = "";
         public int material_id { get; set; }

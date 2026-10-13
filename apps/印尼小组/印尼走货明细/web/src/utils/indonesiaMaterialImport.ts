@@ -58,6 +58,7 @@ export function parseIndonesiaMaterials(wb: XLSX.WorkBook, forTools = false) {
       if (rawUnit && !units[rawUnit]) warnings.push(`${sn} 第 ${ri + 1} 行单位“${rawUnit}”未识别，保留原值`)
       const material: Material = {
         product_code: code, name_zh: name, name_en: get(row, '产品英文名称'), spec: get(row, '规格'),
+        material_code: get(row, '物料编码'),
         hs_cn: get(row, '中国HSCODE'), hs_id: get(row, '印尼HSCODE'), supplier: get(row, '供应商'),
         customs_company: get(row, '报关公司'), weight_per_carton: number('每箱重量'),
         unit_kg: units[rawUnit], gross_per_pc: number('单个毛重'), net_per_pc: number('单个净重'),
@@ -78,7 +79,6 @@ export function parseIndonesiaMaterials(wb: XLSX.WorkBook, forTools = false) {
           warnings.push(`${sn} 第 ${ri + 1} 行：采购单价已读取，币种${currency ? '无法识别' : '未填写'}，请确认`)
         material.related_product_code = code
         delete material.product_code
-        material.material_code = get(row, '物料编码')
         const kind = get(row, '类别') || get(row, '产品用途')
         if (['工具', '模具', '耗材'].includes(kind)) material.tool_kind = '工具'
         else if (['设备', '机器', '机器设备'].includes(kind)) material.tool_kind = '机器设备'

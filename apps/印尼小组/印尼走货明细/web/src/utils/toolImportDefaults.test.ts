@@ -31,3 +31,15 @@ it('导入完整档案与每箱重量，区分单件和总量', () => {
     customs_company: '公司甲', weight_per_carton: 4, gross_per_pc: 2, length: 23, material_code: '0002', tool_kind: '工具',
   })
 })
+it.each([false, true])('物料编号导入物料编码并保留前导零（工具模式 %s）', (forTools) => {
+  const wb = XLSX.utils.book_new()
+  const sheet = XLSX.utils.aoa_to_sheet([
+    ['货号', '产品中文名称', '物料编号'],
+    ['A001', '物料甲', '01020096'],
+    ['A001', '物料乙', 1020097],
+  ])
+  sheet.C3.z = '00000000'
+  XLSX.utils.book_append_sheet(wb, sheet, '资料')
+  expect(parseIndonesiaMaterials(wb, forTools).groups[0].materials.map(m => m.material_code))
+    .toEqual(['01020096', '01020097'])
+})

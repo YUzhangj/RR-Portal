@@ -32,8 +32,8 @@ public static class MaterialTrackingHistory
         var completion = await db.ExecuteScalarAsync<string?>(
             "SELECT value FROM settings WHERE key='material_tracking_completed_schedules'", transaction: tx);
         var schedules = await db.QueryAsync<Snapshot>("""
-            SELECT id AS schedule_id, week_label, upload_date, COALESCE(raw_rows,'[]'::jsonb)::text AS raw_rows,
-                   md5(COALESCE(raw_rows,'[]'::jsonb)::text) AS rows_hash FROM schedules
+            SELECT id AS schedule_id, week_label, upload_date, COALESCE(raw_rows::text,'[]') AS raw_rows,
+                   md5(COALESCE(raw_rows::text,'[]')) AS rows_hash FROM schedules
             ORDER BY upload_date NULLS FIRST, id
             """, transaction: tx);
         var materials = await db.ExecuteScalarAsync<string>("""

@@ -4,6 +4,21 @@ import * as XLSX from 'xlsx'
 import { importEngineeringFile, isZipWorkbookBuffer } from './engineeringImport'
 
 describe('engineering material import', () => {
+  it.each(['xls', 'xlsx'] as const)('maps 物料编号 to material_code preserving displayed zeros (%s)', async (bookType) => {
+    const workbook = XLSX.utils.book_new()
+    const sheet = XLSX.utils.aoa_to_sheet([
+      ['产品编号', 'A001'],
+      ['类别', '物料名称', '物料\n编号', '用量'],
+      ['五金', '物料甲', '01020096', 2],
+      ['五金', '物料乙', 1020097, 3],
+    ])
+    sheet.C4.z = '00000000'
+    XLSX.utils.book_append_sheet(workbook, sheet, '外购件清单')
+    const bytes = XLSX.write(workbook, { type: 'array', bookType }) as ArrayBuffer
+    const result = await importEngineeringFile({ arrayBuffer: async () => bytes } as File)
+    expect(result.materials.map(m => m.material_code)).toEqual(['01020096', '01020097'])
+  })
+
   it.runIf(process.env.ENGINEERING_IMPORT_FILE)('imports the supplied real workbook', async () => {
     const bytes = readFileSync(process.env.ENGINEERING_IMPORT_FILE!)
     const file = { arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) } as File

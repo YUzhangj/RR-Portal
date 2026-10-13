@@ -18,7 +18,7 @@ function exactProfile(name: string, profiles: SupplierDict[]) {
   return matches.length === 1 ? matches[0] : undefined
 }
 
-function sameSupplier(a: string, b: string, profiles: SupplierDict[]) {
+export function sameSupplier(a: string, b: string, profiles: SupplierDict[]) {
   if (!key(a) || !key(b)) return false
   if (key(a) === key(b)) return true
   const first = exactProfile(a, profiles)

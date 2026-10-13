@@ -9,6 +9,37 @@ import {
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { api } from '../api/client'
+import { getStoredSession, hasBits } from '../auth/permissions'
+
+interface TrackingAdjustment {
+  required_delta?: number | null
+  ordered_qty?: number | null
+  received_qty?: number | null
+  outbound_qty?: number | null
+  manual_qty?: number | null
+  ordered_base?: number | null
+  received_base?: number | null
+  outbound_base?: number | null
+  manual_base?: number | null
+  status?: string | null
+  note: string
+  updated_at: string
+  updated_by: string
+}
+const trackingQuantityLabels = { required_qty: '需求', ordered_qty: '采购/排产', received_qty: '入库', outbound_qty: '出库', manual_qty: '送完确认' } as const
+type TrackingQuantities = Record<keyof typeof trackingQuantityLabels, number> & { status?: string }
+interface AdjustmentHistoryEntry {
+  id: number; occurred_at: string; username: string; action: string
+  details: { after: TrackingAdjustment; previous?: TrackingQuantities; current?: TrackingQuantities; source?: TrackingQuantities }
+}
+interface TrackingOrder {
+  key: string; order_no: string; product_code: string; customer: string; schedule_label: string
+  manual_qty: number; accepted_date: string; required_qty: number; ordered_qty: number
+  received_qty: number; outbound_qty: number; status: string
+  source_required_qty: number; source_ordered_qty: number; source_received_qty: number
+  source_outbound_qty: number; source_manual_qty: number
+  adjustment_version: number; adjustment?: TrackingAdjustment | null
+}
 
 interface AlertItem {
   key: string
@@ -21,7 +52,12 @@ interface AlertItem {
   supplier?: string
   order_count: number
   order_nos: string[]
-  order_details?: Array<{ key: string; order_no: string; product_code: string; customer: string; schedule_label: string; manual_qty: number; accepted_date: string; required_qty: number; received_qty: number; outbound_qty: number; status: string }>
+  order_details?: TrackingOrder[]
+  has_adjustments?: boolean
+  source_required_qty?: number
+  source_ordered_qty?: number
+  source_received_qty?: number
+  source_outbound_qty?: number
   accepted_date: string
   due_date?: string
   lead_days?: number
@@ -45,6 +81,7 @@ interface AlertItem {
 }
 
 interface AlertResponse {
+  latest_revision_id?: number
   revision_id?: number
   schedule_id?: number
   schedule_label?: string
@@ -114,6 +151,61 @@ export default function MaterialAlertsPage() {
   const [profileSaving, setProfileSaving] = useState(false)
   const [orderDetailItem, setOrderDetailItem] = useState<AlertItem | null>(null)
   const [profileForm] = Form.useForm()
+  const [adjustingOrder, setAdjustingOrder] = useState<TrackingOrder | null>(null)
+  const [adjustmentSaving, setAdjustmentSaving] = useState(false)
+  const [adjustmentForm] = Form.useForm()
+  const [historyOrder, setHistoryOrder] = useState<TrackingOrder | null>(null)
+  const [adjustmentHistory, setAdjustmentHistory] = useState<{ items: AdjustmentHistoryEntry[]; total: number }>({ items: [], total: 0 })
+  const [historyPage, setHistoryPage] = useState(1)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const historySequence = useRef(0)
+  const canAdjust = !revisionId && hasBits(getStoredSession()?.usereditpower, [4])
+
+  async function loadAdjustmentHistory(order: TrackingOrder, page = 1) {
+    const sequence = ++historySequence.current
+    setHistoryOrder(order); setHistoryPage(page); setHistoryLoading(true)
+    setAdjustmentHistory({ items: [], total: 0 })
+    try {
+      const response = await api.get('/material-alerts/adjustment-history', { params: { order_key: order.key, page } })
+      if (sequence === historySequence.current) setAdjustmentHistory(response.data)
+    } finally { if (sequence === historySequence.current) setHistoryLoading(false) }
+  }
+
+  function openAdjustment(order: TrackingOrder) {
+    setAdjustingOrder(order)
+    const adjustment = order.adjustment
+    adjustmentForm.resetFields()
+    adjustmentForm.setFieldsValue({
+      required_qty: adjustment?.required_delta == null ? null : Math.max(0, order.source_required_qty + adjustment.required_delta),
+      ordered_qty: adjustment?.ordered_qty == null ? null : Math.max(0, order.source_ordered_qty + adjustment.ordered_qty - (adjustment.ordered_base ?? order.source_ordered_qty)),
+      received_qty: adjustment?.received_qty == null ? null : Math.max(0, order.source_received_qty + adjustment.received_qty - (adjustment.received_base ?? order.source_received_qty)),
+      outbound_qty: adjustment?.outbound_qty == null ? null : Math.max(0, order.source_outbound_qty + adjustment.outbound_qty - (adjustment.outbound_base ?? order.source_outbound_qty)),
+      manual_qty: adjustment?.manual_qty == null ? null : Math.max(0, order.source_manual_qty + adjustment.manual_qty - (adjustment.manual_base ?? order.source_manual_qty)),
+      status: adjustment?.status, note: adjustment?.note || '',
+    })
+  }
+
+  async function saveAdjustment(reset = false) {
+    if (!adjustingOrder || !canAdjust) return
+    const values = reset ? {} : await adjustmentForm.validateFields()
+    setAdjustmentSaving(true)
+    try {
+      await api.put('/material-alerts/adjustment', {
+        ...values, reset, order_key: adjustingOrder.key,
+        expected_version: adjustingOrder.adjustment_version || 0,
+        expected_revision_id: data.latest_revision_id,
+        expected_source_required: adjustingOrder.source_required_qty,
+        expected_source_ordered: adjustingOrder.source_ordered_qty,
+        expected_source_received: adjustingOrder.source_received_qty,
+        expected_source_outbound: adjustingOrder.source_outbound_qty,
+        expected_source_manual: adjustingOrder.source_manual_qty,
+        ...(reset ? { note: '用户确认恢复自动计算' } : {}),
+      })
+      setAdjustingOrder(null)
+      message.success(reset ? '已恢复自动追踪，实际业务记录未改动' : '已保存手动追踪调整，实际业务记录未改动')
+      await load()
+    } finally { setAdjustmentSaving(false) }
+  }
 
   async function load() {
     const sequence = ++loadSequence.current
@@ -126,6 +218,7 @@ export default function MaterialAlertsPage() {
       ])
       if (sequence !== loadSequence.current) return
       setData(alertsResp.data?.items ? alertsResp.data : { items: [] })
+      setOrderDetailItem(current => current ? alertsResp.data.items.find(item => item.key === current.key) || null : null)
       setProfiles(Array.isArray(profilesResp.data) ? profilesResp.data : [])
       setRevisions(Array.isArray(historyResp.data) ? historyResp.data : [])
     } finally { if (sequence === loadSequence.current) setLoading(false) }
@@ -134,6 +227,9 @@ export default function MaterialAlertsPage() {
   useEffect(() => {
     setData({ items: [] })
     setOrderDetailItem(null)
+    setAdjustingOrder(null)
+    setHistoryOrder(null)
+    ++historySequence.current
     void load()
     return () => { ++loadSequence.current }
   }, [revisionId])
@@ -383,6 +479,7 @@ export default function MaterialAlertsPage() {
         return (
           <Space direction="vertical" size={6} style={{ width: '100%' }}>
             <Space size={[4, 4]} wrap>
+              {r.has_adjustments && <Tooltip title={`含订单级手动调整。原始统计：需求 ${r.source_required_qty}，采购/排产 ${r.source_ordered_qty}，入库 ${r.source_received_qty}，出库 ${r.source_outbound_qty}`}><Tag color="purple">手动追踪</Tag></Tooltip>}
               {(v || '待处理').split('·').map((step) => (
                 <Tag
                   key={step}
@@ -394,11 +491,11 @@ export default function MaterialAlertsPage() {
                 </Tag>
               ))}
             </Space>
-            <Tooltip title={r.manual_completed ? '本排期已手动确认送完；账面入库、出库数量保持实际记录' : `入库 ${numberFmt.format(r.received_qty)} / 出库 ${numberFmt.format(r.outbound_qty)}；出库达到需求后才算完成`}>
+            <Tooltip title={r.manual_completed ? '相关订单已手动确认送完；账面入库、出库数量保持实际记录' : `追踪入库 ${numberFmt.format(r.received_qty)} / 出库 ${numberFmt.format(r.outbound_qty)}；出库达到需求后才算完成`}>
               <Progress
                 percent={pct}
                 size="small"
-                status={r.manual_completed || (pct >= 100 && r.received_qty >= r.required_qty) ? 'success' : r.status === 'critical' ? 'exception' : 'active'}
+                status={r.status === 'covered' ? 'success' : r.status === 'critical' ? 'exception' : 'active'}
               />
             </Tooltip>
           </Space>
@@ -409,7 +506,7 @@ export default function MaterialAlertsPage() {
       title: '对应订单', dataIndex: 'order_count', width: 110, align: 'center',
       render: (v: number, r: AlertItem) => (
         <Tooltip title={(r.order_nos || []).join('、') || '排期未填写订单号'}>
-          <Badge count={v} showZero color="#1677ff" overflowCount={999} />
+          <Button type="link" size="small" onClick={() => setOrderDetailItem(r)} aria-label={`查看 ${r.product_code} ${r.material_name} 对应订单`}><Badge count={v} showZero color="#1677ff" overflowCount={999} /></Button>
         </Tooltip>
       ),
     },
@@ -447,15 +544,15 @@ export default function MaterialAlertsPage() {
       render: (_: any, r: AlertItem) => (
         <Space direction="vertical" size={1} style={{ width: '100%' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>入库</Typography.Text>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>{r.has_adjustments ? '追踪入库' : '入库'}</Typography.Text>
             <Typography.Text style={{ color: '#52c41a' }}>{numberFmt.format(r.received_qty)}</Typography.Text>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>出库</Typography.Text>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>{r.has_adjustments ? '追踪出库' : '出库'}</Typography.Text>
             <Typography.Text strong style={{ color: '#389e0d' }}>{numberFmt.format(r.outbound_qty)}</Typography.Text>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>库存</Typography.Text>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>实际库存</Typography.Text>
             <Typography.Text>{numberFmt.format(r.available_qty)}</Typography.Text>
           </div>
         </Space>
@@ -532,6 +629,7 @@ export default function MaterialAlertsPage() {
             </Space>
             <Typography.Text type="secondary">
               {revisionId ? '按该版本的订单和物料资料查看；入出库数量仍为当前实际记录。' : '新排期未出现的历史订单继续保留；相同订单、货号、物料不重复累计。缺少订单号的行只计入最新排期，可在历史版本查看。'}
+              {!revisionId && ' 点击对应订单可手动调整追踪状态和数量；手调不写入采购单或实际库存，历史版本不应用当前手调。'}
             </Typography.Text>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
               <Space wrap size={8}>
@@ -582,15 +680,17 @@ export default function MaterialAlertsPage() {
       <Modal
         open={Boolean(orderDetailItem)}
         title={orderDetailItem ? `${orderDetailItem.product_code} · ${orderDetailItem.material_name || orderDetailItem.item_no} · 对应排期订单` : '对应排期订单'}
-        width={1200}
+        width={1450}
         footer={null}
         onCancel={() => setOrderDetailItem(null)}
       >
         <Typography.Paragraph type="secondary">入库、出库数量按最早接单日期 FIFO 自动分配到订单。手动确认量按订单、货号及物料保留；与实际记录不重复相加，追加需求继续追踪。已交完订单保留在明细中，不参与最早接单日、应交日及逾期预警计算。</Typography.Paragraph>
+        <Typography.Paragraph type="secondary">手调数量按差额保留，后续实际分配增减会继续计入；实际库存不变。“调整记录”可核对修改前后数量、差额、原因和操作人。普通状态是流程标记，“已送完”确认当前需求；新增需求仍需继续完成。</Typography.Paragraph>
         <Table
           rowKey="key"
           size="small"
           dataSource={orderDetailItem?.order_details || []}
+          scroll={{ x: 1300 }}
           pagination={{ defaultPageSize: 20, showTotal: total => `共 ${total} 张订单` }}
           summary={rows => <Table.Summary.Row>
             <Table.Summary.Cell index={0} colSpan={2}><Typography.Text strong>合计</Typography.Text></Table.Summary.Cell>
@@ -607,6 +707,8 @@ export default function MaterialAlertsPage() {
               <Typography.Text strong>{numberFmt.format(rows.reduce((sum, row) => sum + Number(row.manual_qty || 0), 0))}</Typography.Text>
             </Table.Summary.Cell>
             <Table.Summary.Cell index={6} />
+            <Table.Summary.Cell index={7} />
+            <Table.Summary.Cell index={8} />
           </Table.Summary.Row>}
           columns={[
             { title: '订单 / 货号 / 排期', dataIndex: 'order_no', render: (v, row) => <Space direction="vertical" size={0}>
@@ -619,9 +721,76 @@ export default function MaterialAlertsPage() {
             { title: '分配入库', dataIndex: 'received_qty', width: 130, align: 'right', render: v => numberFmt.format(v) },
             { title: '分配出库', dataIndex: 'outbound_qty', width: 130, align: 'right', render: v => numberFmt.format(v) },
             { title: '手动确认量', dataIndex: 'manual_qty', width: 130, align: 'right', render: v => numberFmt.format(v || 0) },
-            { title: '订单状态', dataIndex: 'status', width: 170, render: v => <Tag color={v === '已完成' || v === '已送完(手动)' ? 'green' : v.includes('部分') ? 'orange' : 'blue'}>{v}</Tag> },
+            { title: '采购/排产量（分配）', dataIndex: 'ordered_qty', width: 140, align: 'right', render: v => numberFmt.format(v || 0) },
+            { title: '订单状态', dataIndex: 'status', width: 190, render: (v, row) => <>
+              <Tag color={v.startsWith('已完成') || v === '已送完(手动)' ? 'green' : v.includes('部分') ? 'orange' : 'blue'}>{v}</Tag>
+              {row.adjustment && <Tooltip title={`原始分配：需求 ${row.source_required_qty} / 采购排产 ${row.source_ordered_qty} / 入库 ${row.source_received_qty} / 出库 ${row.source_outbound_qty} / 送完确认 ${row.source_manual_qty}。${row.adjustment.updated_by} ${dayjs(row.adjustment.updated_at).format('YYYY-MM-DD HH:mm')}：${row.adjustment.note}`}><Tag color="purple">手动</Tag></Tooltip>}
+            </> },
+            { title: '操作', width: 180, fixed: 'right', render: (_v, row) => <Space size={0}>
+              <Button type="link" size="small" disabled={!canAdjust || !row.order_no} onClick={() => openAdjustment(row)}>调整追踪</Button>
+              <Button type="link" size="small" onClick={() => loadAdjustmentHistory(row)}>调整记录</Button>
+            </Space> },
           ]}
         />
+      </Modal>
+
+      <Modal open={Boolean(adjustingOrder)} title={`调整追踪 · ${adjustingOrder?.order_no || ''} · ${orderDetailItem?.material_name || ''}`}
+        width={680} confirmLoading={adjustmentSaving} onCancel={() => !adjustmentSaving && setAdjustingOrder(null)}
+        footer={<Space>
+          <Button disabled={adjustmentSaving || !adjustingOrder?.adjustment} onClick={() => Modal.confirm({
+            title: '恢复这张订单的自动追踪？', content: '移除本次手调，重新使用排期、采购、入出库和原有送完确认记录；不会删除实际业务数据。',
+            onOk: () => saveAdjustment(true), okText: '恢复自动', cancelText: '取消',
+          })}>恢复自动计算</Button>
+          <Button disabled={adjustmentSaving} onClick={() => setAdjustingOrder(null)}>取消</Button>
+          <Button type="primary" loading={adjustmentSaving} onClick={() => saveAdjustment()}>保存追踪调整</Button>
+        </Space>}>
+        <Typography.Paragraph type="secondary">填写当前调整后的总数量（不是新增量），系统保存相对自动统计的差额。比如自动入库 0、改为 100，后续实际分配新增 50，追踪变为 150。留空使用自动统计；改为 0 后也会继续计入后续增减。仅影响当前订单这项物料的追踪，不改实际库存。</Typography.Paragraph>
+        <Form form={adjustmentForm} layout="vertical">
+          <Form.Item name="status" label="流程状态（留空自动计算）">
+            <Select allowClear placeholder="自动计算" options={[
+              ...(orderDetailItem?.tracking_type === 'purchase' ? ['未下单', '已下单', '欠采购'] : ['未排产', '已排产', '欠排产']),
+              '待入库', '部分入库', '已入库', '待出库', '部分出库', '已出库', '部分已送完', '已送完',
+            ].map(value => ({ value, label: value }))} />
+          </Form.Item>
+          <Typography.Paragraph type="warning">选择“已送完”会按当前调整后需求确认送完，并计入完成率、停止该订单提醒；其他状态仅作流程标记，不自动改变数量。</Typography.Paragraph>
+          <Row gutter={16}>{([
+            ['required_qty', '需求数量', adjustingOrder?.source_required_qty],
+            ['ordered_qty', '已采购/已排产数量', adjustingOrder?.source_ordered_qty],
+            ['received_qty', '入库追踪数量', adjustingOrder?.source_received_qty],
+            ['outbound_qty', '出库追踪数量', adjustingOrder?.source_outbound_qty],
+            ['manual_qty', '确认送完数量', adjustingOrder?.source_manual_qty],
+          ] as const).map(([field, label, original]) => <Col span={12} key={field}>
+            <Form.Item name={field} label={`${label}（原值 ${numberFmt.format(original || 0)}）`}>
+              <InputNumber min={0} max={1e12} style={{ width: '100%' }} placeholder="留空自动" />
+            </Form.Item>
+          </Col>)}</Row>
+          <Form.Item name="note" label="调整原因" rules={[{ required: true, whitespace: true, message: '请填写调整原因' }]}>
+            <Input.TextArea maxLength={500} showCount rows={2} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal open={Boolean(historyOrder)} title={`追踪调整记录 · ${historyOrder?.order_no || ''}`} width={1000} footer={null}
+        onCancel={() => { setHistoryOrder(null); ++historySequence.current }}>
+        <Typography.Paragraph type="secondary">记录手动调整及恢复自动的操作，保留当时的自动分配原值。后续业务变化按差额继续计算，不会改写这里的历史快照。</Typography.Paragraph>
+        <Table rowKey="id" size="small" loading={historyLoading} dataSource={adjustmentHistory.items}
+          pagination={{ current: historyPage, pageSize: 20, total: adjustmentHistory.total, showSizeChanger: false,
+            onChange: page => historyOrder && loadAdjustmentHistory(historyOrder, page), showTotal: total => `共 ${total} 条记录` }}
+          columns={[
+            { title: '时间 / 操作人', width: 170, render: (_v, row) => <>{dayjs(row.occurred_at).format('YYYY-MM-DD HH:mm:ss')}<br />{row.username || '未记录用户名'}</> },
+            { title: '操作 / 原因', width: 200, render: (_v, row) => <><Tag color={row.action === 'reset-adjustment' ? 'default' : 'purple'}>{row.action === 'reset-adjustment' ? '恢复自动' : '手动调整'}</Tag><div>{row.details.after.note}</div></> },
+            { title: '修改前 → 修改后（相对自动值的差额）', render: (_v, row) => {
+              const { previous, current, source } = row.details
+              if (!previous || !current || !source) return '旧记录未保存数量快照'
+              return <Space direction="vertical" size={0}>
+                <Typography.Text>状态：{previous.status} → {current.status}</Typography.Text>
+                {(Object.keys(trackingQuantityLabels) as Array<keyof typeof trackingQuantityLabels>).map(field => {
+                  const delta = current[field] - source[field]
+                  return <Typography.Text key={field}>{trackingQuantityLabels[field]}：{previous[field]} → {current[field]}（自动 {source[field]}，差额 {delta >= 0 ? '+' : ''}{Number(delta.toPrecision(12))}）</Typography.Text>
+                })}
+              </Space>
+            } },
+          ]} />
       </Modal>
 
       <Card

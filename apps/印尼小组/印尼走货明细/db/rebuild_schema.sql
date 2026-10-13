@@ -178,7 +178,7 @@ CREATE TABLE dbo.po_items (
     material_id     INT           NULL,
     material_name   NVARCHAR(256) NULL,
     qty             DECIMAL(18,4) NULL,
-    price           DECIMAL(18,4) NULL,
+    price           DECIMAL(22,8) NULL,
     currency        NVARCHAR(8)   NOT NULL DEFAULT N'¥',
     notes           NVARCHAR(MAX) NULL,
     category        NVARCHAR(64)  NULL,
