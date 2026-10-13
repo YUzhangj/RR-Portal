@@ -8,7 +8,7 @@ import { api, type Material, type Dictionaries } from '../api/client'
 import { purchaseItemCodes, resolvePurchaseCustoms } from '../utils/purchaseCustoms'
 import { numToChinese, poCorrectHsyNumber, poLineCurrency, poDetermineEntity, poGenContractNo, PO_ENTITY_META, type PoEntity } from '../utils/poNumber'
 import './PurchasePage.css'
-import { combinePurchaseContracts } from '../utils/purchaseContractWorkbook'
+import { combinePurchaseContracts, formatPurchaseContractFonts, formatPurchaseContractTotals } from '../utils/purchaseContractWorkbook'
 import PurchaseMaterialPicker from '../components/PurchaseMaterialPicker'
 import { purchaseMaterialBucket, purchaseMaterialLine, purchaseSelectionSource, purchaseSelectionSupplier, type PurchaseMaterialChoice } from '../utils/purchaseMaterialSelection'
 import { linkPurchaseLine, matchingLineSchedules } from '../utils/purchaseScheduleLink'
@@ -1211,9 +1211,10 @@ export default function PurchasePage() {
     }
     rows.push(['以下空白！', '按工程签板生产！', '', '', '', '', '', ''])
     const sumRow = rows.length
-    rows.push(['', '', '', '', '', '合计', Number(totalAmount.toFixed(2)), ''])
-    rows.push(['', '', '', '', '', '大写', meta.currency === 'RMB' ? '人民币' : '美金', numToChinese(totalAmount)])
-    rows.push(PAD(8))
+    rows.push(['', '', '', '', '合计', '', Number(totalAmount.toFixed(2)), ''])
+    rows.push(['', '', '', '', '大写', meta.currency === 'RMB' ? '人民币' : '美金', numToChinese(totalAmount), ''])
+    // 交货说明紧接大写金额，避免中间出现无边框的空白格。
+    const notesStart = rows.length
     rows.push(['1.  ' + deliveryDateCN + '前交货', ...PAD(7)])
     rows.push([meta.priceIncludesVAT ? '2.单价已含 13 %增值税，月结 90 天；' : '2.单价为美金单价，月结 90 天；', ...PAD(7)])
     rows.push(['3、货物及部件质量符合国外现行最新标准', ...PAD(7)])
@@ -1261,8 +1262,7 @@ export default function PurchasePage() {
     const mg = (sR: number, sC: number, eR: number, eC: number) => ws['!merges']!.push({ s: { r: sR, c: sC }, e: { r: eR, c: eC } })
     mg(0, 0, 0, 7); mg(1, 0, 1, 7); mg(2, 0, 2, 7); mg(3, 0, 3, 7)
     mg(5, 1, 5, 4); mg(5, 6, 5, 7); mg(6, 1, 6, 4); mg(6, 6, 6, 7)
-    mg(sumRow, 6, sumRow, 7)
-    for (let r = sumRow + 3; r < rows.length - 2; r++) { if (String(rows[r][0] || '')) mg(r, 0, r, 7) }
+    for (let r = notesStart; r < rows.length - 2; r++) { if (String(rows[r][0] || '')) mg(r, 0, r, 7) }
     mg(rows.length - 2, 1, rows.length - 2, 3); mg(rows.length - 2, 5, rows.length - 2, 7)
     mg(rows.length - 1, 1, rows.length - 1, 3); mg(rows.length - 1, 5, rows.length - 1, 7)
     ws['!cols'] = [{ wch: 12 }, { wch: 22 }, { wch: 16 }, { wch: 10 }, { wch: 8 }, { wch: 13 }, { wch: 13 }, { wch: 18 }, { wch: 32 }, { wch: 16 }]
@@ -1299,9 +1299,9 @@ export default function PurchasePage() {
         fill: { patternType: 'solid', fgColor: { rgb: 'FFFF00' } },
       })
     }
-    for (let r = sumRow + 3; r < rows.length - 2; r++) setStyle(r, 0, { font: { sz: 11 }, alignment: left })
+    for (let r = notesStart; r < rows.length - 2; r++) setStyle(r, 0, { font: { sz: 11 }, alignment: left })
     // 三条合同说明各自加完整格子边框，与上方明细表保持一致。
-    for (let r = sumRow + 3; r <= sumRow + 5; r++) {
+    for (let r = notesStart; r < notesStart + 3; r++) {
       for (let c = 0; c < 8; c++) setStyle(r, c, { font: { sz: 11 }, alignment: left, border })
     }
     for (const r of [rows.length - 2, rows.length - 1]) {
@@ -1311,6 +1311,8 @@ export default function PurchasePage() {
       setStyle(r, 5, { font: { sz: 12 }, alignment: left })
     }
 
+    formatPurchaseContractTotals(ws, sumRow)
+    formatPurchaseContractFonts(ws)
     return { ws, poNo, supplier, entity }
   }
 

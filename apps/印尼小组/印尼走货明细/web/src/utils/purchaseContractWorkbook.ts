@@ -5,6 +5,42 @@ const companySheets: [PoEntity, string][] = [
   ['HD_INDUSTRY', '华登实业'], ['HD_GLOBAL', '华登全球'], ['HSY', '华胜益'],
 ]
 
+/** 公司抬头 22 号、购销合同标题 18 号，其余 12 号；全部加粗。合并前逐单应用。 */
+export function formatPurchaseContractFonts(ws: XLSX.WorkSheet) {
+  for (const [address, cell] of Object.entries(ws)) {
+    if (address.startsWith('!')) continue
+    const size = address === 'A1' ? 22 : address === 'A4' ? 18 : 12
+    cell.s = { ...cell.s, font: { ...cell.s?.font, sz: size, bold: true } }
+  }
+}
+
+/** 合计/大写按采购合同样表定位；sumRow 为从 0 开始的行号，不改金额或公式。 */
+export function formatPurchaseContractTotals(ws: XLSX.WorkSheet, sumRow: number) {
+  const upperRow = sumRow + 1
+  ws['!merges'] ||= []
+  ws['!merges'].push(
+    { s: { r: sumRow, c: 4 }, e: { r: sumRow, c: 5 } },
+    { s: { r: sumRow, c: 6 }, e: { r: sumRow, c: 7 } },
+    { s: { r: upperRow, c: 6 }, e: { r: upperRow, c: 7 } },
+  )
+  for (const [row, column] of [[sumRow, 4], [sumRow, 6], [upperRow, 4], [upperRow, 5], [upperRow, 6]]) {
+    const cell = ws[XLSX.utils.encode_cell({ r: row, c: column })]
+    if (!cell) continue
+    cell.s = { ...cell.s, alignment: {
+      ...cell.s?.alignment, horizontal: row === upperRow && column === 6 ? 'left' : 'center',
+      vertical: 'center', wrapText: true,
+    } }
+  }
+  // Merged cells do not reliably auto-fit in Excel/WPS; reserve enough height for
+  // long Chinese amounts without widening the item table or auxiliary columns.
+  const text = String(ws[XLSX.utils.encode_cell({ r: upperRow, c: 6 })]?.v || '')
+  const textWidth = Array.from(text).reduce((width, char) => width + (char.charCodeAt(0) > 255 ? 2 : 1), 0)
+  const width = (ws['!cols']?.[6]?.wch || 13) + (ws['!cols']?.[7]?.wch || 18) - 2
+  ws['!rows'] ||= []
+  ws['!rows'][sumRow] = { ...ws['!rows'][sumRow], hpt: Math.max(ws['!rows'][sumRow]?.hpt || 0, 24) }
+  ws['!rows'][upperRow] = { ...ws['!rows'][upperRow], hpt: Math.max(24, Math.ceil(textWidth / width) * 18 + 6) }
+}
+
 /** 拼接系统生成的独立合同（公式仅引用合同内 D/F/G 列），保留样式和合并区域。 */
 export function combinePurchaseContracts(contracts: { entity: PoEntity; ws: XLSX.WorkSheet }[]) {
   const wb = XLSX.utils.book_new()
