@@ -1208,7 +1208,7 @@ export default function PurchasePage() {
     const itemStart = rows.length
     for (const m of mergedRows) {
       const contractUnit = contractUnitLabel(m.unit)
-      // D/F/G 由下方统一写入，不能先按显示位数舍入数量再参与公式计算。
+      // D/F/G 由下方统一写入：数量沿用单位精度，单价按原金额反算。
       rows.push([m.code, m.matName, m.spec, '', contractUnit, '', '', '数量：' + Number(m.totalPurchaseQty.toFixed(2)) + 'pcs', m.nameEn, m.materialCode])
     }
     rows.push(['以下空白！', '按工程签板生产！', '', '', '', '', '', ''])
@@ -1240,7 +1240,7 @@ export default function PurchasePage() {
     const lastItemExcelRow = itemStart + mergedRows.length
     for (let r = itemStart; r < itemStart + mergedRows.length; r++) {
       const item = mergedRows[r - itemStart]
-      setPurchaseContractLineAmounts(ws, r + 1, item.totalShipQty, item.totalAmount)
+      setPurchaseContractLineAmounts(ws, r + 1, item.totalShipQty, item.totalAmount, shipQuantityDigits(item.unit))
     }
     const totalAddr = XLSX.utils.encode_cell({ r: sumRow, c: 6 })
     const totalFormula = mergedRows.length
