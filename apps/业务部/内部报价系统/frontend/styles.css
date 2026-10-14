@@ -1106,3 +1106,5 @@ h3 .upload-mold-sheet button:hover { background: #334155; }
   .audit-at,.audit-detail{grid-column:1/-1}
   .audit-search{box-sizing:border-box;width:100%;max-width:100%;margin-left:0}
 }
+
+.summary-workshop-actions{display:flex;align-items:center;gap:6px}.summary-workshop-actions .summary-workshop{flex:1;width:0;min-width:0!important}.summary-workshop-actions .save-summary{flex:none;padding:6px 8px;white-space:nowrap}
