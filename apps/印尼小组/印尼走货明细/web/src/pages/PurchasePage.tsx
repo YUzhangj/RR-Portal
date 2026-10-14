@@ -1760,7 +1760,7 @@ export default function PurchasePage() {
               { title: '规格', width: 160, render: (_v, r, i) => fillable(i, 'spec', <Input size="small" value={r.spec} onChange={(e) => patchItem(i, 'spec', e.target.value)} />) },
               { title: '用量', width: 100, render: (_v, r, i) => fillable(i, 'usage_qty', <InputNumber size="small" min={0} step={0.001} value={r.usage_qty} onChange={(v) => patchItem(i, 'usage_qty', v ?? 0)} style={{ width: '100%' }} />) },
               { title: '订单量', width: 120, render: (_v, r, i) => fillable(i, 'ordered_qty', <InputNumber size="small" min={0} value={r.ordered_qty} onChange={(v) => patchItem(i, 'ordered_qty', v ?? 0)} style={{ width: '100%' }} />) },
-              { title: '物料量', width: 100, align: 'right', render: (_v, r) => Number(r.material_qty ?? 0).toFixed(2) },
+              { title: '物料量', width: 100, align: 'right', render: (_v, r) => Number(r.material_qty ?? 0).toFixed(0) },
               { title: '损耗量', width: 110, render: (_v, r, i) => fillable(i, 'spoilage_qty', <InputNumber size="small" min={0} value={r.spoilage_qty} onChange={(v) => patchItem(i, 'spoilage_qty', v ?? 0)} style={{ width: '100%' }} />) },
               { title: '采购量', width: 100, align: 'right', render: (_v, r) => <b style={{ color: '#1677ff' }}>{Number(r.purchase_qty ?? r.qty ?? 0).toFixed(2)}</b> },
               { title: '单价', width: 150, render: (_v, r, i) => fillable(i, 'price', <InputNumber size="small" min={0} precision={8} step={0.00000001} value={r.price} onChange={(v) => patchItem(i, 'price', v ?? 0)} style={{ width: '100%' }} />) },
