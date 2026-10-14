@@ -5,6 +5,29 @@ const companySheets: [PoEntity, string][] = [
   ['HD_INDUSTRY', '华登实业'], ['HD_GLOBAL', '华登全球'], ['HSY', '华胜益'],
 ]
 
+/** Match Excel's 15 significant digits, then round cents halfway away from zero. */
+export function roundPurchaseContractAmount(amount: number): number {
+  if (!Number.isFinite(amount)) return amount
+  const sign = amount < 0 ? -1 : 1
+  const magnitude = Number(Math.abs(amount).toPrecision(15))
+  // At this scale the 15-digit value has no fractional cents; avoid exponent overflow.
+  if (magnitude >= 1e15) return sign * magnitude
+  const [coefficient, exponent = '0'] = String(magnitude).split('e')
+  const cents = Math.round(Number(`${coefficient}e${Number(exponent) + 2}`))
+  return sign * cents / 100
+}
+
+/** 数量保留计算精度；仅单元格显示格式控制小数位，金额按分取整。 */
+export function setPurchaseContractLineAmounts(ws: XLSX.WorkSheet, row: number, quantity: number, amount: number) {
+  const price = quantity > 0 ? amount / quantity : 0
+  ws[`D${row}`] = { ...ws[`D${row}`], t: 'n', v: quantity, z: '0.######' }
+  ws[`F${row}`] = { ...ws[`F${row}`], t: 'n', v: price, z: '0.00######' }
+  ws[`G${row}`] = {
+    ...ws[`G${row}`], t: 'n', v: roundPurchaseContractAmount(amount),
+    f: `ROUND(D${row}*F${row},2)`, z: '0.00',
+  }
+}
+
 /** 公司抬头 22 号、购销合同标题 18 号，其余 12 号；全部加粗。合并前逐单应用。 */
 export function formatPurchaseContractFonts(ws: XLSX.WorkSheet) {
   for (const [address, cell] of Object.entries(ws)) {
