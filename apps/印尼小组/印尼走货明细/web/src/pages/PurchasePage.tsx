@@ -1208,7 +1208,7 @@ export default function PurchasePage() {
     const itemStart = rows.length
     for (const m of mergedRows) {
       const contractUnit = contractUnitLabel(m.unit)
-      // D/F/G 由下方统一写入，不能先按显示位数舍入数量再参与公式计算。
+      // D/F/G 由下方统一写入：数量沿用单位精度，单价按原金额反算。
       rows.push([m.code, m.matName, m.spec, '', contractUnit, '', '', '数量：' + Number(m.totalPurchaseQty.toFixed(2)) + 'pcs', m.nameEn, m.materialCode])
     }
     rows.push(['以下空白！', '按工程签板生产！', '', '', '', '', '', ''])
@@ -1240,7 +1240,7 @@ export default function PurchasePage() {
     const lastItemExcelRow = itemStart + mergedRows.length
     for (let r = itemStart; r < itemStart + mergedRows.length; r++) {
       const item = mergedRows[r - itemStart]
-      setPurchaseContractLineAmounts(ws, r + 1, item.totalShipQty, item.totalAmount)
+      setPurchaseContractLineAmounts(ws, r + 1, item.totalShipQty, item.totalAmount, shipQuantityDigits(item.unit))
     }
     const totalAddr = XLSX.utils.encode_cell({ r: sumRow, c: 6 })
     const totalFormula = mergedRows.length
@@ -1259,7 +1259,8 @@ export default function PurchasePage() {
     for (let r = notesStart; r < rows.length - 2; r++) { if (String(rows[r][0] || '')) mg(r, 0, r, 7) }
     mg(rows.length - 2, 1, rows.length - 2, 3); mg(rows.length - 2, 5, rows.length - 2, 7)
     mg(rows.length - 1, 1, rows.length - 1, 3); mg(rows.length - 1, 5, rows.length - 1, 7)
-    ws['!cols'] = [{ wch: 12 }, { wch: 22 }, { wch: 16 }, { wch: 10 }, { wch: 8 }, { wch: 13 }, { wch: 13 }, { wch: 18 }, { wch: 32 }, { wch: 16 }]
+    // 反算单价可能带较长小数；保留数值精度并预留显示宽度，避免原生表格显示 ###。
+    ws['!cols'] = [{ wch: 12 }, { wch: 22 }, { wch: 16 }, { wch: 10 }, { wch: 8 }, { wch: 20 }, { wch: 13 }, { wch: 18 }, { wch: 32 }, { wch: 16 }]
     const rowH: any[] = [{ hpt: 30 }, { hpt: 18 }, { hpt: 18 }, { hpt: 24 }, { hpt: 10 }, { hpt: 22 }, { hpt: 22 }, { hpt: 10 }, { hpt: 26 }]
     // 所有物料明细行使用相同行高；多行名称/规格仍可完整换行显示。
     for (let r = itemStart; r < itemStart + mergedRows.length; r++) rowH[r] = { hpt: 45 }

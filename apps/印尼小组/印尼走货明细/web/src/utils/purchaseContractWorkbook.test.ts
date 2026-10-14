@@ -24,8 +24,8 @@ describe('采购导出计算精度', () => {
       ['SYNTHETIC-PO'], ['', '', '', '', '', '', ''], ['', '', '', '', '', '', ''],
       ['', '', '', '', '合计', '', total], ['', '', '', '', '大写', '人民币', numToChinese(total)],
     ])
-    setPurchaseContractLineAmounts(ws, 2, quantity, first)
-    setPurchaseContractLineAmounts(ws, 3, quantity, second)
+    setPurchaseContractLineAmounts(ws, 2, quantity, first, 2)
+    setPurchaseContractLineAmounts(ws, 3, quantity, second, 2)
     ws.G4.f = 'ROUND(SUM(G2:G3),2)'
     const single = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(single, ws, '合同')
@@ -34,7 +34,7 @@ describe('采购导出计算精度', () => {
       const sheet = XLSX.read(XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }), { type: 'buffer' }).Sheets[name]
       for (const offset of offsets) {
         expect(sheet[`D${2 + offset}`].v).toBe(quantity)
-        expect(sheet[`F${2 + offset}`].v).toBe(first / quantity)
+        expect(sheet[`F${2 + offset}`].v).toBe(1.01 / quantity)
         expect(sheet[`G${2 + offset}`].v).toBe(1.01)
         expect(sheet[`G${3 + offset}`].v).toBe(1)
         expect(sheet[`G${2 + offset}`].f).toBe(`ROUND(D${2 + offset}*F${2 + offset},2)`)
@@ -46,23 +46,32 @@ describe('采购导出计算精度', () => {
   })
 
   it.each([
-    [0.00808, 20200 * 0.08, 200000, 1616],
-    [0.00202, 20200 * 0.07, 700000, 1414],
-    [0.505, 151.5, 300, 151.5],
-    [0.000001, 0.25, 250000, 0.25],
-  ])('完整数量 %s 参与金额计算，不先按吨/千克显示位数截断', (quantity, amount, price, expected) => {
+    [0.00808, 20200 * 0.08, 4, 0.0081, 1616 / 0.0081, 1616],
+    [0.00202, 20200 * 0.07, 4, 0.002, 707000, 1414],
+    [0.505, 151.5, 2, 0.51, 151.5 / 0.51, 151.5],
+    [20200, 1616, 2, 20200, 0.08, 1616],
+    [0, 0, 4, 0, 0, 0],
+  ])('数量 %s 按原精度保留，调整单价保持金额不变', (quantity, amount, digits, roundedQuantity, price, expected) => {
     const ws = XLSX.utils.aoa_to_sheet([['合同'], ['', '', '', '', '', '', '']])
-    setPurchaseContractLineAmounts(ws, 2, quantity, amount)
+    setPurchaseContractLineAmounts(ws, 2, quantity, amount, digits)
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, '合同')
     const restored = XLSX.read(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }), { type: 'buffer', cellNF: true }).Sheets['合同']
-    expect(restored.D2.v).toBe(quantity)
-    expect(restored.D2.z).toBe('0.######')
-    expect(XLSX.utils.format_cell(restored.D2)).toBe(String(quantity))
+    expect(restored.D2.v).toBe(roundedQuantity)
+    expect(restored.D2.z).toBe(`0.${'#'.repeat(digits)}`)
     expect(Number(restored.F2.v)).toBeCloseTo(price, 6)
     expect(restored.G2.f).toBe('ROUND(D2*F2,2)')
     expect(Number((Number(restored.D2.v) * Number(restored.F2.v)).toFixed(2))).toBe(expected)
     expect(restored.G2.v).toBe(expected)
+  })
+
+  it('数量舍入为零时保留原金额且留空无法计算的单价', () => {
+    const ws = XLSX.utils.aoa_to_sheet([['', '', '', '', '', '', '']])
+    setPurchaseContractLineAmounts(ws, 1, 0.000001, 0.25, 4)
+    expect(ws.D1.v).toBe(0)
+    expect(ws.F1.v).toBe('')
+    expect(ws.G1.v).toBe(0.25)
+    expect(ws.G1.f).toBeUndefined()
   })
 
   it('两行金额、合计、大写在单张和合并导出后均为 3030', () => {
@@ -70,12 +79,14 @@ describe('采购导出计算精度', () => {
       ['2026900171'], ['', '', '', '', '', '', ''], ['', '', '', '', '', '', ''],
       ['', '', '', '', '合计', '', 3030], ['', '', '', '', '大写', '人民币', numToChinese(3030)],
     ])
-    setPurchaseContractLineAmounts(ws, 2, 0.00808, 20200 * 0.08)
-    setPurchaseContractLineAmounts(ws, 3, 0.00202, 20200 * 0.07)
+    setPurchaseContractLineAmounts(ws, 2, 0.00808, 20200 * 0.08, 4)
+    setPurchaseContractLineAmounts(ws, 3, 0.00202, 20200 * 0.07, 4)
     ws.G4.f = 'ROUND(SUM(G2:G3),2)'
     const wb = combinePurchaseContracts([{ entity: 'HSY', ws }, { entity: 'HSY', ws }])
     const exported = XLSX.read(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }), { type: 'buffer' }).Sheets['华胜益']
     for (const offset of [0, 7]) {
+      expect(exported[`D${2 + offset}`].v).toBe(0.0081)
+      expect(exported[`D${3 + offset}`].v).toBe(0.002)
       const amounts = [2, 3].map(row => {
         const r = row + offset
         expect(exported[`G${r}`].f).toBe(`ROUND(D${r}*F${r},2)`)
