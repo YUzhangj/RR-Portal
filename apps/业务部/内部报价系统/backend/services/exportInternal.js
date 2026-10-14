@@ -335,7 +335,7 @@ function patchPaintingProductMix(ws, painting) {
   // 喷油表使用两层表头（工序名 + 数量/单价），数据从标题下第 3 行开始。
   const dataStart = headerRow + 2;
   const originalTotalRow = dataStart + items.length;
-  const amountKeys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer'];
+  const amountKeys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer', 'roller', 'hot_stamp'];
   const amountColumn = 4 + amountKeys.length * 2;
   const ratioColumn = amountColumn - 1;
   const ratioLetter = colLetter(ratioColumn);
@@ -906,7 +906,7 @@ function blowSubtotal(molding) {
 }
 
 function secondProcSubtotal(painting) {
-  const keys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer'];
+  const keys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer', 'roller', 'hot_stamp'];
   const payload = painting || {};
   const items = payload.painting_items || [];
   ensureExplicitProductGroups(items);
@@ -1183,7 +1183,7 @@ function enhanceWorkbook(workbook, { quote, sections }) {
         payloads.painting || {},
         (payloads.painting && payloads.painting.painting_items) || [],
         item => sum(
-          ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer'],
+          ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer', 'roller', 'hot_stamp'],
           key => num(item[`${key}_qty`]) * num(item[`${key}_unit`])
         )
       ),

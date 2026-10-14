@@ -302,7 +302,7 @@
       const mode = preview.querySelector('[data-import-mode]:checked').value;
       if (mode === 'replace') {
         const codes = new Set(groups.products.map(p => String(p.code)));
-        const removed = config().products.filter(p => !codes.has(String(p.code)));
+        const removed = config().products.filter(p => !codes.has(window.MixedSku.productSerial(p)));
         if (!confirm(`完全替换全部模具和零件，并按文件重建为 ${groups.product_count} 个小产品？\n将移除 ${removed.length} 个旧产品及其各部门明细${removed.length ? '：' + removed.map(p => p.code).join('、') : ''}。\n同编号产品资料保留；移除前保存备份。`)) return;
       }
       const dirty = [...document.querySelectorAll('.dept-tab[title="有未保存修改"]')].some(tab=>tab.dataset.dept!=='engineering');
@@ -504,8 +504,45 @@
       host.innerHTML = `<div class="mixed-switch"><div><span class="mixed-tag">混装款</span><strong>当前报价对象（共 ${cfg.products.length} 个小产品）</strong></div>
         <select aria-label="选择小产品">${groupedOptions}</select>
         <p class="muted mixed-help"></p></div><div class="mixed-detail"></div>`;
-      if (fixedProductId) host.querySelector('.mixed-switch').hidden = true;
+      if (dept === 'painting' && !fixedProductId) selected = '__overall__';
+      if (fixedProductId || dept === 'painting') host.querySelector('.mixed-switch').hidden = true;
       const detail = host.querySelector('.mixed-detail');
+      if (dept === 'engineering' && edit && !fixedProductId) {
+        const upload=document.createElement('section');upload.className='mixed-config';
+        upload.innerHTML='<h3>批量导入混装外购报价</h3><p class="muted">使用供应商报价模板，单独增加“货号”列，填写小产品完整货号；每条明细均填写货号（可合并单元格）。整表按货号分配，保留物料名称、MOQ、币种及价格。</p><label>导入类别 <select data-supplier-kind><option value="hardware">五金</option><option value="aux_materials">辅助材料</option><option value="packaging_materials">包装材料</option></select></label> <label>选择报价表 <input data-supplier-file type="file" accept=".xlsx,.xls"></label><div data-supplier-preview></div>';
+        host.insertBefore(upload,detail);
+        const attach=()=>window.attachSupplierMaterialImportUI(upload,{},edit,onChange,args[0],args[1],window.__data.quote.qty,window.__data.quote.customer,{
+          inputId:'[data-supplier-file]',previewId:'[data-supplier-preview]',targetKey:upload.querySelector('[data-supplier-kind]').value,
+          label:upload.querySelector('[data-supplier-kind]').selectedOptions[0].textContent,mixedConfig:cfg,mixedRoot:root,onApplied:draw
+        });
+        upload.querySelector('[data-supplier-kind]').onchange=()=>{upload.querySelector('[data-supplier-preview]').textContent='';upload.querySelector('[data-supplier-file]').value='';attach();};
+        attach();
+      }
+      if (dept === 'painting' && edit && !fixedProductId) {
+        const upload=document.createElement('section');upload.className='mixed-config';
+        upload.innerHTML='<h3>批量导入混装喷油</h3><label>选择整份喷油报价表 <input type="file" accept=".xlsx,.xls"></label><div data-paint-preview></div>';
+        host.insertBefore(upload,detail);
+        upload.querySelector('input').onchange=async event=>{
+          const file=event.target.files[0];if(!file)return;
+          const preview=upload.querySelector('[data-paint-preview]');preview.textContent='正在解析…';
+          try{
+            const fd=new FormData();fd.append('file',file);
+            const response=await fetch('./api/uploads/painting-sheet',{method:'POST',credentials:'include',body:fd});
+            const result=await response.json();if(!response.ok)throw Error(result.error||'解析失败');
+            const plan=window.MixedSku.planPainting(cfg,result.items||[]);
+            if(plan.unmatched.length)throw Error('以下货号无法唯一匹配，请先导入或核对产品资料：'+plan.unmatched.join('、'));
+            if(!plan.groups.length)throw Error('没有可匹配的喷油工序');
+            const untouched=cfg.products.length-plan.groups.length;
+            preview.innerHTML=`<p>匹配 ${plan.groups.length} 款，共 ${result.count} 条工序。另 ${untouched} 款未匹配到工序，保留已有资料。按各款分别导入，汇总沿用现有混装配比。</p><div class="mixed-scroll"><table><thead><tr><th>货号</th><th>产品名称</th><th>工序行数</th></tr></thead><tbody>${plan.groups.map(g=>`<tr><td>${esc(g.product.code)}</td><td>${esc(g.product.name)}</td><td>${g.items.length}</td></tr>`).join('')}</tbody></table></div><button type="button" data-paint-apply>应用到对应产品</button>`;
+            preview.querySelector('[data-paint-apply]').onclick=()=>{
+              const existing=plan.groups.filter(g=>(root.mixed_products[g.product.id]?.painting_items||[]).length);
+              if(existing.length&&!confirm(`将替换 ${existing.length} 款产品的已有喷油明细，确认？`))return;
+              for(const g of plan.groups){root.mixed_products[g.product.id]||={};root.mixed_products[g.product.id].painting_items=g.items;}
+              onChange();draw();preview.textContent=`已应用 ${plan.groups.length} 款喷油明细，请保存喷油部草稿。`;
+            };
+          }catch(error){preview.textContent=error.message;}
+        };
+      }
       if (dept === 'molding') { const merged = window.MixedMolds.engineeringCatalog(root, savedEngineering); if (merged.parts_catalog) root.parts_catalog = merged.parts_catalog; }
       function draw() {
         sessionStorage.setItem(key, selected);
@@ -515,6 +552,25 @@
           : selected === '__molds__' ? '按每款穴数和需求量分阶段拆分机台费用，自动计入小产品的完整报价。'
           : '本页数量和费用均按一个小产品填写。切换小产品保留当前输入，完成后保存本部门草稿。';
         if (dept === 'molding' && root.parts_catalog && savedEngineering.mixed_part_selections && !['__catalog__', '__all_molds__', '__molds__'].includes(selected)) host.querySelector('.mixed-help').textContent = '本款零件和用量由工程/业务的模具部分选择；啤机部在“全部模具 · 统一编辑”填写价格。';
+        if (dept === 'painting' && selected === '__overall__') {
+          const products=[...cfg.products,{id:'__shared__',code:'共有费用',name:'每包装计一次'}];
+          const view={mixed_product_options:products,painting_items:products.flatMap(product=>{
+            const data=product.id==='__shared__'?root.mixed_shared:root.mixed_products[product.id];
+            return (data?.painting_items||[]).map(row=>({...row,mixed_product_id:product.id}));
+          })};
+          detail.innerHTML='<h3>混装喷油整体明细</h3><p class="muted">全部产品在同一张表编辑，所属产品用于费用归属；报价汇总仍按各款混装配比计算。完成后保存喷油部草稿。</p><div class="mixed-scroll" data-painting-all></div>';
+          window.renderPaintingTable(detail.querySelector('[data-painting-all]'),view,()=>{
+            for(const product of products){
+              const items=view.painting_items.filter(row=>row.mixed_product_id===product.id).map(row=>{const copy={...row};delete copy.mixed_product_id;return copy;});
+              const existing=product.id==='__shared__'?root.mixed_shared:root.mixed_products[product.id];
+              if (!items.length && !existing?.painting_items) continue;
+              const data=existing || (root.mixed_products[product.id]={});
+              data.painting_items=items;
+            }
+            onChange();
+          },edit);
+          return;
+        }
         if (selected === '__overall__') {
           host.querySelector('.mixed-help').textContent = '在同一页填写全部资料，各区显示产品归属；保存本部门草稿后，汇总自动收集对应金额。共有费用单独计一次。';
           const search = document.createElement('input'); search.type = 'search'; search.placeholder = '查找货号或品名'; search.setAttribute('aria-label', '查找整体资料'); detail.appendChild(search);
@@ -699,6 +755,7 @@
       panel.innerHTML = `${edit && !locked ? `<label>报价类型 <select class="mixed-type" aria-label="报价类型"><option value="single" ${!expanded ? 'selected' : ''}>单品报价</option><option value="mixed" ${expanded ? 'selected' : ''}>混装报价</option></select></label>` : ''}<h3>${saved?.enabled ? '混装产品配置' : '报价类型：单品报价'}</h3>${!expanded ? `<p>支持多个小产品独立报价、共用模具拆价及混装平均价。</p>${edit && !locked ? '<button type="button" class="mixed-enable">设置为混装报价</button>' : '<p class="muted">解除审核后可设置混装报价。</p>'}` : `
         <p class="muted">不预设小产品；可在工程/业务导入模具报价单，按配件序号建立小产品，也可手动添加。在此维护小产品和每包装数量。啤工需求量在啤机部手填，报价NA比例在汇总页填写。</p>
         <div class="mixed-fields"><label>每包装小产品数量${input('units_per_pack', cfg.units_per_pack, edit && !locked)}</label></div>
+        ${edit && !locked ? `<label>导入产品资料（配比表）<input type="file" class="mixed-sku-file" accept=".xlsx"></label><div class="mixed-sku-preview"></div>` : ''}
         <div class="mixed-scroll"><table><thead><tr><th>小产品货号</th><th>小产品名称</th><th></th></tr></thead><tbody>${cfg.products.map((p, i) => `<tr data-product="${i}"><td>${input('code', p.code, edit && !locked, 'text')}</td><td>${input('name', p.name, edit && !locked, 'text')}</td><td>${edit && !locked ? '<button type="button" class="mini mixed-remove">移除</button>' : ''}</td></tr>`).join('')}</tbody></table></div>
         ${edit && !locked ? `<div class="wb-bar"><button type="button" class="mini mixed-add">＋ 添加小产品</button>${!saved?.enabled ? '<button type="button" class="mini mixed-cancel">取消设置</button>' : ''}<button type="button" class="mixed-save-config">${saved ? '保存混装配置并刷新' : '保存并启用（现有明细归入首款）'}</button></div><p class="muted">修改配置后，各部门需重新提交审核。移除小产品后保存时需确认，将一并删除该产品的部门明细与零件选用关系，保留共用零件和其他小产品。</p>` : '<p class="muted">修改混装构成前请先解除各部门审核。</p>'}<p class="mixed-message" role="status"></p>`}`;
       panel.querySelector('.mixed-enable')?.addEventListener('click', () => { cfg.enabled = true; expanded = true; draw(); });
@@ -708,7 +765,19 @@
         row.querySelectorAll('input').forEach(el => el.oninput = () => { cfg.products[index][el.dataset.field] = el.type === 'number' ? Number(el.value) : el.value; });
         row.querySelector('.mixed-remove')?.addEventListener('click', () => { cfg.products.splice(index, 1); draw(); });
       });
-      panel.querySelector('.mixed-add')?.addEventListener('click', () => { cfg.products.push({ id: `p_${uuid()}`, code: '', name: '', ratio: 1 }); draw(); });
+      panel.querySelector('.mixed-sku-file')?.addEventListener('change', async event => {
+        const file=event.target.files[0];if(!file)return;
+        const preview=panel.querySelector('.mixed-sku-preview');preview.textContent='正在解析产品资料…';
+        try {
+          const fd=new FormData();fd.append('file',file);
+          const response=await fetch('./api/uploads/mixed-sku-sheet',{method:'POST',credentials:'include',body:fd});
+          const result=await response.json();if(!response.ok)throw Error(result.error);
+          const applied=window.MixedSku.apply(cfg,result.records);
+          preview.innerHTML=`<p>按序号匹配 ${applied.matched} 款，新增 ${applied.added} 款。已有模具和部门资料保留；本次只更新货号、名称和品牌，配比另行设置。</p>${applied.unmatched.length?`<p>未匹配的现有产品保留：${applied.unmatched.map(esc).join('、')}</p>`:''}<div class="mixed-scroll"><table><thead><tr><th>序号</th><th>货号</th><th>品牌</th><th>产品名称</th></tr></thead><tbody>${result.records.map(r=>`<tr><td>${esc(r.source_number)}</td><td>${esc(r.code)}</td><td>${esc(r.brand)}</td><td>${esc(r.name)}</td></tr>`).join('')}</tbody></table></div><button type="button" data-sku-apply>应用产品资料</button>`;
+          preview.querySelector('[data-sku-apply]').onclick=()=>{const latest=window.MixedSku.apply(cfg,result.records);cfg.products=latest.config.products;draw();panel.querySelector('.mixed-message').textContent='产品资料已应用，请点击保存混装配置。';};
+        } catch(error){preview.textContent=error.message;}
+      });
+      panel.querySelector('.mixed-add')?.addEventListener('click', () => { cfg.products.push({ id: `p_${crypto.randomUUID()}`, code: '', name: '', ratio: 1 }); draw(); });
       panel.querySelector('.mixed-cancel')?.addEventListener('click', () => { expanded = false; draw(); });
       panel.querySelector('.mixed-type')?.addEventListener('change', async event => {
         if (event.target.value === 'mixed') { cfg.enabled = true; expanded = true; draw(); return; }

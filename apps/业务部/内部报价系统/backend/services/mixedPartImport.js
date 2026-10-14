@@ -1,6 +1,7 @@
 'use strict';
 const { createHash, randomUUID } = require('node:crypto');
 const { inheritMoldFields, validateConfig, prepareMoldImport, isNonMoldPart, updateEngineeringFields } = require('../../frontend/mixed-molds');
+const {productSerial} = require('../../frontend/mixed-sku');
 const canonical = value => /^\d+$/.test(String(value).trim()) ? String(Number(value)).padStart(2, '0') : String(value).trim();
 function productNumbers(name) {
   const text = String(name || '').normalize('NFKC').trim();
@@ -48,7 +49,7 @@ function importParts(config, engineering, molds, { replacePlaceholders = false, 
   if (!summary.product_count) throw new Error('没有识别到配件名称前的产品序号');
   const next = structuredClone(config);
   let root = prepareMoldImport(engineering, existingParts, mode);
-  const removedProducts = mode === 'replace' ? next.products.filter(p => !summary.products.some(group => canonical(p.code) === group.code)) : [];
+  const removedProducts = mode === 'replace' ? next.products.filter(p => !summary.products.some(group => productSerial(p) === group.code)) : [];
   if (removedProducts.length) {
     const removedIds = new Set(removedProducts.map(p => p.id));
     next.products = next.products.filter(p => !removedIds.has(p.id));
@@ -61,12 +62,12 @@ function importParts(config, engineering, molds, { replacePlaceholders = false, 
     next.products = next.products.filter(p => !removed.has(p.id));
   }
   for (const group of summary.products) {
-    const matches = next.products.filter(p => canonical(p.code) === group.code);
+    const matches = next.products.filter(p => productSerial(p) === group.code);
     if (matches.length > 1) throw new Error(`序号 ${group.code} 对应多个现有小产品，请先整理货号`);
     if (!matches.length) {
       let id = `number_${group.code}`;
       while (next.products.some(p => p.id === id)) id += '_';
-      next.products.push({ id, code:group.code, name:`小产品 ${group.code}`, ratio:1, ...(next.na_direct ? {na_ratio:0} : {}) });
+      next.products.push({ id, source_number:group.code, code:group.code, name:`小产品 ${group.code}`, ratio:1, ...(next.na_direct ? {na_ratio:0} : {}) });
     }
   }
   validateConfig(next);
@@ -99,7 +100,7 @@ function importParts(config, engineering, molds, { replacePlaceholders = false, 
     }
     root.mixed_deleted_part_ids = (root.mixed_deleted_part_ids || []).filter(id => id !== stored.id);
     for (const code of productNumbers(part.name)) {
-      const product = next.products.find(p => canonical(p.code) === code);
+      const product = next.products.find(p => productSerial(p) === code);
       const refs = root.mixed_part_selections[product.id] ||= [];
       if (!refs.some(r => r.part_id === stored.id)) { refs.push({part_id:stored.id,usage:1}); assigned++; }
     }

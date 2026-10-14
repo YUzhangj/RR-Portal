@@ -1095,3 +1095,6 @@ h3 .upload-mold-sheet button:hover { background: #334155; }
   .verification-version-category-editor{align-items:stretch;flex-direction:column}.verification-version-category-editor input{width:100%}
   #verification-workbench-body,#verification-summary-workbench{padding:14px 16px}.verification-workbench-actions{align-items:stretch;flex-direction:column;padding:12px 16px}
 }
+
+.summary-table th.summary-blue-text, .summary-table td.summary-blue-text, .summary-table .summary-customer-total td.summary-blue-text { color: #0000ff; font-weight: 700; }
+.summary-table th.summary-red-text, .summary-table td.summary-red-text, .summary-table .summary-customer-total td.summary-red-text { color: #ff0000; }

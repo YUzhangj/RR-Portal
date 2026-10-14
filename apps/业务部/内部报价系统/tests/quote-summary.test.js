@@ -120,7 +120,7 @@ test('报价汇总按减税明细口径计算各项减税后单价', () => {
   assert.equal(result.components.suction, 9.4);
   assert.equal(result.components.color_box, 8.85);
   assert.equal(result.components.plating, 9.901);
-  assert.equal(result.components.carton, 8.85);
+  assert.equal(result.components.carton, 9);
   assert.equal(result.components.freight, 9.174);
   assert.equal(result.components.cabinet, 10);
   assert.equal(result.components.misc, 10);
@@ -161,7 +161,7 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   assert.equal(sheet.getCell(5, 11).value, 1.5);
   assert.deepEqual(sheet.getCell(5, 12).value, { formula: 'K5', result: 1.5 });
   assert.deepEqual(sheet.getCell(5, 13).value, { formula: 'L5*G5', result: 150 });
-  assert.equal(sheet.getCell(5, 14).value.formula, 'IF(H5=0,0,L5/H5)');
+  assert.equal(sheet.getCell(5, 14).value.formula, 'IF(DM5=0,0,M5/DM5)');
   assert.ok(Math.abs(sheet.getCell(5, 14).value.result - 0.15) < 1e-12);
   assert.equal(sheet.getCell(4, 25).value, '退税后原料');
   assert.equal(sheet.getCell(4, 30).value, '总采购价');
@@ -182,7 +182,7 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   assert.equal(sheet.getCell(6, 11).value.formula, 'SUM(K5:K5)');
   assert.equal(sheet.getCell(6, 12).value.formula, 'SUM(L5:L5)');
   assert.equal(sheet.getCell(6, 13).value.formula, 'SUM(M5:M5)');
-  assert.equal(sheet.getCell(6, 14).value.formula, 'SUM(N5:N5)');
+  assert.equal(sheet.getCell(6, 14).value.formula, 'IF(DM6=0,0,SUM(M6)/DM6)');
   const buffer = await workbook.xlsx.writeBuffer();
   assert.ok(buffer.byteLength > 1000);
   const reopened = new (require('exceljs').Workbook)();
@@ -221,7 +221,7 @@ test('导出表按客户组内逐条编号并在总计行留空', () => {
   assert.equal(sheet.getCell('A9').value, '');
 });
 
-test('客户总计逐列汇总货价、单价和占比，即使接单数量为零', () => {
+test('客户总计汇总金额后计算占比，零接单数量占比为零', () => {
   const base = {
     customer: 'TOMY', product_name: '产品', qty: 0,
     components_before_tax: {}, confirmation: { confirmed_qty: 0 },
@@ -235,7 +235,8 @@ test('客户总计逐列汇总货价、单价和占比，即使接单数量为�
   assert.deepEqual(sheet.getCell('K7').value, { formula: 'SUM(K5:K6)', result: 3 });
   assert.deepEqual(sheet.getCell('L7').value, { formula: 'SUM(L5:L6)', result: 3 });
   assert.equal(sheet.getCell('M7').value.formula, 'SUM(M5:M6)');
-  assert.deepEqual(sheet.getCell('N7').value, { formula: 'SUM(N5:N6)', result: 0.2 });
+  assert.equal(sheet.getCell('N7').value.formula, 'IF(DM7=0,0,SUM(M7)/DM7)');
+  assert.equal(sheet.getCell('N7').value.result || 0, 0);
 });
 
 test('导出表长内容自动换行并增加行高', () => {

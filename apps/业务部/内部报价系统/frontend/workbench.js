@@ -545,6 +545,7 @@ function productModeSelect(payload, key, canEdit) {
   return `<select class="product-mix-mode" data-group="${escapeHtml(key)}" aria-label="计算方式" ${canEdit ? '' : 'disabled'}><option value="average" ${direct ? '' : 'selected'}>参与配比平均</option><option value="direct" ${direct ? 'selected' : ''}>直接累加</option></select>`;
 }
 function weightedProductRows(payload, rows, getter) {
+  if (payload.mixed_product_options) return sum(rows, getter);
   const groups = rowProductGroups(payload, rows);
   if (groups.length <= 1) return sum(rows, getter);
   const totalRatio = sum(groups.filter(g => !directProductGroup(payload, g.key)), g => productMixRatio(payload, g.key));
@@ -2767,6 +2768,132 @@ function renderCartonCalc(host, c, canEdit, onChange) {
   render();
 }
 
+function attachSupplierMaterialImportUI(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quoteQty, quoteCustomer, { inputId, previewId, targetKey, label, mixedConfig, mixedRoot, onApplied }) {
+    const fileInput = host.querySelector(inputId);
+    if (!fileInput) return;
+    fileInput.onchange = async (e) => {
+      const file = e.target.files[0]; if (!file) return;
+      const preview = host.querySelector(previewId);
+      preview.innerHTML = '<i class="muted">正在识别 MOQ 与币种报价…</i>';
+      try {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('target_qty', '5000');
+        const response = await fetch('/api/uploads/hardware-sheet', { method: 'POST', credentials: 'include', body: fd });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || '解析失败');
+        const selections = result.items.map(item => ({
+          moqQty: item.moq_qty ?? item.price_tiers?.[0]?.moq_qty ?? null,
+          priceType: item.price_type || (item.source_currency === 'USD' ? 'USD_UNTAXED' : (item.tax_pct ? 'RMB_TAXED' : 'RMB_UNTAXED')),
+        }));
+        const tierOptions = item => {
+          const tiers = Array.isArray(item.price_tiers) ? item.price_tiers : [];
+          const map = new Map();
+          tiers.forEach(tier => { if (tier.moq_qty != null && !map.has(tier.moq_qty)) map.set(tier.moq_qty, tier.moq || tier.moq_qty); });
+          return [...map.entries()].sort((a, b) => a[0] - b[0]);
+        };
+        const selectedItem = (item, index) => {
+          const tiers = Array.isArray(item.price_tiers) ? item.price_tiers : [];
+          if (!tiers.length) return { ...item, source_currency: item.source_currency || 'RMB' };
+          const selection = selections[index];
+          const tier = tiers.find(value => value.moq_qty === selection.moqQty) || tiers[0];
+          const priceTypes = [
+            tier.unit_price_rmb_untaxed != null ? 'RMB_UNTAXED' : null,
+            tier.unit_price_rmb_taxed != null ? 'RMB_TAXED' : null,
+            tier.unit_price_usd != null ? 'USD_UNTAXED' : null,
+          ].filter(Boolean);
+          if (!priceTypes.includes(selection.priceType)) selection.priceType = priceTypes[0] || 'RMB_UNTAXED';
+          const useUsd = selection.priceType === 'USD_UNTAXED';
+          const useTaxedRmb = selection.priceType === 'RMB_TAXED';
+          const baseNote = String(item.note || '').split('；').filter(part => !/^适用MOQ：|^价格来源：/.test(part));
+          const priceSource = useUsd ? 'USD不含税' : (useTaxedRmb ? '人民币含税' : '人民币不含税');
+          return {
+            ...item,
+            moq: tier.moq,
+            moq_qty: tier.moq_qty,
+            source_currency: useUsd ? 'USD' : 'RMB',
+            price_type: selection.priceType,
+            unit_price_rmb: useUsd ? null : (useTaxedRmb ? tier.unit_price_rmb_taxed : tier.unit_price_rmb_untaxed),
+            unit_price_usd: useUsd ? tier.unit_price_usd : null,
+            tax_pct: useTaxedRmb ? 13 : 0,
+            price_source: priceSource,
+            note: [...baseNote, tier.moq ? `适用MOQ：${tier.moq}` : '', `价格来源：${priceSource}`].filter(Boolean).join('；'),
+          };
+        };
+        const renderPreview = () => {
+          const normalizedItems = result.items.map(selectedItem);
+          const allocation = mixedConfig ? window.MixedSku.planSupplier(mixedConfig, normalizedItems) : null;
+          preview.innerHTML = `
+            <div class="card" style="background:#f0fdf4;border:1px solid #86efac;">
+              <p>从 <b>${escapeHtml(result.sheet_used || '')}</b> 解析到 <b>${normalizedItems.length}</b> 条${escapeHtml(label)}明细；可逐项选择识别到的 MOQ 与币种：</p>
+              <table class="wb-table"><thead><tr>
+                <th>货号</th><th>产品名称</th><th>规格 / 材料</th><th>用量</th><th>选择 MOQ</th><th>选择价格类型</th><th>原币单价</th><th>单价 HKD</th><th>备注</th>
+              </tr></thead><tbody>
+              ${normalizedItems.map((item, index) => {
+                const source = result.items[index];
+                const tiers = source.price_tiers || [];
+                const activeTier = tiers.find(tier => tier.moq_qty === selections[index].moqQty) || tiers[0];
+                const priceTypes = activeTier ? [
+                  activeTier.unit_price_rmb_untaxed != null ? ['RMB_UNTAXED', '人民币不含税'] : null,
+                  activeTier.unit_price_rmb_taxed != null ? ['RMB_TAXED', '人民币含税'] : null,
+                  activeTier.unit_price_usd != null ? ['USD_UNTAXED', '美金不含税'] : null,
+                ].filter(Boolean) : [[item.price_type || 'RMB_UNTAXED', item.price_source || item.source_currency || 'RMB']];
+                return `<tr>
+                  <td>${escapeHtml(item.product_code || '')}</td><td>${escapeHtml(item.name || '')}</td><td>${escapeHtml(item.spec || '')}</td><td>${escapeHtml(item.qty ?? '')}</td>
+                  <td><select data-tier-index="${index}" ${tiers.length ? '' : 'disabled'}>${tierOptions(source).map(([qty, text]) => `<option value="${qty}" ${qty === item.moq_qty ? 'selected' : ''}>${escapeHtml(text)}</option>`).join('') || `<option>${escapeHtml(item.moq || '')}</option>`}</select></td>
+                  <td><select data-price-type-index="${index}" ${priceTypes.length > 1 ? '' : 'disabled'}>${priceTypes.map(([value, text]) => `<option value="${value}" ${value === item.price_type ? 'selected' : ''}>${text}</option>`).join('')}</select></td>
+                  <td>${escapeHtml(item.source_currency === 'USD' ? item.unit_price_usd : item.unit_price_rmb)}</td>
+                  <td>${escapeHtml(formatNum(freeUnitHkd(item, fxRmbHkd, fxHkdUsd)))}</td><td>${escapeHtml(item.note || '')}</td>
+                </tr>`;
+              }).join('')}
+              </tbody></table>
+              ${allocation ? `<p>${allocation.unmatched.length ? '无法分配：'+allocation.unmatched.map(escapeHtml).join('、') : '已匹配 '+allocation.groups.length+' 款产品，将按货号分配；未涉及的产品保留原明细。'}</p>` : ''}
+              <div style="margin-top:10px">
+                <button data-action="replace" ${allocation?.unmatched.length ? 'disabled' : ''}>${allocation ? '替换对应产品的'+escapeHtml(label) : '应用（替换全部'+escapeHtml(label)+'）'}</button>
+                <button data-action="append" class="mini" ${allocation?.unmatched.length ? 'disabled' : ''}>追加到现有列表</button>
+                <button data-action="cancel" class="mini danger">取消</button>
+              </div>
+            </div>`;
+          preview.querySelectorAll('[data-tier-index]').forEach(select => select.onchange = () => {
+            selections[Number(select.dataset.tierIndex)].moqQty = Number(select.value);
+            renderPreview();
+          });
+          preview.querySelectorAll('[data-price-type-index]').forEach(select => select.onchange = () => {
+            selections[Number(select.dataset.priceTypeIndex)].priceType = select.value;
+            renderPreview();
+          });
+          const finish = (mode) => {
+            const appliedItems = result.items.map(selectedItem);
+            if (mixedConfig) {
+              const plan=window.MixedSku.planSupplier(mixedConfig,appliedItems);
+              if(plan.unmatched.length || !plan.groups.length)return;
+              if(mode==='replace' && plan.groups.some(g=>mixedRoot.mixed_products[g.product.id]?.[targetKey]?.length) && !confirm('将替换匹配产品的'+label+'明细，确认？'))return;
+              for(const group of plan.groups){
+                const target=mixedRoot.mixed_products[group.product.id] ||= {};
+                target[targetKey]=mode==='replace'?group.items:(target[targetKey]||[]).concat(group.items);
+              }
+              preview.innerHTML='已分配到 '+plan.groups.length+' 款产品，请保存工程/业务草稿。';
+              fileInput.value='';onChange();onApplied?.();return;
+            }
+            payload[targetKey] = mode === 'replace'
+              ? appliedItems.map(item => ({ ...item }))
+              : (payload[targetKey] || []).concat(appliedItems.map(item => ({ ...item })));
+            preview.innerHTML = '';
+            fileInput.value = '';
+            renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quoteQty, quoteCustomer);
+            onChange();
+          };
+          preview.querySelector('[data-action="replace"]').onclick = () => finish('replace');
+          preview.querySelector('[data-action="append"]').onclick = () => finish('append');
+          preview.querySelector('[data-action="cancel"]').onclick = () => { preview.innerHTML = ''; fileInput.value = ''; };
+        };
+        renderPreview();
+      } catch (err) {
+        preview.innerHTML = `<div class="card" style="background:#fef2f2;border:1px solid #fecaca">解析失败：${escapeHtml(err.message)}</div>`;
+      }
+    };
+  }
+
 function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quoteQty = 0, quoteCustomer = '') {
   payload.molds = payload.molds || [];
   payload.electronics = payload.electronics || [];
@@ -2921,118 +3048,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
   };
 
   // 五金 / 辅助材料 / 包装材料共用统一供应商报价模板；导入预览可逐项选择 MOQ 和币种。
-  const attachSupplierMaterialImport = ({ inputId, previewId, targetKey, label }) => {
-    const fileInput = host.querySelector(inputId);
-    if (!fileInput) return;
-    fileInput.onchange = async (e) => {
-      const file = e.target.files[0]; if (!file) return;
-      const preview = host.querySelector(previewId);
-      preview.innerHTML = '<i class="muted">正在识别 MOQ 与币种报价…</i>';
-      try {
-        const fd = new FormData();
-        fd.append('file', file);
-        fd.append('target_qty', '5000');
-        const response = await fetch('/api/uploads/hardware-sheet', { method: 'POST', credentials: 'include', body: fd });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || '解析失败');
-        const selections = result.items.map(item => ({
-          moqQty: item.moq_qty ?? item.price_tiers?.[0]?.moq_qty ?? null,
-          priceType: item.price_type || (item.source_currency === 'USD' ? 'USD_UNTAXED' : (item.tax_pct ? 'RMB_TAXED' : 'RMB_UNTAXED')),
-        }));
-        const tierOptions = item => {
-          const tiers = Array.isArray(item.price_tiers) ? item.price_tiers : [];
-          const map = new Map();
-          tiers.forEach(tier => { if (tier.moq_qty != null && !map.has(tier.moq_qty)) map.set(tier.moq_qty, tier.moq || tier.moq_qty); });
-          return [...map.entries()].sort((a, b) => a[0] - b[0]);
-        };
-        const selectedItem = (item, index) => {
-          const tiers = Array.isArray(item.price_tiers) ? item.price_tiers : [];
-          if (!tiers.length) return { ...item, source_currency: item.source_currency || 'RMB' };
-          const selection = selections[index];
-          const tier = tiers.find(value => value.moq_qty === selection.moqQty) || tiers[0];
-          const priceTypes = [
-            tier.unit_price_rmb_untaxed != null ? 'RMB_UNTAXED' : null,
-            tier.unit_price_rmb_taxed != null ? 'RMB_TAXED' : null,
-            tier.unit_price_usd != null ? 'USD_UNTAXED' : null,
-          ].filter(Boolean);
-          if (!priceTypes.includes(selection.priceType)) selection.priceType = priceTypes[0] || 'RMB_UNTAXED';
-          const useUsd = selection.priceType === 'USD_UNTAXED';
-          const useTaxedRmb = selection.priceType === 'RMB_TAXED';
-          const baseNote = String(item.note || '').split('；').filter(part => !/^适用MOQ：|^价格来源：/.test(part));
-          const priceSource = useUsd ? 'USD不含税' : (useTaxedRmb ? '人民币含税' : '人民币不含税');
-          return {
-            ...item,
-            moq: tier.moq,
-            moq_qty: tier.moq_qty,
-            source_currency: useUsd ? 'USD' : 'RMB',
-            price_type: selection.priceType,
-            unit_price_rmb: useUsd ? null : (useTaxedRmb ? tier.unit_price_rmb_taxed : tier.unit_price_rmb_untaxed),
-            unit_price_usd: useUsd ? tier.unit_price_usd : null,
-            tax_pct: useTaxedRmb ? 13 : 0,
-            price_source: priceSource,
-            note: [...baseNote, tier.moq ? `适用MOQ：${tier.moq}` : '', `价格来源：${priceSource}`].filter(Boolean).join('；'),
-          };
-        };
-        const renderPreview = () => {
-          const normalizedItems = result.items.map(selectedItem);
-          preview.innerHTML = `
-            <div class="card" style="background:#f0fdf4;border:1px solid #86efac;">
-              <p>从 <b>${escapeHtml(result.sheet_used || '')}</b> 解析到 <b>${normalizedItems.length}</b> 条${escapeHtml(label)}明细；可逐项选择识别到的 MOQ 与币种：</p>
-              <table class="wb-table"><thead><tr>
-                <th>产品名称</th><th>规格 / 材料</th><th>用量</th><th>选择 MOQ</th><th>选择价格类型</th><th>原币单价</th><th>单价 HKD</th><th>备注</th>
-              </tr></thead><tbody>
-              ${normalizedItems.map((item, index) => {
-                const source = result.items[index];
-                const tiers = source.price_tiers || [];
-                const activeTier = tiers.find(tier => tier.moq_qty === selections[index].moqQty) || tiers[0];
-                const priceTypes = activeTier ? [
-                  activeTier.unit_price_rmb_untaxed != null ? ['RMB_UNTAXED', '人民币不含税'] : null,
-                  activeTier.unit_price_rmb_taxed != null ? ['RMB_TAXED', '人民币含税'] : null,
-                  activeTier.unit_price_usd != null ? ['USD_UNTAXED', '美金不含税'] : null,
-                ].filter(Boolean) : [[item.price_type || 'RMB_UNTAXED', item.price_source || item.source_currency || 'RMB']];
-                return `<tr>
-                  <td>${escapeHtml(item.name || '')}</td><td>${escapeHtml(item.spec || '')}</td><td>${escapeHtml(item.qty ?? '')}</td>
-                  <td><select data-tier-index="${index}" ${tiers.length ? '' : 'disabled'}>${tierOptions(source).map(([qty, text]) => `<option value="${qty}" ${qty === item.moq_qty ? 'selected' : ''}>${escapeHtml(text)}</option>`).join('') || `<option>${escapeHtml(item.moq || '')}</option>`}</select></td>
-                  <td><select data-price-type-index="${index}" ${priceTypes.length > 1 ? '' : 'disabled'}>${priceTypes.map(([value, text]) => `<option value="${value}" ${value === item.price_type ? 'selected' : ''}>${text}</option>`).join('')}</select></td>
-                  <td>${escapeHtml(item.source_currency === 'USD' ? item.unit_price_usd : item.unit_price_rmb)}</td>
-                  <td>${escapeHtml(formatNum(freeUnitHkd(item, fxRmbHkd, fxHkdUsd)))}</td><td>${escapeHtml(item.note || '')}</td>
-                </tr>`;
-              }).join('')}
-              </tbody></table>
-              <div style="margin-top:10px">
-                <button data-action="replace">应用（替换全部${escapeHtml(label)}）</button>
-                <button data-action="append" class="mini">追加到现有列表</button>
-                <button data-action="cancel" class="mini danger">取消</button>
-              </div>
-            </div>`;
-          preview.querySelectorAll('[data-tier-index]').forEach(select => select.onchange = () => {
-            selections[Number(select.dataset.tierIndex)].moqQty = Number(select.value);
-            renderPreview();
-          });
-          preview.querySelectorAll('[data-price-type-index]').forEach(select => select.onchange = () => {
-            selections[Number(select.dataset.priceTypeIndex)].priceType = select.value;
-            renderPreview();
-          });
-          const finish = (mode) => {
-            const appliedItems = result.items.map(selectedItem);
-            payload[targetKey] = mode === 'replace'
-              ? appliedItems.map(item => ({ ...item }))
-              : (payload[targetKey] || []).concat(appliedItems.map(item => ({ ...item })));
-            preview.innerHTML = '';
-            fileInput.value = '';
-            renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quoteQty, quoteCustomer);
-            onChange();
-          };
-          preview.querySelector('[data-action="replace"]').onclick = () => finish('replace');
-          preview.querySelector('[data-action="append"]').onclick = () => finish('append');
-          preview.querySelector('[data-action="cancel"]').onclick = () => { preview.innerHTML = ''; fileInput.value = ''; };
-        };
-        renderPreview();
-      } catch (err) {
-        preview.innerHTML = `<div class="card" style="background:#fef2f2;border:1px solid #fecaca">解析失败：${escapeHtml(err.message)}</div>`;
-      }
-    };
-  };
+  const attachSupplierMaterialImport = options => attachSupplierMaterialImportUI(host,payload,canEdit,onChange,fxRmbHkd,fxHkdUsd,quoteQty,quoteCustomer,options);
 
   attachSupplierMaterialImport({ inputId: '#hardware-sheet-input', previewId: '#hardware-sheet-preview', targetKey: 'hardware', label: '五金' });
   attachSupplierMaterialImport({ inputId: '#aux-sheet-input', previewId: '#aux-sheet-preview', targetKey: 'aux_materials', label: '辅助材料' });
@@ -4340,7 +4356,7 @@ function renderPainting(host, payload, canEdit, onChange, fxRmbHkd) {
             <p>从 <b>${escapeHtml(j.sheet_used || '')}</b> 解析到 <b>${j.count}</b> 行喷油工序${imgInfo}${j.meta && j.meta.title ? ' · ' + escapeHtml(j.meta.title) : ''}</p>
             ${j.multi_product ? `<p><b>已识别 ${j.product_groups.length} 个明确产品编号</b>，应用后按产品配比加权平均。</p>` : '<p class="muted">未识别到两个以上明确产品编号，将按单产品直接合计。</p>'}
             ${j.images_hint ? `<p class="muted">⚠️ ${escapeHtml(j.images_hint)}</p>` : ''}
-            <p class="muted">应用后会替换当前喷油明细（夹模/移印/炒货/散枪/边模/油色/浸油/抹油/擦PP水/UV 十道工序）。</p>
+            <p class="muted">应用后会替换当前喷油明细（夹模/移印/炒货/散枪/边模/油色/浸油/抹油/擦PP水/UV/热转印/滚印/烫印工序）。</p>
             <div style="margin-top:10px;display:flex;gap:8px">
               <button id="pp-imp-apply">应用</button>
               <button id="pp-imp-cancel" class="mini danger">取消</button>
@@ -4374,6 +4390,8 @@ const PAINTING_PROCS = [
   { key: 'pp_water', label: '擦PP水' },
   { key: 'uv', label: 'UV' },
   { key: 'heat_transfer', label: '热转印' },
+  { key: 'roller', label: '滚印' },
+  { key: 'hot_stamp', label: '烫印' },
 ];
 
 function currentFactoryCode() {
@@ -4427,7 +4445,7 @@ function renamePaintingProductGroup(payload, groupKey, name) {
 function renderPaintingTable(container, payload, onChange, canEdit) {
   const rows = payload.painting_items ||= [];
   payload.product_mix_ratios ||= {};
-  const groups = rowProductGroups(payload, rows);
+  const groups = payload.mixed_product_options ? [] : rowProductGroups(payload, rows);
   const hasMultipleProducts = groups.length > 1;
   const groupByKey = new Map(groups.map(group => [group.key, group]));
   container.innerHTML = '';
@@ -4438,6 +4456,7 @@ function renderPaintingTable(container, payload, onChange, canEdit) {
   table.innerHTML = `<thead>
     <tr>
       <th rowspan="2" style="width:40px">#</th>
+      ${payload.mixed_product_options ? '<th rowspan="2" class="painting-product-cell">所属产品</th>' : ''}
       <th rowspan="2" style="width:120px">图片</th>
       <th rowspan="2" style="width:160px">名称</th>
       <th rowspan="2" style="width:180px">位置</th>
@@ -4503,12 +4522,37 @@ function renderPaintingTable(container, payload, onChange, canEdit) {
     row.images = row.images || [];
     const tr = document.createElement('tr');
     tr.innerHTML = `<td class="ro">${idx + 1}</td>`;
+    if (payload.mixed_product_options) {
+      const td=document.createElement('td'); td.className='painting-product-cell';
+      const productLabel=()=>{const p=payload.mixed_product_options.find(p=>p.id===row.mixed_product_id);return p?`${p.code} · ${p.name}`:'';};
+      td.title=productLabel();
+      if(canEdit){
+        const select=document.createElement('select');select.setAttribute('aria-label','所属产品');
+        select.innerHTML=payload.mixed_product_options.map(p=>`<option value="${escapeHtml(p.id)}" ${p.id===row.mixed_product_id?'selected':''}>${escapeHtml(p.code)}</option>`).join('');
+        select.title=productLabel();
+        select.onchange=()=>{row.mixed_product_id=select.value;td.title=select.title=productLabel();onChange();};td.appendChild(select);
+      }else {const p=payload.mixed_product_options.find(p=>p.id===row.mixed_product_id);td.textContent=p?p.code:'';}
+      tr.appendChild(td);
+    }
     // 图片
     const tdImg = document.createElement('td'); tdImg.className = 'mold-img-cell';
     renderImageCell(tdImg, row, canEdit, onChange);
     tr.appendChild(tdImg);
-    // 名称
-    tr.appendChild(makePCell('name', 'text', row, canEdit, onChange));
+    // 整体表名称限制列宽，查看和编辑均可换行。
+    const nameCell = makePCell('name', 'text', row, false, onChange);
+    if (payload.mixed_product_options) {
+      nameCell.classList.add('painting-name-cell');
+      if (canEdit) {
+        nameCell.textContent = '';
+        const input = document.createElement('textarea');
+        input.value = row.name || '';
+        input.rows = 3;
+        input.setAttribute('aria-label', '名称');
+        input.oninput = () => { row.name = input.value; onChange(); };
+        nameCell.appendChild(input);
+      }
+      tr.appendChild(nameCell);
+    } else tr.appendChild(makePCell('name', 'text', row, canEdit, onChange));
     // 位置
     tr.appendChild(makePCell('position', 'text', row, canEdit, onChange));
     // 五工序
@@ -4553,7 +4597,7 @@ function renderPaintingTable(container, payload, onChange, canEdit) {
   const totalAmt = weightedPaintingSum(payload);
   const tr = document.createElement('tr'); tr.className = 'hi'; tr.dataset.paintingTotal = '';
   const totalRatio = sum(groups.filter(g => !directProductGroup(payload, g.key)), group => productMixRatio(payload, group.key));
-  let html = `<td colspan="4" style="text-align:right">${hasMultipleProducts ? `配比平均 + 直接累加（总配比 ${formatNum(totalRatio)}）` : '合计'}</td>`;
+  let html = `<td colspan="${payload.mixed_product_options ? 5 : 4}" style="text-align:right">${payload.mixed_product_options ? '明细合计（未按混装配比）' : hasMultipleProducts ? `配比平均 + 直接累加（总配比 ${formatNum(totalRatio)}）` : '合计'}</td>`;
   PAINTING_PROCS.forEach((p, i) => { html += `<td>${formatNum(totals[i])}</td><td></td>`; });
   html += `<td>${formatNum(totalAmt)}</td><td></td>${canEdit ? '<td></td>' : ''}`;
   tr.innerHTML = html;
@@ -4564,10 +4608,11 @@ function renderPaintingTable(container, payload, onChange, canEdit) {
     const btn = document.createElement('button'); btn.textContent = '+ 增加行'; btn.className = 'mini'; btn.style.marginTop = '8px';
     btn.onclick = () => {
       const last = rows[rows.length - 1] || {};
-      rows.push({ images: [], product_group_id: last.product_group_id || '', product_group_name: last.product_group_name || '' });
+      rows.push({ ...(payload.mixed_product_options ? {mixed_product_id:last.mixed_product_id || payload.mixed_product_options[0].id} : {}), images: [], product_group_id: last.product_group_id || '', product_group_name: last.product_group_name || '' });
       renderPaintingTable(container, payload, onChange, canEdit); onChange();
     };
     container.appendChild(btn);
+    if (payload.mixed_product_options) return;
     const addGroup = document.createElement('button'); addGroup.type = 'button'; addGroup.className = 'mini';
     addGroup.textContent = '＋ 添加产品分组'; addGroup.style.marginLeft = '8px';
     const form = document.createElement('div'); form.hidden = true;

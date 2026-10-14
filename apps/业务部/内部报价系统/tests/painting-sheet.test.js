@@ -80,7 +80,6 @@ test('separate images and blank divider rows stay as one product without explici
   assert.equal(result.items.some(item => item.product_group_id), false);
 });
 
-
 test('部门导出控件保留喷油、电子导入按钮和文件框，其他部门继续隐藏导入', () => {
   const vm = require('node:vm');
   const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '../frontend/workbench.js'), 'utf8');
@@ -119,4 +118,23 @@ test('heat transfer imports quantity and price and participates in painting cost
  const context=vm.createContext({num:v=>Number(v)||0});
  vm.runInContext(source.slice(start,end)+'\n'+source.slice(fnStart,fnEnd),context);
  assert.equal(context.paintingRowAmount(result.items[0]),0.75);
+});
+
+test('混装货号继承合并单元格，滚印烫印UV打印按各款导入',async()=>{
+ const wb=new ExcelJS.Workbook(),ws=wb.addWorksheet('77957');
+ ws.addRow(['图片','货号','位置','夹模','夹模单价','滚印','滚印单价','烫印','烫印单价','UV打印','UV打印单价']);
+ ws.addRow([null,'Beauty Mini_S3-\n002','瓶口',1,0.09]);
+ ws.addRow([null,null,'瓶身',null,null,3,0.06,1,0.15,2,0.2]);ws.mergeCells('B2:B3');
+ ws.addRow([null,'Beauty Mini_S3-060','瓶身',1,0.1]);
+ const parsed=await parseWorkbook(await wb.xlsx.writeBuffer());
+ assert.equal(parsed.count,3);assert.equal(parsed.items[1].uv_qty,2);assert.equal(parsed.items[1].uv_unit,0.2);
+ assert.equal(parsed.items[1].roller_qty,3);assert.equal(parsed.items[1].hot_stamp_qty,1);
+ const {planPainting}=require('../frontend/mixed-sku');
+ const cfg={products:[{id:'a',code:'BEAUTYM-S3-002',source_number:'02',name:'二号'},{id:'b',code:'BEAUTYM-S3-048-excl',source_number:'60',name:'独家'}]};
+ const plan=planPainting(cfg,parsed.items);assert.deepEqual(plan.unmatched,[]);assert.equal(plan.groups.length,2);assert.equal(plan.groups[0].items.length,2);assert.equal(plan.groups[1].product.id,'b');assert.equal(plan.groups[0].items[0].product_group_id,undefined);
+ const source=fs.readFileSync(path.join(__dirname,'../frontend/workbench.js'),'utf8'),vm=require('node:vm');
+ const start=source.indexOf('const PAINTING_PROCS ='),end=source.indexOf('];',start)+2,fn=source.indexOf('function paintingRowAmount('),last=source.indexOf('function renamePaintingProductGroup(',fn);
+ const context=vm.createContext({num:v=>Number(v)||0});vm.runInContext(source.slice(start,end)+'\n'+source.slice(fn,last),context);
+ assert.ok(Math.abs(context.paintingRowAmount(parsed.items[1])-0.73)<1e-9);
+ assert.equal(planPainting({products:[]},parsed.items).unmatched.length,2);
 });

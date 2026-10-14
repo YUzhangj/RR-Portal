@@ -31,7 +31,7 @@ function isHeader(row) {
   const text = (row || []).map(norm).join('|');
   const legacy = /(零件名称|零件名稱|PARTNAME)/.test(text)
     && /(用量|数量|數量|QTY|QUANTITY)/.test(text);
-  const supplier = /(产品编号.*(?:产品|物料)名称|產品編號.*(?:產品|物料)名稱|物料名称|物料名稱|PRODUCT.*NAME|ITEM.*NAME|MATERIAL.*NAME)/.test(text)
+  const supplier = /(产品名称|產品名稱|产品编号.*(?:产品|物料)名称|產品編號.*(?:產品|物料)名稱|物料名称|物料名稱|PRODUCT.*NAME|ITEM.*NAME|MATERIAL.*NAME)/.test(text)
     && /MOQ/.test(text);
   return (legacy || supplier) && /(单价|單價|UNITPRICE)/.test(text);
 }
@@ -41,7 +41,8 @@ function indexHeader(row) {
   (row || []).forEach((value, index) => {
     const s = norm(value);
     if (!s) return;
-    if (cols.serial == null && /^(序号|序號|NO\.?|#)$/.test(s)) cols.serial = index;
+    if (/^(所属产品货号|货号|貨號|MINI_ITEMNO|MINIITEMNO)$/.test(s)) cols.productCode = index;
+    else if (cols.serial == null && /^(序号|序號|NO\.?|#)$/.test(s)) cols.serial = index;
     else if (cols.productCode == null && /^(产品编号|產品編號|PRODUCT(?:NO\.?|CODE)|ITEM(?:NO\.?|CODE))$/.test(s)) cols.productCode = index;
     else if (cols.name == null && /(零件名称|零件名稱|PARTNAME|物料名称|物料名稱|产品名称|產品名稱|产品编号.*(?:产品|物料)名称|產品編號.*(?:產品|物料)名稱|PRODUCT.*NAME|ITEM.*NAME|MATERIAL.*NAME)/.test(s)) cols.name = index;
     else if (cols.spec == null && /(规格描述|規格描述|规格|規格|SPEC)/.test(s)) cols.spec = index;
@@ -198,14 +199,15 @@ async function parseSheets(sheets, options = {}) {
       // 部分供应商会给同一物料的每个 MOQ 档都填独立序号；名称和规格相同的连续行
       // 仍应合并成一个物料的阶梯价，不能因序号不同拆成多个单选档。
       const repeatsCurrentProduct = !!(current
+        && (!rawProductCode || identityNorm(rawProductCode) === identityNorm(current.product_code))
         && (!rawName || identityNorm(rawName) === identityNorm(current.name))
         && (!rawSpec || !current.spec || identityNorm(rawSpec) === identityNorm(current.spec)));
       const startsProduct = !repeatsCurrentProduct
-        && !!(rawSerial || (rawName && identityNorm(rawName) !== identityNorm(carried.name)));
+        && !!(rawSerial || rawProductCode || (rawName && identityNorm(rawName) !== identityNorm(carried.name)));
       if (startsProduct) {
         carried = {
           serial: rawSerial || carried.serial,
-          product_code: rawProductCode || carried.product_code,
+          product_code: rawProductCode,
           name: rawName || carried.name,
           spec: rawSpec || '',
           material: rawMaterial || '',
@@ -300,6 +302,7 @@ async function parseSheets(sheets, options = {}) {
     if (qty == null && unitPrice == null && /合计|合計|总计|總計/.test(rowText)) continue;
 
     items.push({
+      ...(cols.productCode == null ? {} : {product_code: toStr(row[cols.productCode])}),
       name,
       spec: cols.spec == null ? '' : toStr(row[cols.spec]),
       qty: qty ?? 1,

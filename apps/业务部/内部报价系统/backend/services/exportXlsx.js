@@ -1528,8 +1528,8 @@ function renderSecondProc(ws, row, payload, fxRH, refs) {
   const items = payload.painting_items || payload.second_proc || [];
   const colLetter = (n) => { let s=''; while(n>0){const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=Math.floor((n-1)/26);} return s; };
   // 工序列布局：A 序号 | B 名称 | C 位置 | 各工序(数量+单价 两列) | 报价
-  const procs = ['夹模', '移印', '炒货', '散枪', '边模', '油色', '浸油', '抹油', '擦PP水', 'UV', '热转印'];
-  const procKeys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer'];
+  const procs = ['夹模', '移印', '炒货', '散枪', '边模', '油色', '浸油', '抹油', '擦PP水', 'UV', '热转印', '滚印', '烫印'];
+  const procKeys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer', 'roller', 'hot_stamp'];
   const priceCol = 4 + procs.length * 2;      // 报价列号（十一工序 = 26）
   const PRICE = colLetter(priceCol);
   ws.getColumn(priceCol).width = 16;
@@ -1601,7 +1601,7 @@ function renderSecondProc(ws, row, payload, fxRH, refs) {
   return row;
 }
 function secondProcSubtotal(p) {
-  const procKeys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer'];
+  const procKeys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer', 'roller', 'hot_stamp'];
   const items = p.painting_items || p.second_proc || [];
   ensureExplicitProductGroups(items);
   const s = weightedRowsSum(p, items, r => {

@@ -68,3 +68,12 @@ table[aria-label="统一零件编辑"] td.mixed-machine-column input { border-co
 .mixed-import-options>p{font-size:12px;line-height:1.6;margin:10px 0 0}
 button.mixed-import-replace{background:#b45309;border-color:#b45309}
 @media(max-width:640px){.mixed-import-choices{grid-template-columns:1fr}}
+
+/* Keep hidden product selectors hidden despite the flex layout. */
+.mixed-switch[hidden] { display: none !important; }
+
+[data-painting-all] .painting-product-cell{width:240px;min-width:240px;max-width:240px;overflow:hidden;text-overflow:ellipsis;box-sizing:border-box}
+[data-painting-all] .painting-product-cell select{display:block;width:220px;min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;box-sizing:border-box}
+
+[data-painting-all] .painting-name-cell{width:220px;min-width:220px;max-width:220px;white-space:normal;overflow-wrap:anywhere;line-height:1.5;box-sizing:border-box}
+[data-painting-all] .painting-name-cell textarea{display:block;width:200px;min-width:0;max-width:200px;box-sizing:border-box;white-space:pre-wrap;overflow-wrap:anywhere;resize:vertical;font:inherit;line-height:1.5}

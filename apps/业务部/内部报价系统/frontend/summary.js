@@ -71,7 +71,7 @@ function renderHead() {
   $('summary-head').closest('table').style.width = `${widths.reduce((sum, width) => sum + width, 0)}px`;
   $('summary-head').innerHTML = `<tr>
     ${fixed.map(label => `<th>${label}</th>`).join('')}
-    ${state.summaryColumns.map((item, index) => `<th class="${item.code.endsWith('_share') || item.format === 'percent' ? 'component-sub' : 'component-unit'} group-${Math.floor(index / 4) % 2}">${esc(item.name)}</th>`).join('')}
+    ${state.summaryColumns.map((item, index) => `<th class="${summaryColorClass(item.code)} ${item.code.endsWith('_share') || item.format === 'percent' ? 'component-sub' : 'component-unit'} group-${Math.floor(index / 4) % 2}">${esc(item.name)}</th>`).join('')}
     ${workflow.map(label => `<th class="workflow-head">${label}</th>`).join('')}
   </tr>`;
 }
@@ -86,7 +86,7 @@ function rowHtml(row, serial) {
   </select>`;
   const price = confirmation.confirmed_price ?? row.quoted_price;
   const qty = confirmation.confirmed_qty ?? row.qty;
-  const componentHtml = state.summaryColumns.map(item => `<td class="${item.format === 'percent' ? 'component-share' : item.format === 'amount' ? 'component-amount' : 'component-value'}">${formatted(row.summary_values?.[item.code], item.format)}</td>`).join('');
+  const componentHtml = state.summaryColumns.map(item => `<td class="${summaryColorClass(item.code)} ${item.format === 'percent' ? 'component-share' : item.format === 'amount' ? 'component-amount' : 'component-value'}">${formatted(row.summary_values?.[item.code], item.format)}</td>`).join('');
   return `<tr data-id="${row.id}">
     <td class="summary-customer-no">${serial}</td>
     <td><b>${esc(row.customer || '未填写')}</b></td>
@@ -103,12 +103,24 @@ function rowHtml(row, serial) {
   </tr>`;
 }
 
+function summaryColorClass(code) {
+  if (['markup_before_tax', 'markup_after_tax'].includes(code)) return 'summary-red-text';
+  return ['surtax_04', 'rmb_purchase_cost'].includes(code) ? 'summary-blue-text' : '';
+}
+
 function subtotalHtml(customer, rows) {
   const qtyTotal = rows.reduce((sum, row) => sum + num(row.confirmation?.confirmed_qty ?? row.qty), 0);
   const priceTotal = rows.reduce((sum, row) => sum + num(row.confirmation?.confirmed_price ?? row.quoted_price), 0);
   const componentHtml = state.summaryColumns.map(item => {
-    const value = rows.reduce((sum, row) => sum + num(row.summary_values?.[item.code]), 0);
-    return `<td class="${item.format === 'percent' ? 'component-share' : item.format === 'amount' ? 'component-amount' : 'component-value'}">${formatted(value, item.format)}</td>`;
+    let value = rows.reduce((sum, row) => sum + num(row.summary_values?.[item.code]), 0);
+    if (item.share_amounts || item.share_unit) {
+      const production = item.share_unit ? priceTotal : rows.reduce((s,r)=>s+num(r.summary_values?.production_amount),0);
+      const amount = rows.reduce((sum,r) => sum + (item.share_unit
+        ? num(r.summary_values?.[item.share_unit])
+        : item.share_amounts.reduce((s,key) => s + num(r.summary_values?.[key]),0)),0);
+      value = production ? amount / production : 0;
+    }
+    return `<td class="${summaryColorClass(item.code)} ${item.format === 'percent' ? 'component-share' : item.format === 'amount' ? 'component-amount' : 'component-value'}">${formatted(value, item.format)}</td>`;
   }).join('');
   return `<tr class="summary-customer-total">
     <td></td><td>${esc(customer)}</td><td></td><td colspan="2">客户总计</td><td></td>
