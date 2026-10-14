@@ -8,7 +8,7 @@ import { api, type Material, type Dictionaries } from '../api/client'
 import { purchaseItemCodes, resolvePurchaseCustoms } from '../utils/purchaseCustoms'
 import { numToChinese, poCorrectHsyNumber, poLineCurrency, poDetermineEntity, poGenContractNo, PO_ENTITY_META, type PoEntity } from '../utils/poNumber'
 import './PurchasePage.css'
-import { combinePurchaseContracts, formatPurchaseContractFonts, formatPurchaseContractTotals, setPurchaseContractLineAmounts } from '../utils/purchaseContractWorkbook'
+import { combinePurchaseContracts, formatPurchaseContractFonts, formatPurchaseContractTotals, roundPurchaseContractAmount, setPurchaseContractLineAmounts } from '../utils/purchaseContractWorkbook'
 import PurchaseMaterialPicker from '../components/PurchaseMaterialPicker'
 import { purchaseMaterialBucket, purchaseMaterialLine, purchaseSelectionSource, purchaseSelectionSupplier, type PurchaseMaterialChoice } from '../utils/purchaseMaterialSelection'
 import { linkPurchaseLine, matchingLineSchedules } from '../utils/purchaseScheduleLink'
@@ -1188,10 +1188,10 @@ export default function PurchasePage() {
       merged.set(k, cur)
     }
     const mergedRows = [...merged.values()]
-    let totalAmount = 0
+    let totalCents = 0
     // 与 Excel 的逐行 ROUND(..., 2) 后求和一致，大写和合计共用此金额。
-    mergedRows.forEach(m => totalAmount += Number((m.totalAmount || 0).toFixed(2)))
-    totalAmount = Number(totalAmount.toFixed(2))
+    mergedRows.forEach(m => totalCents += Math.round(roundPurchaseContractAmount(m.totalAmount || 0) * 100))
+    const totalAmount = roundPurchaseContractAmount(totalCents / 100)
 
     const PAD = (n: number) => Array(n).fill('')
     const rows: any[][] = []

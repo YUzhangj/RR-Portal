@@ -1,9 +1,50 @@
 import { describe, expect, it } from 'vitest'
 import * as XLSX from 'xlsx-js-style'
-import { combinePurchaseContracts, formatPurchaseContractFonts, formatPurchaseContractTotals, setPurchaseContractLineAmounts } from './purchaseContractWorkbook'
+import { combinePurchaseContracts, formatPurchaseContractFonts, formatPurchaseContractTotals, roundPurchaseContractAmount, setPurchaseContractLineAmounts } from './purchaseContractWorkbook'
 import { numToChinese } from './poNumber'
 
 describe('采购导出计算精度', () => {
+  it.each([
+    [1.005, 1.01], [2.675, 2.68], [1.255, 1.26], [0.005, 0.01],
+    [-1.005, -1.01], [-2.675, -2.68], [-1.255, -1.26], [-0.005, -0.01],
+    [1.0049999999999999, 1.01], [-1.0049999999999999, -1.01],
+    [1.0049, 1], [-1.0049, -1], [12345.675, 12345.68],
+  ])('金额 %s 按 Excel 分位规则舍入为 %s', (amount, expected) => {
+    expect(roundPurchaseContractAmount(amount)).toBe(expected)
+  })
+
+  it.each([
+    [1, 1.005, 1.004],
+    [100, 100 * 0.01005, 100 * 0.01004],
+  ])('半分边界数量 %s 的单张和合并合同缓存、公式及大写均为 2.01', (quantity, first, second) => {
+    const cents = [first, second].reduce((sum, amount) => sum + Math.round(roundPurchaseContractAmount(amount) * 100), 0)
+    const total = roundPurchaseContractAmount(cents / 100)
+    expect(total).toBe(2.01)
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['SYNTHETIC-PO'], ['', '', '', '', '', '', ''], ['', '', '', '', '', '', ''],
+      ['', '', '', '', '合计', '', total], ['', '', '', '', '大写', '人民币', numToChinese(total)],
+    ])
+    setPurchaseContractLineAmounts(ws, 2, quantity, first)
+    setPurchaseContractLineAmounts(ws, 3, quantity, second)
+    ws.G4.f = 'ROUND(SUM(G2:G3),2)'
+    const single = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(single, ws, '合同')
+    const combined = combinePurchaseContracts([{ entity: 'HSY', ws }, { entity: 'HSY', ws }])
+    for (const [book, name, offsets] of [[single, '合同', [0]], [combined, '华胜益', [0, 7]]] as const) {
+      const sheet = XLSX.read(XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }), { type: 'buffer' }).Sheets[name]
+      for (const offset of offsets) {
+        expect(sheet[`D${2 + offset}`].v).toBe(quantity)
+        expect(sheet[`F${2 + offset}`].v).toBe(first / quantity)
+        expect(sheet[`G${2 + offset}`].v).toBe(1.01)
+        expect(sheet[`G${3 + offset}`].v).toBe(1)
+        expect(sheet[`G${2 + offset}`].f).toBe(`ROUND(D${2 + offset}*F${2 + offset},2)`)
+        expect(sheet[`G${4 + offset}`].f).toBe(`ROUND(SUM(G${2 + offset}:G${3 + offset}),2)`)
+        expect(sheet[`G${4 + offset}`].v).toBe(total)
+        expect(sheet[`G${5 + offset}`].v).toBe('贰元零壹分')
+      }
+    }
+  })
+
   it.each([
     [0.00808, 20200 * 0.08, 200000, 1616],
     [0.00202, 20200 * 0.07, 700000, 1414],
