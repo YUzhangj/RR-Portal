@@ -11,6 +11,8 @@ import { documentSellerForLine, supplierForLine } from './supplierProfiles'
 import { deliveryDeadline, syncedShipmentDeadline } from './shipmentDeadline'
 import { isPaperRope, shipmentGrossPerPc, shipmentPackingAverageQty, shipmentWeightQuantity } from './shipmentWeight'
 import { bindInvoiceLookupSerial, documentRow, rebindDocumentFormula, type DocumentTableLayout } from './documentTemplateFormula'
+import auxiliaryDocumentLayout from './auxiliaryDocumentLayout.json'
+import { AUXILIARY_TABLES, auxiliaryDetailFormulas } from './auxiliaryDocumentFormula'
 
 import { CUSTOMS_FIXED, effectiveCustomsCompany, sortShipmentItems, cartonLayout } from './shipmentOrder'
 export { CUSTOMS_FIXED, effectiveCustomsCompany } from './shipmentOrder'
@@ -1501,9 +1503,11 @@ export async function buildCustomsWorkbook(input: CustomsExportInput): Promise<B
     documentPlans = await resizeModernLinkedDocumentTables(outZip, newName, linkedDocumentGroups, String(form.customer || '').toUpperCase().includes('RRI'))
   }
   if (!input.mainOnly) await restoreLinkedTemplateFormulas(outZip, documentTemplates, documentPlans, newName)
+  if (!input.mainOnly) await restoreApprovedAuxiliaryLayout(outZip)
   await ensureMainTableGrid(outZip, newName, mainTotalRow)
   await mergeMainCartonCells(outZip, newName, cartonRows)
   if (!input.mainOnly) await groupGenericInvoice(outZip, newName, sorted.map(effCustoms), ws, wbObj.Sheets['商品汇总表'])
+  if (!input.mainOnly) await restoreAuxiliaryFormulas(outZip, sorted, form, newName)
   if (!input.mainOnly) await formatHengxinchangInvoiceFooters(outZip)
   if (!input.mainOnly) await compactEmptyInvoiceFooters(outZip)
   if (!input.mainOnly) await addPackingGrandTotal(outZip, newName, mainTotalRow)
@@ -2049,6 +2053,53 @@ async function workbookSheetParts(zip: JSZip): Promise<Map<string, string>> {
   return parts
 }
 
+// 这些固定版式辅助单据不参与动态分组扩行，完整保留模板的行列和空白边框格。
+function restoreAuxiliaryLayout(sourceDoc: XmlDocument, outputDoc: XmlDocument) {
+  const sourceRoot = sourceDoc.documentElement as XmlElement
+  const outputRoot = outputDoc.documentElement as XmlElement
+  const sourceData = directChild(sourceRoot, 'sheetData')
+  const outputData = directChild(outputRoot, 'sheetData')
+  if (!sourceData || !outputData) return
+  // 只取结构与样式，绝不把模板的旧值、公式或共享字符串索引复制回输出。
+  const restoredData = outputDoc.importNode(sourceData, true) as XmlElement
+  for (const row of directChildren(restoredData, 'row')) {
+    for (const cell of directChildren(row, 'c')) {
+      while (cell.firstChild) cell.removeChild(cell.firstChild)
+      cell.removeAttribute('t')
+    }
+  }
+  const rows = new Map(directChildren(restoredData, 'row').map(row => [rowNumber(row), row]))
+  for (const row of directChildren(outputData, 'row')) {
+    let targetRow = rows.get(rowNumber(row))
+    if (!targetRow) {
+      targetRow = outputDoc.importNode(row, true) as XmlElement
+      const next = directChildren(restoredData, 'row').find(candidate => rowNumber(candidate) > rowNumber(row))
+      restoredData.insertBefore(targetRow, next || null)
+      continue
+    }
+    const cells = new Map(directChildren(targetRow, 'c').map(cell => [cell.getAttribute('r'), cell]))
+    for (const cell of directChildren(row, 'c')) {
+      const targetCell = cells.get(cell.getAttribute('r'))
+      if (targetCell) copyGeneratedCellValue(outputDoc, targetCell, cell)
+      else {
+        const next = directChildren(targetRow, 'c').find(candidate =>
+          XLSX.utils.decode_cell(candidate.getAttribute('r')!).c > XLSX.utils.decode_cell(cell.getAttribute('r')!).c)
+        targetRow.insertBefore(outputDoc.importNode(cell, true), next || null)
+      }
+    }
+  }
+  outputRoot.replaceChild(restoredData, outputData)
+  for (const tag of ['sheetFormatPr', 'cols', 'mergeCells', 'printOptions', 'pageMargins']) {
+    const original = directChild(sourceRoot, tag)
+    const current = directChild(outputRoot, tag)
+    if (original && current) outputRoot.replaceChild(outputDoc.importNode(original, true), current)
+    else if (original) {
+      const before = ['sheetFormatPr', 'cols'].includes(tag) ? restoredData : null
+      outputRoot.insertBefore(outputDoc.importNode(original, true), before)
+    } else if (current) outputRoot.removeChild(current)
+  }
+}
+
 // xlsx-js-style 会在读取时丢失复杂模板的字体、边框和对齐。写完数据后直接
 // 恢复原模板 OOXML 样式表，并让新明细按报关公司轮用模板中的分组底色。
 async function restoreTemplateDocumentStyles(
@@ -2313,6 +2364,165 @@ async function ensureMainTableGrid(zip: JSZip, mainName: string, totalRow?: numb
 // 才能同时保住两套单据的字体、边框、行高、合并单元格和打印区域。
 async function restoreIndonesiaDocumentStyles(indonesiaTemplateBuffer: ArrayBuffer, outputZip: JSZip) {
   const sourceZip = await JSZip.loadAsync(indonesiaTemplateBuffer)
+  await restoreDocumentStyles(sourceZip, outputZip, ['印尼合同', '印尼发票'])
+}
+
+async function restoreApprovedAuxiliaryLayout(outputZip: JSZip) {
+  const sourceZip = new JSZip()
+  const names = Object.keys(auxiliaryDocumentLayout.sheets)
+  sourceZip.file('xl/styles.xml', auxiliaryDocumentLayout.styles)
+  sourceZip.file('xl/workbook.xml', `<workbook xmlns="${SPREADSHEET_NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${names.map((name, i) => `<sheet name="${name}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets></workbook>`)
+  sourceZip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${names.map((_, i) => `<Relationship Id="rId${i + 1}" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}</Relationships>`)
+  Object.values(auxiliaryDocumentLayout.sheets).forEach((xml, i) => sourceZip.file(`xl/worksheets/sheet${i + 1}.xml`, xml))
+  await restoreDocumentStyles(sourceZip, outputZip, names, true)
+}
+
+// Run after invoice regrouping: these template formulas look up its unique
+// detail serials, excluding inserted company subtotals and the grand total.
+async function restoreAuxiliaryFormulas(zip: JSZip, items: CustomsItem[], form: CustomsExportForm, mainName: string) {
+  const parts = await workbookSheetParts(zip)
+  const parser = new DOMParser(), serializer = new XMLSerializer()
+  const docs = new Map<string, XmlDocument>()
+  for (const name of ['发票', '司机资料', ...AUXILIARY_TABLES.map(t => t.name)]) {
+    const path = parts.get(name)
+    if (path) docs.set(name, parser.parseFromString(await zip.file(path)!.async('string'), 'application/xml'))
+  }
+  const invoice = docs.get('发票')
+  if (!invoice) return
+  const sharedFile = zip.file('xl/sharedStrings.xml')
+  const shared = sharedFile ? Array.from(parser.parseFromString(await sharedFile.async('string'), 'application/xml')
+    .getElementsByTagNameNS(SPREADSHEET_NS, 'si')).map(si => si.textContent || '') : []
+  const valueOf = (cell: XmlElement): string | number => {
+    const value = directChild(cell, 'v')?.textContent || ''
+    const type = cell.getAttribute('t')
+    if (type === 's') return shared[Number(value)] || ''
+    if (type === 'inlineStr') return directChild(cell, 'is')?.textContent || ''
+    return type === 'str' || !value ? value : Number(value)
+  }
+  const getRow = (doc: XmlDocument, number: number) => {
+    const data = directChild(doc.documentElement as XmlElement, 'sheetData')!
+    let row = directChildren(data, 'row').find(r => rowNumber(r) === number)
+    if (!row) {
+      row = doc.createElementNS(SPREADSHEET_NS, 'row') as XmlElement
+      row.setAttribute('r', String(number))
+      data.insertBefore(row, directChildren(data, 'row').find(r => rowNumber(r) > number) || null)
+    }
+    return row
+  }
+  const put = (doc: XmlDocument, address: string, value: string | number, formula?: string, arrayRange?: string) => {
+    const row = getRow(doc, Number(address.match(/\d+$/)![0]))
+    const cell = ensureXmlCell(doc, row, cellColumn(address))
+    const next = directChildren(row, 'c').find(other => XLSX.utils.decode_cell(other.getAttribute('r')!).c > XLSX.utils.decode_cell(address).c)
+    row.insertBefore(cell, next || null)
+    clearXmlCell(cell)
+    if (formula) {
+      const f = doc.createElementNS(SPREADSHEET_NS, 'f')
+      f.textContent = formula
+      if (arrayRange) { f.setAttribute('t', 'array'); f.setAttribute('ref', arrayRange) }
+      cell.appendChild(f)
+    }
+    cell.setAttribute('t', typeof value === 'number' ? 'n' : formula ? 'str' : 'inlineStr')
+    const v = doc.createElementNS(SPREADSHEET_NS, typeof value === 'string' && !formula ? 'is' : 'v')
+    if (typeof value === 'string' && !formula) {
+      const text = doc.createElementNS(SPREADSHEET_NS, 't'); text.textContent = value; v.appendChild(text)
+    } else v.textContent = String(value)
+    cell.appendChild(v)
+  }
+  const details = new Map<number, Record<string, string | number>>()
+  for (const row of directChildren(directChild(invoice.documentElement as XmlElement, 'sheetData')!, 'row')) {
+    if (rowNumber(row) < 9) continue
+    const values = Object.fromEntries(directChildren(row, 'c').map(c => [cellColumn(c.getAttribute('r') || ''), valueOf(c)]))
+    if (typeof values.B === 'number' && values.B > 0) details.set(values.B, values)
+  }
+  const sum = (column: string) => [...details.values()].reduce((total, row) => total + (Number(row[column]) || 0), 0)
+  const number = [...new Set(items.map(item => item.contract_no?.trim()).filter(Boolean))].join(' / ')
+  const date = excelDate(form.shipDate || form.loadDate || items.find(item => item.contract_date)?.contract_date || '')
+  put(invoice, 'D5', number)
+  put(invoice, 'H5', date)
+  const driver = docs.get('司机资料')
+  if (driver) {
+    // The approved driver sheet has inputs, not formulas. Never export the
+    // sample person's phone/plate/seal/booking details as current shipment data.
+    for (let row = 1; row <= 8; row++) put(driver, `B${row}`, row === 2 ? mainName : '')
+  }
+  const layouts = new Map<string, DocumentTableLayout[]>(AUXILIARY_TABLES.map(table => [table.name, [{
+    start: table.start, end: table.total - 1, finalStart: table.start,
+    finalTotal: Math.max(table.total, table.start + items.length),
+  }]]))
+  const workbook = parser.parseFromString(await zip.file('xl/workbook.xml')!.async('string'), 'application/xml')
+  for (const table of AUXILIARY_TABLES) {
+    const doc = docs.get(table.name)
+    if (!doc) continue
+    const root = doc.documentElement as XmlElement
+    const data = directChild(root, 'sheetData')!
+    const total = layouts.get(table.name)![0].finalTotal
+    const delta = total - table.total
+    if (delta) {
+      const prototype = getRow(doc, table.start).cloneNode(true) as XmlElement
+      for (const row of directChildren(data, 'row')) if (rowNumber(row) >= table.total) setXmlRowNumber(row, rowNumber(row) + delta)
+      const merges = directChild(root, 'mergeCells')
+      const prototypeMerges = merges ? directChildren(merges, 'mergeCell')
+        .map(m => m.getAttribute('ref')!).filter(ref => {
+          const r = XLSX.utils.decode_range(ref); return r.s.r === table.start - 1 && r.e.r === table.start - 1
+        }) : []
+      for (const merge of merges ? directChildren(merges, 'mergeCell') : []) {
+        merge.setAttribute('ref', shiftA1Rows(merge.getAttribute('ref')!, table.total, delta))
+      }
+      for (let r = table.total; r < total; r++) {
+        const row = prototype.cloneNode(true) as XmlElement; setXmlRowNumber(row, r)
+        data.insertBefore(row, getRow(doc, total))
+        for (const ref of prototypeMerges) {
+          const merge = doc.createElementNS(SPREADSHEET_NS, 'mergeCell')
+          merge.setAttribute('ref', shiftA1Rows(ref, table.start, r - table.start)); merges!.appendChild(merge)
+        }
+      }
+      merges?.setAttribute('count', String(directChildren(merges, 'mergeCell').length))
+      const dimension = directChild(root, 'dimension')
+      const oldLastColumn = cellColumn(dimension?.getAttribute('ref')?.split(':').pop() || table.lastColumn)
+      const lastColumn = XLSX.utils.encode_col(Math.max(XLSX.utils.decode_col(oldLastColumn), XLSX.utils.decode_col(table.lastColumn)))
+      dimension?.setAttribute('ref', `A1:${lastColumn}${Math.max(...directChildren(data, 'row').map(rowNumber))}`)
+      const sheetIndex = Array.from(workbook.getElementsByTagNameNS(SPREADSHEET_NS, 'sheet')).findIndex(s => s.getAttribute('name') === table.name)
+      for (const defined of Array.from(workbook.getElementsByTagNameNS(SPREADSHEET_NS, 'definedName'))) {
+        if (defined.getAttribute('localSheetId') === String(sheetIndex) && defined.getAttribute('name') === '_xlnm.Print_Area') {
+          defined.textContent = shiftA1Rows(defined.textContent || '', table.total, delta)
+        }
+      }
+    }
+    // Clear the whole old detail area, including cached spill children and
+    // template serials. Only active invoice serials receive formulas/data.
+    for (let r = table.start; r < total; r++) {
+      for (const cell of directChildren(getRow(doc, r), 'c')) clearXmlCell(cell)
+      const serial = r - table.start + 1, values = details.get(serial)
+      if (!values) continue
+      put(doc, `A${r}`, serial)
+      for (const [column, rule] of Object.entries(auxiliaryDetailFormulas(table.name, r))) {
+        const startColumn = XLSX.utils.decode_col(column)
+        const arrayRange = rule.sources.length > 1 ? `${column}${r}:${XLSX.utils.encode_col(startColumn + rule.sources.length - 1)}${r}` : undefined
+        rule.sources.forEach((source, offset) => put(doc, `${XLSX.utils.encode_col(startColumn + offset)}${r}`,
+          values[source] ?? '', offset === 0 ? rule.formula : undefined, offset === 0 ? arrayRange : undefined))
+      }
+      if (table.name === '销售合同') put(doc, `G${r}`, 'FOB DONG GUAN')
+      if (table.name === '草稿大单-1') {
+        for (const [col, text] of Object.entries({ I: '中国', J: '印度尼西亚', O: 'USD', P: '照章征税' })) put(doc, `${col}${r}`, text)
+      }
+    }
+    const totals = table.name === '销售合同' ? { E: 'F', I: 'I' }
+      : table.name === '装箱单 (2)' ? { C: 'L', E: 'F', G: 'J', H: 'K' } : { N: 'I', Q: 'K' }
+    for (const [column, source] of Object.entries(totals)) put(doc, `${column}${total}`, sum(source), `SUM(${column}${table.start}:${column}${total - 1})`)
+    const headers = table.name === '销售合同' ? { I4: ["'发票'!D5", number], I6: ["'发票'!H5", date] }
+      : table.name === '装箱单 (2)' ? { H4: ["'发票'!D5", number] } : {
+        J4: ['TODAY()', excelDate(new Date())], M4: ['TODAY()', excelDate(new Date())],
+        M6: ["'司机资料'!B8", ''], A14: ["'发票'!D5", number], A16: ["'司机资料'!B2", mainName], D17: ["'司机资料'!B5", ''],
+        E14: ["SUM('装箱单 (2)'!C47)", sum('L')], I14: ["SUM('装箱单 (2)'!G47)", sum('J')], M14: ["SUM('装箱单 (2)'!H47)", sum('K')],
+      }
+    for (const [address, [formula, value]] of Object.entries(headers)) put(doc, address, value,
+      rebindDocumentFormula(String(formula), { sheet: table.name, main: mainName, layouts }))
+  }
+  for (const [name, doc] of docs) zip.file(parts.get(name)!, serializer.serializeToString(doc))
+  zip.file('xl/workbook.xml', serializer.serializeToString(workbook))
+}
+
+async function restoreDocumentStyles(sourceZip: JSZip, outputZip: JSZip, sheetNames: string[], layoutOnly = false) {
   const sourceStylesFile = sourceZip.file('xl/styles.xml')
   const outputStylesFile = outputZip.file('xl/styles.xml')
   if (!sourceStylesFile || !outputStylesFile) return
@@ -2414,7 +2624,7 @@ async function restoreIndonesiaDocumentStyles(indonesiaTemplateBuffer: ArrayBuff
 
   const sourceParts = await workbookSheetParts(sourceZip)
   const outputParts = await workbookSheetParts(outputZip)
-  for (const name of ['印尼合同', '印尼发票']) {
+  for (const name of sheetNames) {
     const sourcePath = sourceParts.get(name)
     const outputPath = outputParts.get(name)
     const sourceSheet = sourcePath ? sourceZip.file(sourcePath) : null
@@ -2425,6 +2635,19 @@ async function restoreIndonesiaDocumentStyles(indonesiaTemplateBuffer: ArrayBuff
     for (const cell of indonesiaCells) {
       const sourceStyle = Number(cell.getAttribute('s') || 0)
       cell.setAttribute('s', String(styleOffset + sourceStyle))
+    }
+    if (layoutOnly) {
+      // 列/行的默认样式也引用源 styles.xml，必须与单元格一起偏移。
+      for (const tag of ['row', 'col']) {
+        for (const node of Array.from(sourceDoc.getElementsByTagNameNS(SPREADSHEET_NS, tag)) as XmlElement[]) {
+          const attr = tag === 'col' ? 'style' : 's'
+          if (node.hasAttribute(attr)) node.setAttribute(attr, String(styleOffset + Number(node.getAttribute(attr))))
+        }
+      }
+      const generatedDoc = parser.parseFromString(await outputSheet.async('string'), 'application/xml')
+      restoreAuxiliaryLayout(sourceDoc, generatedDoc)
+      outputZip.file(outputPath, serializer.serializeToString(generatedDoc))
+      continue
     }
     const generatedXml = await outputSheet.async('string')
     const merged = mergeWorksheetXml(

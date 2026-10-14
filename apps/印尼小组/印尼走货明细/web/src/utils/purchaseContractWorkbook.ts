@@ -26,7 +26,7 @@ export function setPurchaseContractLineAmounts(ws: XLSX.WorkSheet, row: number, 
   // 数量舍入为零时无法反算单价；留空单价并保留原金额，不产生除零或错误的零金额。
   ws[`F${row}`] = exportQuantity === 0 && exportAmount !== 0
     ? { ...ws[`F${row}`], t: 's', v: '', f: undefined }
-    : { ...ws[`F${row}`], t: 'n', v: price, z: '0.00######' }
+    : { ...ws[`F${row}`], t: 'n', v: price, z: '0.00' } // 仅显示两位，计算保留完整单价。
   ws[`G${row}`] = {
     ...ws[`G${row}`], t: 'n', v: exportAmount,
     f: exportQuantity === 0 && exportAmount !== 0 ? undefined : `ROUND(D${row}*F${row},2)`, z: '0.00',

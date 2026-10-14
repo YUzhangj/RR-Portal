@@ -1,7 +1,58 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import * as XLSX from 'xlsx'
-import { importEngineeringFile, isZipWorkbookBuffer } from './engineeringImport'
+import { importEngineeringFile, isZipWorkbookBuffer, parseEngineeringUsage } from './engineeringImport'
+
+describe('engineering fraction usage', () => {
+  it.each([
+    ['1/2', 0.5], ['1 / 3', 1 / 3], ['１／４', 0.25], ['1⁄8', 0.125],
+    ['1 1/2', 1.5], ['2又1/4', 2.25], ['½', 0.5], ['1½', 1.5],
+    ['=1/2', 0.5], ['0/2', 0], [0, 0], ['0', 0], ['.25', 0.25],
+    ['1,000.5', 1000.5], ['1e-3', 0.001], [1 / 3, 1 / 3],
+  ])('parses %s without rounding', (value, expected) => {
+    expect(parseEngineeringUsage(value, 1)).toBe(expected)
+  })
+  it.each([null, undefined, '', '   '])('keeps the blank-cell default for %s', value => {
+    expect(parseEngineeringUsage(value, 1)).toBe(1)
+    expect(parseEngineeringUsage(value, 0)).toBe(0)
+  })
+  it.each(['1/0', '0/0', '1/2/3', '1+2', '=SUM(A1:A2)', 'abc', Infinity, NaN])('rejects invalid usage %s', value => {
+    expect(() => parseEngineeringUsage(value, 1)).toThrow()
+  })
+
+  it.each(['xls', 'xlsx'] as const)('imports fractions in both purchase and molding usage (%s)', async bookType => {
+    const workbook = XLSX.utils.book_new()
+    const external = XLSX.utils.aoa_to_sheet([
+      ['产品编号', 'A001'], ['类别', '物料名称', '物料编号', '用量'],
+      ['五金', '材料甲', 1020096, '1/2'], ['五金', '材料乙', '01020097', '1 1/2'],
+      ['五金', '材料丙', '01020098', 1 / 3], ['五金', '材料丁', '01020099', 0],
+      ['五金', '材料戊', '01020100', null],
+    ])
+    external.C3.z = '00000000'
+    external.D5.z = '# ?/?'
+    XLSX.utils.book_append_sheet(workbook, external, '外购清单')
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+      ['产品编号', 'A001'], ['工模编号', '工模名称', '物料名称', '用量', '用料名称'],
+      ['M1', '测试模具', null, null, 'ABS'],
+      [null, null, '零件甲', '1/4'], [null, null, '零件乙', '2 1/2'],
+    ]), '排模表')
+    const bytes = XLSX.write(workbook, { type: 'array', bookType }) as ArrayBuffer
+    const result = await importEngineeringFile({ arrayBuffer: async () => bytes } as File)
+    expect(result.materials.map(m => m.usage_qty)).toEqual([0.5, 1.5, 1 / 3, 0, 1])
+    expect(result.materials[0].material_code).toBe('01020096')
+    expect(result.moldings[0].parts?.map(p => p.usage)).toEqual([0.25, 2.5])
+  })
+
+  it('reports the sheet and row instead of silently replacing an invalid fraction with 1', async () => {
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+      ['产品编号', 'A001'], ['类别', '物料名称', '用量'], ['五金', '材料甲', '1/0'],
+    ]), '外购清单')
+    const bytes = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer
+    await expect(importEngineeringFile({ arrayBuffer: async () => bytes } as File))
+      .rejects.toThrow('外购清单 第 3 行：用量分数的分母不能为 0')
+  })
+})
 
 describe('engineering material import', () => {
   it.each(['xls', 'xlsx'] as const)('maps 物料编号 to material_code preserving displayed zeros (%s)', async (bookType) => {

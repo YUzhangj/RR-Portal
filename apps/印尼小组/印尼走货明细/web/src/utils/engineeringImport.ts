@@ -242,6 +242,31 @@ export function inferMaterialCategory(s: string): string {
   return '其它类'
 }
 
+// Parse quantities only, never evaluate spreadsheet expressions as JavaScript.
+export function parseEngineeringUsage(value: unknown, fallback: number): number {
+  if (value == null || (typeof value === 'string' && !value.trim())) return fallback
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  const text = String(value).replace(/[¼-¾⅐-⅞]/g, char => ` ${char}`)
+    .normalize('NFKC').replace(/[⁄／]/g, '/').replace(/又/g, ' ').trim().replace(/^=\s*/, '')
+  const fraction = text.match(/^([+-]?)(?:(\d+)\s+)?(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/)
+  let result: number
+  if (fraction) {
+    const denominator = Number(fraction[4])
+    if (denominator === 0) throw new Error('用量分数的分母不能为 0')
+    result = (fraction[1] === '-' ? -1 : 1) * (Number(fraction[2] || 0) + Number(fraction[3]) / denominator)
+  } else {
+    const numeric = text.replace(/^(\d{1,3}(?:,\d{3})+)(?=\.|$)/, grouped => grouped.replace(/,/g, ''))
+    result = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(numeric) ? Number(numeric) : NaN
+  }
+  if (!Number.isFinite(result)) throw new Error(`无法识别用量“${String(value)}”，请填写数字或分数（如 1/2）`)
+  return result
+}
+
+function usageAt(value: unknown, fallback: number, sheet: string, row: number): number {
+  try { return parseEngineeringUsage(value, fallback) }
+  catch (error) { throw new Error(`${sheet} 第 ${row} 行：${(error as Error).message}`) }
+}
+
 export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDictEntry[] }): Promise<EngineeringImportResult> {
   const hsDict = opts?.hsDict
   // SheetJS 在浏览器中读取大型 OLE2 工作簿时，默认会把每个字节展开成普通 JS 数组。
@@ -416,7 +441,7 @@ export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDict
         hsID: partHs.hsID,
         category: curMold.cat,
         ejections: cEjections >= 0 ? (Number(row[cEjections]) || 0) : 0,
-        usage:     cUsage    >= 0 ? (Number(row[cUsage])    || 0) : 0,
+        usage:     cUsage    >= 0 ? usageAt(row[cUsage], 0, snMold, r + 1) : 0,
         grossPerPc: cGrossPer >= 0 ? ((Number(row[cGrossPer]) || 0) / 1000) : 0,
         netPerPc:   cNetPer   >= 0 ? ((Number(row[cNetPer])   || 0) / 1000) : 0,
       }
@@ -435,6 +460,9 @@ export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDict
   if (snExt) {
     // 使用 Excel 显示值读取外购清单，避免 01020100 这类物料编码被当作数字后丢失前导 0。
     const grid = XLSX.utils.sheet_to_json<any[]>(wb.Sheets[snExt], { header: 1, defval: null, raw: false })
+    // Identifiers still use display text; quantities use raw numeric values so
+    // fraction/decimal display rounding cannot alter the imported consumption.
+    const rawGrid = XLSX.utils.sheet_to_json<any[]>(wb.Sheets[snExt], { header: 1, defval: null, raw: true })
     let hdrIdx = 3
     for (let r = 0; r < Math.min(10, grid.length); r++) {
       const joined = (grid[r] || []).map(c => String(c ?? '').replace(/\s+/g, '')).join('|')
@@ -499,7 +527,7 @@ export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDict
         length: 0, width: 0, height: 0,
         qty_per_carton: 0, weight_per_carton: 0,
         active: true,
-        usage_qty: cUsage >= 0 ? (Number(row[cUsage]) || 1) : 1,
+        usage_qty: cUsage >= 0 ? usageAt(rawGrid[r]?.[cUsage], 1, snExt, r + 1) : 1,
       })
     }
   }

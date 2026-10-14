@@ -60,6 +60,8 @@ describe('采购导出计算精度', () => {
     expect(restored.D2.v).toBe(roundedQuantity)
     expect(restored.D2.z).toBe(`0.${'#'.repeat(digits)}`)
     expect(Number(restored.F2.v)).toBeCloseTo(price, 6)
+    expect(restored.F2.z).toBe('0.00')
+    expect(XLSX.utils.format_cell(restored.F2)).toBe(price.toFixed(2))
     expect(restored.G2.f).toBe('ROUND(D2*F2,2)')
     expect(Number((Number(restored.D2.v) * Number(restored.F2.v)).toFixed(2))).toBe(expected)
     expect(restored.G2.v).toBe(expected)
@@ -83,10 +85,12 @@ describe('采购导出计算精度', () => {
     setPurchaseContractLineAmounts(ws, 3, 0.00202, 20200 * 0.07, 4)
     ws.G4.f = 'ROUND(SUM(G2:G3),2)'
     const wb = combinePurchaseContracts([{ entity: 'HSY', ws }, { entity: 'HSY', ws }])
-    const exported = XLSX.read(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }), { type: 'buffer' }).Sheets['华胜益']
+    const exported = XLSX.read(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }), { type: 'buffer', cellNF: true }).Sheets['华胜益']
     for (const offset of [0, 7]) {
       expect(exported[`D${2 + offset}`].v).toBe(0.0081)
       expect(exported[`D${3 + offset}`].v).toBe(0.002)
+      expect(XLSX.utils.format_cell(exported[`F${2 + offset}`])).toBe('199506.17')
+      expect(XLSX.utils.format_cell(exported[`F${3 + offset}`])).toBe('707000.00')
       const amounts = [2, 3].map(row => {
         const r = row + offset
         expect(exported[`G${r}`].f).toBe(`ROUND(D${r}*F${r},2)`)
