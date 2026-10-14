@@ -559,6 +559,7 @@
             return (data?.painting_items||[]).map(row=>({...row,mixed_product_id:product.id}));
           })};
           detail.innerHTML='<h3>混装喷油整体明细</h3><p class="muted">全部产品在同一张表编辑，所属产品用于费用归属；报价汇总仍按各款混装配比计算。完成后保存喷油部草稿。</p><div class="mixed-scroll" data-painting-all></div>';
+          const refreshSummaries=[];
           window.renderPaintingTable(detail.querySelector('[data-painting-all]'),view,()=>{
             for(const product of products){
               const items=view.painting_items.filter(row=>row.mixed_product_id===product.id).map(row=>{const copy={...row};delete copy.mixed_product_id;return copy;});
@@ -567,8 +568,21 @@
               const data=existing || (root.mixed_products[product.id]={});
               data.painting_items=items;
             }
+            refreshSummaries.forEach(refresh=>refresh());
             onChange();
           },edit);
+          const summaries=document.createElement('section');
+          const heading=document.createElement('h3');heading.textContent='各款喷油成本与印尼运费';summaries.appendChild(heading);
+          for(const product of products){
+            const data=product.id==='__shared__'?root.mixed_shared:(root.mixed_products[product.id] ||= {});
+            refreshSummaries.push(window.renderLossSummary(summaries,esc(product.code+' · '+product.name),
+              ()=>window.weightedPaintingSum(data),()=>0,args[0],'HKD',{
+                host:data,pctKey:'indo_pct',readonly:!edit,onChange,
+                label:'印尼运费 <small class="muted">(总价×30%为基数)</small>',
+                base:()=>window.weightedPaintingSum(data)*0.3
+              }));
+          }
+          detail.appendChild(summaries);
           return;
         }
         if (selected === '__overall__') {
@@ -777,7 +791,7 @@
           preview.querySelector('[data-sku-apply]').onclick=()=>{const latest=window.MixedSku.apply(cfg,result.records);cfg.products=latest.config.products;draw();panel.querySelector('.mixed-message').textContent='产品资料已应用，请点击保存混装配置。';};
         } catch(error){preview.textContent=error.message;}
       });
-      panel.querySelector('.mixed-add')?.addEventListener('click', () => { cfg.products.push({ id: `p_${crypto.randomUUID()}`, code: '', name: '', ratio: 1 }); draw(); });
+      panel.querySelector('.mixed-add')?.addEventListener('click', () => { cfg.products.push({ id: `p_${uuid()}`, code: '', name: '', ratio: 1 }); draw(); });
       panel.querySelector('.mixed-cancel')?.addEventListener('click', () => { expanded = false; draw(); });
       panel.querySelector('.mixed-type')?.addEventListener('change', async event => {
         if (event.target.value === 'mixed') { cfg.enabled = true; expanded = true; draw(); return; }

@@ -1100,3 +1100,9 @@ h3 .upload-mold-sheet button:hover { background: #334155; }
 .summary-table th.summary-red-text, .summary-table td.summary-red-text, .summary-table .summary-customer-total td.summary-red-text { color: #ff0000; }
 
 .audit-detail{min-width:0}.audit-detail-fold summary{cursor:pointer;color:#2563eb}.audit-detail-fold pre{max-height:240px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0;font:inherit;padding:10px;background:#f8fafc;border:1px solid #dbe3ed;border-radius:6px}
+@media(max-width:650px){
+  .audit-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start;gap:6px 12px}
+  .audit-row>*{min-width:0;overflow-wrap:anywhere}
+  .audit-at,.audit-detail{grid-column:1/-1}
+  .audit-search{box-sizing:border-box;width:100%;max-width:100%;margin-left:0}
+}

@@ -316,17 +316,17 @@ test('internal export keeps editable spray-product ratios and a weighted-average
   const totalRow = secondSummary + 1;
   assert.ok(firstSummary && secondSummary);
   assert.equal(worksheet.getCell(totalRow, 1).value, '合计 HKD');
-  assert.equal(worksheet.getCell(firstSummary, 25).value, 2);
-  assert.equal(worksheet.getCell(secondSummary, 25).value, 1);
-  assert.equal(worksheet.getCell(firstSummary, 26).value.result, 30);
-  assert.equal(worksheet.getCell(secondSummary, 26).value.result, 60);
+  assert.equal(worksheet.getCell(firstSummary, 29).value, 2);
+  assert.equal(worksheet.getCell(secondSummary, 29).value, 1);
+  assert.equal(worksheet.getCell(firstSummary, 30).value.result, 30);
+  assert.equal(worksheet.getCell(secondSummary, 30).value.result, 60);
   assert.equal(
-    worksheet.getCell(totalRow, 26).value.formula,
-    `(IFERROR(SUMPRODUCT(Y${firstSummary}:Y${secondSummary},Z${firstSummary}:Z${secondSummary})/SUM(Y${firstSummary}:Y${secondSummary}),0))`,
+    worksheet.getCell(totalRow, 30).value.formula,
+    `(IFERROR(SUMPRODUCT(AC${firstSummary}:AC${secondSummary},AD${firstSummary}:AD${secondSummary})/SUM(AC${firstSummary}:AC${secondSummary}),0))`,
   );
-  assert.equal(worksheet.getCell(totalRow, 26).value.result, 40);
-  assert.equal(worksheet.getCell(totalRow, 27).value.formula, `Z${totalRow}*30%*5/100`);
-  assert.equal(worksheet.getCell(totalRow, 27).value.result, 0.6);
+  assert.equal(worksheet.getCell(totalRow, 30).value.result, 40);
+  assert.equal(worksheet.getCell(totalRow, 31).value.formula, `AD${totalRow}*30%*5/100`);
+  assert.equal(worksheet.getCell(totalRow, 31).value.result, 0.6);
 });
 
 test('empty department Indonesian freight totals do not create circular references', async () => {
@@ -1306,7 +1306,7 @@ test('export includes UV and heat transfer in painting detail and total quotatio
   worksheet.eachRow(row => row.eachCell(cell => {
     if (cell.value === '热转印') heatHeaderFound = true;
     if (cell.value === 'UV') uvHeaderFound = true;
-    if (cell.value === 'UV测试件') uvQuoteCell = worksheet.getCell(row.number, 26).value;
+    if (cell.value === 'UV测试件') uvQuoteCell = worksheet.getCell(row.number, 30).value;
   }));
 
   assert.equal(uvHeaderFound, true);
@@ -1668,8 +1668,8 @@ test('internal export mirrors UI formulas for slush and each departmental Indone
     if (typeof value === 'string') paintingSectionRows[value] = row.number;
   });
   const paintingHeader = paintingSectionRows['五、二次加工（印喷报价）'] + 1;
-  assert.equal(paintingWorksheet.getCell(paintingHeader, 27).value, '印尼运费 6%');
-  assert.equal(paintingWorksheet.getCell(paintingHeader + 2, 27).value.formula, `Z${paintingHeader + 2}*30%*6/100`);
+  assert.equal(paintingWorksheet.getCell(paintingHeader, 31).value, '印尼运费 6%');
+  assert.equal(paintingWorksheet.getCell(paintingHeader + 2, 31).value.formula, `AD${paintingHeader + 2}*30%*6/100`);
 
   const sewingDetail = workbook.getWorksheet('车缝明细');
   assert.equal(sewingDetail.getCell(3, 12).value, '印尼运费 4%');

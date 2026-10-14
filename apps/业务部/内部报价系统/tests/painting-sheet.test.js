@@ -138,3 +138,16 @@ test('混装货号继承合并单元格，滚印烫印UV打印按各款导入',a
  assert.ok(Math.abs(context.paintingRowAmount(parsed.items[1])-0.73)<1e-9);
  assert.equal(planPainting({products:[]},parsed.items).unmatched.length,2);
 });
+
+test('UV打印、滚印、烫印单独作为喷油表头也可识别', async () => {
+  for (const [label, key] of [['UV打印', 'uv'], ['滚印', 'roller'], ['烫印', 'hot_stamp']]) {
+    const workbook = new ExcelJS.Workbook(), sheet = workbook.addWorksheet(label);
+    sheet.addRow(['货号', '位置', label, label + '单价']);
+    sheet.addRow(['BeautyMini_S3-001', '正面', 2, 0.25]);
+    const parsed = await parseWorkbook(await workbook.xlsx.writeBuffer());
+    assert.equal(parsed.error, undefined, label);
+    assert.equal(parsed.items[0][key + '_qty'], 2);
+    assert.equal(parsed.items[0][key + '_unit'], 0.25);
+    assert.equal(parsed.items[0].source_product_number, '001');
+  }
+});

@@ -16,6 +16,8 @@ const {
 
 const FONT = 'Microsoft YaHei';
 const HKD4 = '"HK$"0.0000';
+const PAINTING_PROCESS_KEYS = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer', 'roller', 'hot_stamp'];
+const PAINTING_AMOUNT_COLUMN = 4 + PAINTING_PROCESS_KEYS.length * 2;
 const EXPORT_COLORS = {
   navy: 'FF17365D',
   blue: 'FF5B9BD5',
@@ -335,8 +337,8 @@ function patchPaintingProductMix(ws, painting) {
   // 喷油表使用两层表头（工序名 + 数量/单价），数据从标题下第 3 行开始。
   const dataStart = headerRow + 2;
   const originalTotalRow = dataStart + items.length;
-  const amountKeys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer', 'roller', 'hot_stamp'];
-  const amountColumn = 4 + amountKeys.length * 2;
+  const amountKeys = PAINTING_PROCESS_KEYS;
+  const amountColumn = PAINTING_AMOUNT_COLUMN;
   const ratioColumn = amountColumn - 1;
   const ratioLetter = colLetter(ratioColumn);
   const amountLetter = colLetter(amountColumn);
@@ -387,7 +389,7 @@ function patchSimpleIndoColumns(ws, payloads) {
   const patches = [
     { title: '二、注塑部分', dept: payloads.molding || {}, amountCol: 14, indoCol: 15, weighted: true, hideDisplay: true },
     { title: '二·B、吹气部分 (HKD)', dept: payloads.molding || {}, amountCol: 12, indoCol: 15, hideDisplay: true },
-    { title: '五、二次加工（印喷报价）', refKey: 'paintingDetail', dept: payloads.painting || {}, amountCol: 26, indoCol: 27, factor: 0.3, totalFromAmount: true },
+    { title: '五、二次加工（印喷报价）', refKey: 'paintingDetail', dept: payloads.painting || {}, amountCol: PAINTING_AMOUNT_COLUMN, indoCol: PAINTING_AMOUNT_COLUMN + 1, dataRowOffset: 2, factor: 0.3, totalFromAmount: true },
     {
       title: '六、电子',
       refKey: 'electronic',
@@ -414,6 +416,14 @@ function patchSimpleIndoColumns(ws, payloads) {
       Math.min(ws.rowCount, headerRow + 100)
     );
     if (!totalRow) continue;
+    const dataStart = headerRow + (patch.dataRowOffset || 1);
+    if (patch.refKey === 'paintingDetail') {
+      // 新增工序沿用原工序宽度，金额列容纳完整 HK$ 四位小数。
+      for (let column = 4; column < patch.amountCol; column += 1) {
+        if (!ws.getColumn(column).width) ws.getColumn(column).width = 13;
+      }
+      ws.getColumn(patch.indoCol).width = 16;
+    }
     const pct = num(patch.dept.indo_pct);
     const headerStyle = ws.getCell(headerRow, 1).style;
     if (!patch.hideDisplay) {
@@ -423,14 +433,14 @@ function patchSimpleIndoColumns(ws, payloads) {
     let total = 0;
     const rowResults = [];
     const eligibleAmountCells = [];
-    for (let row = headerRow + 1; row < totalRow; row += 1) {
+    for (let row = dataStart; row < totalRow; row += 1) {
       const amountCell = ws.getCell(row, patch.amountCol);
       const amount = num(amountCell.value && typeof amountCell.value === 'object'
         ? amountCell.value.result
         : amountCell.value);
       if (!amount && !ws.getCell(row, 1).value) continue;
       const factor = patch.factor || 1;
-      const item = (patch.rows || [])[row - (headerRow + 1)];
+      const item = (patch.rows || [])[row - dataStart];
       const excluded = Boolean(patch.exclude && patch.exclude(item));
       const result = excluded ? 0 : amount * factor * pct / 100;
       const formula = excluded
@@ -457,7 +467,7 @@ function patchSimpleIndoColumns(ws, payloads) {
         : totalAmountCell.value);
       total = totalAmount * (patch.factor || 1) * pct / 100;
     }
-    const hasDetailRows = totalRow > headerRow + 1;
+    const hasDetailRows = totalRow > dataStart;
     ws.getCell(totalRow, patch.indoCol).value = {
       formula: patch.hideDisplay
         ? `${colLetter(patch.amountCol)}${totalRow}*${pct}/100`
@@ -466,8 +476,8 @@ function patchSimpleIndoColumns(ws, payloads) {
         : patch.totalFromAmount
           ? `${colLetter(patch.amountCol)}${totalRow}*30%*${pct}/100`
         : patch.weighted
-          ? weightedColumnFormula(patch.dept, headerRow + 1, colLetter(patch.indoCol))
-          : `SUM(${colLetter(patch.indoCol)}${headerRow + 1}:${colLetter(patch.indoCol)}${totalRow - 1})`,
+          ? weightedColumnFormula(patch.dept, dataStart, colLetter(patch.indoCol))
+          : `SUM(${colLetter(patch.indoCol)}${dataStart}:${colLetter(patch.indoCol)}${totalRow - 1})`,
       result: total,
     };
     if (patch.hideDisplay) {
@@ -488,7 +498,7 @@ function patchSimpleIndoColumns(ws, payloads) {
   return refs;
 }
 
-function patchUnifiedCostTable(ws, payloads) {
+function patchUnifiedCostTable(ws, payloads, paintingDetailRef) {
   let headerRow = 0;
   for (let row = 1; row <= ws.rowCount; row += 1) {
     if (String(ws.getCell(row, 1).value || '').trim() === '序号'
@@ -538,6 +548,13 @@ function patchUnifiedCostTable(ws, payloads) {
     const category = String(ws.getCell(row, 2).value || '').trim();
     const key = buckets[category];
     if (!key) continue;
+    if (key === 'secondProc' && paintingDetailRef) {
+      // 产品配比会在喷油表插入小计行，主表必须重接到移动后的最终合计。
+      ws.getCell(row, 10).value = {
+        formula: `'喷油明细'!${paintingDetailRef}`,
+        result: secondProcSubtotal(payloads.painting),
+      };
+    }
     amountCells[key] = amountCells[key] || [];
     amountCells[key].push(`K${row}`);
     if (key === 'sewingHkd' && String(ws.getCell(row, 3).value || '').trim() === '车缝物料') {
@@ -906,7 +923,7 @@ function blowSubtotal(molding) {
 }
 
 function secondProcSubtotal(painting) {
-  const keys = ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer', 'roller', 'hot_stamp'];
+  const keys = PAINTING_PROCESS_KEYS;
   const payload = painting || {};
   const items = payload.painting_items || [];
   ensureExplicitProductGroups(items);
@@ -1172,8 +1189,8 @@ function enhanceWorkbook(workbook, { quote, sections }) {
   patchFreeInputFormulas(ws, payloads);
   patchZeroCartonRate(ws, payloads);
   const refs = patchSimpleIndoColumns(ws, payloads);
-  Object.assign(refs, patchUnifiedCostTable(ws, payloads));
   if (paintingWs) Object.assign(refs, patchSimpleIndoColumns(paintingWs, payloads));
+  Object.assign(refs, patchUnifiedCostTable(ws, payloads, refs.paintingDetail));
   Object.assign(refs, patchSlush(slushWs || ws, payloads.slush || {}));
   const paintingSummaryRow = findRow(ws, '五、二次加工（印喷汇总）');
   if (paintingSummaryRow && refs.paintingDetail) {
@@ -1183,7 +1200,7 @@ function enhanceWorkbook(workbook, { quote, sections }) {
         payloads.painting || {},
         (payloads.painting && payloads.painting.painting_items) || [],
         item => sum(
-          ['clamp', 'pad', 'roast', 'spray', 'edge', 'color', 'dip', 'oil', 'pp_water', 'uv', 'heat_transfer', 'roller', 'hot_stamp'],
+          PAINTING_PROCESS_KEYS,
           key => num(item[`${key}_qty`]) * num(item[`${key}_unit`])
         )
       ),

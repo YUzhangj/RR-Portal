@@ -37,8 +37,9 @@ function toNum(v) {
 }
 
 function isHeaderRow(values) {
-  const j = values.map(toStr).join('|');
-  return /位置/.test(j) && /(夹模|移印|散枪|边模|抹油|热转印)/.test(j);
+  const labels = values.map(toStr);
+  return labels.includes('位置') && labels.some(label =>
+    label === 'UV打印' || PROCS.some(proc => proc.label === label));
 }
 
 // 只有“1#公仔 / 2#产品”这类明确编号才视为产品边界。
