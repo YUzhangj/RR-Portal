@@ -5,6 +5,7 @@ import JSZip from 'jszip'
 import { DOMParser } from '@xmldom/xmldom'
 import { buildCustomsWorkbook, customsFileName } from './customsExport'
 import { bindInvoiceLookupSerial } from './documentTemplateFormula'
+import auxiliaryDocumentLayout from './auxiliaryDocumentLayout.json'
 
 const SPREADSHEET_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 
@@ -123,6 +124,173 @@ async function worksheetXml(zip: JSZip, sheetName: string) {
 }
 
 describe('supplier document export', () => {
+  it.each(['legacy', 'RRI', 'RRM'])('restores approved auxiliary lookup formulas against current grouped invoice (%s)', async variant => {
+    const buffer = variant === 'legacy' ? templateBuffer : variant === 'RRI' ? rriTemplateBuffer : rrmTemplateBuffer
+    const output = await buildCustomsWorkbook({ templateBuffer: buffer, seller,
+      items: [1, 2, 3].map(id => ({ material_id: id, qty: 10 * id, kg: id, price: 2,
+        customs_company: id === 2 ? '其他报关公司' : '深圳市华胜益出口贸易有限公司',
+        contract_no: 'CURRENT-C', invoice_no: 'CURRENT-I' })),
+      materials: new Map([1, 2, 3].map(id => [id, { id, product_code: `CURRENT-${id}`, name_zh: `当前物料${id}`, supplier: seller.keyword }])),
+      productHs: new Map(), images: new Map(), form: { customer: variant, containerNo: 'CURRENT-CONTAINER', shipDate: '2026-10-14' },
+    })
+    const wb = XLSX.read(await output.arrayBuffer(), { type: 'array' })
+    const invoice = wb.Sheets['发票']
+    const invoiceRows = Object.entries(invoice).filter(([address, cell]) => /^B\d+$/.test(address) && typeof cell.v === 'number')
+    expect(invoiceRows).toHaveLength(3)
+    for (let serial = 1; serial <= 3; serial++) {
+      const invoiceRow = Number(invoiceRows.find(([, c]) => c.v === serial)![0].slice(1))
+      const sales = wb.Sheets['销售合同'], packing = wb.Sheets['装箱单 (2)'], declaration = wb.Sheets['草稿大单-1']
+      const sr = serial + 15, pr = serial + 9, dr = serial + 20
+      expect(sales[`B${sr}`].f).toMatch(/HSTACK\(/)
+      expect(sales[`B${sr}`].f).toContain(`XLOOKUP($A${sr},'发票'!$B:$B,'发票'!$C:$C)`)
+      expect(sales[`B${sr}`].F).toBe(`B${sr}:F${sr}`)
+      expect(packing[`B${pr}`].F).toBe(`B${pr}:H${pr}`)
+      for (const [col, source] of Object.entries({ B: 'D', C: 'L', D: 'M', E: 'F', F: 'G', G: 'J', H: 'K' })) {
+        expect(packing[`${col}${pr}`].v).toBe(invoice[`${source}${invoiceRow}`].v)
+      }
+      expect(sales[`I${sr}`].v).toBe(invoice[`I${invoiceRow}`].v)
+      expect(declaration[`D${dr}`].f).toContain(`XLOOKUP($A${dr},'发票'!$B:$B,'发票'!$D:$D,"")`)
+      expect(declaration[`N${dr}`].v).toBe(invoice[`I${invoiceRow}`].v)
+    }
+    const total = invoiceRows.reduce((sum, [address]) => sum + Number(invoice[`I${address.slice(1)}`].v), 0)
+    expect(wb.Sheets['销售合同'].I53).toMatchObject({ f: 'SUM(I16:I52)', v: total })
+    expect(wb.Sheets['草稿大单-1'].N52).toMatchObject({ f: 'SUM(N21:N51)', v: total })
+    expect(wb.Sheets['销售合同'].I4).toMatchObject({ f: "'发票'!D5", v: 'CURRENT-C' })
+    expect(wb.Sheets['销售合同'].I6.v).toBe(46309)
+    expect(wb.Sheets['草稿大单-1'].A16).toMatchObject({ f: 'IF(\'司机资料\'!B2="","",\'司机资料\'!B2)', v: 'CURRENT-CONTAINER' })
+    expect(wb.Sheets['司机资料'].B2.v).toBe('CURRENT-CONTAINER')
+    for (const name of ['销售合同', '装箱单 (2)', '草稿大单-1']) {
+      expect(Object.values(wb.Sheets[name]).some((c: any) => /#REF!/.test(c?.f || ''))).toBe(false)
+    }
+    for (const [name, start] of [['销售合同', 19], ['装箱单 (2)', 13], ['草稿大单-1', 24]] as const) {
+      expect(wb.Sheets[name][`A${start}`]?.v || '').toBe('')
+      expect(wb.Sheets[name][`B${start}`]?.f).toBeUndefined()
+      expect(wb.Sheets[name][`C${start}`]?.v || '').toBe('')
+    }
+    for (const row of [1, 3, 4, 5, 6, 7, 8]) expect(wb.Sheets['司机资料'][`B${row}`]?.v || '').toBe('')
+  })
+
+  it('keeps missing driver references blank after recalculation and never uses the template sheet name as a container', async () => {
+    const output = await buildCustomsWorkbook({ templateBuffer: rrmTemplateBuffer, seller,
+      items: [{ material_id: 1, qty: 10, kg: 1, price: 2, contract_no: 'C', invoice_no: 'I' }],
+      materials: new Map([[1, { id: 1, name_zh: '当前物料', supplier: seller.keyword }]]),
+      productHs: new Map(), images: new Map(), form: { customer: 'RRM' },
+    })
+    const wb = XLSX.read(await output.arrayBuffer(), { type: 'array' })
+    for (let row = 1; row <= 8; row++) expect(wb.Sheets['司机资料'][`B${row}`]?.v || '').toBe('')
+    const declaration = wb.Sheets['草稿大单-1']
+    for (const [address, source] of [['M6', 'B8'], ['A16', 'B2'], ['D17', 'B5']]) {
+      // A direct reference to an empty input evaluates to 0 in Excel/Calc.
+      // Keep an editable link with an explicit blank guard instead.
+      expect(declaration[address]).toMatchObject({ f: `IF('司机资料'!${source}="","",'司机资料'!${source})`, v: '' })
+    }
+  })
+
+  it('keeps missing specifications blank while retaining numeric and text zero specifications', async () => {
+    const template = XLSX.read(rrmTemplateBuffer, { type: 'array', cellFormula: true, cellStyles: true })
+    template.Sheets['商品汇总表'] = XLSX.utils.aoa_to_sheet([
+      ['HS', '品名', '', '申报要素'], ['100', '空规格', '', ''],
+      ['100', '数字零规格', '', 0], ['100', '文本零规格', '', '0'], ['100', '当前规格', '', 'CURRENT-SPEC'],
+    ])
+    const names = ['空规格', '数字零规格', '文本零规格', '当前规格']
+    const output = await buildCustomsWorkbook({ templateBuffer: XLSX.write(template, { type: 'array', bookType: 'xlsx' }), seller,
+      items: names.map((_name, index) => ({ material_id: index + 1, qty: 10, kg: 1, price: 2, contract_no: 'C', invoice_no: 'I', customs_company: '深圳市华胜益出口贸易有限公司' })),
+      materials: new Map(names.map((name, index) => [index + 1, { id: index + 1, name_zh: name, hs_cn: '100', supplier: seller.keyword }])),
+      productHs: new Map(), images: new Map(), form: { customer: 'RRM', containerNo: 'CURRENT' },
+    })
+    const wb = XLSX.read(await output.arrayBuffer(), { type: 'array' })
+    for (const [index, expected] of ['', '0', '0', 'CURRENT-SPEC'].entries()) {
+      expect(wb.Sheets['销售合同'][`D${16 + index}`]?.v || '').toBe(expected)
+      expect(wb.Sheets['草稿大单-1'][`E${21 + index}`]?.v || '').toBe(expected)
+    }
+    expect(wb.Sheets['销售合同'].B16.f).toContain(`COUNTBLANK(INDEX('发票'!$E:$E,MATCH($A16,'发票'!$B:$B,0)))`)
+    expect(wb.Sheets['草稿大单-1'].E21.f).toContain(`COUNTBLANK(INDEX('发票'!$E:$E,MATCH($A21,'发票'!$B:$B,0)))`)
+    expect(wb.Sheets['商品汇总表'].D3).toMatchObject({ t: 'n', v: 0 })
+    expect(wb.Sheets['商品汇总表'].D4).toMatchObject({ t: 's', v: '0' })
+  })
+
+  it.each([0, 3, 40, 80])('keeps auxiliary totals and cross-sheet references correct with %s details', async count => {
+    const ids = Array.from({ length: count }, (_, i) => i + 1)
+    const output = await buildCustomsWorkbook({ templateBuffer: rrmTemplateBuffer, seller,
+      items: ids.map(id => ({ material_id: id, qty: id, kg: id, price: 1, contract_no: 'C', invoice_no: 'I' })),
+      materials: new Map(ids.map(id => [id, { id, name_zh: `M${id}`, supplier: seller.keyword }])),
+      productHs: new Map(), images: new Map(), form: { customer: 'RRM', containerNo: 'CURRENT' },
+    })
+    const wb = XLSX.read(await output.arrayBuffer(), { type: 'array' })
+    const salesTotal = Math.max(53, 16 + count), packingTotal = Math.max(47, 10 + count), declarationTotal = Math.max(52, 21 + count)
+    expect(wb.Sheets['销售合同'][`I${salesTotal}`].f).toBe(`SUM(I16:I${salesTotal - 1})`)
+    expect(wb.Sheets['装箱单 (2)'][`G${packingTotal}`].f).toBe(`SUM(G10:G${packingTotal - 1})`)
+    expect(wb.Sheets['草稿大单-1'].I14.f).toBe(`SUM('装箱单 (2)'!G${packingTotal})`)
+    expect(wb.Sheets['草稿大单-1'][`N${declarationTotal}`].f).toBe(`SUM(N21:N${declarationTotal - 1})`)
+    const signatureRow = 62 + Math.max(0, count - 37)
+    const sales = wb.Sheets['销售合同']
+    expect(sales[`A${signatureRow}`].v).toBe(sales.B8.v)
+    expect(sales[`E${signatureRow}`].v).toBe(String(sales.B4.v).split(/\r?\n/).map(line => line.trim()).filter(Boolean).at(-1))
+    if (count) expect(sales[`E${signatureRow}`].v).toBe(seller.nameEn)
+    expect(sales[`A${signatureRow - 1}`].v).toBe('The Buyer')
+    expect(sales[`E${signatureRow - 1}`].v).toBe('The Seller')
+    expect(Object.values(sales).some((cell: any) => /精駿|ZHONG SHAN JUN TAI/.test(String(cell?.v || '')))).toBe(false)
+    if (count) {
+      expect(wb.Sheets['销售合同'][`B${15 + count}`].f).toContain(`$A${15 + count}`)
+      if (count >= 40) expect(wb.Sheets['销售合同']['!merges']?.map(XLSX.utils.encode_range)).toContain('I55:J55')
+      expect(wb.Sheets['草稿大单-1'][`D${20 + count}`].v).toBe(`M${count}`)
+    } else {
+      expect(wb.Sheets['销售合同'].I53.v).toBe(0)
+      expect(wb.Sheets['草稿大单-1'].N52.v).toBe(0)
+      expect(wb.Sheets['销售合同'].B16?.f).toBeUndefined()
+    }
+  })
+
+  it.each(['RRI', 'RRM'])('restores auxiliary template blank cells and layout (%s)', async variant => {
+    const buffer = variant === 'RRI' ? rriTemplateBuffer : rrmTemplateBuffer
+    const output = await buildCustomsWorkbook({ templateBuffer: buffer, seller,
+      items: [{ material_id: 1, qty: 10, kg: 1, price: 2, contract_no: 'CURRENT-C', invoice_no: 'CURRENT-I' }],
+      materials: new Map([[1, { id: 1, product_code: 'CURRENT-P', name_zh: '当前物料', supplier: seller.keyword }]]),
+      productHs: new Map(), images: new Map(), form: { customer: variant, containerNo: 'CURRENT' },
+    })
+    const outputZip = await JSZip.loadAsync(await output.arrayBuffer())
+    const parser = new DOMParser()
+    for (const [name, layoutXml] of Object.entries(auxiliaryDocumentLayout.sheets)) {
+      const source = parser.parseFromString(layoutXml, 'application/xml')
+      const actual = parser.parseFromString(await worksheetXml(outputZip, name), 'application/xml')
+      const elements = (doc: any, tag: string): any[] => Array.from(doc.getElementsByTagNameNS(SPREADSHEET_NS, tag))
+      const attrs = (node: any) => Object.fromEntries(Array.from(node.attributes as any).map((a: any) => [a.name, a.value]))
+      const styleOffset = Number(elements(actual, 'c').find(c => c.getAttribute('r') === 'A1').getAttribute('s'))
+        - Number(elements(source, 'c').find(c => c.getAttribute('r') === 'A1').getAttribute('s'))
+      expect(elements(source, 'v')).toHaveLength(0)
+      expect(elements(source, 'f')).toHaveLength(0)
+      expect(elements(source, 'is')).toHaveLength(0)
+      expect(elements(actual, 'col')).toHaveLength(elements(source, 'col').length)
+      expect(elements(actual, 'col').map(attrs)).toEqual(elements(source, 'col').map(col => ({ ...attrs(col),
+        ...(col.hasAttribute('style') ? { style: String(Number(col.getAttribute('style')) + styleOffset) } : {}),
+      })))
+      expect(elements(actual, 'mergeCell').map(attrs)).toEqual(elements(source, 'mergeCell').map(attrs))
+      for (const address of name === '销售合同' ? ['I16', 'J16', 'G4', 'H4'] : ['A1', 'B8']) {
+        expect(borderEdges(await outputZip.file('xl/styles.xml')!.async('string'), await worksheetXml(outputZip, name), address))
+          .toEqual(borderEdges(auxiliaryDocumentLayout.styles, layoutXml, address))
+      }
+      const actualCells = new Map(elements(actual, 'c').map(cell => [cell.getAttribute('r'), cell]))
+      for (const cell of elements(source, 'c')) {
+        if (elements(cell, 'v').length || elements(cell, 'f').length || elements(cell, 'is').length) continue
+        const exported = actualCells.get(cell.getAttribute('r'))
+        expect(exported, `${variant} ${name}!${cell.getAttribute('r')}`).toBeDefined()
+        expect(exported?.getAttribute('s')).toBe(String(Number(cell.getAttribute('s') || 0) + styleOffset))
+      }
+      const actualRows = new Map(elements(actual, 'row').map(row => [row.getAttribute('r'), row]))
+      for (const row of elements(source, 'row')) {
+        const exported = actualRows.get(row.getAttribute('r'))
+        for (const attribute of ['ht', 'customHeight', 'hidden', 's', 'customFormat']) {
+          const expected = attribute === 's' && row.hasAttribute('s')
+            ? String(Number(row.getAttribute('s')) + styleOffset) : row.getAttribute(attribute) || ''
+          expect(exported?.getAttribute(attribute) || '').toBe(expected)
+        }
+      }
+    }
+    const wb = XLSX.read(await output.arrayBuffer(), { type: 'array' })
+    expect(wb.Sheets['销售合同'].A16.v).toBe(1)
+    expect(wb.Sheets['销售合同'].B4.v).toContain(seller.nameEn)
+  })
+
   it.each(['legacy', 'RRI'])('keeps original full-column lookup expressions and array metadata (%s)', async variant => {
     const buffer = variant === 'RRI' ? rriTemplateBuffer : templateBuffer
     const template = XLSX.read(buffer, { type: 'array' })
