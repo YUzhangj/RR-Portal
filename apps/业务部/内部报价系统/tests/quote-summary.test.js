@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {
-  QUOTE_COMPONENTS, TAX_DEDUCTION_RATES, SUMMARY_COLUMNS, calculateSummaryValues, groupSummaryRows, buildQuoteSummary, buildSummaryWorkbook,
+  QUOTE_COMPONENTS, TAX_DEDUCTION_RATES, BASE_SUMMARY_COLUMNS, SUMMARY_COLUMNS, afterTaxComponents, calculateSummaryValues, groupSummaryRows, buildQuoteSummary, buildSummaryWorkbook,
 } = require('../backend/services/quoteSummary');
 
 test('客价确认在报价单列表操作，汇总页只关联显示', () => {
@@ -315,4 +315,66 @@ test('汇总最后一列汇总各成本项目占比并导出为公式', () => {
   const column = sheet.getRow(4).values.findIndex(value => value === '各金额占比求和');
   assert.match(sheet.getCell(5, column).value.formula, /^SUM\(/);
   assert.equal(sheet.getCell(5, column).value.result, 0.5);
+});
+
+test('总生产成本包含人工和未展开的采购项目，总毛利率按生产金额计算', () => {
+  const before = { injection_labor: 2, assembly_labor: 3, imp_mat: 20, dom_mat: 10, blow: 7, glue_bag: 8, motor: 9 };
+  const after = afterTaxComponents(before);
+  const values = calculateSummaryValues(before, after, 10, 100);
+  assert.equal(values.cost_with_labor, 59);
+  assert.equal(values.production_cost, 590);
+  assert.equal(values.production_amount, 1000);
+  assert.equal(values.total_gross_before_tax, 460);
+  assert.equal(values.total_gross_before_tax_rate, 0.46);
+
+  const zeroQty = calculateSummaryValues(before, after, 0, 100);
+  assert.equal(zeroQty.gross_before_tax_rate, 0.46);
+  assert.equal(zeroQty.production_cost, 0);
+  assert.equal(zeroQty.total_gross_before_tax_rate, 0);
+  const zeroPrice = calculateSummaryValues(before, after, 10, 0);
+  assert.equal(zeroPrice.production_cost, 590);
+  assert.equal(zeroPrice.total_gross_before_tax, -540);
+  assert.equal(zeroPrice.total_gross_before_tax_rate, 0);
+});
+
+test('客户总毛利率按金额加权并保留明确的零数量和零货价确认值', () => {
+  const makeRow = (id, qty, quoted_price, before, confirmation = {}) => ({
+    id, customer: 'TOMY', quote_no: `WEIGHT-${id}`, product_name: '加权毛利',
+    qty, quoted_price, components_before_tax: before, components: afterTaxComponents(before), confirmation,
+  });
+  const rows = [
+    makeRow(1, 100, 100, { injection_labor: 1, imp_mat: 1 }, { confirmed_qty: 2, confirmed_price: 10 }),
+    makeRow(2, 20, 5, { injection_labor: 1, imp_mat: 2 }),
+    makeRow(3, 500, 200, { imp_mat: 1000 }, { confirmed_qty: 0 }),
+    makeRow(4, 4, 300, { imp_mat: 1 }, { confirmed_price: 0 }),
+  ];
+  const sheet = buildSummaryWorkbook(rows).getWorksheet('各客报价汇总');
+  const columns = [...BASE_SUMMARY_COLUMNS, ...SUMMARY_COLUMNS];
+  const column = key => columns.findIndex(([code]) => code === key) + 1;
+  const value = (row, key) => sheet.getCell(row, column(key));
+  assert.equal(value(5, 'qty').value, 2);
+  assert.equal(value(5, 'quoted_price').value, 10);
+  assert.equal(value(7, 'qty').value, 0);
+  assert.equal(value(7, 'total_gross_before_tax_rate').result, 0);
+  assert.equal(value(8, 'quoted_price').value, 0);
+  assert.equal(value(8, 'total_gross_before_tax_rate').result, 0);
+  assert.equal(value(9, 'production_cost').result, 68);
+  assert.equal(value(9, 'production_amount').result, 120);
+  assert.equal(value(9, 'total_gross_before_tax').result, 74);
+  assert.equal(value(9, 'total_gross_before_tax_rate').result, 74 / 120);
+  assert.equal(value(9, 'total_gross_before_tax_rate').formula, 'IF(DM9=0,0,SUM(DO9)/DM9)');
+});
+
+test('汇总导出总成本及总毛利率引用可重算单元格，保存后保留公式及结果', async () => {
+  const workbook = buildSummaryWorkbook([{
+    id: 1, customer: 'TOMY', quote_no: 'FORMULA-1', product_name: '公式引用', qty: 10, quoted_price: 100,
+    components_before_tax: { injection_labor: 2, assembly_labor: 3, imp_mat: 20, dom_mat: 10, blow: 7, glue_bag: 8, motor: 9 },
+    components: afterTaxComponents({ injection_labor: 2, assembly_labor: 3, imp_mat: 20, dom_mat: 10, blow: 7, glue_bag: 8, motor: 9 }),
+  }]);
+  const reopened = new (require('exceljs').Workbook)();
+  await reopened.xlsx.load(await workbook.xlsx.writeBuffer());
+  const sheet = reopened.getWorksheet('各客报价汇总');
+  assert.deepEqual(sheet.getCell('DN5').value, { formula: 'G5*I5', result: 590 });
+  assert.deepEqual(sheet.getCell('DP5').value, { formula: 'IF(DM5=0,0,DO5/DM5)', result: 0.46 });
+  assert.deepEqual(sheet.getCell('DP6').value, { formula: 'IF(DM6=0,0,SUM(DO6)/DM6)', result: 0.46 });
 });
