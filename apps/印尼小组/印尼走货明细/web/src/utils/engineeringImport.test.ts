@@ -200,23 +200,65 @@ describe('engineering material import', () => {
 
 
 describe('bilingual mold layout', () => {
-  it('recognizes part names, material and gram weights and excludes the footer', async () => {
+  const layouts = (['xls', 'xlsx'] as const).flatMap(bookType => [
+    { bookType, partHeader: '零件名称', materialHeader: '材料', weightHeader: '零件重量(G)' },
+    { bookType, partHeader: 'Nama Part', materialHeader: 'Material Part', weightHeader: 'Berat Perpart (G)' },
+    { bookType, partHeader: 'Nama Part\n零件名称', materialHeader: 'Material Part\n材料', weightHeader: 'Berat Perpart\n零件重量(G)' },
+  ])
+  it.each(layouts)('recognizes $partHeader, material and gram weights and excludes the footer ($bookType)', async ({ bookType, partHeader, materialHeader, weightHeader }) => {
     const wb = XLSX.utils.book_new()
     const sheet = XLSX.utils.aoa_to_sheet([
       ['产品编号: L21106'], [], [], [], [], [],
-      ['工模编号', '工模名称', 'Nama Part\n零件名称', 'Material Part\n材料', '零件重量(G)', '用量', '生产地'],
+      ['工模编号', '工模名称', partHeader, materialHeader, weightHeader, '用量', '生产地'],
       ['P01', '公仔左右手', null, 'PVC85', null, null, '中国'],
       [null, null, '兔子左右手A7', null, 4, 1],
       ['S01', '公仔脸', null, 'PVC85', null, null, 'Indonesia\n印尼'],
       [null, null, '兔子公仔脸A7', null, 12, 1],
       ['Material Tipe 料型', 'Penggunaan 用量(G)'],
+      ['ABS', '100'],
     ])
     XLSX.utils.book_append_sheet(wb, sheet, '排模表 Mold Layout')
-    const bytes = XLSX.write(wb, { type: 'array', bookType: 'xls' }) as ArrayBuffer
+    const bytes = XLSX.write(wb, { type: 'array', bookType }) as ArrayBuffer
     const result = await importEngineeringFile({ arrayBuffer: async () => bytes } as File)
     expect(result.moldings).toHaveLength(1)
     expect(result.moldings[0].materialName).toBe('PVC85')
     expect(result.moldings[0].parts).toHaveLength(1)
     expect(result.moldings[0].parts![0].netPerPc).toBe(0.004)
+  })
+
+  it.each(['xls', 'xlsx'] as const)('does not truncate valid names or notes containing footer words (%s)', async bookType => {
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+      ['产品编号: T001'],
+      ['工模编号', '工模名称', '零件名称', '材料', '零件重量(G)', '用量', '生产地', '备注'],
+      ['M1', '测试工模', null, 'ABS', null, null, '中国'],
+      [null, null, '塑料型腔底座', null, 4, '1/2'],
+      [null, null, '右手', null, 2, 1, null, 'Material Tipe changed'],
+      ['M2', '第二工模', null, 'PP', null, null, '中国'],
+      [null, null, '左脚', null, 3, 1],
+      ['料型', '用量（G）'],
+      ['ABS', '100'],
+    ]), '排模表')
+    const bytes = XLSX.write(wb, { type: 'array', bookType }) as ArrayBuffer
+    const result = await importEngineeringFile({ arrayBuffer: async () => bytes } as File)
+    expect(result.moldings.map(m => m.moldId)).toEqual(['M1', 'M2'])
+    expect(result.moldings.map(m => m.parts?.map(p => p.partName))).toEqual([
+      ['塑胶件-塑料型腔底座', '塑胶件-右手'], ['塑胶件-左脚'],
+    ])
+    expect(result.moldings[0].parts?.[0].usage).toBe(0.5)
+  })
+
+  it.each(['xls', 'xlsx'] as const)('matches the material column rather than a preceding 材料编号 (%s)', async bookType => {
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+      ['产品编号: T001'],
+      ['工模编号', '工模名称', 'Nama Part\n零件名称', '材料编号', 'Material Part\n材料', 'Berat Perpart (G)', '用量', '生产地'],
+      ['M1', '测试工模', null, '01020096', 'ABS', null, null, '中国'],
+      [null, null, '右手', null, null, 4, 1],
+    ]), '排模表')
+    const bytes = XLSX.write(wb, { type: 'array', bookType }) as ArrayBuffer
+    const result = await importEngineeringFile({ arrayBuffer: async () => bytes } as File)
+    expect(result.moldings[0].materialName).toBe('ABS')
+    expect(result.moldings[0].parts?.[0].netPerPc).toBe(0.004)
   })
 })

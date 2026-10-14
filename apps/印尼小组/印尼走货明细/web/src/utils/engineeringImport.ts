@@ -382,7 +382,10 @@ export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDict
     const cPartNo   = colOf('零件编号', 'PartNumber', 'NoPart')
     const cPartName = colOf('物料名称', 'MaterialName', '零件名称', 'NamaPart')
     const cPartEn   = colOf('英文物料', 'Englishmaterial')
-    const cMaterial = colOf('用料名称', 'Materialused', '材料', 'MaterialPart')
+    const cLegacyMaterial = colOf('用料名称', 'Materialused')
+    // Match the added aliases as complete labels: 材料编号/材料颜色 are different columns.
+    const cMaterial = cLegacyMaterial >= 0 ? cLegacyMaterial : headers.findIndex(h =>
+      /^(?:MaterialPart(?:材料)?|材料(?:MaterialPart)?)$/i.test(h))
     const cColor    = colOf('顔色', '颜色', 'Color')
     const cPigment  = colOf('色粉号', 'PigmentNumber', 'Pigment')
     const cNet      = colOf('整啤净重', 'Netweight')
@@ -396,8 +399,11 @@ export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDict
     let curMold: { prefix: string; cat: string; place: string; entry: Molding } | null = null
     for (let r = hdrIdx + 1; r < grid.length; r++) {
       const row = grid[r] || []
-      // The material-ratio footer is not a mold or a part.
-      if (row.some(cell => /料型|Material\s*Tipe/i.test(String(cell ?? '')))) break
+      // A footer has both column labels; part names/notes containing 料型 must not end the import.
+      const footerLabels = row.map(cell => String(cell ?? '').replace(/\s+/g, '')
+        .replace(/（/g, '(').replace(/）/g, ')'))
+      if (footerLabels.some(cell => /^(?:MaterialTipe(?:料型)?|料型(?:MaterialTipe)?)$/i.test(cell)) &&
+          footerLabels.some(cell => /^(?:Penggunaan(?:用量)?|用量(?:Penggunaan)?)(?:\(G\))?$/i.test(cell))) break
       const moldName = cMoldName >= 0 ? String(row[cMoldName] ?? '').trim() : ''
       const partName = cPartName >= 0 ? String(row[cPartName] ?? '').trim() : ''
       const partEn   = cPartEn   >= 0 ? String(row[cPartEn]   ?? '').trim() : ''
