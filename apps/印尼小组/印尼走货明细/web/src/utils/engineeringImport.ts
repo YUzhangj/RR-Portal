@@ -370,7 +370,7 @@ export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDict
     let hdrIdx = 3
     for (let r = 0; r < Math.min(10, grid.length); r++) {
       const joined = (grid[r] || []).map(c => String(c ?? '').replace(/\s+/g, '')).join('|')
-      if (joined.includes('工模编号') && joined.includes('物料名称')) { hdrIdx = r; break }
+      if (joined.includes('工模编号') && /物料名称|零件名称|NamaPart/.test(joined)) { hdrIdx = r; break }
     }
     const headers = (grid[hdrIdx] || []).map((c: any) => String(c ?? '').replace(/\s+/g, ''))
     const colOf = (...kws: string[]) => {
@@ -380,13 +380,13 @@ export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDict
     const cMoldId   = colOf('工模编号', 'MoldNumber')
     const cMoldName = colOf('工模名称', 'MoldName')
     const cPartNo   = colOf('零件编号', 'PartNumber', 'NoPart')
-    const cPartName = colOf('物料名称', 'MaterialName')
+    const cPartName = colOf('物料名称', 'MaterialName', '零件名称', 'NamaPart')
     const cPartEn   = colOf('英文物料', 'Englishmaterial')
-    const cMaterial = colOf('用料名称', 'Materialused')
+    const cMaterial = colOf('用料名称', 'Materialused', '材料', 'MaterialPart')
     const cColor    = colOf('顔色', '颜色', 'Color')
     const cPigment  = colOf('色粉号', 'PigmentNumber', 'Pigment')
     const cNet      = colOf('整啤净重', 'Netweight')
-    const cNetPer   = colOf('单净重', '单个净重', 'NetWeight(perunit)', 'NetWeightperunit', 'Netweightperunit')
+    const cNetPer   = colOf('单净重', '单个净重', '零件重量', 'BeratPerpart', 'NetWeight(perunit)', 'NetWeightperunit', 'Netweightperunit')
     const cGrossPer = colOf('单毛重', '单个毛重', 'GrossWeight(perunit)', 'Grossweightperunit')
     const cUsage    = colOf('用量', '数量', 'Qty', 'Quantity')
     const cSets     = colOf('套数', 'Sets')
@@ -396,6 +396,8 @@ export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDict
     let curMold: { prefix: string; cat: string; place: string; entry: Molding } | null = null
     for (let r = hdrIdx + 1; r < grid.length; r++) {
       const row = grid[r] || []
+      // The material-ratio footer is not a mold or a part.
+      if (row.some(cell => /料型|Material\s*Tipe/i.test(String(cell ?? '')))) break
       const moldName = cMoldName >= 0 ? String(row[cMoldName] ?? '').trim() : ''
       const partName = cPartName >= 0 ? String(row[cPartName] ?? '').trim() : ''
       const partEn   = cPartEn   >= 0 ? String(row[cPartEn]   ?? '').trim() : ''

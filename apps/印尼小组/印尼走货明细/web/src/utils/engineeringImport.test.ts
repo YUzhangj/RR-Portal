@@ -197,3 +197,26 @@ describe('engineering material import', () => {
     })
   })
 })
+
+
+describe('bilingual mold layout', () => {
+  it('recognizes part names, material and gram weights and excludes the footer', async () => {
+    const wb = XLSX.utils.book_new()
+    const sheet = XLSX.utils.aoa_to_sheet([
+      ['产品编号: L21106'], [], [], [], [], [],
+      ['工模编号', '工模名称', 'Nama Part\n零件名称', 'Material Part\n材料', '零件重量(G)', '用量', '生产地'],
+      ['P01', '公仔左右手', null, 'PVC85', null, null, '中国'],
+      [null, null, '兔子左右手A7', null, 4, 1],
+      ['S01', '公仔脸', null, 'PVC85', null, null, 'Indonesia\n印尼'],
+      [null, null, '兔子公仔脸A7', null, 12, 1],
+      ['Material Tipe 料型', 'Penggunaan 用量(G)'],
+    ])
+    XLSX.utils.book_append_sheet(wb, sheet, '排模表 Mold Layout')
+    const bytes = XLSX.write(wb, { type: 'array', bookType: 'xls' }) as ArrayBuffer
+    const result = await importEngineeringFile({ arrayBuffer: async () => bytes } as File)
+    expect(result.moldings).toHaveLength(1)
+    expect(result.moldings[0].materialName).toBe('PVC85')
+    expect(result.moldings[0].parts).toHaveLength(1)
+    expect(result.moldings[0].parts![0].netPerPc).toBe(0.004)
+  })
+})
