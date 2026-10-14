@@ -6390,7 +6390,9 @@ async function renderAuditLog(host, quoteId) {
           <span class="audit-dept">${r.dept_name || r.dept || '系统'}</span>
           <span class="audit-actor">${r.actor || '匿名'}</span>
           <span class="audit-action">${ACTION_LABEL[r.action] || r.action}</span>
-          <span class="audit-detail muted">${r.detail ? escapeHtml(r.detail) : ''}</span>
+          <div class="audit-detail muted">${r.detail ? (r.detail.length > 120 || /^[\[{]/.test(r.detail.trim())
+            ? `<details class="audit-detail-fold"><summary>查看详情</summary><pre>${escapeHtml(r.detail)}</pre></details>`
+            : escapeHtml(r.detail)) : ''}</div>
         </div>`).join('');
       // 分页器
       const pager = document.createElement('div'); pager.className = 'audit-pager';
