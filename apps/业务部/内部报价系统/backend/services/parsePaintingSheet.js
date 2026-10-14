@@ -18,6 +18,8 @@ const PROCS = [
   { key: 'pp_water', label: '擦PP水' },
   { key: 'uv', label: 'UV' },
   { key: 'heat_transfer', label: '热转印' },
+  { key: 'roller', label: '滚印' },
+  { key: 'hot_stamp', label: '烫印' },
 ];
 
 function toStr(v) {
@@ -35,8 +37,9 @@ function toNum(v) {
 }
 
 function isHeaderRow(values) {
-  const j = values.map(toStr).join('|');
-  return /位置/.test(j) && /(夹模|移印|散枪|边模|抹油|热转印)/.test(j);
+  const labels = values.map(toStr);
+  return labels.includes('位置') && labels.some(label =>
+    label === 'UV打印' || PROCS.some(proc => proc.label === label));
 }
 
 // 只有“1#公仔 / 2#产品”这类明确编号才视为产品边界。
@@ -65,14 +68,15 @@ function sheetjsToRows(sheet) {
 
 // 按表头定位列：名称 / 位置 / 备注 / 各工序数量列(+右邻单价列)
 function indexHeader(values) {
-  const map = { name: null, position: null, note: null, procs: {} };
+  const map = { name: null, sku: null, position: null, note: null, procs: {} };
   values.forEach((v, i) => {
     const s = toStr(v);
     if (s === '名称') map.name = i;
+    else if (s === '货号') { map.name = i; map.sku = i; }
     else if (s === '位置') map.position = i;
     else if (/^备注/.test(s)) map.note = i;
     else {
-      const p = PROCS.find(p => p.label === s);
+      const p = PROCS.find(p => p.label === s || (p.key === 'uv' && s === 'UV打印'));
       if (p) map.procs[p.key] = { qty: i, unit: i + 1 };
     }
   });
@@ -117,6 +121,7 @@ async function parseWorkbook(buffer) {
   let cols = null;
   const items = [];
   let currentProduct = null;
+  const skuGroups = new Map();
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i] || [];
@@ -129,16 +134,21 @@ async function parseWorkbook(buffer) {
       if (isHeaderRow(r)) cols = indexHeader(r);
       continue;
     }
+    if (isHeaderRow(r)) { cols = indexHeader(r); currentProduct = null; continue; }
     const first = toStr(r[1]);
     if (/合计|小计|总报价/.test(first)) continue; // 跳过底部合计行（"合计"在首列）
     const name = cols.name != null ? toStr(r[cols.name]) : '';
     const position = cols.position != null ? toStr(r[cols.position]) : '';
-    const explicitProduct = parseProductLabel(name);
+    const sourceCode = cols.sku != null ? toStr(r[cols.sku]).replace(/\s+/g, '') : '';
+    const explicitProduct = sourceCode ? {id:`sku-${sourceCode}`,name:sourceCode,code:sourceCode,
+      source_number:/^BeautyMini[_-]?S3-(\d+)$/i.exec(sourceCode)?.[1] || '',number:skuGroups.size+1} : parseProductLabel(name);
+    if (sourceCode && !skuGroups.has(sourceCode)) skuGroups.set(sourceCode,explicitProduct);
     if (explicitProduct) currentProduct = explicitProduct;
     if (!name && !position) continue; // 跳过分隔空行
     if (/合计|小计|总报价/.test(position) || /[:：]\s*$/.test(position)) continue; // 跳过合计/图例(如"夹模：")
     const item = {
       name,
+      ...(cols.sku != null && currentProduct ? {source_product_code:currentProduct.code,source_product_number:currentProduct.source_number} : {}),
       position,
       note: cols.note != null ? toStr(r[cols.note]) : '',
       _row: i,
@@ -153,7 +163,15 @@ async function parseWorkbook(buffer) {
       item[p.key + '_unit'] = unit;
       if (qty > 0) hasQty = true;
     }
-    if (!hasQty) continue; // 位置有但无任何工序数量 → 多为说明行
+    if (!hasQty) {
+      // SKU subtotal notes (e.g. 手感油) apply to the product's preceding process rows.
+      if (cols.sku != null && currentProduct && item.note) {
+        items.filter(row => row.source_product_code === currentProduct.code).forEach(row => {
+          row.note = [row.note, item.note].filter(Boolean).join('；');
+        });
+      }
+      continue;
+    }
     items.push(item);
   }
 
@@ -179,6 +197,7 @@ async function parseWorkbook(buffer) {
     count: items.length,
     sheet_used: picked.name,
     product_groups: productGroups,
+    source_products: [...skuGroups.values()],
     multi_product: isMultiProduct,
   };
 }

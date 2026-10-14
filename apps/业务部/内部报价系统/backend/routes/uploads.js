@@ -328,4 +328,10 @@ router.post('/slush-sheet', requireAuth, memUpload.single('file'), async (req, r
   }
 });
 
+router.post('/mixed-sku-sheet', requireAuth, memUpload.single('file'), async (req,res)=>{
+  if (!['sales','engineering'].includes(req.user.dept) && req.user.role!=='admin') return res.status(403).json({error:'无权导入产品资料'});
+  if(!req.file)return res.status(400).json({error:'请选择配比表'});
+  try{res.json(await require('../services/parseMixedSku').parseWorkbook(req.file.buffer));}
+  catch(e){res.status(400).json({error:e.message});}
+});
 module.exports = router;

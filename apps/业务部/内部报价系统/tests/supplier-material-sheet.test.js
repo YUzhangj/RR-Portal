@@ -188,3 +188,40 @@ test('legacy hardware quotation header remains supported', async () => {
     name: '螺丝', spec: 'M3', qty: 4, unit_price_rmb: 0.2, tax_pct: null, note: '镀锌',
   });
 });
+
+ test('mixed supplier import separates identical material names by product code and blocks unknown codes', async () => {
+  const wb=new ExcelJS.Workbook(),ws=wb.addWorksheet('报价');
+  ws.addRow(['序号','货号','产品名称','规格','MOQ','单价(元)不含税']);
+  ws.addRow([1,'BEAUTYM-S3-002','瓶盖','20mm','1K',2]);
+  ws.addRow([null,'BEAUTYM-S3-002',null,null,'5K',1]);
+  ws.addRow([2,'BEAUTYM-S3-003','瓶盖','20mm','5K',3]);
+  const result=await parseWorkbook(await wb.xlsx.writeBuffer(),{targetQty:5000});
+  assert.equal(result.error,undefined);assert.equal(result.items.length,2);
+  const {planSupplier}=require('../frontend/mixed-sku');
+  const config={products:[{id:'a',code:'BEAUTYM-S3-002'},{id:'b',code:'BEAUTYM-S3-003'}]};
+  const plan=planSupplier(config,result.items);
+  assert.equal(plan.groups.length,2);assert.deepEqual(plan.unmatched,[]);
+  assert.equal(plan.groups[0].items[0].unit_price_rmb,1);
+  assert.equal(plan.groups[1].items[0].unit_price_rmb,3);
+  assert.equal(plan.groups[0].items[0].name,'瓶盖');
+  assert.equal(planSupplier(config,[{product_code:'unknown'},{}]).unmatched.length,2);
+  assert.equal(planSupplier({products:[...config.products,{id:'c',code:'BEAUTYM-S3-002'}]},result.items).unmatched.length,1);
+});
+
+ test('supplier BeautyMini aliases match SKU serials, preserve exact priority and reject ambiguity', () => {
+  const {planSupplier}=require('../frontend/mixed-sku');
+  const numbers=[3,4,10,32,33,34,56];
+  const products=numbers.map(n=>({id:'p'+n,code:'BEAUTYM-S3-'+String(n).padStart(3,'0'),source_number:String(n)}));
+  products.push({id:'exclusive',code:'BEAUTYM-S3-048-excl',source_number:'60'});
+  const items=numbers.map(n=>({product_code:'BEAUTYMINI_S3-'+String(n).padStart(2,'0'),name:'物料',unit_price_rmb:2}));
+  items.push({product_code:'Beauty Mini_S3-060',name:'独家款物料'});
+  const plan=planSupplier({products},items);
+  assert.deepEqual(plan.unmatched,[]);assert.equal(plan.groups.length,8);
+  assert.equal(plan.groups[7].product.id,'exclusive');
+  assert.equal(plan.groups[0].items[0].name,'物料');
+  assert.equal(plan.groups[0].items[0].product_code,'BEAUTYMINI_S3-03');
+  const conflicting=[...products,{id:'other',code:'OTHER-003',source_number:'03'}];
+  assert.equal(planSupplier({products:conflicting},[items[0]]).unmatched.length,1);
+  assert.equal(planSupplier({products:conflicting},[{product_code:'BEAUTYM-S3-003'}]).groups[0].product.id,'p3');
+  assert.equal(planSupplier({products},[{product_code:'UNRELATED-03'}]).unmatched.length,1);
+});

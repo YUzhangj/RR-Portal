@@ -135,6 +135,13 @@ const AMOUNT_SHARE_KEYS = [
   'other_buy_share', 'misc_share', 'freight_share',
 ];
 
+// Cost shares use extended amounts so zero-order quotes do not affect totals.
+const SHARE_AMOUNTS = Object.fromEntries(AMOUNT_SHARE_KEYS.map(key => [key, key.replace(/_share$/, '_amount')]));
+SUMMARY_COLUMNS.forEach(([key]) => {
+  if (key.startsWith('total_') && key.endsWith('_share')) SHARE_AMOUNTS[key] = key.slice(0, -6);
+});
+const SHARE_UNITS = { abs_material_share: 'abs_material_cost', rmb_purchase_share: 'rmb_purchase_cost' };
+
 function calculateSummaryValues(before, after, qty, price, absMaterialCost = 0) {
   const values = {};
   const setComponent = key => {
@@ -162,15 +169,15 @@ function calculateSummaryValues(before, after, qty, price, absMaterialCost = 0) 
   values.cost_without_labor = totalBefore - laborBefore;
   values.rmb_purchase_cost = num(before.misc)+num(before.other_buy)+num(before.paint_material)+num(before.sewing_cloth)+num(before.sewing_hair)+num(before.hardware)+num(before.battery)+num(before.electronic)+num(before.plating)+num(before.flocking)+num(before.carton)+num(before.libao)+num(before.color_box)+num(before.dom_mat);
   values.rmb_purchase_share = price ? values.rmb_purchase_cost/price : 0;
-  values.gross_before_tax = price-(totalBefore-laborBefore); values.gross_before_tax_rate = price ? values.gross_before_tax/price : 0;
-  values.profit_before_tax = price-totalBefore; values.profit_before_tax_rate = price ? values.profit_before_tax/price : 0;
-  values.markup_before_tax = totalBefore ? price/totalBefore : 0;
+  values.gross_before_tax = price-values.cost_without_labor; values.gross_before_tax_rate = price ? values.gross_before_tax/price : 0;
+  values.profit_before_tax = price-values.cost_with_labor; values.profit_before_tax_rate = price ? values.profit_before_tax/price : 0;
+  values.markup_before_tax = values.cost_with_labor ? price/values.cost_with_labor : 0;
   values.tax_1_cost = num(before.plating); values.labor_13_cost = laborBefore*0.08;
-  values.freight_9_cost = num(before.freight); values.tax_13_cost = num(before.color_box)+num(before.libao)+num(before.hardware)+num(before.battery)+num(before.flocking)+num(before.other_buy)+num(before.paint_material)+num(before.dom_mat);
+  values.freight_9_cost = num(before.freight); values.tax_13_cost = num(before.color_box)+num(before.libao)+num(before.hardware)+num(before.battery)+num(before.flocking)+num(before.other_buy)+num(before.paint_material)+num(before.dom_mat)+num(before.misc);
   values.carton_13_cost = num(before.carton); values.slush_3_cost = num(before.slush);
   values.hair_13_cost = num(before.sewing_hair); values.cloth_13_cost = num(before.sewing_cloth); values.suction_6_cost = num(before.suction);
   values.rebate_reduction = values.tax_1_cost*0.0099 + values.labor_13_cost*0.115 + values.freight_9_cost*0.0826 + values.tax_13_cost*0.115 + values.carton_13_cost/1.1*0.115 + values.slush_3_cost*0.03 + values.hair_13_cost*0.115 + values.cloth_13_cost*0.115 + values.suction_6_cost*0.06;
-  values.cost_after_rebate = totalBefore-values.rebate_reduction;
+  values.cost_after_rebate = values.cost_with_labor-values.rebate_reduction;
   values.markup_after_tax = values.cost_after_rebate ? price/values.cost_after_rebate : 0;
   values.raw_cost_after_tax = values.raw_material_after_tax;
   values.labor_cost_after_tax = laborBefore-values.labor_13_cost*0.115;
@@ -189,6 +196,12 @@ function calculateSummaryValues(before, after, qty, price, absMaterialCost = 0) 
   values.total_profit_after_tax=values.profit_after_tax*qty; values.total_profit_after_tax_rate=values.profit_after_tax_rate;
   values.total_raw_after_tax=values.raw_cost_after_tax*qty; values.total_raw_after_tax_share=values.production_amount?values.total_raw_after_tax/values.production_amount:0;
   values.total_labor_after_tax=values.labor_cost_after_tax*qty; values.total_labor_after_tax_share=values.production_amount?values.total_labor_after_tax/values.production_amount:0;
+  Object.entries(SHARE_AMOUNTS).forEach(([key, amount]) => {
+    values[key] = values.production_amount ? values[amount] / values.production_amount : 0;
+  });
+  Object.entries(SHARE_UNITS).forEach(([key, unit]) => {
+    values[key] = price ? values[unit] / price : 0;
+  });
   values.amount_share_total=AMOUNT_SHARE_KEYS.reduce((sum,key)=>sum+num(values[key]),0);
   return values;
 }
@@ -212,7 +225,9 @@ function parseJson(raw, fallback = {}) {
 function afterTaxComponents(components) {
   return Object.fromEntries(QUOTE_COMPONENTS.map(([key]) => {
     const rate = num(TAX_DEDUCTION_RATES[key]);
-    return [key, +(num(components?.[key]) * (1 - rate / 100)).toFixed(6)];
+    const cost = num(components?.[key]);
+    const afterTax = key === 'carton' ? cost - cost / 1.15 * 0.115 : cost * (1 - rate / 100);
+    return [key, +afterTax.toFixed(6)];
   }));
 }
 
@@ -549,6 +564,8 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
     const labor=`SUM(${ref('injection_labor',row)},${ref('assembly_labor',row)},${ref('painting_labor',row)})`;
     if (key === 'cost_with_labor') return rawSum;
     if (key === 'cost_without_labor') return `${ref('cost_with_labor',row)}-${labor}`;
+    if (key === 'carton_after_tax') return `${ref('carton',row)}-${ref('carton',row)}/1.15*11.5%`;
+    if (key === 'freight_after_tax') return `(${ref('freight',row)}-${ref('freight',row)}*8.26%)+${ref('cabinet',row)}`;
     const componentAfter = key.match(/^(.+)_after_tax$/);
     if (componentAfter && columnByKey[componentAfter[1]]) {
       const base=componentAfter[1], rate=num(TAX_DEDUCTION_RATES[base]);
@@ -556,28 +573,27 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
     }
     const componentAmount = key.match(/^(.+)_amount$/);
     if (componentAmount && columnByKey[`${componentAmount[1]}_after_tax`]) return `${ref(`${componentAmount[1]}_after_tax`,row)}*${qty}`;
-    const componentShare = key.match(/^(.+)_share$/);
-    if (componentShare && columnByKey[`${componentShare[1]}_after_tax`]) return `IF(${price}=0,0,${ref(`${componentShare[1]}_after_tax`,row)}/${price})`;
+    if (SHARE_AMOUNTS[key]) return `IF(${ref('production_amount',row)}=0,0,${ref(SHARE_AMOUNTS[key],row)}/${ref('production_amount',row)})`;
+    if (SHARE_UNITS[key]) return `IF(${price}=0,0,${ref(SHARE_UNITS[key],row)}/${price})`;
     const formulas = {
       raw_material_after_tax:`${ref('imp_mat',row)}+${ref('dom_mat',row)}*(1-11.5%)`,
       raw_material_amount:`${ref('raw_material_after_tax',row)}*${qty}`,
       raw_material_share:`IF(${price}=0,0,${ref('raw_material_after_tax',row)}/${price})`,
       abs_material_share:`IF(${price}=0,0,${ref('abs_material_cost',row)}/${price})`,
       total_purchase_price:`SUM(${['color_box','libao','suction','carton','plating','flocking','electronic','battery','hardware','slush','sewing_hair','sewing_cloth','paint_material','other_buy','misc'].map(k=>ref(k,row)).join(',')})`,
-      freight_after_tax:`${ref('freight',row)}*(1-8.26%)+${ref('cabinet',row)}`,
       freight_amount:`${ref('freight_after_tax',row)}*${qty}`,
       freight_share:`IF(${price}=0,0,${ref('freight_after_tax',row)}/${price})`,
       surtax_04:`${price}*0.4%`,
       rmb_purchase_cost:`SUM(${['misc','other_buy','paint_material','sewing_cloth','sewing_hair','hardware','battery','electronic','plating','flocking','carton','libao','color_box','dom_mat'].map(k=>ref(k,row)).join(',')})`,
       rmb_purchase_share:`IF(${price}=0,0,${ref('rmb_purchase_cost',row)}/${price})`,
-      gross_before_tax:`${price}-(${rawSum}-${labor})`, gross_before_tax_rate:`IF(${price}=0,0,${ref('gross_before_tax',row)}/${price})`,
-      profit_before_tax:`${price}-${rawSum}`, profit_before_tax_rate:`IF(${price}=0,0,${ref('profit_before_tax',row)}/${price})`,
-      markup_before_tax:`IF(${rawSum}=0,0,${price}/(${rawSum}))`, tax_1_cost:ref('plating',row), labor_13_cost:`(${labor})*8%`,
+      gross_before_tax:`${price}-${ref('cost_without_labor',row)}`, gross_before_tax_rate:`IF(${price}=0,0,${ref('gross_before_tax',row)}/${price})`,
+      profit_before_tax:`${price}-${ref('cost_with_labor',row)}`, profit_before_tax_rate:`IF(${price}=0,0,${ref('profit_before_tax',row)}/${price})`,
+      markup_before_tax:`IF(${ref('cost_with_labor',row)}=0,0,${price}/${ref('cost_with_labor',row)})`, tax_1_cost:ref('plating',row), labor_13_cost:`(${labor})*8%`,
       freight_9_cost:ref('freight',row),
-      tax_13_cost:`SUM(${['color_box','libao','battery','paint_material','dom_mat','hardware','flocking','other_buy'].map(k=>ref(k,row)).join(',')})`,
+      tax_13_cost:`SUM(${['color_box','libao','battery','paint_material','dom_mat','hardware','flocking','other_buy','misc'].map(k=>ref(k,row)).join(',')})`,
       carton_13_cost:ref('carton',row), slush_3_cost:ref('slush',row), hair_13_cost:ref('sewing_hair',row), cloth_13_cost:ref('sewing_cloth',row), suction_6_cost:ref('suction',row),
       rebate_reduction:`${ref('tax_1_cost',row)}*0.99%+${ref('labor_13_cost',row)}*11.5%+${ref('freight_9_cost',row)}*8.26%+${ref('tax_13_cost',row)}*11.5%+${ref('carton_13_cost',row)}/1.1*11.5%+${ref('slush_3_cost',row)}*3%+${ref('hair_13_cost',row)}*11.5%+${ref('cloth_13_cost',row)}*11.5%+${ref('suction_6_cost',row)}*6%`,
-      cost_after_rebate:`${rawSum}-${ref('rebate_reduction',row)}`,
+      cost_after_rebate:`${ref('cost_with_labor',row)}-${ref('rebate_reduction',row)}`,
       markup_after_tax:`IF(${ref('cost_after_rebate',row)}=0,0,${price}/${ref('cost_after_rebate',row)})`,
       raw_cost_after_tax:ref('raw_material_after_tax',row), labor_cost_after_tax:`${labor}-${ref('labor_13_cost',row)}*11.5%`,
       no_labor_cost_after_tax:`${ref('cost_after_rebate',row)}-${ref('labor_cost_after_tax',row)}`,
@@ -651,7 +667,18 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
       if(i>=6 && !['text','date','link','workshop','serial'].includes(type)) {
         const key=columns[i][0];
         const result=group.rows.reduce((s,r)=>s+num(key==='qty'?(r.confirmation?.confirmed_qty??r.qty):key==='quoted_price'?(r.confirmation?.confirmed_price??r.quoted_price):(r.summary_values||{})[key]),0);
-        c.value={formula:`SUM(${letter}${start}:${letter}${end})`,result};
+        if (SHARE_AMOUNTS[key] || SHARE_UNITS[key] || key === 'amount_share_total') {
+          const denominatorKey = SHARE_UNITS[key] ? 'quoted_price' : 'production_amount';
+          const production=group.rows.reduce((s,r)=>s+num(SHARE_UNITS[key] ? (r.confirmation?.confirmed_price ?? r.quoted_price) : r.summary_values?.production_amount),0);
+          const amountKeys = key === 'amount_share_total' ? AMOUNT_SHARE_KEYS.map(k => SHARE_AMOUNTS[k]) : [SHARE_AMOUNTS[key]];
+          const amount = group.rows.reduce((sum,r) => sum + (SHARE_UNITS[key]
+            ? num(r.summary_values?.[SHARE_UNITS[key]])
+            : amountKeys.reduce((s,k) => s + num(r.summary_values?.[k]),0)),0);
+          const numerator = SHARE_UNITS[key]
+            ? ref(SHARE_UNITS[key],subtotal)
+            : `SUM(${amountKeys.map(k => ref(k,subtotal)).join(',')})`;
+          c.value={formula:`IF(${ref(denominatorKey,subtotal)}=0,0,${numerator}/${ref(denominatorKey,subtotal)})`,result:production?amount/production:0};
+        } else c.value={formula:`SUM(${letter}${start}:${letter}${end})`,result};
       }
       c.font={name:'Microsoft YaHei',size:9,bold:true,color:{argb:'FF0B4369'}}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFDDEBFA'}}; c.border=border; c.alignment={vertical:'middle',wrapText:true};
       if(type==='percent') c.numFmt='0.00%'; else if(['unit','price','number'].includes(type)) c.numFmt='#,##0.00'; else if(['amount','qty'].includes(type)) c.numFmt='#,##0.00';
@@ -659,10 +686,17 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
   });
   columns.forEach(([,,type],i)=>{ ws.getColumn(i+1).width=i===1?20:i===2?16:i===3?24:i===4?16:type==='percent'?12:type==='amount'?15:13; });
   ws.autoFilter={from:{row:4,column:1},to:{row:Math.max(4,rowNo-1),column:columns.length}};
-  const noLaborColumn = columnByKey.cost_without_labor;
-  for (let row = 4; row < rowNo; row++) {
-    const cell = ws.getCell(row, noLaborColumn);
-    cell.font = { ...cell.font, bold: true, color: { argb: 'FF0000FF' } };
+  for (const key of ['cost_without_labor', 'surtax_04', 'rmb_purchase_cost']) {
+    for (let row = 4; row < rowNo; row++) {
+      const cell = ws.getCell(row, columnByKey[key]);
+      cell.font = { ...cell.font, bold: true, color: { argb: 'FF0000FF' } };
+    }
+  }
+  for (const key of ['markup_before_tax', 'markup_after_tax']) {
+    for (let row = 4; row < rowNo; row++) {
+      const cell = ws.getCell(row, columnByKey[key]);
+      cell.font = { ...cell.font, color: { argb: 'FFFF0000' } };
+    }
   }
   ws.eachRow(row => row.eachCell(cell => {
     cell.alignment = { ...cell.alignment, horizontal: 'center', vertical: 'middle' };
@@ -671,7 +705,7 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
 }
 
 module.exports = {
-  WORKSHOPS, QUOTE_COMPONENTS, TAX_DEDUCTION_RATES, BASE_SUMMARY_COLUMNS, SUMMARY_COLUMNS,
+  WORKSHOPS, QUOTE_COMPONENTS, TAX_DEDUCTION_RATES, BASE_SUMMARY_COLUMNS, SUMMARY_COLUMNS, SHARE_AMOUNTS, SHARE_UNITS, AMOUNT_SHARE_KEYS,
   afterTaxComponents, calculateSummaryValues, groupSummaryRows, buildQuoteSummary,
   buildSummaryWorkbook: buildDetailedSummaryWorkbook, parseJson,
 };
