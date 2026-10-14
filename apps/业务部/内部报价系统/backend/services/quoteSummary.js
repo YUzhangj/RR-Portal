@@ -141,6 +141,8 @@ SUMMARY_COLUMNS.forEach(([key]) => {
   if (key.startsWith('total_') && key.endsWith('_share')) SHARE_AMOUNTS[key] = key.slice(0, -6);
 });
 SHARE_AMOUNTS.total_gross_before_tax_rate = 'total_gross_before_tax';
+SHARE_AMOUNTS.total_profit_before_tax_rate = 'total_profit_before_tax';
+SHARE_AMOUNTS.total_gross_after_tax_rate = 'total_gross_after_tax';
 const SHARE_UNITS = { abs_material_share: 'abs_material_cost', rmb_purchase_share: 'rmb_purchase_cost' };
 
 function calculateSummaryValues(before, after, qty, price, absMaterialCost = 0) {
@@ -187,13 +189,13 @@ function calculateSummaryValues(before, after, qty, price, absMaterialCost = 0) 
   values.profit_after_tax = price-values.cost_after_rebate; values.profit_after_tax_rate = price ? values.profit_after_tax/price : 0;
   values.production_amount=price*qty; values.production_cost=values.cost_with_labor*qty;
   values.total_gross_before_tax=values.gross_before_tax*qty; values.total_gross_before_tax_rate=values.production_amount ? values.total_gross_before_tax/values.production_amount : 0;
-  values.total_profit_before_tax=values.profit_before_tax*qty; values.total_profit_before_tax_rate=values.profit_before_tax_rate;
+  values.total_profit_before_tax=values.profit_before_tax*qty; values.total_profit_before_tax_rate=values.production_amount ? values.total_profit_before_tax/values.production_amount : 0;
   values.total_raw_before_tax=(num(before.imp_mat)+num(before.dom_mat))*qty; values.total_raw_before_tax_share=values.production_amount?values.total_raw_before_tax/values.production_amount:0;
   values.total_labor_before_tax=laborBefore*qty; values.total_labor_before_tax_share=values.production_amount?values.total_labor_before_tax/values.production_amount:0;
   values.total_rmb_purchase=values.rmb_purchase_cost*qty; values.total_rmb_purchase_share=values.production_amount?values.total_rmb_purchase/values.production_amount:0;
   values.total_rebate_reduction=values.rebate_reduction*qty;
   values.total_no_labor_after_tax=values.no_labor_cost_after_tax*qty; values.total_no_labor_after_tax_share=values.production_amount?values.total_no_labor_after_tax/values.production_amount:0;
-  values.total_gross_after_tax=values.gross_after_tax*qty; values.total_gross_after_tax_rate=values.gross_after_tax_rate;
+  values.total_gross_after_tax=values.gross_after_tax*qty; values.total_gross_after_tax_rate=values.production_amount ? values.total_gross_after_tax/values.production_amount : 0;
   values.total_profit_after_tax=values.profit_after_tax*qty; values.total_profit_after_tax_rate=values.profit_after_tax_rate;
   values.total_raw_after_tax=values.raw_cost_after_tax*qty; values.total_raw_after_tax_share=values.production_amount?values.total_raw_after_tax/values.production_amount:0;
   values.total_labor_after_tax=values.labor_cost_after_tax*qty; values.total_labor_after_tax_share=values.production_amount?values.total_labor_after_tax/values.production_amount:0;
@@ -602,13 +604,13 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
       profit_after_tax:`${price}-${ref('cost_after_rebate',row)}`, profit_after_tax_rate:`IF(${price}=0,0,${ref('profit_after_tax',row)}/${price})`,
       production_amount:`${price}*${qty}`, production_cost:`${qty}*${ref('cost_with_labor',row)}`,
       total_gross_before_tax:`${ref('gross_before_tax',row)}*${qty}`, total_gross_before_tax_rate:`IF(${ref('production_amount',row)}=0,0,${ref('total_gross_before_tax',row)}/${ref('production_amount',row)})`,
-      total_profit_before_tax:`${ref('profit_before_tax',row)}*${qty}`, total_profit_before_tax_rate:ref('profit_before_tax_rate',row),
+      total_profit_before_tax:`${ref('profit_before_tax',row)}*${qty}`, total_profit_before_tax_rate:`IF(${ref('production_amount',row)}=0,0,${ref('total_profit_before_tax',row)}/${ref('production_amount',row)})`,
       total_raw_before_tax:`(${ref('imp_mat',row)}+${ref('dom_mat',row)})*${qty}`, total_raw_before_tax_share:`IF(${ref('production_amount',row)}=0,0,${ref('total_raw_before_tax',row)}/${ref('production_amount',row)})`,
       total_labor_before_tax:`(${labor})*${qty}`, total_labor_before_tax_share:`IF(${ref('production_amount',row)}=0,0,${ref('total_labor_before_tax',row)}/${ref('production_amount',row)})`,
       total_rmb_purchase:`${ref('rmb_purchase_cost',row)}*${qty}`, total_rmb_purchase_share:`IF(${ref('production_amount',row)}=0,0,${ref('total_rmb_purchase',row)}/${ref('production_amount',row)})`,
       total_rebate_reduction:`${ref('rebate_reduction',row)}*${qty}`,
       total_no_labor_after_tax:`${ref('no_labor_cost_after_tax',row)}*${qty}`, total_no_labor_after_tax_share:`IF(${ref('production_amount',row)}=0,0,${ref('total_no_labor_after_tax',row)}/${ref('production_amount',row)})`,
-      total_gross_after_tax:`${ref('gross_after_tax',row)}*${qty}`, total_gross_after_tax_rate:ref('gross_after_tax_rate',row),
+      total_gross_after_tax:`${ref('gross_after_tax',row)}*${qty}`, total_gross_after_tax_rate:`IF(${ref('production_amount',row)}=0,0,${ref('total_gross_after_tax',row)}/${ref('production_amount',row)})`,
       total_profit_after_tax:`${ref('profit_after_tax',row)}*${qty}`, total_profit_after_tax_rate:ref('profit_after_tax_rate',row),
       total_raw_after_tax:`${ref('raw_cost_after_tax',row)}*${qty}`, total_raw_after_tax_share:`IF(${ref('production_amount',row)}=0,0,${ref('total_raw_after_tax',row)}/${ref('production_amount',row)})`,
       total_labor_after_tax:`${ref('labor_cost_after_tax',row)}*${qty}`, total_labor_after_tax_share:`IF(${ref('production_amount',row)}=0,0,${ref('total_labor_after_tax',row)}/${ref('production_amount',row)})`,
