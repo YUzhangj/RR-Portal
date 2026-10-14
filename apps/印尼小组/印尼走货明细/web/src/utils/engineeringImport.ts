@@ -262,8 +262,11 @@ export function parseEngineeringUsage(value: unknown, fallback: number): number 
   return result
 }
 
-function usageAt(value: unknown, fallback: number, sheet: string, row: number): number {
-  try { return parseEngineeringUsage(value, fallback) }
+function usageAt(cell: { t: string; v?: unknown } | undefined, fallback: number, sheet: string, row: number): number {
+  try {
+    if (cell?.t === 'e') throw new Error('用量单元格为 Excel 错误，请修正后重新导入')
+    return parseEngineeringUsage(cell?.v, fallback)
+  }
   catch (error) { throw new Error(`${sheet} 第 ${row} 行：${(error as Error).message}`) }
 }
 
@@ -361,7 +364,9 @@ export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDict
 
   // -------- 2. 排模表: 工模 → 子零件 --------
   if (snMold) {
-    const grid = XLSX.utils.sheet_to_json<any[]>(wb.Sheets[snMold], { header: 1, defval: null })
+    const worksheet = wb.Sheets[snMold]
+    const rangeStart = XLSX.utils.decode_range(worksheet['!ref'] || 'A1').s
+    const grid = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1, defval: null })
     let hdrIdx = 3
     for (let r = 0; r < Math.min(10, grid.length); r++) {
       const joined = (grid[r] || []).map(c => String(c ?? '').replace(/\s+/g, '')).join('|')
@@ -441,7 +446,7 @@ export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDict
         hsID: partHs.hsID,
         category: curMold.cat,
         ejections: cEjections >= 0 ? (Number(row[cEjections]) || 0) : 0,
-        usage:     cUsage    >= 0 ? usageAt(row[cUsage], 0, snMold, r + 1) : 0,
+        usage:     cUsage    >= 0 ? usageAt(worksheet[XLSX.utils.encode_cell({ r: rangeStart.r + r, c: rangeStart.c + cUsage })], 0, snMold, rangeStart.r + r + 1) : 0,
         grossPerPc: cGrossPer >= 0 ? ((Number(row[cGrossPer]) || 0) / 1000) : 0,
         netPerPc:   cNetPer   >= 0 ? ((Number(row[cNetPer])   || 0) / 1000) : 0,
       }
@@ -459,10 +464,11 @@ export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDict
   // -------- 3. 外购清单 --------
   if (snExt) {
     // 使用 Excel 显示值读取外购清单，避免 01020100 这类物料编码被当作数字后丢失前导 0。
-    const grid = XLSX.utils.sheet_to_json<any[]>(wb.Sheets[snExt], { header: 1, defval: null, raw: false })
-    // Identifiers still use display text; quantities use raw numeric values so
-    // fraction/decimal display rounding cannot alter the imported consumption.
-    const rawGrid = XLSX.utils.sheet_to_json<any[]>(wb.Sheets[snExt], { header: 1, defval: null, raw: true })
+    const worksheet = wb.Sheets[snExt]
+    const rangeStart = XLSX.utils.decode_range(worksheet['!ref'] || 'A1').s
+    const grid = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1, defval: null, raw: false })
+    // Read quantities from their actual cells: JSON conversion drops Excel
+    // errors, and formatted display text can round fraction/decimal values.
     let hdrIdx = 3
     for (let r = 0; r < Math.min(10, grid.length); r++) {
       const joined = (grid[r] || []).map(c => String(c ?? '').replace(/\s+/g, '')).join('|')
@@ -527,7 +533,7 @@ export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDict
         length: 0, width: 0, height: 0,
         qty_per_carton: 0, weight_per_carton: 0,
         active: true,
-        usage_qty: cUsage >= 0 ? usageAt(rawGrid[r]?.[cUsage], 1, snExt, r + 1) : 1,
+        usage_qty: cUsage >= 0 ? usageAt(worksheet[XLSX.utils.encode_cell({ r: rangeStart.r + r, c: rangeStart.c + cUsage })], 1, snExt, rangeStart.r + r + 1) : 1,
       })
     }
   }

@@ -2439,11 +2439,12 @@ async function restoreAuxiliaryFormulas(zip: JSZip, items: CustomsItem[], form: 
   const date = excelDate(form.shipDate || form.loadDate || items.find(item => item.contract_date)?.contract_date || '')
   put(invoice, 'D5', number)
   put(invoice, 'H5', date)
+  const container = (form.containerNo || '').trim()
   const driver = docs.get('司机资料')
   if (driver) {
     // The approved driver sheet has inputs, not formulas. Never export the
     // sample person's phone/plate/seal/booking details as current shipment data.
-    for (let row = 1; row <= 8; row++) put(driver, `B${row}`, row === 2 ? mainName : '')
+    for (let row = 1; row <= 8; row++) put(driver, `B${row}`, row === 2 ? container : '')
   }
   const layouts = new Map<string, DocumentTableLayout[]>(AUXILIARY_TABLES.map(table => [table.name, [{
     start: table.start, end: table.total - 1, finalStart: table.start,
@@ -2512,11 +2513,23 @@ async function restoreAuxiliaryFormulas(zip: JSZip, items: CustomsItem[], form: 
     const headers = table.name === '销售合同' ? { I4: ["'发票'!D5", number], I6: ["'发票'!H5", date] }
       : table.name === '装箱单 (2)' ? { H4: ["'发票'!D5", number] } : {
         J4: ['TODAY()', excelDate(new Date())], M4: ['TODAY()', excelDate(new Date())],
-        M6: ["'司机资料'!B8", ''], A14: ["'发票'!D5", number], A16: ["'司机资料'!B2", mainName], D17: ["'司机资料'!B5", ''],
+        M6: ['IF(\'司机资料\'!B8="","",\'司机资料\'!B8)', ''], A14: ["'发票'!D5", number],
+        A16: ['IF(\'司机资料\'!B2="","",\'司机资料\'!B2)', container], D17: ['IF(\'司机资料\'!B5="","",\'司机资料\'!B5)', ''],
         E14: ["SUM('装箱单 (2)'!C47)", sum('L')], I14: ["SUM('装箱单 (2)'!G47)", sum('J')], M14: ["SUM('装箱单 (2)'!H47)", sum('K')],
       }
     for (const [address, [formula, value]] of Object.entries(headers)) put(doc, address, value,
       rebindDocumentFormula(String(formula), { sheet: table.name, main: mainName, layouts }))
+    if (table.name === '销售合同') {
+      // The signature blocks belong to this contract's current header parties.
+      // Keep the approved single-line English seller layout, including after expansion.
+      const signatureRow = documentRow(62, layouts.get(table.name)!)
+      const header = (address: string) => valueOf(ensureXmlCell(doc,
+        getRow(doc, Number(address.match(/\d+$/)![0])), cellColumn(address)))
+      const buyer = String(header('B8')).trim()
+      const seller = String(header('B4')).split(/\r?\n/).map(line => line.trim()).filter(Boolean).at(-1) || ''
+      put(doc, `A${signatureRow}`, buyer)
+      put(doc, `E${signatureRow}`, seller)
+    }
   }
   for (const [name, doc] of docs) zip.file(parts.get(name)!, serializer.serializeToString(doc))
   zip.file('xl/workbook.xml', serializer.serializeToString(workbook))

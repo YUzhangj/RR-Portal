@@ -9,6 +9,8 @@ describe('engineering fraction usage', () => {
     ['1 1/2', 1.5], ['2又1/4', 2.25], ['½', 0.5], ['1½', 1.5],
     ['=1/2', 0.5], ['0/2', 0], [0, 0], ['0', 0], ['.25', 0.25],
     ['1,000.5', 1000.5], ['1e-3', 0.001], [1 / 3, 1 / 3],
+    ['-1/2', -0.5], ['-1 1/2', -1.5], ['-1½', -1.5], ['+１／４', 0.25],
+    ['2⅔', 2 + 2 / 3], ['0.5/2', 0.25], [-1.25, -1.25],
   ])('parses %s without rounding', (value, expected) => {
     expect(parseEngineeringUsage(value, 1)).toBe(expected)
   })
@@ -51,6 +53,58 @@ describe('engineering fraction usage', () => {
     const bytes = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer
     await expect(importEngineeringFile({ arrayBuffer: async () => bytes } as File))
       .rejects.toThrow('外购清单 第 3 行：用量分数的分母不能为 0')
+  })
+
+  const usageSheet = (sheet: '外购清单' | '排模表', value: unknown, origin = 'A1') => {
+    const rows = sheet === '外购清单'
+      ? [['产品编号', 'A001'], ['类别', '物料名称', '用量'], ['五金', '材料甲', value]]
+      : [['产品编号', 'A001'], ['工模编号', '工模名称', '物料名称', '用量', '用料名称'],
+        ['M1', '测试模具', null, null, 'ABS'], [null, null, '零件甲', value]]
+    const worksheet: XLSX.WorkSheet = {}
+    XLSX.utils.sheet_add_aoa(worksheet, rows, { origin })
+    const start = XLSX.utils.decode_cell(origin)
+    const end = { r: start.r + rows.length - 1, c: start.c + (sheet === '外购清单' ? 2 : 4) }
+    worksheet['!ref'] = XLSX.utils.encode_range(start, end)
+    const usageCell = XLSX.utils.encode_cell({ r: end.r, c: start.c + (sheet === '外购清单' ? 2 : 3) })
+    return { worksheet, usageCell, row: end.r + 1 }
+  }
+
+  it.each(['xls', 'xlsx'] as const)('rejects Excel error cells in both usage sheets (%s)', async bookType => {
+    for (const sheet of ['外购清单', '排模表'] as const) {
+      const { worksheet, usageCell, row } = usageSheet(sheet, null)
+      worksheet[usageCell] = { t: 'e', v: 7 }
+      const workbook = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(workbook, worksheet, sheet)
+      const bytes = XLSX.write(workbook, { type: 'array', bookType }) as ArrayBuffer
+      await expect(importEngineeringFile({ arrayBuffer: async () => bytes } as File))
+        .rejects.toThrow(`${sheet} 第 ${row} 行：用量单元格为 Excel 错误`)
+    }
+  })
+
+  it.each(['xls', 'xlsx'] as const)('reports actual worksheet rows when the used range starts at B3 (%s)', async bookType => {
+    for (const sheet of ['外购清单', '排模表'] as const) {
+      const { worksheet, row } = usageSheet(sheet, '1/0', 'B3')
+      const workbook = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(workbook, worksheet, sheet)
+      const bytes = XLSX.write(workbook, { type: 'array', bookType }) as ArrayBuffer
+      await expect(importEngineeringFile({ arrayBuffer: async () => bytes } as File))
+        .rejects.toThrow(`${sheet} 第 ${row} 行：用量分数的分母不能为 0`)
+    }
+  })
+
+  it.each(['xls', 'xlsx'] as const)('keeps raw formula results and numeric precision independently of display format (%s)', async bookType => {
+    for (const sheet of ['外购清单', '排模表'] as const) {
+      for (const value of [0, -1.25, 1 / 3, 0.123456789012345]) {
+        const { worksheet, usageCell } = usageSheet(sheet, value, 'B3')
+        worksheet[usageCell].z = '# ?/?'
+        worksheet[usageCell].f = value === 1 / 3 ? '1/3' : undefined
+        const workbook = XLSX.utils.book_new()
+        XLSX.utils.book_append_sheet(workbook, worksheet, sheet)
+        const bytes = XLSX.write(workbook, { type: 'array', bookType }) as ArrayBuffer
+        const result = await importEngineeringFile({ arrayBuffer: async () => bytes } as File)
+        expect(sheet === '外购清单' ? result.materials[0].usage_qty : result.moldings[0].parts?.[0].usage).toBe(value)
+      }
+    }
   })
 })
 

@@ -7,8 +7,14 @@ export const AUXILIARY_TABLES = [
 ] as const
 
 export function auxiliaryDetailFormulas(name: string, row: number) {
-  const lookup = (column: string, fallback = false) =>
-    `_xlfn.XLOOKUP($A${row},'发票'!$B:$B,'发票'!${fallback && ['I', 'K'].includes(column) ? `${column}:${column}` : `$${column}:$${column}`}${fallback ? ',""' : ''})`
+  const lookup = (column: string, fallback = false) => {
+    const formula = `_xlfn.XLOOKUP($A${row},'发票'!$B:$B,'发票'!${fallback && ['I', 'K'].includes(column) ? `${column}:${column}` : `$${column}:$${column}`}${fallback ? ',""' : ''})`
+    // XLOOKUP converts a matched blank into 0. Inspect only that source cell,
+    // preserving a real numeric/text 0 and avoiding a full-column array rewrite.
+    return column === 'E'
+      ? `IF(COUNTBLANK(INDEX('发票'!$E:$E,MATCH($A${row},'发票'!$B:$B,0)))>0,"",${formula})`
+      : formula
+  }
   if (name === '销售合同') return {
     B: { formula: `_xlfn.HSTACK(${['C', 'D', 'E', 'F', 'G'].map(c => lookup(c)).join(',')})`, sources: ['C', 'D', 'E', 'F', 'G'] },
     I: { formula: lookup('I', true), sources: ['I'] },
