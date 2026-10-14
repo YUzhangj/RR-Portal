@@ -8,7 +8,7 @@ import { api, type Material, type Dictionaries } from '../api/client'
 import { purchaseItemCodes, resolvePurchaseCustoms } from '../utils/purchaseCustoms'
 import { numToChinese, poCorrectHsyNumber, poLineCurrency, poDetermineEntity, poGenContractNo, PO_ENTITY_META, type PoEntity } from '../utils/poNumber'
 import './PurchasePage.css'
-import { combinePurchaseContracts, formatPurchaseContractFonts, formatPurchaseContractTotals } from '../utils/purchaseContractWorkbook'
+import { combinePurchaseContracts, formatPurchaseContractFonts, formatPurchaseContractTotals, setPurchaseContractLineAmounts } from '../utils/purchaseContractWorkbook'
 import PurchaseMaterialPicker from '../components/PurchaseMaterialPicker'
 import { purchaseMaterialBucket, purchaseMaterialLine, purchaseSelectionSource, purchaseSelectionSupplier, type PurchaseMaterialChoice } from '../utils/purchaseMaterialSelection'
 import { linkPurchaseLine, matchingLineSchedules } from '../utils/purchaseScheduleLink'
@@ -1189,7 +1189,9 @@ export default function PurchasePage() {
     }
     const mergedRows = [...merged.values()]
     let totalAmount = 0
-    mergedRows.forEach(m => totalAmount += m.totalAmount || 0)
+    // 与 Excel 的逐行 ROUND(..., 2) 后求和一致，大写和合计共用此金额。
+    mergedRows.forEach(m => totalAmount += Number((m.totalAmount || 0).toFixed(2)))
+    totalAmount = Number(totalAmount.toFixed(2))
 
     const PAD = (n: number) => Array(n).fill('')
     const rows: any[][] = []
@@ -1205,9 +1207,9 @@ export default function PurchasePage() {
     rows.push(['货 号', '货品名称', '规格型号', '数量', '单位', '单 价 (' + meta.currency + ')', '金额', '备 注', '英文名称', '物料编码'])
     const itemStart = rows.length
     for (const m of mergedRows) {
-      const shipUnitPrice = m.totalShipQty > 0 ? m.totalAmount / m.totalShipQty : 0
       const contractUnit = contractUnitLabel(m.unit)
-      rows.push([m.code, m.matName, m.spec, Number(m.totalShipQty.toFixed(shipQuantityDigits(m.unit))), contractUnit, shipUnitPrice, Number(m.totalAmount.toFixed(2)), '数量：' + Number(m.totalPurchaseQty.toFixed(2)) + 'pcs', m.nameEn, m.materialCode])
+      // D/F/G 由下方统一写入，不能先按显示位数舍入数量再参与公式计算。
+      rows.push([m.code, m.matName, m.spec, '', contractUnit, '', '', '数量：' + Number(m.totalPurchaseQty.toFixed(2)) + 'pcs', m.nameEn, m.materialCode])
     }
     rows.push(['以下空白！', '按工程签板生产！', '', '', '', '', '', ''])
     const sumRow = rows.length
@@ -1237,16 +1239,8 @@ export default function PurchasePage() {
     const firstItemExcelRow = itemStart + 1
     const lastItemExcelRow = itemStart + mergedRows.length
     for (let r = itemStart; r < itemStart + mergedRows.length; r++) {
-      const excelRow = r + 1
-      // Keep the calculated price in the cell; formatting must not round the stored value.
-      ws[XLSX.utils.encode_cell({ r, c: 5 })].z = '0.00######'
-      const amountAddr = XLSX.utils.encode_cell({ r, c: 6 })
-      ;(ws as any)[amountAddr] = {
-        t: 'n',
-        v: Number(rows[r][6]) || 0,
-        f: `ROUND(D${excelRow}*F${excelRow},2)`,
-        z: '0.00',
-      }
+      const item = mergedRows[r - itemStart]
+      setPurchaseContractLineAmounts(ws, r + 1, item.totalShipQty, item.totalAmount)
     }
     const totalAddr = XLSX.utils.encode_cell({ r: sumRow, c: 6 })
     const totalFormula = mergedRows.length

@@ -5,6 +5,17 @@ const companySheets: [PoEntity, string][] = [
   ['HD_INDUSTRY', '华登实业'], ['HD_GLOBAL', '华登全球'], ['HSY', '华胜益'],
 ]
 
+/** 数量保留计算精度；仅单元格显示格式控制小数位，金额按分取整。 */
+export function setPurchaseContractLineAmounts(ws: XLSX.WorkSheet, row: number, quantity: number, amount: number) {
+  const price = quantity > 0 ? amount / quantity : 0
+  ws[`D${row}`] = { ...ws[`D${row}`], t: 'n', v: quantity, z: '0.######' }
+  ws[`F${row}`] = { ...ws[`F${row}`], t: 'n', v: price, z: '0.00######' }
+  ws[`G${row}`] = {
+    ...ws[`G${row}`], t: 'n', v: Number(amount.toFixed(2)),
+    f: `ROUND(D${row}*F${row},2)`, z: '0.00',
+  }
+}
+
 /** 公司抬头 22 号、购销合同标题 18 号，其余 12 号；全部加粗。合并前逐单应用。 */
 export function formatPurchaseContractFonts(ws: XLSX.WorkSheet) {
   for (const [address, cell] of Object.entries(ws)) {

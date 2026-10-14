@@ -1,6 +1,52 @@
 import { describe, expect, it } from 'vitest'
 import * as XLSX from 'xlsx-js-style'
-import { combinePurchaseContracts, formatPurchaseContractFonts, formatPurchaseContractTotals } from './purchaseContractWorkbook'
+import { combinePurchaseContracts, formatPurchaseContractFonts, formatPurchaseContractTotals, setPurchaseContractLineAmounts } from './purchaseContractWorkbook'
+import { numToChinese } from './poNumber'
+
+describe('采购导出计算精度', () => {
+  it.each([
+    [0.00808, 20200 * 0.08, 200000, 1616],
+    [0.00202, 20200 * 0.07, 700000, 1414],
+    [0.505, 151.5, 300, 151.5],
+    [0.000001, 0.25, 250000, 0.25],
+  ])('完整数量 %s 参与金额计算，不先按吨/千克显示位数截断', (quantity, amount, price, expected) => {
+    const ws = XLSX.utils.aoa_to_sheet([['合同'], ['', '', '', '', '', '', '']])
+    setPurchaseContractLineAmounts(ws, 2, quantity, amount)
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, '合同')
+    const restored = XLSX.read(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }), { type: 'buffer', cellNF: true }).Sheets['合同']
+    expect(restored.D2.v).toBe(quantity)
+    expect(restored.D2.z).toBe('0.######')
+    expect(XLSX.utils.format_cell(restored.D2)).toBe(String(quantity))
+    expect(Number(restored.F2.v)).toBeCloseTo(price, 6)
+    expect(restored.G2.f).toBe('ROUND(D2*F2,2)')
+    expect(Number((Number(restored.D2.v) * Number(restored.F2.v)).toFixed(2))).toBe(expected)
+    expect(restored.G2.v).toBe(expected)
+  })
+
+  it('两行金额、合计、大写在单张和合并导出后均为 3030', () => {
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['2026900171'], ['', '', '', '', '', '', ''], ['', '', '', '', '', '', ''],
+      ['', '', '', '', '合计', '', 3030], ['', '', '', '', '大写', '人民币', numToChinese(3030)],
+    ])
+    setPurchaseContractLineAmounts(ws, 2, 0.00808, 20200 * 0.08)
+    setPurchaseContractLineAmounts(ws, 3, 0.00202, 20200 * 0.07)
+    ws.G4.f = 'ROUND(SUM(G2:G3),2)'
+    const wb = combinePurchaseContracts([{ entity: 'HSY', ws }, { entity: 'HSY', ws }])
+    const exported = XLSX.read(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }), { type: 'buffer' }).Sheets['华胜益']
+    for (const offset of [0, 7]) {
+      const amounts = [2, 3].map(row => {
+        const r = row + offset
+        expect(exported[`G${r}`].f).toBe(`ROUND(D${r}*F${r},2)`)
+        return Number((Number(exported[`D${r}`].v) * Number(exported[`F${r}`].v)).toFixed(2))
+      })
+      expect(amounts).toEqual([1616, 1414])
+      expect(exported[`G${4 + offset}`].f).toBe(`ROUND(SUM(G${2 + offset}:G${3 + offset}),2)`)
+      expect(amounts.reduce((a, b) => a + b, 0)).toBe(exported[`G${4 + offset}`].v)
+      expect(exported[`G${5 + offset}`].v).toBe(numToChinese(3030))
+    }
+  })
+})
 
 it('公司抬头 22 号、购销合同 18 号，其余 12 号加粗，合并后保持相同格式', () => {
   const ws = XLSX.utils.aoa_to_sheet([['标题', '明细', '合同条款', '英文名称', '物料编码'], [153], [], ['购销合同']])
