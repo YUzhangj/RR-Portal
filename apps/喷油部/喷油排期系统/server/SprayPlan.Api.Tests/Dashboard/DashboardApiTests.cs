@@ -48,7 +48,7 @@ public class DashboardApiTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Dashboard_InProductionQuantity_MatchesOverviewRemainingParts()
+    public async Task Dashboard_InProductionQuantity_IncludesScheduledAndMatchesOverviewRemainingQty()
     {
         await LoginAsync("clerk", "clerk123");
         await _factory.WithDbAsync(async db => {
@@ -61,12 +61,61 @@ public class DashboardApiTests : IAsyncLifetime
                 ExternalOrderNo = "RECEIVED", Status = "received", OrderDate = DateTime.UtcNow,
                 PartQtys = new() { new() { PartName = "头", Qty = 500 } }
             });
+            foreach (var status in new[] { "scheduled", "completed", "archived", "draft" })
+                db.Orders.Add(new SprayPlan.Api.Entities.Order {
+                    ExternalOrderNo = status, Status = status, OrderDate = DateTime.UtcNow,
+                    PartQtys = new() { new() { PartName = "头", Qty = 50 }, new() { PartName = "脚", Qty = 50 } }
+                });
             await db.SaveChangesAsync();
         });
         var stats = await _client.GetFromJsonAsync<JsonElement>("/api/dashboard");
-        Assert.Equal(160, stats.GetProperty("inProductionQty").GetInt32());
+        Assert.Equal(150, stats.GetProperty("inProductionQty").GetInt32());
         var overview = await _client.GetFromJsonAsync<JsonElement>("/api/orders/overview");
-        Assert.Contains(overview.EnumerateArray(), o => o.GetProperty("inProductionRemainingQty").GetInt32() == 160);
+        Assert.Contains(overview.EnumerateArray(), o => o.GetProperty("remainingQty").GetInt32() == 100);
+    }
+
+    [Fact]
+    public async Task Dashboard_QuantityUsesBottleneckAndExcludesPendingInactiveAndOtherFactory()
+    {
+        await LoginAsync("clerk", "clerk123");
+        await _factory.WithDbAsync(async db => {
+            foreach (var (status, demand, firstStep, lastStep, secondPart) in new[] {
+                ("scheduled", 100, 100, 80, 90), ("in_production", 200, 90, 130, 120)
+            }) {
+                db.Orders.Add(new SprayPlan.Api.Entities.Order {
+                    ExternalOrderNo = "BOTTLENECK-" + status, Status = status, OrderDate = DateTime.UtcNow,
+                    PartQtys = new() { new() { PartName = "头", Qty = demand }, new() { PartName = "脚", Qty = demand } },
+                    Plans = new() {
+                        new() { PartName = "头", StepNo = 1, GoodQty = firstStep, LineId = 1, PlanDate = DateTime.UtcNow },
+                        new() { PartName = "头", StepNo = 2, GoodQty = lastStep, LineId = 1, PlanDate = DateTime.UtcNow },
+                        new() { PartName = "头", StepNo = 2, GoodQty = 500, LineId = 1, PlanDate = DateTime.UtcNow, DeletedAt = DateTime.UtcNow },
+                        new() { PartName = "脚", StepNo = 1, GoodQty = secondPart, LineId = 1, PlanDate = DateTime.UtcNow }
+                    }
+                });
+            }
+            foreach (var status in new[] { "received", "completed", "archived" })
+                db.Orders.Add(new SprayPlan.Api.Entities.Order {
+                    ExternalOrderNo = "EXCLUDED-" + status, Status = status, OrderDate = DateTime.UtcNow,
+                    PartQtys = new() { new() { PartName = "头", Qty = 700 } }
+                });
+            db.Orders.Add(new SprayPlan.Api.Entities.Order {
+                ExternalOrderNo = "PENDING", Status = "scheduled", PendingProduct = true, OrderDate = DateTime.UtcNow,
+                PartQtys = new() { new() { PartName = "头", Qty = 500 } }
+            });
+            db.Orders.Add(new SprayPlan.Api.Entities.Order {
+                ExternalOrderNo = "OTHER-FACTORY", FactoryId = "HUADENG", Status = "scheduled", OrderDate = DateTime.UtcNow,
+                PartQtys = new() { new() { PartName = "头", Qty = 987 } }
+            });
+            await db.SaveChangesAsync();
+        });
+        var stats = await _client.GetFromJsonAsync<JsonElement>("/api/dashboard");
+        Assert.Equal(130, stats.GetProperty("inProductionQty").GetInt32()); // (100 - 80) + (200 - 90)
+        var orders = await _client.GetFromJsonAsync<JsonElement>("/api/orders");
+        var includedIds = orders.EnumerateArray().Where(o => !o.GetProperty("pendingProduct").GetBoolean() &&
+            o.GetProperty("status").GetString() is "scheduled" or "in_production").Select(o => o.GetProperty("id").GetInt32()).ToHashSet();
+        var overview = await _client.GetFromJsonAsync<JsonElement>("/api/orders/overview");
+        Assert.Equal(130, overview.EnumerateArray().Where(o => includedIds.Contains(o.GetProperty("id").GetInt32()))
+            .Sum(o => o.GetProperty("remainingQty").GetInt32()));
     }
 
     [Fact]
