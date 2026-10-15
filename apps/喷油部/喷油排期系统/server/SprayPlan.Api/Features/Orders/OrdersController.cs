@@ -837,6 +837,7 @@ public class OrdersController(AppDbContext db, PdfStorage pdf) : ControllerBase
         if (rows.Any(row => row.LaborPrice is < 0))
             return BadRequest(new { error = "人工价格不能小于 0" });
 
+        await using var transaction = await db.Database.BeginTransactionAsync();
         var order = await db.Orders
             .Include(o => o.PartQtys)
             .Include(o => o.Product!).ThenInclude(product => product.Parts)
@@ -866,6 +867,7 @@ public class OrdersController(AppDbContext db, PdfStorage pdf) : ControllerBase
         if (lines.Count != requestedLineIds.Count)
             return BadRequest(new { error = "所选拉别不存在、已停用或不属于当前厂区，请刷新页面后重试" });
         var lineById = lines.ToDictionary(line => line.Id);
+        var calendar = new ProductionCalendar(await db.Holidays.AsNoTracking().ToListAsync());
         var sourcePartIds = order.PartQtys.Where(part => part.SourcePartId.HasValue)
             .Select(part => part.SourcePartId!.Value).ToList();
         var relatedProducts = await db.Products.Include(product => product.Parts)
@@ -926,7 +928,7 @@ public class OrdersController(AppDbContext db, PdfStorage pdf) : ControllerBase
             var stepNo = rows.Take(rowIndex + 1).Count(previous => previous.PartQtyId == row.PartQtyId);
             var line = lineById[row.LineId!.Value];
             var craft = line.CraftType;
-            var start = DateUtil.ParseUtc(row.StartDate!);
+            var start = calendar.NextWorkday(DateUtil.ParseUtc(row.StartDate!));
             var dailyTarget = row.DailyTarget!.Value;
             var scheduledParts = order.PartQtys.Where(part => part.Qty > 0 && (row.PartQtyId is null || row.PartQtyId == part.Id));
             foreach (var part in scheduledParts)
@@ -945,7 +947,7 @@ public class OrdersController(AppDbContext db, PdfStorage pdf) : ControllerBase
                         LastModifiedAt = now, ModificationHistory = "[]",
                     });
                     remaining -= qty;
-                    day = day.AddDays(1);
+                    day = calendar.NextWorkday(day.AddDays(1));
                 }
             }
         }
@@ -955,6 +957,7 @@ public class OrdersController(AppDbContext db, PdfStorage pdf) : ControllerBase
         order.LastUpdatedBy = by;
         order.UpdatedAt = now;
         await db.SaveChangesAsync();
+        await transaction.CommitAsync();
         return StatusCode(201, new CreateOrderProcessScheduleResult(plans.Count,
             plans.Count == 0 ? null : ScheduleCalc.Ymd(plans.Min(plan => plan.PlanDate)),
             plans.Count == 0 ? null : ScheduleCalc.Ymd(plans.Max(plan => plan.PlanDate))));
