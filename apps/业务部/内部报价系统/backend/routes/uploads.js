@@ -216,7 +216,7 @@ router.post('/assembly-sheet', requireAuth, memUpload.single('file'), async (req
   if (!req.file) return res.status(400).json({ error: '缺少文件' });
   if (!/\.(xls|xlsx)$/i.test(req.file.originalname)) return res.status(400).json({ error: '只支持 .xls/.xlsx' });
   try {
-    const result = await parseAssemblyWorkbook(req.file.buffer);
+    const result = await parseAssemblyWorkbook(req.file.buffer, { mixed: req.query.mixed === '1' });
     if (result.error) return res.status(422).json(result);
     res.json(result);
   } catch (e) {

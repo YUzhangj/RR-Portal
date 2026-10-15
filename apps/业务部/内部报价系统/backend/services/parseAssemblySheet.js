@@ -149,7 +149,56 @@ function sheetjsToRows(sheet) {
   });
 }
 
-async function parseWorkbook(buffer) {
+// Explicit SKU lanes are kept separate from package-wide labor.
+function parseMixedAssembly(sheets) {
+  for (const sheet of sheets) {
+    const headerIndex = sheet.rows.findIndex(row => row.some(v => /^小产品编号$/.test(toStr(v).trim())) && isHeaderRow(row));
+    if (headerIndex < 0) continue;
+    const header = sheet.rows[headerIndex];
+    const codeCol = header.findIndex(v => toStr(v).trim() === '小产品编号');
+    const lanes = indexHeader(header);
+    const groups = new Map();
+    const errors = [];
+    for (const lane of lanes) {
+      let qty = null;
+      let hours = null;
+      const laneGroups = new Map();
+      for (const row of sheet.rows.slice(headerIndex + 1)) {
+        const label = toStr(row[lane.countCol - 1]).replace(/\s/g, '');
+        if (/^(目标数|目标数量|产能|生产量)$/.test(label)) { qty = toNum(row[lane.countCol]); continue; }
+        if (label === '时间') { hours = toNum(row[lane.countCol]); continue; }
+        const name = toStr(row[lane.nameCol]);
+        const count = toNum(row[lane.countCol]);
+        if (!name || !(count > 0) || /工序名称|合计|总计|功能.*要求/.test(name)) continue;
+        const code = lane.kind === 'packaging' ? '' : toStr(row[codeCol]).trim();
+        if (lane.kind !== 'packaging' && !code) { errors.push(`第 ${sheet.rows.indexOf(row) + 1} 行缺少小产品编号`); continue; }
+        const key = lane.kind + ':' + code;
+        if (!laneGroups.has(key)) laneGroups.set(key, { product: code || lane.title, source_product_code: code, shared: lane.kind === 'packaging', kind: lane.kind, qty: null, team: 1, steps: [] });
+        laneGroups.get(key).steps.push({ name, count, note: toStr(row[lane.noteCol]) });
+      }
+      for (const [key, group] of laneGroups) {
+        group.qty = qty > 0 ? qty : null;
+        if (hours > 0) group.work_hours = hours;
+        if (groups.has(key)) return { error: '同一产品有重复工序栏，请核对表格' };
+        groups.set(key, group);
+      }
+    }
+    if (errors.length) return { error: errors.join('；') };
+    const result = [...groups.values()];
+    // A single target on this mixed labor sheet applies to every product lane.
+    const targets = [...new Set(result.map(g => g.qty).filter(qty => qty > 0))];
+    const hours = [...new Set(result.map(g => g.work_hours).filter(value => value > 0))];
+    for (const group of result) {
+      if (!group.qty && targets.length === 1) group.qty = targets[0];
+      if (!group.work_hours && hours.length === 1) group.work_hours = hours[0];
+    }
+    if (!result.length) return { error: '未识别到装工工序' };
+    return { format: 'mixed_assembly', groups: result, count: result.reduce((n,g) => n + g.steps.length, 0), sheet_used: sheet.name };
+  }
+  return { error: '混装装工表需包含“小产品编号”“工序名称”和“人数”列' };
+}
+
+async function parseWorkbook(buffer, options = {}) {
   let sheets = [];
   // 尝试 .xlsx（ExcelJS）
   try {
@@ -179,6 +228,8 @@ async function parseWorkbook(buffer) {
     }
   }
   if (!sheets.length) return { error: '工作簿为空' };
+
+  if (options.mixed) return parseMixedAssembly(sheets);
 
   // 新版装工报价表：按产品分组，一次识别组装与包装人数。
   for (const sheet of sheets) {

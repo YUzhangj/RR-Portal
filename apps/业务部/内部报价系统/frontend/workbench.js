@@ -5156,9 +5156,13 @@ function installDepartmentExport(host, dept, quoteId) {
     // 喷油部、电子部和车缝部保留报价导入入口，其余部门沿用手动填写模式。
     if (!['painting', 'electronic', 'sewing'].includes(dept)) {
       host.querySelectorAll('button').forEach(button => {
+        if (dept === 'assembly' && button.closest('[data-mixed-assembly-import]')) return;
         if (/导入/.test(button.textContent || '') || /上传.*报价/.test(button.textContent || '')) button.remove();
       });
-      host.querySelectorAll('input[type="file"][accept*=".xls"]').forEach(input => input.remove());
+      host.querySelectorAll('input[type="file"][accept*=".xls"]').forEach(input => {
+        if (dept === 'assembly' && input.closest('[data-mixed-assembly-import]')) return;
+        input.remove();
+      });
     }
     if (!host.querySelector(`[data-department-export="${dept}"]`)) {
       const heading = host.querySelector('h3') || host;
