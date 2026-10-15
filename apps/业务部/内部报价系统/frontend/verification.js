@@ -674,18 +674,28 @@ function renderDepartmentWorkbench() {
     renderer(body, section._draft, editable, onChange, fxRmbHkd);
   }
 
+  let savePending = false;
   const save = async submit => {
+    if (savePending) return;
     if (submit && !confirm(`确认提交 ${section.dept_name} 的 ${versionTitle(version)} 核价明细审核？`)) return;
+    savePending = true;
+    body.inert = true;
+    const saveButtons = [$('verification-save-draft'), $('verification-submit')].filter(Boolean);
+    saveButtons.forEach(button => { button.disabled = true; });
     try {
       await api(`/verifications/versions/${version.id}/sections/${section.id}`, {
         method: 'PUT',
-        body: JSON.stringify({ payload: section._draft, submit }),
+        body: JSON.stringify({ payload: section._draft, submit, base_revision: section.revision }),
       });
-      sectionDirty = false;
       taskState = await fetchTask(taskState.quote.id, version.id);
+      sectionDirty = false;
       renderDetail();
     } catch (error) {
       alert(error.message);
+    } finally {
+      savePending = false;
+      body.inert = false;
+      saveButtons.forEach(button => { button.disabled = false; });
     }
   };
   if ($('verification-save-draft')) $('verification-save-draft').onclick = () => save(false);

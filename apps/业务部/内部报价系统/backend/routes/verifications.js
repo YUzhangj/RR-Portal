@@ -2,6 +2,7 @@ const express = require('express');
 const db = require('../db');
 const { requireAuth, quoteAccess } = require('../middleware/auth');
 const { expandEngineeringMolds } = require('../services/engineeringMolds');
+const {sectionRevision, assertSectionRevision, saveVerificationSection} = require('../services/verificationSectionSave');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -267,6 +268,7 @@ router.get('/:quoteId', async (req, res) => {
     selected_version: selectedVersion,
     sections: sections.map(section => ({
       ...section,
+      revision: sectionRevision(section),
       can_edit: selectedVersion.status !== 'completed' && selectedVersion.status !== 'cancelled'
         && section.status !== 'approved' && canOperateDepartment(req.user, section.dept),
       can_review: selectedVersion.status !== 'completed' && selectedVersion.status !== 'cancelled'
@@ -294,10 +296,14 @@ router.put('/versions/:versionId/sections/:sectionId', async (req, res) => {
   const payloadJson = JSON.stringify(payload);
   if (payloadJson.length > 2_000_000) return res.status(413).json({ error: '核价部门数据过大' });
   const submit = Boolean(req.body?.submit);
-  await db.prepare(`UPDATE quote_verification_sections
-    SET payload_json=?, status=CASE WHEN ?=1 THEN 'filled' ELSE status END,
-      filled_by=?, filled_at=datetime('now') WHERE id=?`)
-    .run(payloadJson, submit ? 1 : 0, actorName(req.user), sectionId);
+  let filledAt;
+  try {
+    assertSectionRevision(section, req.body?.base_revision);
+    filledAt = await saveVerificationSection(db, section, payload, submit, actorName(req.user));
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    throw error;
+  }
   const status = await recalculateVersionStatus(versionId);
   await db.prepare(`UPDATE quote_verifications SET status='in_progress', updated_by=?, updated_at=datetime('now') WHERE quote_id=?`)
     .run(actorName(req.user), section.quote_id);
@@ -306,7 +312,7 @@ router.put('/versions/:versionId/sections/:sectionId', async (req, res) => {
       VALUES (?, ?, ?, 'verification_submit', ?)`)
       .run(section.quote_id, section.dept, actorName(req.user), `${section.version_label} 提交部门核价审核`);
   }
-  res.json({ ok: true, status });
+  res.json({ ok: true, status, filled_at: filledAt });
 });
 
 router.post('/versions/:versionId/sections/:sectionId/review', async (req, res) => {
