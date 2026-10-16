@@ -51,3 +51,39 @@ test('imported capsule ratios drive backend totals and common cost exactly once'
  assert.ok(Math.abs(result.final_usd-(10*.1389+20*.0694+2))<1e-10);
  assert.equal(result.cost_units,1);assert.equal(result.common_components.color_box,2);
 });
+
+test('partial direct-NA import keeps existing positive fraction and rejects all-zero atomically',()=>{
+ const config={enabled:true,mode:'equal',units_per_pack:6,na_direct:true,products:[
+  {id:'a',code:'A',name:'A',source_number:'01',ratio:1,na_ratio:.1},
+  {id:'b',code:'B',name:'B',source_number:'02',ratio:1,na_ratio:'1/2'},
+ ]};
+ const before=JSON.stringify(config);
+ const updated=apply(config,[{source_number:'01',code:'A',name:'A',na_ratio:0}]);
+ assert.equal(updated.config.products[0].na_ratio,0);
+ assert.equal(updated.config.products[1].na_ratio,'1/2');
+ assert.deepEqual(updated.unmatched,['B']);
+ assert.throws(()=>apply(config,[{source_number:'01',code:'A',name:'A',na_ratio:0},{source_number:'02',code:'B',name:'B',na_ratio:0}]),/合计必须大于零/);
+ assert.equal(JSON.stringify(config),before);
+});
+
+test('capsule numeric exponent values retain precision through import, weights and JSON reload',async()=>{
+ const wb=new ExcelJS.Workbook(),ws=wb.addWorksheet('SKU');
+ ws.addRow(['NO.','Mini_item no','Discription','Ratio per capsule']);
+ ws.addRow([1,'A','A',1e-7]);ws.addRow([2,'B','B',1e21]);
+ const {records}=await parseWorkbook(await wb.xlsx.writeBuffer());
+ const config=apply({enabled:true,mode:'equal',units_per_pack:6,products:[]},records).config;
+ const reloaded=JSON.parse(JSON.stringify(config));
+ const weights=require('../frontend/mixed-molds').pricingWeights(reloaded);
+ assert.equal(weights[reloaded.products[0].id],1e-7);
+ assert.equal(weights[reloaded.products[1].id],1e21);
+});
+
+test('capsule parser rejects invalid cells without accepting partial numeric strings',async()=>{
+ const wb=new ExcelJS.Workbook(),ws=wb.addWorksheet('SKU');
+ ws.addRow(['NO.','Mini_item no','Discription','Ratio per capsule']);
+ ws.addRow([1,'A','A',1]);
+ for(const value of [-1,'1oops','1/2','NaN','Infinity',true,{formula:'1/0',result:{error:'#DIV/0!'}}]) {
+  ws.getCell('D2').value=value;
+  await assert.rejects(()=>wb.xlsx.writeBuffer().then(parseWorkbook),/Ratio per capsule 无效/);
+ }
+});

@@ -155,30 +155,46 @@ function parseMixedAssembly(sheets) {
     const headerIndex = sheet.rows.findIndex(row => row.some(v => /^小产品编号$/.test(toStr(v).trim())) && isHeaderRow(row));
     if (headerIndex < 0) continue;
     const header = sheet.rows[headerIndex];
+    if (header.filter(v => toStr(v).trim() === '小产品编号').length !== 1) {
+      return { error: '检测到多个“小产品编号”列，请按单列小产品编号的混装装工模板整理后重新导入' };
+    }
     const codeCol = header.findIndex(v => toStr(v).trim() === '小产品编号');
     const lanes = indexHeader(header);
     const groups = new Map();
     const errors = [];
+    const sheetTargets = new Set(), sheetHours = new Set();
     for (const lane of lanes) {
-      let qty = null;
-      let hours = null;
+      const targets = new Set(), hours = new Set();
       const laneGroups = new Map();
-      for (const row of sheet.rows.slice(headerIndex + 1)) {
-        const label = toStr(row[lane.countCol - 1]).replace(/\s/g, '');
-        if (/^(目标数|目标数量|产能|生产量)$/.test(label)) { qty = toNum(row[lane.countCol]); continue; }
-        if (label === '时间') { hours = toNum(row[lane.countCol]); continue; }
+      for (const [rowIndex, row] of sheet.rows.entries()) {
+        const label = toStr(row[lane.countCol - 1]).replace(/\s/g, '').replace(/[：:]$/, '');
+        const isTarget = /^(目标数|目标数量|总目标数量|产能|生产量)$/.test(label);
+        if (isTarget || label === '时间') {
+          const value = toNum(row[lane.countCol]);
+          // Empty metadata remains available for manual completion in preview.
+          // A supplied invalid value must not fall back to an old/default rate.
+          if (toStr(row[lane.countCol])) {
+            if (!(value > 0) || !Number.isFinite(value)) errors.push(`第 ${rowIndex + 1} 行${isTarget ? '生产量' : '时间'}无效`);
+            else (isTarget ? targets : hours).add(value);
+          }
+          continue;
+        }
+        if (rowIndex <= headerIndex) continue;
         const name = toStr(row[lane.nameCol]);
         const count = toNum(row[lane.countCol]);
         if (!name || !(count > 0) || /工序名称|合计|总计|功能.*要求/.test(name)) continue;
         const code = lane.kind === 'packaging' ? '' : toStr(row[codeCol]).trim();
-        if (lane.kind !== 'packaging' && !code) { errors.push(`第 ${sheet.rows.indexOf(row) + 1} 行缺少小产品编号`); continue; }
+        if (lane.kind !== 'packaging' && !code) { errors.push(`第 ${rowIndex + 1} 行缺少小产品编号`); continue; }
         const key = lane.kind + ':' + code;
         if (!laneGroups.has(key)) laneGroups.set(key, { product: code || lane.title, source_product_code: code, shared: lane.kind === 'packaging', kind: lane.kind, qty: null, team: 1, steps: [] });
         laneGroups.get(key).steps.push({ name, count, note: toStr(row[lane.noteCol]) });
       }
+      if (targets.size > 1 || hours.size > 1) return { error: `${lane.title}栏存在冲突的${targets.size > 1 ? '生产量' : '时间'}，请核对表格` };
+      for (const value of targets) sheetTargets.add(value);
+      for (const value of hours) sheetHours.add(value);
       for (const [key, group] of laneGroups) {
-        group.qty = qty > 0 ? qty : null;
-        if (hours > 0) group.work_hours = hours;
+        group.qty = targets.size ? [...targets][0] : null;
+        if (hours.size) group.work_hours = [...hours][0];
         if (groups.has(key)) return { error: '同一产品有重复工序栏，请核对表格' };
         groups.set(key, group);
       }
@@ -186,8 +202,8 @@ function parseMixedAssembly(sheets) {
     if (errors.length) return { error: errors.join('；') };
     const result = [...groups.values()];
     // A single target on this mixed labor sheet applies to every product lane.
-    const targets = [...new Set(result.map(g => g.qty).filter(qty => qty > 0))];
-    const hours = [...new Set(result.map(g => g.work_hours).filter(value => value > 0))];
+    const targets = [...sheetTargets];
+    const hours = [...sheetHours];
     for (const group of result) {
       if (!group.qty && targets.length === 1) group.qty = targets[0];
       if (!group.work_hours && hours.length === 1) group.work_hours = hours[0];

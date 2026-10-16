@@ -1,4 +1,4 @@
-(function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory();else root.MixedSku=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
+(function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory(require('./mixed-molds'));else root.MixedSku=factory(root.MixedMolds);})(typeof globalThis!=='undefined'?globalThis:this,function(molds){
   const serial=value=>/^\d+$/.test(String(value??'').trim())?String(Number(value)).padStart(2,'0'):String(value??'').trim();
   function productSerial(p){return serial(p.source_number || (/^\d+$/.test(String(p.code))?p.code:/^number_(\d+)_*$/.exec(p.id||'')?.[1] || /-(\d+)$/.exec(p.code||'')?.[1] || p.code));}
   function apply(config,records){
@@ -18,7 +18,7 @@
       const missing=next.products.filter(p=>!seen.has(productSerial(p)));
       if(!next.na_direct && missing.length) throw Error('首次导入NA比例需覆盖全部现有产品，缺少：'+missing.map(p=>p.code).join('、'));
       next.na_direct=true;
-      if(!next.products.some(p=>Number(p.na_ratio ?? p.ratio)>0)) throw Error('NA比例合计必须大于零');
+      if(!next.products.map(p=>molds.ratioValue(p.na_ratio ?? p.ratio)).some(value=>value>0)) throw Error('NA比例合计必须大于零');
     }
     if(new Set(next.products.map(p=>p.code)).size!==next.products.length)throw Error('导入后货号重复');
     return {config:next,matched,added,unmatched:next.products.filter(p=>!seen.has(productSerial(p))).map(p=>p.code)};
@@ -64,7 +64,14 @@
       if (matches.length !== 1) { unmatched.add((code || '缺少货号') + (matches.length ? '（匹配多款）' : '（未找到）')); continue; }
       const product = matches[0];
       if (!groups.has(product.id)) groups.set(product.id, {product, items:[]});
-      groups.get(product.id).items.push(JSON.parse(JSON.stringify(row)));
+      const group = groups.get(product.id);
+      // The department payload has one work-hours field per product. Never
+      // silently replace an earlier lane's hours when normalized codes match.
+      if (row.work_hours != null && group.items.some(item=>item.work_hours != null && Number(item.work_hours)!==Number(row.work_hours))) {
+        unmatched.add(product.code + '（同一产品工时冲突）');
+        continue;
+      }
+      group.items.push(JSON.parse(JSON.stringify(row)));
     }
     return {groups:[...groups.values()],unmatched:[...unmatched]};
   }
