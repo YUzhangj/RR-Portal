@@ -18,6 +18,12 @@ test('NA比例拒绝零分母、无效表达式与代码', () => {
     assert.throws(() => ratioValue(text));
   }
 });
+test('numeric NA ratios preserve exponent values and reject invalid numbers',()=>{
+ for(const value of [0,1e-7,1.2345678901234568e-12,1e21]) assert.equal(ratioValue(value),value);
+ for(const value of [NaN,Infinity,-Infinity,-.01]) assert.throws(()=>ratioValue(value));
+ // Text expressions continue to use the arithmetic-only grammar.
+ for(const value of ['1e-7','Infinity','NaN','1e21']) assert.throws(()=>ratioValue(value));
+});
 
 test('手填NA比例直接求和，合计不为1也不归一化', () => {
   const { pricingWeights } = require('../frontend/mixed-molds');

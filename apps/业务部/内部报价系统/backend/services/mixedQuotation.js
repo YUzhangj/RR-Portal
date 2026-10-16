@@ -117,6 +117,14 @@ function calculateMixedQuote(quote, sections, { strict = false } = {}) {
     freight_scenarios: freightScenarios.map(s => ({ ...s, final_usd: (beforeSurtax + (s.total - freight) * markup / divisor / fx) * (1 + surtax * surtaxMarkup / divisor) })),
     selected_container: selectedFreight.key,
     components, hasSourceData: true, pricing: { fx, divisor, markup, surtax_markup: surtaxMarkup, tax_mode: taxMode, fixed_charge_hkd: fixedCharge, surtax_pct: surtax * 100 } };
+  const amounts = [result.average_usd, result.average_hkd, result.common_usd, result.before_surtax_usd,
+    result.surcharge_usd, result.final_usd, result.final_hkd, result.quotedPrice,
+    ...Object.values(components), ...products.flatMap(p => [p.base_hkd, p.price_hkd, p.price_usd]),
+    ...result.freight_scenarios.filter(s => s.valid).map(s => s.final_usd)];
+  if (amounts.some(value => !Number.isFinite(value))) {
+    errors.push('报价金额超出有效计算范围，请核对NA比例、成本和汇率');
+    return invalid();
+  }
   if (strict && errors.length) throw new Error(errors.join('；'));
   return result;
 }
