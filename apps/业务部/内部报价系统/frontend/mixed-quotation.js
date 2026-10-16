@@ -12,6 +12,7 @@
   };
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = value => Number(value || 0).toFixed(4);
+  const ratioPercent = value => Number.isFinite(value * 100) ? `${value * 100}%` : `比值 ${value}`;
   const config = () => window.__data?.mixed_quote;
   const nested = new WeakSet();
   // Shared mold allocations are display-only; never copy them into saved injection rows.
@@ -58,6 +59,21 @@
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || '操作失败');
     return data;
+  }
+  async function uploadResult(path, file) {
+    const body = new FormData(); body.append('file', file);
+    const response = await fetch(path, { method: 'POST', credentials: 'include', body });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(data?.error || `解析失败（HTTP ${response.status}），请重新选择文件重试`);
+    if (!data) throw new Error('服务器返回的解析结果无效，请重新选择文件重试');
+    return data;
+  }
+  function assemblyImportState(root, cfg) {
+    const groups = list => (list || []).map(({ _open, ...group }) => group);
+    return JSON.stringify({ config: cfg, products: [...cfg.products.map(p => p.id), '__shared__'].map(id => {
+      const payload = id === '__shared__' ? root.mixed_shared : root.mixed_products[id];
+      return [id, groups(payload?.assembly_step_groups), groups(payload?.packaging_step_groups), payload?.assembly_std_time ?? 11];
+    }) });
   }
   const input = (key, value, edit, type = 'number') => `<input data-field="${key}" type="${type}" value="${esc(value)}" ${edit ? '' : 'disabled'} ${type === 'number' ? 'step="any" min="0"' : ''}>`;
   function renderAllMolds(host, root, cfg, selectProduct) {
@@ -518,6 +534,61 @@
         upload.querySelector('[data-supplier-kind]').onchange=()=>{upload.querySelector('[data-supplier-preview]').textContent='';upload.querySelector('[data-supplier-file]').value='';attach();};
         attach();
       }
+      if (dept === 'assembly' && edit && !fixedProductId) {
+        const upload = document.createElement('section'); upload.className = 'mixed-config';
+        upload.dataset.mixedAssemblyImport = '';
+        upload.innerHTML = '<h3>批量导入混装装工</h3><p class="muted">按小产品编号匹配货号，成品包装工序计入每包装共有费用。每款按自身工序人数计算装工，统一目标数自动带入各款生产量，再应用并保存装配部草稿。</p><label class="mixed-upload-button">选择装工报价表<input type="file" accept=".xlsx,.xls" aria-label="选择装工报价表"></label><div data-assembly-preview role="status" aria-live="polite"></div>';
+        host.insertBefore(upload, detail);
+        let uploadSequence = 0;
+        upload.querySelector('input').onchange = async event => {
+          const sequence = ++uploadSequence, control = event.target, file = control.files[0];
+          const preview = upload.querySelector('[data-assembly-preview]'); preview.textContent = '';
+          if (!file) { upload.setAttribute('aria-busy', 'false'); return; }
+          const state = assemblyImportState(root, cfg);
+          const active = () => sequence === uploadSequence && preview.isConnected !== false;
+          const current = () => cfg === config() && state === assemblyImportState(root, cfg);
+          preview.textContent = '正在解析装工报价表…'; upload.setAttribute('aria-busy', 'true');
+          try {
+            const result = await uploadResult('./api/uploads/assembly-sheet?mixed=1', file);
+            if (!active()) return;
+            if (!current()) throw Error('产品或装工资料已修改，请重新选择文件生成预览');
+            const plan = window.MixedSku.planAssembly(cfg, result.groups || []);
+            if (plan.unmatched.length) throw Error('以下货号无法唯一匹配，请先核对产品资料：' + plan.unmatched.join('、'));
+            if (!plan.groups.length) throw Error('没有可匹配的装工工序');
+            const rows = plan.groups.flatMap(g => g.items.map(item => ({product:g.product,item})));
+            preview.innerHTML = `<p>工作表：${esc(result.sheet_used || file.name)}，共 ${result.count} 道工序。生产量为空的项目须补填。</p><label>统一补填空白生产量 <input data-bulk-qty type="number" min="1" step="any"></label><button type="button" data-fill-qty>填入空白项</button><div class="mixed-scroll" role="region" aria-label="装工导入预览，可横向滚动" tabindex="0"><table><thead><tr><th>货号</th><th>名称</th><th>类型</th><th>工序数</th><th>工时 H</th><th>生产量</th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td>${esc(r.product.code)}</td><td style="white-space:normal;overflow-wrap:anywhere;min-width:140px;max-width:260px">${esc(r.product.name)}</td><td>${r.item.kind === 'packaging' ? '包装' : '组装'}</td><td>${r.item.steps.length}</td><td>${esc(r.item.work_hours ?? '保留原值')}</td><td><input data-assembly-qty="${i}" aria-label="${esc(r.product.code)} ${r.item.kind === 'packaging' ? '包装' : '组装'}生产量 ${i + 1}" type="number" min="1" step="any" required value="${r.item.qty || ''}"></td></tr>`).join('')}</tbody></table></div><button type="button" data-assembly-apply>应用到对应产品</button> <button type="button" class="mini" data-assembly-cancel>取消预览</button>`;
+            preview.querySelector('[data-assembly-cancel]').onclick = () => { ++uploadSequence; preview.textContent = ''; control.value = ''; upload.setAttribute('aria-busy', 'false'); };
+            preview.querySelector('[data-fill-qty]').onclick = () => {
+              const qty = Number(preview.querySelector('[data-bulk-qty]').value);
+              if (!(qty > 0) || !Number.isFinite(qty)) return alert('请输入有效生产量');
+              preview.querySelectorAll('[data-assembly-qty]').forEach(input => { if (!input.value) input.value = qty; });
+            };
+            preview.querySelector('[data-assembly-apply]').onclick = () => {
+              if (!active()) return;
+              if (!current()) { ++uploadSequence; preview.textContent = '产品或装工资料已修改，请重新选择文件生成预览'; control.value = ''; return; }
+              const inputs = [...preview.querySelectorAll('[data-assembly-qty]')];
+              if (inputs.some(input => !input.checkValidity() || !(Number(input.value) > 0) || !Number.isFinite(Number(input.value)))) return alert('请补齐每项有效生产量');
+              const getPayload = id => id === '__shared__' ? root.mixed_shared : root.mixed_products[id];
+              const existing = plan.groups.some(g => g.items.some(item => (getPayload(g.product.id)?.[item.kind === 'packaging' ? 'packaging_step_groups' : 'assembly_step_groups'] || []).length));
+              if (existing && !confirm('将替换匹配产品的对应装工分组及本次共有包装工序，确认？')) return;
+              ++uploadSequence;
+              upload.setAttribute('aria-busy', 'false');
+              rows.forEach((r,i) => { r.item.qty = Number(inputs[i].value); });
+              for (const g of plan.groups) {
+                const payload = g.product.id === '__shared__' ? root.mixed_shared : (root.mixed_products[g.product.id] ||= {});
+                for (const kind of ['assembly','packaging']) {
+                  const items = g.items.filter(item => item.kind === kind); if (!items.length) continue;
+                  payload[kind + '_step_groups'] = items.map(item => ({product:item.product,qty:item.qty,team:item.team || 1,steps:item.steps}));
+                  if (items[0].work_hours) payload.assembly_std_time = items[0].work_hours;
+                }
+              }
+              onChange(); draw(); preview.textContent = '已应用装工明细，请保存装配部草稿。';
+              control.value = '';
+            };
+          } catch (error) { if (active()) { preview.textContent = error.message; control.value = ''; } }
+          finally { if (sequence === uploadSequence) upload.setAttribute('aria-busy', 'false'); }
+        };
+      }
       if (dept === 'painting' && edit && !fixedProductId) {
         const upload=document.createElement('section');upload.className='mixed-config';
         upload.innerHTML='<h3>批量导入混装喷油</h3><label>选择整份喷油报价表 <input type="file" accept=".xlsx,.xls"></label><div data-paint-preview></div>';
@@ -583,6 +654,31 @@
               }));
           }
           detail.appendChild(summaries);
+          return;
+        }
+        if (dept === 'assembly' && selected === '__overall__') {
+          host.querySelector('.mixed-help').textContent = '整体资料集中显示各款装工；编辑工序请在上方选择单个产品。成品包装列在共有费用，只计一次。';
+          const products = [...cfg.products, {id:'__shared__',code:'共有费用',name:'成品包装（每包装计一次）'}];
+          const number = value => Number(value) || 0;
+          const rows = products.map(product => {
+            const payload = product.id === '__shared__' ? root.mixed_shared : (root.mixed_products[product.id] || {});
+            const assembly = payload.assembly_step_groups || [];
+            const packaging = payload.packaging_step_groups || [];
+            const groups = [...assembly, ...packaging];
+            const base = number(payload.assembly_base_rate ?? defaultAssemblyBaseRateForFactory());
+            const legacyTotal = key => (payload[key] || []).reduce((total,row) => total + number(row.qty) * number(row.unit_price), 0);
+            const assemblyCost = assemblyGroupsTotal(assembly,base) + legacyTotal('assembly_labor');
+            const packagingCost = assemblyGroupsTotal(packaging,base) + legacyTotal('packaging_labor');
+            const people = groups.reduce((total,g) => total + (g.steps || []).reduce((n,step) => n + number(step.count),0) * (number(g.team ?? 1) || 1),0);
+            const targets = [...new Set(groups.map(g => g.qty))].map(qty => esc(qty ?? '—')).join(' / ') || '—';
+            const steps = groups.reduce((total,g) => total + (g.steps || []).length,0);
+            return `<tr data-assembly-product="${esc(product.id)}"${product.id === '__shared__' ? ' class="hi"' : ''}><td>${esc(product.code)}</td><td style="white-space:normal;overflow-wrap:anywhere;min-width:140px;max-width:260px">${esc(product.name)}</td><td>${steps}</td><td>${people}</td><td>${targets}</td><td>${esc(payload.assembly_std_time ?? 11)}</td><td>${fmt(base)}</td><td>${fmt(assemblyCost)}</td><td>${fmt(packagingCost)}</td><td><strong>${fmt(assemblyCost + packagingCost)}</strong></td></tr>`;
+          });
+          detail.innerHTML = `<h3>混装装工汇总</h3><input type="search" placeholder="查找货号或品名" aria-label="查找装工汇总"><div class="mixed-scroll" role="region" aria-label="混装装工汇总，可横向滚动" tabindex="0"><table class="wb-table"><thead><tr><th>货号</th><th>产品名称</th><th>工序数</th><th>人数</th><th>目标数</th><th>工时 H</th><th>基数 HKD/人</th><th>半成品装工 HKD/PCS</th><th>成品包装 HKD/PCS</th><th>合计 HKD/PCS</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
+          detail.querySelector('input').oninput = event => {
+            const query = event.target.value.trim().toLowerCase();
+            detail.querySelectorAll('[data-assembly-product]').forEach((row,i) => { row.hidden = !`${products[i].code} ${products[i].name}`.toLowerCase().includes(query); });
+          };
           return;
         }
         if (selected === '__overall__') {
@@ -765,9 +861,11 @@
     const panel = document.createElement('section'); panel.className = 'mixed-config'; host.appendChild(panel);
     let expanded = !!saved?.enabled;
     const locked = sections.some(s => s.status === 'approved');
+    let skuUploadSequence = 0;
     function draw() {
+      ++skuUploadSequence;
       panel.innerHTML = `${edit && !locked ? `<label>报价类型 <select class="mixed-type" aria-label="报价类型"><option value="single" ${!expanded ? 'selected' : ''}>单品报价</option><option value="mixed" ${expanded ? 'selected' : ''}>混装报价</option></select></label>` : ''}<h3>${saved?.enabled ? '混装产品配置' : '报价类型：单品报价'}</h3>${!expanded ? `<p>支持多个小产品独立报价、共用模具拆价及混装平均价。</p>${edit && !locked ? '<button type="button" class="mixed-enable">设置为混装报价</button>' : '<p class="muted">解除审核后可设置混装报价。</p>'}` : `
-        <p class="muted">不预设小产品；可在工程/业务导入模具报价单，按配件序号建立小产品，也可手动添加。在此维护小产品和每包装数量。啤工需求量在啤机部手填，报价NA比例在汇总页填写。</p>
+        <p class="muted">不预设小产品；可在工程/业务导入模具报价单，按配件序号建立小产品，也可手动添加。在此维护小产品和每包装数量。啤工需求量在啤机部手填，报价NA比例可从配比表 Ratio per capsule 列导入，也可在汇总页填写。</p>
         <div class="mixed-fields"><label>每包装小产品数量${input('units_per_pack', cfg.units_per_pack, edit && !locked)}</label></div>
         ${edit && !locked ? `<label>导入产品资料（配比表）<input type="file" class="mixed-sku-file" accept=".xlsx"></label><div class="mixed-sku-preview"></div>` : ''}
         <div class="mixed-scroll"><table><thead><tr><th>小产品货号</th><th>小产品名称</th><th></th></tr></thead><tbody>${cfg.products.map((p, i) => `<tr data-product="${i}"><td>${input('code', p.code, edit && !locked, 'text')}</td><td>${input('name', p.name, edit && !locked, 'text')}</td><td>${edit && !locked ? '<button type="button" class="mini mixed-remove">移除</button>' : ''}</td></tr>`).join('')}</tbody></table></div>
@@ -780,16 +878,25 @@
         row.querySelector('.mixed-remove')?.addEventListener('click', () => { cfg.products.splice(index, 1); draw(); });
       });
       panel.querySelector('.mixed-sku-file')?.addEventListener('change', async event => {
-        const file=event.target.files[0];if(!file)return;
-        const preview=panel.querySelector('.mixed-sku-preview');preview.textContent='正在解析产品资料…';
+        const sequence=++skuUploadSequence,control=event.target,file=control.files[0];
+        const preview=panel.querySelector('.mixed-sku-preview');preview.textContent='';
+        if(!file){preview.setAttribute('aria-busy','false');return;}
+        const state=JSON.stringify(cfg),active=()=>sequence===skuUploadSequence&&preview.isConnected!==false;
+        preview.setAttribute('role','status');preview.setAttribute('aria-live','polite');preview.setAttribute('aria-busy','true');preview.textContent='正在解析产品资料…';
         try {
-          const fd=new FormData();fd.append('file',file);
-          const response=await fetch('./api/uploads/mixed-sku-sheet',{method:'POST',credentials:'include',body:fd});
-          const result=await response.json();if(!response.ok)throw Error(result.error);
+          const result=await uploadResult('./api/uploads/mixed-sku-sheet',file);
+          if(!active())return;
+          if(state!==JSON.stringify(cfg))throw Error('产品配置已修改，请重新选择配比表生成预览');
           const applied=window.MixedSku.apply(cfg,result.records);
-          preview.innerHTML=`<p>按序号匹配 ${applied.matched} 款，新增 ${applied.added} 款。已有模具和部门资料保留；本次只更新货号、名称和品牌，配比另行设置。</p>${applied.unmatched.length?`<p>未匹配的现有产品保留：${applied.unmatched.map(esc).join('、')}</p>`:''}<div class="mixed-scroll"><table><thead><tr><th>序号</th><th>货号</th><th>品牌</th><th>产品名称</th></tr></thead><tbody>${result.records.map(r=>`<tr><td>${esc(r.source_number)}</td><td>${esc(r.code)}</td><td>${esc(r.brand)}</td><td>${esc(r.name)}</td></tr>`).join('')}</tbody></table></div><button type="button" data-sku-apply>应用产品资料</button>`;
-          preview.querySelector('[data-sku-apply]').onclick=()=>{const latest=window.MixedSku.apply(cfg,result.records);cfg.products=latest.config.products;draw();panel.querySelector('.mixed-message').textContent='产品资料已应用，请点击保存混装配置。';};
-        } catch(error){preview.textContent=error.message;}
+          preview.innerHTML=`<p>按序号匹配 ${applied.matched} 款，新增 ${applied.added} 款。已有模具和部门资料保留；${result.records.some(r=>r.na_ratio!=null)?'同步导入 Ratio per capsule 为 NA 比例；各款乘比例求和，共有费用只计一次。':'本次更新货号、名称和品牌，保留原有比例。'}</p>${applied.unmatched.length?`<p>未匹配的现有产品保留：${applied.unmatched.map(esc).join('、')}</p>`:''}<div class="mixed-scroll"><table><thead><tr><th>序号</th><th>货号</th><th>品牌</th><th>产品名称</th><th>NA比例（Ratio per capsule）</th></tr></thead><tbody>${result.records.map(r=>`<tr><td>${esc(r.source_number)}</td><td>${esc(r.code)}</td><td>${esc(r.brand)}</td><td>${esc(r.name)}</td><td>${r.na_ratio==null?'保留原值':esc(r.na_ratio)+'（'+esc(ratioPercent(r.na_ratio))+'）'}</td></tr>`).join('')}</tbody></table></div><button type="button" data-sku-apply>应用产品资料</button>`;
+          preview.querySelector('[data-sku-apply]').onclick=()=>{
+            if(!active())return;
+            if(state!==JSON.stringify(cfg)){++skuUploadSequence;preview.textContent='产品配置已修改，请重新选择配比表生成预览';control.value='';return;}
+            try{const latest=window.MixedSku.apply(cfg,result.records);cfg.products=latest.config.products;cfg.na_direct=latest.config.na_direct;draw();panel.querySelector('.mixed-message').textContent='产品资料及比例已应用，请点击保存混装配置，同步更新汇总。';}
+            catch(error){preview.textContent=error.message;control.value='';}
+          };
+        } catch(error){if(active()){preview.textContent=error.message;control.value='';}}
+        finally{if(sequence===skuUploadSequence)preview.setAttribute('aria-busy','false');}
       });
       panel.querySelector('.mixed-add')?.addEventListener('click', () => { cfg.products.push({ id: `p_${uuid()}`, code: '', name: '', ratio: 1 }); draw(); });
       panel.querySelector('.mixed-cancel')?.addEventListener('click', () => { expanded = false; draw(); });
@@ -848,13 +955,13 @@
     };
     const aggregateRow = (average) => {
       const sum = getter => breakdowns.reduce((total, entry) => total + getter(entry) * (average ? entry.item.weight : 1), 0);
-      const label = average ? (result.config?.na_direct || result.config?.mode === 'ratio' ? '全部小产品平均价（NA）' : '全部小产品平均价') : '小产品合计';
+      const label = average ? (result.config?.na_direct || result.config?.mode === 'ratio' ? '全部小产品NA比例合计' : '全部小产品平均价') : '小产品合计';
       const note = average ? (result.config?.na_direct ? '各款分类金额 × 手填NA比例，再求和' : result.config?.mode === 'ratio' ? '各款分类金额 × 归一化生产配比，再求和' : `各款合计 ÷ ${result.products.length} 款`) : `${result.products.length} 款，不含共有费用`;
       return `<tr class="mixed-average-row ${average ? 'mixed-na-average-row' : ''}"><th scope="row">${label}</th><td>${note}</td>${columns.map(([key]) => average ? weightedCell(key) : `<td>${fmt(sum(e => e.breakdown.columns[key] || 0))}</td>`).join('')}${average ? weightedCell('total') : `<td class="mixed-cost-total">${fmt(sum(e => e.breakdown.total))}</td>`}<td>${average ? '每个小产品' : '—'}</td><td class="mixed-cost-total" ${average ? 'data-na-total-sum' : ''}>${average ? fmt(sum(e => e.breakdown.total)) : '—'}</td></tr>`;
     };
     const aggregateRows = result.products.length ? aggregateRow(false) + aggregateRow(true) : '';
     const combined = key => (key === 'total' ? commonBreakdown.total : commonBreakdown.columns[key] || 0) + breakdowns.reduce((sum, e) => sum + (key === 'total' ? e.breakdown.total : e.breakdown.columns[key] || 0) * e.item.weight, 0);
-    const combinedRow = `<tr class="mixed-combined-row"><th scope="row">合计</th><td>NA平均价＋共有费用</td>${columns.map(([key]) => weightedCell(key, commonBreakdown.columns[key] || 0)).join('')}<td class="mixed-cost-total" data-na-combined data-common-cost="${commonBreakdown.total}">${fmt(combined('total'))}</td><td>—</td><td class="mixed-cost-total" data-na-combined data-common-cost="${commonBreakdown.total}">${fmt(combined('total'))}</td></tr>`;
+    const combinedRow = `<tr class="mixed-combined-row"><th scope="row">合计</th><td>NA比例合计＋共有费用</td>${columns.map(([key]) => weightedCell(key, commonBreakdown.columns[key] || 0)).join('')}<td class="mixed-cost-total" data-na-combined data-common-cost="${commonBreakdown.total}">${fmt(combined('total'))}</td><td>—</td><td class="mixed-cost-total" data-na-combined data-common-cost="${commonBreakdown.total}">${fmt(combined('total'))}</td></tr>`;
 
     return `<h3>各小产品报价（未乘NA比例）</h3><p class="muted">各分类及成本合计显示原始金额；右侧合计＝成本合计 × NA比例，底部汇总各款结果。</p><p class="muted">物料金额按五金及工程明细的分类归集，同类合并；产品利宝和彩盒利宝分别列示；金额为 HKD，无费用留空。成本合计未加码点，右侧显示乘NA比例后的成本合计。共有费用单列，每包装计一次。</p><div class="mixed-scroll mixed-cost-matrix"><table aria-label="各小产品费用明细"><thead><tr><th>货号</th><th>品名</th>${columns.map(([,label]) => `<th>${esc(label)}</th>`).join('')}<th>成本合计 HKD</th><th>NA比例</th><th>NA比例后合计 HKD</th></tr></thead><tbody>${result.products.map(item => row(item, engineering.mixed_products?.[item.id], false)).join('')}${aggregateRows}${result.common_components ? row({ code: '共有费用', name: '每包装共有项目', components: result.common_components, price_hkd: result.common_usd * result.pricing.fx, price_usd: result.common_usd }, engineering.mixed_shared, true) : ''}${combinedRow}</tbody></table></div>`;
   }
@@ -882,7 +989,7 @@
     const selector = (s, index) => `<select data-compare-column="${index}" aria-label="对比运输方式${index}">${choices.map(option => `<option value="${esc(option.key)}" ${option.key === s.key ? 'selected' : ''}>${esc(option.name)}${option.valid ? '' : '（待补资料）'}</option>`).join('')}</select>`;
 
     const row = (label, key, highlight = '') => `<tr class="${highlight}"><td>${label}</td>${visible.map((s, index) => `<td data-compare-cell="${index}" data-price-value="${key}" data-price-scenario="${esc(s.key)}"></td>`).join('')}</tr>`;
-    host.innerHTML = `<h3>🚚 出货价算价</h3><p class="muted">主体小计＝上方“NA平均价＋共有费用”合计－车缝－电子；主体、车缝、电子分别乘码点，合计后统一除找数。</p>
+    host.innerHTML = `<h3>🚚 出货价算价</h3><p class="muted">主体小计＝上方“NA比例合计＋共有费用”合计－车缝－电子；主体、车缝、电子分别乘码点，合计后统一除找数。</p>
       <label>报客场景 <select data-container ${editable ? '' : 'disabled'}>${scenarios.map(s => `<option value="${esc(s.key)}" ${s.key === containerKey ? 'selected' : ''} ${s.valid ? '' : 'disabled'}>${esc(s.name)}${s.valid ? '' : '（待补资料）'}</option>`).join('')}</select></label>
       <div class="mixed-scroll"><table class="wb-table ship-table" aria-label="出货价算价"><thead><tr><th>项</th>${visible.map((s, index) => `<th>${s.key === 'factory' ? esc(s.name) : selector(s, index)}</th>`).join('')}</tr></thead><tbody>
       ${row('主体小计 HK$（不含车缝、电子）','main')}${row('运费 HK$','transport')}${row('吊柜费 HK$','cabinet')}${row('含运 HK$','withFreight','hi')}
@@ -988,23 +1095,31 @@
       const naInputs = [...host.querySelectorAll('[data-na-product]')];
       const naStatus = host.querySelector('[data-na-status]');
       const naSave = host.querySelector('[data-save-na]');
-      const naConfig = () => ({ ...result.config, na_direct: true, products: result.config.products.map(product => ({ ...product, na_ratio: naInputs.find(el => el.dataset.naProduct === product.id).value.trim() })) });
+      const naConfig = () => ({ ...result.config, na_direct: true, products: result.config.products.map(product => {
+        const value = naInputs.find(el => el.dataset.naProduct === product.id).value.trim();
+        const previous = product.na_ratio ?? product.ratio;
+        return { ...product, na_ratio: typeof previous === 'number' && value === String(previous) ? previous : value };
+      }) });
       naInputs.forEach(el => el.oninput = () => {
         try {
           const shares = window.MixedMolds.pricingWeights(naConfig());
-          host.querySelectorAll('[data-na-share]').forEach(node => node.textContent = (shares[node.dataset.naShare] * 100).toFixed(2) + '%');
-          host.querySelectorAll('[data-na-weighted]').forEach(node => {
+          const weighted = [...host.querySelectorAll('[data-na-weighted]')].map(node => {
             const values = JSON.parse(node.dataset.naWeighted);
-            node.textContent = fmt(Object.entries(values).reduce((sum, [id, value]) => sum + value * shares[id], Number(node.dataset.naOffset)));
+            return [node, Object.entries(values).reduce((sum, [id, value]) => sum + value * shares[id], Number(node.dataset.naOffset))];
           });
-          let naTotal = 0;
-          host.querySelectorAll('[data-na-total]').forEach(node => {
-            const value = Number(node.dataset.naCost) * shares[node.dataset.naTotal];
-            node.textContent = fmt(value); naTotal += value;
+          const totals = [...host.querySelectorAll('[data-na-total]')].map(node => [node, Number(node.dataset.naCost) * shares[node.dataset.naTotal]]);
+          const naTotal = totals.reduce((sum, [, value]) => sum + value, 0);
+          const combined = [...host.querySelectorAll('[data-na-combined]')].map(node => [node, naTotal + Number(node.dataset.commonCost)]);
+          if (![...weighted, ...totals, ...combined, [null, naTotal]].every(([, value]) => Number.isFinite(value))) {
+            throw new Error('报价金额超出有效计算范围，请核对NA比例、成本和汇率');
+          }
+          host.querySelectorAll('[data-na-share]').forEach(node => {
+            const value = shares[node.dataset.naShare];
+            node.textContent = Number.isFinite(value * 100) ? (value * 100).toFixed(2) + '%' : ratioPercent(value);
           });
+          [...weighted, ...totals, ...combined].forEach(([node, value]) => node.textContent = fmt(value));
           const totalCell = host.querySelector('[data-na-total-sum]');
           if (totalCell) totalCell.textContent = fmt(naTotal);
-          host.querySelectorAll('[data-na-combined]').forEach(node => node.textContent = fmt(naTotal + Number(node.dataset.commonCost)));
           naStatus.textContent = '比例试算已更新，保存后重新计算报价。'; naSave.disabled = false;
         } catch (error) { naStatus.textContent = error.message; naSave.disabled = true; }
       });

@@ -35,9 +35,9 @@ function addMixedClassification(wb, quote, result, keys, sections=[]) {
   result.products.forEach((p,i)=>detail(items[i],i));
   const last=ws.rowCount;
   const subtotal=ws.addRow(['小产品合计',`${result.products.length}款，不含共有费用`]).number;
-  const avg=ws.addRow(['全部小产品平均价（NA）','各款分类金额×NA比例，再求和']).number;
+  const avg=ws.addRow([result.config.na_direct?'全部小产品NA比例合计':'全部小产品平均价（NA）','各款分类金额×NA比例，再求和']).number;
   const common=detail(items.at(-1),result.products.length,true);
-  const combined=ws.addRow(['合计','NA平均价＋共有费用']).number;
+  const combined=ws.addRow(['合计','NA比例合计＋共有费用']).number;
   const refs={};
   for(let col=3;col<=weightedCol;col++){
     if(col===naCol)continue;

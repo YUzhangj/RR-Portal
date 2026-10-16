@@ -10,6 +10,12 @@
   };
   // Parse arithmetic only; never execute user-entered formula text.
   function ratioValue(value) {
+    // Imported Excel numbers may stringify in exponent notation. Keep their
+    // original precision rather than routing them through the text grammar.
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value) || value < 0) throw new Error('NA比例必须计算为非负数，分母不能为零');
+      return value;
+    }
     const source = String(value ?? '').trim().replace(/^=/, '').replace(/\s+/g, '');
     if (!source || source.length > 200) throw new Error('NA比例请输入数字、分数或算式');
     const tokens = source.match(/(?:\d+(?:\.\d*)?|\.\d+)|[()+*/%\-]/g) || [];
