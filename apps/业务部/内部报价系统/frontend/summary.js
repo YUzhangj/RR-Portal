@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const state = { rows: [], workshops: [], components: [], summaryColumns: [], canEdit: false };
+const state = { rows: [], workshops: [], components: [], summaryColumns: [], canEdit: false, drafts: new Map(), saved: new Map(), saving: new Set(), loadSequence: 0, saveEpoch: 0 };
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -78,19 +78,20 @@ function renderHead() {
 
 function rowHtml(row, serial) {
   const confirmation = row.confirmation || { status: 'pending', workshops: [] };
-  const selectedWorkshop = (confirmation.workshops || [])[0] || '';
+  const draft = state.drafts.get(String(row.id)) || state.saved.get(String(row.id));
+  const selectedWorkshop = draft ? draft.workshop : (confirmation.workshops || [])[0] || '';
   const disabled = state.canEdit ? '' : 'disabled';
   const workshopHtml = `<select class="summary-workshop" ${disabled}>
     <option value="">请选择车间</option>
     ${state.workshops.map(item => `<option value="${esc(item.code)}" ${selectedWorkshop === item.code ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}
   </select>`;
-  const price = confirmation.confirmed_price ?? row.quoted_price;
-  const qty = confirmation.confirmed_qty ?? row.qty;
+  const price = draft ? draft.confirmed_price : confirmation.confirmed_price ?? row.quoted_price;
+  const qty = draft ? draft.confirmed_qty : confirmation.confirmed_qty ?? row.qty;
   const componentHtml = state.summaryColumns.map(item => `<td class="${summaryColorClass(item.code)} ${item.format === 'percent' ? 'component-share' : item.format === 'amount' ? 'component-amount' : 'component-value'}">${formatted(row.summary_values?.[item.code], item.format)}</td>`).join('');
   return `<tr data-id="${row.id}">
     <td class="summary-customer-no">${serial}</td>
     <td><b>${esc(row.customer || '未填写')}</b></td>
-    <td><div class="summary-workshop-actions">${workshopHtml}${state.canEdit ? '<button type="button" class="save-summary">保存</button>' : ''}</div></td>
+    <td><div class="summary-workshop-actions">${workshopHtml}${state.canEdit ? `<button type="button" class="save-summary" ${state.saving.has(String(row.id)) ? 'disabled' : ''}>${state.saving.has(String(row.id)) ? '保存中…' : state.drafts.has(String(row.id)) ? '保存*' : '保存'}</button>` : ''}</div></td>
     <td><a href="./quote.html?id=${row.id}"><b>${esc(row.quote_no)}</b></a></td>
     <td><b>${esc(row.product_name)}</b>${row.version ? `<small>${esc(row.version)}</small>` : ''}</td>
     <td>${dateOnly(row.created_at)}</td>
@@ -98,7 +99,7 @@ function rowHtml(row, serial) {
     <td><input class="summary-price" type="number" min="0" step="any" value="${esc(price ?? '')}" ${disabled}></td>
     ${componentHtml}
     <td><span class="badge ${confirmation.status === 'confirmed' ? 'b-approved' : 'b-filled'}">${confirmation.status === 'confirmed' ? '已确认' : '待确认'}</span></td>
-    <td><input class="summary-note" value="${esc(confirmation.note || '')}" placeholder="选填" ${disabled}></td>
+    <td><input class="summary-note" value="${esc(draft ? draft.note : confirmation.note || '')}" placeholder="选填" ${disabled}></td>
   </tr>`;
 }
 
@@ -137,28 +138,77 @@ function render() {
   document.querySelectorAll('.save-summary').forEach(button => { button.onclick = () => saveRow(button.closest('tr')); });
 }
 
+function rowInput(tr) {
+  return {
+    workshop: tr.querySelector('.summary-workshop').value,
+    confirmed_price: tr.querySelector('.summary-price').value,
+    confirmed_qty: tr.querySelector('.summary-qty').value,
+    note: tr.querySelector('.summary-note').value,
+  };
+}
+
+function trackSummaryDraft(event) {
+  const tr = event.target.closest('tr[data-id]');
+  if (!tr || !event.target.matches('.summary-workshop,.summary-price,.summary-qty,.summary-note')) return;
+  const id = tr.dataset.id;
+  state.drafts.set(id, rowInput(tr));
+  const button = tr.querySelector('.save-summary');
+  if (button && !state.saving.has(id)) button.textContent = '保存*';
+}
+$('summary-body').addEventListener('input', trackSummaryDraft);
+$('summary-body').addEventListener('change', trackSummaryDraft);
+window.addEventListener('beforeunload', event => {
+  if (!state.drafts.size && !state.saving.size) return;
+  event.preventDefault(); event.returnValue = '';
+});
+
 async function saveRow(tr) {
+  const id = tr.dataset.id;
+  if (state.saving.has(id)) return;
+  const invalid = tr.querySelector('input:invalid');
+  if (invalid) { invalid.reportValidity(); return; }
+  const submitted = rowInput(tr);
+  state.drafts.set(id, submitted);
+  state.saving.add(id);
   const button = tr.querySelector('.save-summary');
   button.disabled = true;
-  const workshop = tr.querySelector('.summary-workshop').value;
+  button.textContent = '保存中…';
   try {
-    await api(`/quote-summary/${tr.dataset.id}/confirmation`, {
-      method: 'PUT', body: JSON.stringify({
-        workshop,
-        confirmed_price: tr.querySelector('.summary-price').value,
-        confirmed_qty: tr.querySelector('.summary-qty').value,
-        note: tr.querySelector('.summary-note').value,
-      }),
+    await api(`/quote-summary/${id}/confirmation`, {
+      method: 'PUT', body: JSON.stringify(submitted),
     });
-    button.textContent = '已保存';
-    setTimeout(() => { button.textContent = '保存'; button.disabled = false; }, 900);
-    await load(false);
-  } catch (error) { alert(error.message); button.disabled = false; }
+    state.saveEpoch += 1;
+    // Keep the acknowledged values visible if refreshing fails or another save supersedes this refresh.
+    state.saved.set(id, submitted);
+    // Edits made while this request was pending belong to the next save.
+    if (JSON.stringify(state.drafts.get(id)) === JSON.stringify(submitted)) state.drafts.delete(id);
+    try { await load(false); }
+    catch (error) { alert(`本行已保存，汇总刷新失败：${error.message}`); }
+  } catch (error) { alert(error.message); }
+  finally {
+    state.saving.delete(id);
+    const currentButton = Array.from($('summary-body').querySelectorAll('tr[data-id]'))
+      .find(row => row.dataset.id === id)?.querySelector('.save-summary');
+    if (currentButton) {
+      currentButton.disabled = false;
+      currentButton.textContent = state.drafts.has(id) ? '保存*' : '保存';
+    }
+  }
 }
 
 async function load(showLoading = true) {
+  const sequence = ++state.loadSequence;
+  const epoch = state.saveEpoch;
   if (showLoading) $('summary-body').innerHTML = `<tr><td colspan="${totalColumns()}" class="summary-empty">正在读取…</td></tr>`;
-  const data = await api('/quote-summary');
+  let data;
+  try { data = await api('/quote-summary'); }
+  catch (error) {
+    if (sequence !== state.loadSequence || epoch !== state.saveEpoch) return false;
+    throw error;
+  }
+  // A snapshot requested before a newer save must never replace that save's values.
+  if (sequence !== state.loadSequence || epoch !== state.saveEpoch) return false;
+  state.saved.clear();
   $('completion-open').hidden = !data.can_view_completion;
   if (!data.can_view_completion) { $('completion-panel').hidden = true; $('completion-body').textContent = ''; }
   state.rows = data.rows || []; state.workshops = data.workshops || []; state.components = data.components || []; state.summaryColumns = data.summary_columns || []; state.canEdit = Boolean(data.can_edit);
@@ -170,6 +220,7 @@ async function load(showLoading = true) {
   $('summary-customer').innerHTML = '<option value="">全部客户</option>' + customers.map(customer => `<option value="${esc(customer)}">${esc(customer)}</option>`).join('');
   $('summary-customer').value = customers.includes(selected) ? selected : '';
   render();
+  return true;
 }
 
 $('summary-customer').onchange = render;
