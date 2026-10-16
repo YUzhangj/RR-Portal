@@ -2,7 +2,7 @@ const express = require('express');
 const db = require('../db');
 const { requireAuth, quoteAccess } = require('../middleware/auth');
 const { expandEngineeringMolds } = require('../services/engineeringMolds');
-const {sectionRevision, assertSectionRevision, saveVerificationSection} = require('../services/verificationSectionSave');
+const { sectionRevision, assertSectionRevision, saveVerificationSection, nextSectionTime, withVerificationVersion } = require('../services/verificationSectionSave');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -111,7 +111,7 @@ async function recalculateVersionStatus(versionId) {
   const approved = Number(counts.approved || 0);
   const filled = Number(counts.filled || 0);
   const status = total > 0 && approved === total ? 'ready' : filled > 0 ? 'in_review' : 'drafting';
-  await db.prepare(`UPDATE quote_verification_versions SET status=?, updated_at=datetime('now') WHERE id=?`)
+  await db.prepare(`UPDATE quote_verification_versions SET status=?, updated_at=datetime('now') WHERE id=? AND status NOT IN ('completed','cancelled')`)
     .run(status, versionId);
   return status;
 }
@@ -296,23 +296,31 @@ router.put('/versions/:versionId/sections/:sectionId', async (req, res) => {
   const payloadJson = JSON.stringify(payload);
   if (payloadJson.length > 2_000_000) return res.status(413).json({ error: '核价部门数据过大' });
   const submit = Boolean(req.body?.submit);
-  let filledAt;
   try {
-    assertSectionRevision(section, req.body?.base_revision);
-    filledAt = await saveVerificationSection(db, section, payload, submit, actorName(req.user));
+    const result = await withVerificationVersion(db, versionId, async version => {
+      if (['completed', 'cancelled'].includes(version.status)) throw Object.assign(new Error('该核价版本已锁定'), { status: 409 });
+      const current = await db.prepare('SELECT * FROM quote_verification_sections WHERE id=? AND version_id=?').get(sectionId, versionId);
+      if (!current) throw Object.assign(new Error('核价部门明细不存在'), { status: 404 });
+      assertSectionRevision(current, req.body?.base_revision);
+      if (current.status === 'approved') throw Object.assign(new Error('该部门核价已经审核通过，不能修改'), { status: 409 });
+      await saveVerificationSection(db, current, payload, submit, actorName(req.user));
+      const status = await recalculateVersionStatus(versionId);
+      await db.prepare(`UPDATE quote_verifications SET status='in_progress', updated_by=?, updated_at=datetime('now') WHERE quote_id=?`)
+        .run(actorName(req.user), section.quote_id);
+      if (submit) {
+        await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
+          VALUES (?, ?, ?, 'verification_submit', ?)`)
+          .run(section.quote_id, section.dept, actorName(req.user), `${section.version_label} 提交部门核价审核`);
+      }
+      const saved = await db.prepare('SELECT * FROM quote_verification_sections WHERE id=? AND version_id=?').get(sectionId, versionId);
+      return { ok: true, status, filled_at: saved.filled_at, filled_by: saved.filled_by,
+        section_status: saved.status, revision: sectionRevision(saved) };
+    });
+    res.json(result);
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });
     throw error;
   }
-  const status = await recalculateVersionStatus(versionId);
-  await db.prepare(`UPDATE quote_verifications SET status='in_progress', updated_by=?, updated_at=datetime('now') WHERE quote_id=?`)
-    .run(actorName(req.user), section.quote_id);
-  if (submit) {
-    await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
-      VALUES (?, ?, ?, 'verification_submit', ?)`)
-      .run(section.quote_id, section.dept, actorName(req.user), `${section.version_label} 提交部门核价审核`);
-  }
-  res.json({ ok: true, status, filled_at: filledAt });
 });
 
 router.post('/versions/:versionId/sections/:sectionId/review', async (req, res) => {
@@ -326,14 +334,27 @@ router.post('/versions/:versionId/sections/:sectionId/review', async (req, res) 
   if (!canReviewDepartment(req.user, section.dept)) return res.status(403).json({ error: '只有主管可以审核本部门核价' });
   if (['completed', 'cancelled'].includes(section.version_status)) return res.status(409).json({ error: '该核价版本已锁定' });
   if (action === 'approve' && section.status !== 'filled') return res.status(409).json({ error: '该部门尚未提交核价审核' });
-  await db.prepare(`UPDATE quote_verification_sections SET status=?, reviewed_by=?,
-    reviewed_at=datetime('now'), review_comment=? WHERE id=?`)
-    .run(action === 'approve' ? 'approved' : 'rejected', actorName(req.user), String(comment || '').slice(0, 1000) || null, sectionId);
-  const status = await recalculateVersionStatus(versionId);
-  await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
-    VALUES (?, ?, ?, ?, ?)`)
-    .run(section.quote_id, section.dept, actorName(req.user), `verification_${action}`, `${section.version_label}${comment ? `：${String(comment).slice(0, 500)}` : ''}`);
-  res.json({ ok: true, status });
+  try {
+    const status = await withVerificationVersion(db, versionId, async version => {
+      if (['completed', 'cancelled'].includes(version.status)) throw Object.assign(new Error('该核价版本已锁定'), { status: 409 });
+      const current = await db.prepare('SELECT * FROM quote_verification_sections WHERE id=? AND version_id=?').get(sectionId, versionId);
+      if (!current) throw Object.assign(new Error('核价部门明细不存在'), { status: 404 });
+      assertSectionRevision(current, sectionRevision(section));
+      if (action === 'approve' && current.status !== 'filled') throw Object.assign(new Error('该部门尚未提交核价审核'), { status: 409 });
+      await db.prepare(`UPDATE quote_verification_sections SET status=?, reviewed_by=?,
+        reviewed_at=?, review_comment=? WHERE id=?`)
+        .run(action === 'approve' ? 'approved' : 'rejected', actorName(req.user), nextSectionTime(current), String(comment || '').slice(0, 1000) || null, sectionId);
+      const nextStatus = await recalculateVersionStatus(versionId);
+      await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
+        VALUES (?, ?, ?, ?, ?)`)
+        .run(section.quote_id, section.dept, actorName(req.user), `verification_${action}`, `${section.version_label}${comment ? `：${String(comment).slice(0, 500)}` : ''}`);
+      return nextStatus;
+    });
+    res.json({ ok: true, status });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    throw error;
+  }
 });
 
 router.post('/versions/:versionId/sections/:sectionId/reopen', async (req, res) => {
@@ -346,13 +367,26 @@ router.post('/versions/:versionId/sections/:sectionId/reopen', async (req, res) 
   if (['completed', 'cancelled'].includes(section.version_status)) return res.status(409).json({ error: '该核价版本已锁定' });
   if (section.status !== 'approved') return res.status(409).json({ error: '只能解除已经审核通过的部门核价' });
   const reason = String(req.body?.reason || '').trim().slice(0, 1000);
-  await db.prepare(`UPDATE quote_verification_sections SET status='filled', review_comment=? WHERE id=?`)
-    .run(reason ? `【解除审核】${reason}` : '【解除审核】', sectionId);
-  const status = await recalculateVersionStatus(versionId);
-  await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
-    VALUES (?, ?, ?, 'verification_reopen', ?)`)
-    .run(section.quote_id, section.dept, actorName(req.user), `${section.version_label}${reason ? `：${reason}` : ''}`);
-  res.json({ ok: true, status });
+  try {
+    const status = await withVerificationVersion(db, versionId, async version => {
+      if (['completed', 'cancelled'].includes(version.status)) throw Object.assign(new Error('该核价版本已锁定'), { status: 409 });
+      const current = await db.prepare('SELECT * FROM quote_verification_sections WHERE id=? AND version_id=?').get(sectionId, versionId);
+      if (!current) throw Object.assign(new Error('核价部门明细不存在'), { status: 404 });
+      assertSectionRevision(current, sectionRevision(section));
+      if (current.status !== 'approved') throw Object.assign(new Error('只能解除已经审核通过的部门核价'), { status: 409 });
+      await db.prepare(`UPDATE quote_verification_sections SET status='filled', review_comment=?, reviewed_at=? WHERE id=?`)
+        .run(reason ? `【解除审核】${reason}` : '【解除审核】', nextSectionTime(current), sectionId);
+      const nextStatus = await recalculateVersionStatus(versionId);
+      await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
+        VALUES (?, ?, ?, 'verification_reopen', ?)`)
+        .run(section.quote_id, section.dept, actorName(req.user), `${section.version_label}${reason ? `：${reason}` : ''}`);
+      return nextStatus;
+    });
+    res.json({ ok: true, status });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    throw error;
+  }
 });
 
 router.post('/versions/:versionId/complete', async (req, res) => {
@@ -362,23 +396,31 @@ router.post('/versions/:versionId/complete', async (req, res) => {
   if (!version) return res.status(404).json({ error: '核价版本不存在' });
   const access = await quoteAccess(req.user, version.quote_id);
   if (access.status !== 200) return res.status(access.status).json({ error: '无权操作该核价任务' });
-  if (version.status === 'completed') return res.json({ ok: true, status: 'completed' });
-  const counts = await db.prepare(`SELECT COUNT(*) AS total,
-    SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END) AS approved
-    FROM quote_verification_sections WHERE version_id=?`).get(versionId);
-  if (!Number(counts.total) || Number(counts.approved || 0) !== Number(counts.total)) {
-    return res.status(409).json({ error: '所有部门审核通过后才能完成核价版本' });
-  }
   const note = String(req.body?.note || '').trim().slice(0, 1000);
-  await db.prepare(`UPDATE quote_verification_versions SET status='completed', note=?, completed_by=?,
-    completed_at=datetime('now'), updated_at=datetime('now') WHERE id=?`)
-    .run(note || version.note || null, actorName(req.user), versionId);
-  await db.prepare(`UPDATE quote_verifications SET status='completed', note=?, updated_by=?, updated_at=datetime('now') WHERE quote_id=?`)
-    .run(note || null, actorName(req.user), version.quote_id);
-  await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
-    VALUES (?, ?, ?, 'verification_complete', ?)`)
-    .run(version.quote_id, req.user.dept, actorName(req.user), `完成并锁定 ${version.label}`);
-  res.json({ ok: true, status: 'completed' });
+  try {
+    await withVerificationVersion(db, versionId, async current => {
+      if (current.status === 'completed') return;
+      if (current.status === 'cancelled') throw Object.assign(new Error('该核价版本已锁定'), { status: 409 });
+      const counts = await db.prepare(`SELECT COUNT(*) AS total,
+        SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END) AS approved
+        FROM quote_verification_sections WHERE version_id=?`).get(versionId);
+      if (!Number(counts.total) || Number(counts.approved || 0) !== Number(counts.total)) {
+        throw Object.assign(new Error('所有部门审核通过后才能完成核价版本'), { status: 409 });
+      }
+      await db.prepare(`UPDATE quote_verification_versions SET status='completed', note=?, completed_by=?,
+        completed_at=datetime('now'), updated_at=datetime('now') WHERE id=?`)
+        .run(note || current.note || null, actorName(req.user), versionId);
+      await db.prepare(`UPDATE quote_verifications SET status='completed', note=?, updated_by=?, updated_at=datetime('now') WHERE quote_id=?`)
+        .run(note || null, actorName(req.user), current.quote_id);
+      await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
+        VALUES (?, ?, ?, 'verification_complete', ?)`)
+        .run(current.quote_id, req.user.dept, actorName(req.user), `完成并锁定 ${current.label}`);
+    });
+    res.json({ ok: true, status: 'completed' });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    throw error;
+  }
 });
 
 module.exports = router;

@@ -216,6 +216,9 @@ let taskState = null;
 let detailMode = 'workflow';
 let activeDepartment = null;
 let sectionDirty = false;
+let sectionSavePending = false;
+let versionLoadPending = false;
+let taskRequestSequence = 0;
 let comparisonState = { quoteId: null, baseline: 'quote', targets: null, dept: 'all', changedOnly: true, query: '' };
 let comparisonRefreshToken = 0;
 const versionCache = new Map();
@@ -264,16 +267,26 @@ function cacheVersion(data) {
 
 async function fetchTask(quoteId, versionId) {
   const suffix = versionId ? `?version_id=${encodeURIComponent(versionId)}` : '';
-  return cacheVersion(await api(`/verifications/${quoteId}${suffix}`));
+  const data = await api(`/verifications/${quoteId}${suffix}`);
+  if (Number(data?.quote?.id) !== Number(quoteId)
+    || (versionId && Number(data?.selected_version?.id) !== Number(versionId))) {
+    throw new Error('核价任务或版本不匹配，请重新打开任务');
+  }
+  return cacheVersion(data);
 }
 
 async function selectTask(quoteId) {
+  if (sectionSavePending || versionLoadPending) return;
+  const requestSequence = ++taskRequestSequence;
   selectedQuoteId = Number(quoteId);
   renderList();
   $('verification-preview').innerHTML = '<div class="verification-preview-empty">正在读取核价任务…</div>';
   try {
-    taskState = await fetchTask(selectedQuoteId);
+    const data = await fetchTask(quoteId);
+    if (requestSequence !== taskRequestSequence) return;
+    taskState = data;
   } catch (error) {
+    if (requestSequence !== taskRequestSequence) return;
     taskState = null;
     $('verification-preview').innerHTML = `<div class="verification-preview-empty"><strong>核价任务暂时无法打开</strong><br>${esc(error.message)}</div>`;
     return;
@@ -327,6 +340,7 @@ function bindVersionCategory(data, idPrefix) {
   const button = $(`${idPrefix}-category-save`);
   if (!button) return;
   button.onclick = async () => {
+    if (sectionSavePending || versionLoadPending) return;
     const category = $(`${idPrefix}-category`).value.trim();
     try {
       button.disabled = true;
@@ -341,6 +355,7 @@ function bindVersionCategory(data, idPrefix) {
       const row = listState.find(item => Number(item.id) === Number(data.quote.id));
       if (row && Number(row.current_version_id) === Number(data.selected_version.id)) row.current_version_category = saved;
       versionCache.set(String(data.selected_version.id), data);
+      if (data !== taskState || sectionSavePending || versionLoadPending) return;
       if ($('verification-list').classList.contains('hidden')) renderDetail();
       else { renderList(); renderPreview(); }
     } catch (error) {
@@ -354,6 +369,7 @@ function bindCreateVersion(data, idPrefix) {
   const button = $(`${idPrefix}-create`);
   if (!button) return;
   button.onclick = async () => {
+    if (sectionSavePending || versionLoadPending) return;
     const source = $(`${idPrefix}-source`).value;
     if (!confirm('新版本会复制所选来源的部门明细，并重新进入填写和审核流程。确认创建？')) return;
     try {
@@ -507,10 +523,26 @@ function openDetail(mode) {
 }
 
 async function switchVersion(versionId) {
+  if (sectionSavePending || versionLoadPending) return;
   if (sectionDirty && !confirm('当前部门有未保存修改，切换版本会放弃这些修改。确认继续？')) return;
-  taskState = await fetchTask(taskState.quote.id, versionId);
-  sectionDirty = false;
-  renderDetail();
+  const quoteId = taskState.quote.id;
+  const requestSequence = ++taskRequestSequence;
+  versionLoadPending = true;
+  const detail = $('verification-detail');
+  const wasInert = detail.inert;
+  detail.inert = true;
+  try {
+    const data = await fetchTask(quoteId, versionId);
+    if (requestSequence !== taskRequestSequence || Number(taskState.quote.id) !== Number(quoteId) || sectionSavePending) return;
+    taskState = data;
+    sectionDirty = false;
+    renderDetail();
+  } catch (error) {
+    if (requestSequence === taskRequestSequence) alert(error.message);
+  } finally {
+    versionLoadPending = false;
+    detail.inert = wasInert;
+  }
 }
 
 function renderDetail() {
@@ -543,6 +575,7 @@ function renderDetail() {
     <section id="verification-detail-content"></section>`;
 
   $('verification-back').onclick = async () => {
+    if (sectionSavePending || versionLoadPending) return;
     if (sectionDirty && !confirm('当前部门有未保存修改，确认返回？')) return;
     $('verification-detail').classList.add('hidden');
     $('verification-list').classList.remove('hidden');
@@ -553,6 +586,7 @@ function renderDetail() {
   });
   document.querySelectorAll('[data-detail-mode]').forEach(button => {
     button.onclick = () => {
+      if (sectionSavePending || versionLoadPending) return;
       if (sectionDirty && !confirm('当前部门有未保存修改，切换页面会放弃这些修改。确认继续？')) return;
       sectionDirty = false;
       detailMode = button.dataset.detailMode;
@@ -591,6 +625,7 @@ function renderWorkflow() {
   host.innerHTML = '<div id="verification-department-workbench"></div>';
   document.querySelectorAll('[data-verification-dept]').forEach(button => {
     button.onclick = () => {
+      if (sectionSavePending || versionLoadPending) return;
       if (sectionDirty && !confirm('当前部门有未保存修改，确认切换？')) return;
       sectionDirty = false;
       activeDepartment = button.dataset.verificationDept;
@@ -674,28 +709,50 @@ function renderDepartmentWorkbench() {
     renderer(body, section._draft, editable, onChange, fxRmbHkd);
   }
 
-  let savePending = false;
   const save = async submit => {
-    if (savePending) return;
+    if (sectionSavePending || versionLoadPending) return;
+    if (!section.revision) { alert('核价服务版本未同步，请刷新页面后再保存'); return; }
     if (submit && !confirm(`确认提交 ${section.dept_name} 的 ${versionTitle(version)} 核价明细审核？`)) return;
-    savePending = true;
+    const sourceTask = taskState;
+    const quoteId = sourceTask.quote.id;
+    const submitted = JSON.stringify(section._draft);
+    const wasInert = body.inert;
+    sectionSavePending = true;
+    ++taskRequestSequence;
     body.inert = true;
-    const saveButtons = [$('verification-save-draft'), $('verification-submit')].filter(Boolean);
-    saveButtons.forEach(button => { button.disabled = true; });
+    const lockedControls = [...$('verification-detail').querySelectorAll('button,select,input,textarea')]
+      .filter(control => !body.contains(control))
+      .map(control => ({ control, disabled: control.disabled }));
+    lockedControls.forEach(({ control }) => { control.disabled = true; });
     try {
-      await api(`/verifications/versions/${version.id}/sections/${section.id}`, {
+      const saved = await api(`/verifications/versions/${version.id}/sections/${section.id}`, {
         method: 'PUT',
-        body: JSON.stringify({ payload: section._draft, submit, base_revision: section.revision }),
+        body: JSON.stringify({ payload: JSON.parse(submitted), submit, base_revision: section.revision }),
       });
-      taskState = await fetchTask(taskState.quote.id, version.id);
-      sectionDirty = false;
-      renderDetail();
+      section.payload_json = submitted;
+      section.revision = saved.revision || section.revision;
+      section.status = saved.section_status || (submit ? 'filled' : section.status);
+      section.filled_at = saved.filled_at;
+      const hasLaterEdits = JSON.stringify(section._draft) !== submitted;
+      if (taskState === sourceTask) sectionDirty = hasLaterEdits;
+      try {
+        const refreshed = await fetchTask(quoteId, version.id);
+        if (taskState !== sourceTask || !body.isConnected) return;
+        if (hasLaterEdits) {
+          const currentSection = refreshed.sections.find(item => Number(item.id) === Number(section.id));
+          if (currentSection) currentSection._draft = section._draft;
+        }
+        taskState = refreshed;
+        renderDetail();
+      } catch (error) {
+        if (taskState === sourceTask && body.isConnected) alert(`本部门已保存，核价刷新失败：${error.message}。可稍后重试刷新。`);
+      }
     } catch (error) {
       alert(error.message);
     } finally {
-      savePending = false;
-      body.inert = false;
-      saveButtons.forEach(button => { button.disabled = false; });
+      sectionSavePending = false;
+      body.inert = wasInert;
+      lockedControls.forEach(({ control, disabled }) => { control.disabled = disabled; });
     }
   };
   if ($('verification-save-draft')) $('verification-save-draft').onclick = () => save(false);
@@ -1016,4 +1073,10 @@ $('verification-export').onclick = () => {
 
 loadList().catch(error => {
   $('verification-list-body').innerHTML = `<tr><td colspan="6" class="summary-empty">${esc(error.message)}</td></tr>`;
+});
+
+window.addEventListener('beforeunload', event => {
+  if (!sectionDirty && !sectionSavePending) return;
+  event.preventDefault();
+  event.returnValue = '';
 });

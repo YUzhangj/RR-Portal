@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const state = { rows: [], workshops: [], components: [], summaryColumns: [], canEdit: false, drafts: new Map(), saving: new Set() };
+const state = { rows: [], workshops: [], components: [], summaryColumns: [], canEdit: false, drafts: new Map(), saved: new Map(), saving: new Set(), loadSequence: 0, saveEpoch: 0 };
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -78,7 +78,7 @@ function renderHead() {
 
 function rowHtml(row, serial) {
   const confirmation = row.confirmation || { status: 'pending', workshops: [] };
-  const draft = state.drafts.get(String(row.id));
+  const draft = state.drafts.get(String(row.id)) || state.saved.get(String(row.id));
   const selectedWorkshop = draft ? draft.workshop : (confirmation.workshops || [])[0] || '';
   const disabled = state.canEdit ? '' : 'disabled';
   const workshopHtml = `<select class="summary-workshop" ${disabled}>
@@ -91,7 +91,7 @@ function rowHtml(row, serial) {
   return `<tr data-id="${row.id}">
     <td class="summary-customer-no">${serial}</td>
     <td><b>${esc(row.customer || '未填写')}</b></td>
-    <td><div class="summary-workshop-actions">${workshopHtml}${state.canEdit ? `<button type="button" class="save-summary" ${state.saving.has(String(row.id)) ? 'disabled' : ''}>${state.saving.has(String(row.id)) ? '保存中…' : draft ? '保存*' : '保存'}</button>` : ''}</div></td>
+    <td><div class="summary-workshop-actions">${workshopHtml}${state.canEdit ? `<button type="button" class="save-summary" ${state.saving.has(String(row.id)) ? 'disabled' : ''}>${state.saving.has(String(row.id)) ? '保存中…' : state.drafts.has(String(row.id)) ? '保存*' : '保存'}</button>` : ''}</div></td>
     <td><a href="./quote.html?id=${row.id}"><b>${esc(row.quote_no)}</b></a></td>
     <td><b>${esc(row.product_name)}</b>${row.version ? `<small>${esc(row.version)}</small>` : ''}</td>
     <td>${dateOnly(row.created_at)}</td>
@@ -177,6 +177,9 @@ async function saveRow(tr) {
     await api(`/quote-summary/${id}/confirmation`, {
       method: 'PUT', body: JSON.stringify(submitted),
     });
+    state.saveEpoch += 1;
+    // Keep the acknowledged values visible if refreshing fails or another save supersedes this refresh.
+    state.saved.set(id, submitted);
     // Edits made while this request was pending belong to the next save.
     if (JSON.stringify(state.drafts.get(id)) === JSON.stringify(submitted)) state.drafts.delete(id);
     try { await load(false); }
@@ -194,8 +197,18 @@ async function saveRow(tr) {
 }
 
 async function load(showLoading = true) {
+  const sequence = ++state.loadSequence;
+  const epoch = state.saveEpoch;
   if (showLoading) $('summary-body').innerHTML = `<tr><td colspan="${totalColumns()}" class="summary-empty">正在读取…</td></tr>`;
-  const data = await api('/quote-summary');
+  let data;
+  try { data = await api('/quote-summary'); }
+  catch (error) {
+    if (sequence !== state.loadSequence || epoch !== state.saveEpoch) return false;
+    throw error;
+  }
+  // A snapshot requested before a newer save must never replace that save's values.
+  if (sequence !== state.loadSequence || epoch !== state.saveEpoch) return false;
+  state.saved.clear();
   $('completion-open').hidden = !data.can_view_completion;
   if (!data.can_view_completion) { $('completion-panel').hidden = true; $('completion-body').textContent = ''; }
   state.rows = data.rows || []; state.workshops = data.workshops || []; state.components = data.components || []; state.summaryColumns = data.summary_columns || []; state.canEdit = Boolean(data.can_edit);
@@ -207,6 +220,7 @@ async function load(showLoading = true) {
   $('summary-customer').innerHTML = '<option value="">全部客户</option>' + customers.map(customer => `<option value="${esc(customer)}">${esc(customer)}</option>`).join('');
   $('summary-customer').value = customers.includes(selected) ? selected : '';
   render();
+  return true;
 }
 
 $('summary-customer').onchange = render;
