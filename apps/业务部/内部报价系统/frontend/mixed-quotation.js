@@ -19,6 +19,7 @@
   const moldingContexts = new WeakMap();
   const engineeringContexts = new WeakMap();
   const engineeringHosts = new WeakMap();
+  const summaryRequests = new WeakMap();
   function refreshEngineeringSharedMolds(host) {
     host.querySelectorAll('#wb-molds-shared').forEach(box => {
       const payload = engineeringHosts.get(box);
@@ -1075,10 +1076,12 @@
     };
   }
   async function summary(host, quote, me) {
+    const requestToken = {};
+    summaryRequests.set(host, requestToken);
     host.innerHTML = '<h3>混装报价汇总</h3><p>正在汇总各小产品的已保存明细…</p>';
     try {
       const result = await request(`/quotes/${quote.id}/mixed`);
-      if (!host.isConnected) return;
+      if (!host.isConnected || summaryRequests.get(host) !== requestToken) return;
       if (!result.enabled) return;
       const p = result.pricing;
       const salesSection = window.__data.sections.find(section => section.dept === 'sales');
@@ -1139,7 +1142,10 @@
           misc: (result.components.misc || 0) + result.surcharge_usd * p.fx,
         });
       }
-    } catch (error) { host.innerHTML = `<p class="mixed-error">混装汇总失败：${esc(error.message)}</p>`; }
+    } catch (error) {
+      if (!host.isConnected || summaryRequests.get(host) !== requestToken) return;
+      host.innerHTML = `<p class="mixed-error">混装汇总失败：${esc(error.message)}</p>`;
+    }
   }
   const componentNames = { injection_labor: '啤工', assembly_labor: '装配人工', painting_labor: '喷油人工', paint_material: '油料', imp_mat: '进口塑胶', dom_mat: '国产塑胶', blow: '吹气', slush: '搪胶', sewing_hair: '车发', sewing_cloth: '车衣', hardware: '五金', electronic: '电子', motor: '马达', suction: '吸塑', glue_bag: '胶袋', color_box: '彩盒/内咭', battery: '电池', libao: '利宝', plating: '电镀', flocking: '植绒', other_buy: '其他外购', carton: '纸箱', freight: '运费', cabinet: '吊柜', misc: '印尼运费', abs_material: '其中 ABS 材料' };
   window.MixedQuotation = { previewNumberedImport, wrap, salesPanel, summary, componentNames, renderMoldingAllocation, renderEngineeringSharedMolds, refreshEngineeringSharedMolds };
