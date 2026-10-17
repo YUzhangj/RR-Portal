@@ -1666,6 +1666,9 @@ function renderMoldCosts(host, mc, onChange, canEdit) {
 
 // ============== 汇总面板 ==============
 function renderSummaryPane(host, sections, quote, me) {
+  if (window.__data?.mixed_quote?.enabled && window.MixedQuotation && !window.__WORKBENCH_EMBED__) {
+    return window.MixedQuotation.summary(host, quote, me);
+  }
   const get = (dept) => {
     const s = sections.find(x => x.dept === dept);
     return s && s.payload_json ? JSON.parse(s.payload_json) : {};
