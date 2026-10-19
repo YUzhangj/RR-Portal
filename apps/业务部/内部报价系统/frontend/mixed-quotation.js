@@ -530,7 +530,7 @@
         host.insertBefore(upload,detail);
         const attach=()=>window.attachSupplierMaterialImportUI(upload,{},edit,onChange,args[0],args[1],window.__data.quote.qty,window.__data.quote.customer,{
           inputId:'[data-supplier-file]',previewId:'[data-supplier-preview]',targetKey:upload.querySelector('[data-supplier-kind]').value,
-          label:upload.querySelector('[data-supplier-kind]').selectedOptions[0].textContent,mixedConfig:cfg,mixedRoot:root,mixedTotalCode:window.__data.quote.quote_no,getMixedImportTarget:()=>selected,onApplied:draw
+          label:upload.querySelector('[data-supplier-kind]').selectedOptions[0].textContent,mixedConfig:cfg,mixedRoot:root,getMixedTotalCode:()=>window.__data.quote.quote_no,getMixedImportTarget:()=>selected,onApplied:draw
         });
         upload.querySelector('[data-supplier-kind]').onchange=()=>{upload.querySelector('[data-supplier-preview]').textContent='';upload.querySelector('[data-supplier-file]').value='';attach();};
         attach();
