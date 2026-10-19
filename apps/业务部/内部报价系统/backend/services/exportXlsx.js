@@ -567,7 +567,7 @@ async function buildWorkbook({ quote, sections }) {
   subRefs.shipSurtaxHkdFormula = shipOpts.shipSurtaxHkdFormula;
 
   // ---------- 减税明细 / 成本汇总 ----------
-  row = renderTaxSummary(ws, row, sales, { subRefs, fxRH, summaryRow });
+  row = renderTaxSummary(ws, row, sales, { subRefs, fxRH, summaryRow, sewing });
 
   // 业务算价参数说明
   ws.mergeCells(row, 1, row, 13);
@@ -2816,7 +2816,7 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
     ['吸塑类6%', 'suction6'], ['运费类9%', 'freight9'], ['含税13%类', 'tax13b']];
   const T4_NO_RATE = new Set(['rmb_buy', 'tax13']);  // 含税13%类成本为参考列，不重复参与减税
   const T4_RATE_DEFAULTS = {
-    carton: 10,
+    carton: 11.5,
     tax1: 0.99,
     slush3: 3,
     sewhair13: 11.5,
@@ -2843,14 +2843,15 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
   const rmbBuyFormula =
     `${tA.dom_mat}+${tA.sewing_hair}+${tA.sewing_cloth}+${tA.hardware}+${tA.electronic}+${tA.motor}`
     + `+${tB.color_box}+${tB.battery}+${tB.libao}+${tB.plating}+${tB.flocking}+${tB.other_buy}+${tB.carton}+${tB.misc}+${tA.glue_bag}+${T3_PMAT}`;
+  const sewingTaxShares = require('../../frontend/sewing-tax').fractions(extra.sewing || {});
   const T4_FORMULA = {
     rmb_buy: rmbBuyFormula,
     tax13: `${tA.dom_mat}+${tA.hardware}+${tA.motor}+${tB.color_box}+${tB.battery}+${tB.libao}+${tB.flocking}+${tB.other_buy}+${T3_PMAT}+${tA.glue_bag}`,
     carton: tB.carton,
     tax1: tB.plating,
     slush3: tA.slush,
-    sewhair13: tA.sewing_hair,
-    sewcloth13: tA.sewing_cloth,
+    sewhair13: `(${tA.sewing_hair})*${sewingTaxShares.sewing_hair}`,
+    sewcloth13: `(${tA.sewing_cloth})*${sewingTaxShares.sewing_cloth}`,
     suction6: tA.suction,
     freight9: tB.freight,
     tax13b: `${tA.dom_mat}+${tA.hardware}+${tA.motor}+${tB.color_box}+${tB.battery}+${tB.libao}+${tB.flocking}+${tB.other_buy}+${T3_PMAT}+${tA.glue_bag}`,
@@ -2865,7 +2866,7 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
     ws.getCell(row, i + 1).value = fml ? { formula: fml, result: amtLive } : amtLive;
     styleData(ws.getCell(row, i + 1));
     ws.getCell(row, i + 1).numFmt = '0.0000';
-    if (!T4_NO_RATE.has(c[1])) totalDed += amtLive * rate / 100;  // 参考列不计减税
+    if (!T4_NO_RATE.has(c[1])) totalDed += amtLive / (c[1] === 'carton' ? 1.1 : 1) * rate / 100;  // 参考列不计减税
   });
   row += 1;
   const t4RateRow = row;
@@ -2887,7 +2888,8 @@ function renderTaxSummary(ws, row, sales, extra = {}) {
     if (T4_NO_RATE.has(c[1])) { ws.getCell(row, i + 1).value = '—'; styleData(ws.getCell(row, i + 1)); return; }  // 参考列无减税额
     const col = colL(i + 1);
     const rate = T4_RATE_DEFAULTS[c[1]] ?? num(e.rate);
-    ws.getCell(row, i + 1).value = { formula: `${col}${t4AmtRow}*${col}${t4RateRow}`, result: num(t4AmtVals[i]) * rate / 100 };
+    const divisor = c[1] === 'carton' ? '/1.1' : '';
+    ws.getCell(row, i + 1).value = { formula: `${col}${t4AmtRow}${divisor}*${col}${t4RateRow}`, result: num(t4AmtVals[i]) / (c[1] === 'carton' ? 1.1 : 1) * rate / 100 };
     ws.getCell(row, i + 1).numFmt = '0.0000';
     styleData(ws.getCell(row, i + 1));
   });

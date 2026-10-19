@@ -1138,6 +1138,7 @@
       if (p && window.renderTaxDeductionBlock) {
         window.renderTaxDeductionBlock(host.querySelector('[data-mixed-tax]'), {}, null, null, {
           ...result.components,
+          sewing_taxable: result.sewing_taxable,
           base_price: result.final_hkd * p.divisor,
           misc: (result.components.misc || 0) + result.surcharge_usd * p.fx,
         });

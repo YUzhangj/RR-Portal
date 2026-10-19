@@ -4,16 +4,22 @@ import uuid
 import re
 import os
 import json
+import time
+import threading
 from io import BytesIO
 from datetime import datetime
 from urllib.parse import quote
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, UploadFile
-from pydantic import BaseModel, Field
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+from pydantic import BaseModel, Field, field_validator
+from typing import Annotated
 from fastapi.responses import Response
 
 from .factory_workbook import parse_factory_workbook
+from .readonly_workbook import load_values_workbook
 from .multi_container import multi_container_plan, order_cargo
 from .eml import parse_eml
 from .carrier_schedule import apply_carrier_schedule
@@ -24,10 +30,24 @@ from .shipment_export import build_completed_shipment_summary_workbook, build_in
 from .product_workbook import parse_product_workbook
 from .inventory_writeback import build_inventory_writeback
 from .destination_country import infer_destination_country
-from .mailbox import fetch_mailbox, test_mailbox_connection
+from .mailbox import MailboxControl, MailboxUidValidityChanged, fetch_mailbox, selected_mailbox_uids, test_mailbox_connection
+from .mail_worker import parse_isolated
 
 PARSER_VERSION = "voyageplex-rules-0.1.3+cargo-notification"
 app = FastAPI(title="VoyagePlex Email Parser", version=PARSER_VERSION)
+_mail_poll_gate = threading.Lock()
+
+
+@app.exception_handler(RequestValidationError)
+async def mailbox_validation_error(request, error):
+    if not request.url.path.startswith("/v1/mailbox/"):
+        return await request_validation_exception_handler(request, error)
+    # A missing-field error normally includes the whole JSON body, including
+    # auth_code. Mailbox callers only need the invalid field and safe reason.
+    details = [{key: value for key, value in item.items() if key in {"type", "loc", "msg"}}
+               for item in error.errors()]
+    return Response(content=json.dumps({"detail": details}, ensure_ascii=False),
+                    status_code=422, media_type="application/json")
 
 
 class PersonalMailboxRequest(BaseModel):
@@ -38,6 +58,19 @@ class PersonalMailboxRequest(BaseModel):
     auth_code: str = Field(max_length=1024)
     host: str = Field(default="imap.exmail.qq.com", max_length=253)
     folder: str = Field(default="INBOX", max_length=100)
+
+
+MailboxUid = Annotated[int, Field(strict=True, gt=0, le=4294967295)]
+
+
+class RetryMailboxRequest(PersonalMailboxRequest):
+    selected_uids: list[MailboxUid] = Field(min_length=1, max_length=5)
+    expected_uid_validity: MailboxUid
+
+    @field_validator("selected_uids")
+    @classmethod
+    def unique_selected_uids(cls, values):
+        return selected_mailbox_uids(values)
 
 
 @app.post("/v1/mailbox/test")
@@ -57,27 +90,95 @@ async def poll_personal_mailbox(payload: PersonalMailboxRequest):
                               {"address": payload.address, "auth_code": payload.auth_code, "host": payload.host, "folder": payload.folder})
 
 
-async def poll_mailbox(after_uid: int = 0, start_date: str = "2026-10-08", company: str = "Xingxin", credentials: dict | None = None):
+@app.post("/v1/mailbox/retry")
+async def retry_personal_mailbox(payload: RetryMailboxRequest):
+    return await poll_mailbox(payload.after_uid, payload.start_date, payload.company,
+                              {"address": payload.address, "auth_code": payload.auth_code, "host": payload.host, "folder": payload.folder},
+                              payload.selected_uids, payload.expected_uid_validity)
+
+
+async def _mail_thread(function, args, control):
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    control.tasks.append(task)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        control.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=3)
+        except (Exception, asyncio.CancelledError):
+            # Network connect itself has a 20s socket deadline; a disposable
+            # parser supervisor is signalled/reaped within the worker deadline.
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        raise
+
+
+async def poll_mailbox(after_uid: int = 0, start_date: str = "2026-10-08", company: str = "Xingxin", credentials: dict | None = None, selected_uids: list[int] | None = None, expected_uid_validity: int | None = None):
     if after_uid < 0:
         return Response(content='{"error":"after_uid 无效"}', status_code=400, media_type="application/json")
+    if not _mail_poll_gate.acquire(blocking=False):
+        return Response(content='{"error":"邮箱读取正在进行，请稍后重试"}', status_code=429, media_type="application/json")
+    control = MailboxControl()
     try:
-        mailbox = await asyncio.to_thread(fetch_mailbox, after_uid, start_date, company, credentials)
+        return await asyncio.wait_for(_poll_mailbox(after_uid, start_date, company, credentials, control, selected_uids, expected_uid_validity), timeout=150)
+    except asyncio.TimeoutError:
+        return Response(content='{"error":"本轮邮箱读取超时，请稍后重试"}', status_code=504, media_type="application/json")
+    finally:
+        control.cancel()
+        pending = {task for task in control.tasks if not task.done()}
+        if not pending:
+            _mail_poll_gate.release()
+        else:
+            # Keep the gate until every actual fetch/worker thread has exited,
+            # even if the requesting client has already stopped waiting.
+            def completed(task):
+                pending.discard(task)
+                if not pending:
+                    _mail_poll_gate.release()
+            for task in list(pending):
+                task.add_done_callback(completed)
+
+
+async def _poll_mailbox(after_uid, start_date, company, credentials, control, selected_uids=None, expected_uid_validity=None):
+    deadline = time.monotonic() + 150
+    try:
+        fetch_args = (after_uid, start_date, company, credentials, control)
+        if selected_uids is not None:
+            fetch_args += (selected_uids, expected_uid_validity)
+        mailbox = await _mail_thread(fetch_mailbox, fetch_args, control)
         if not mailbox["configured"]:
             return {"configured": False, "items": []}
-        entries = [{"filename": f'mail-{entry["uid"]}.eml', "raw": entry["raw"]}
-                   for entry in mailbox["messages"] if entry["raw"]]
-        parsed = await asyncio.to_thread(parse_email_entries, entries, *([] if company == "Xingxin" else [company])) if entries else {"items": []}
-        parsed_by_uid = {int(item["filename"][5:-4]): item for item in parsed["items"]}
         items = []
+        blocked_uid = None
         for entry in mailbox["messages"]:
-            item = parsed_by_uid.get(entry["uid"], {"status": "failed", "error": entry["error"]})
+            if time.monotonic() >= deadline:
+                break  # Unprocessed UIDs remain below the next API cursor.
+            if entry["raw"]:
+                item = await _mail_thread(parse_isolated,
+                    (entry["raw"], f'mail-{entry["uid"]}.eml', company, control.cancelled, deadline), control)
+                if item.get("status") == "failed":
+                    from .mail_worker import failure_headers
+                    item.update(failure_headers(entry["raw"]))
+                entry["raw"] = None  # Release each body as soon as its worker exits.
+            else:
+                item = {"filename": f'mail-{entry["uid"]}.eml', "status": "failed", "error": entry["error"],
+                        "failure_kind": entry.get("failure_kind", "body_read")}
             items.append({**item, "mailbox_uid": entry["uid"],
-                          "mailbox_received_at": entry["received_at"]})
+                          "mailbox_received_at": entry["received_at"],
+                          "retryable": entry.get("retryable", False)})
+            if entry.get("retryable"):
+                blocked_uid = entry["uid"]
+                break
         return {"configured": True, "address": mailbox["address"],
-                "uid_validity": mailbox["uid_validity"], "items": items}
+                "uid_validity": mailbox["uid_validity"], "items": items, "blocked_uid": blocked_uid}
+    except MailboxUidValidityChanged:
+        return Response(content='{"error":"邮箱 UIDVALIDITY 已变化，无法安全重试原邮件"}',
+                        status_code=409, media_type="application/json")
     except Exception:
         return Response(content='{"error":"邮箱连接或读取失败，请检查账号、授权码和网络"}',
                         status_code=502, media_type="application/json")
+    finally:
+        control.cancel()
 
 
 @app.post("/v1/product-workbooks/parse")
@@ -437,6 +538,8 @@ def parse_email_entries(entries: list[dict], company: str = "Xingxin") -> dict:
                         supported_attachment_count += 1
                     try:
                         parsed_attachment = parse_attachment(Path(attachment["stored_path"]), attachment["filename"])
+                    except MemoryError:
+                        raise  # The disposable worker reports its resource failure.
                     except Exception as exc:
                         attachment_results.append({
                             "filename": attachment["filename"], "kind": "failed", "status": "failed",
@@ -620,6 +723,8 @@ def parse_email_entries(entries: list[dict], company: str = "Xingxin") -> dict:
                     "rule_trace": policy["trace"],
                     "review_reasons": policy["review"],
                 })
+            except MemoryError:
+                raise
             except Exception as exc:
                 item.update({"status": "failed", "error": str(exc)})
             results.append(item)
@@ -653,85 +758,87 @@ def _mapping_row(group, source, customer, code, name="", owner="", place="", not
 
 
 def parse_inspection_mapping(path: Path) -> list[dict]:
-    import openpyxl
-    workbook = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    result = []
-    for sheet in workbook.worksheets:
-        title = sheet.title.strip()
-        rows = list(sheet.iter_rows(max_col=min(sheet.max_column, 20), values_only=True))
-        if title.startswith("兴信B车间"):
-            for start in (0, 4, 8, 12, 16):
-                customer = _mapping_text(rows[0][start]) if rows and start < len(rows[0]) else ""
-                for values in rows[2:]:
-                    row = _mapping_row("兴信B车间", "兴信验货总结表", customer,
-                                       values[start] if start < len(values) else None,
-                                       values[start + 1] if start + 1 < len(values) else None,
-                                       "龙丽娟", "兴信B车间")
+    workbook = load_values_workbook(path)
+    try:
+        result = []
+        for sheet in workbook.worksheets:
+            title = sheet.title.strip()
+            rows = list(sheet.iter_rows(max_col=min(sheet.max_column, 20), values_only=True))
+            if title.startswith("兴信B车间"):
+                for start in (0, 4, 8, 12, 16):
+                    customer = _mapping_text(rows[0][start]) if rows and start < len(rows[0]) else ""
+                    for values in rows[2:]:
+                        row = _mapping_row("兴信B车间", "兴信验货总结表", customer,
+                                           values[start] if start < len(values) else None,
+                                           values[start + 1] if start + 1 < len(values) else None,
+                                           "龙丽娟", "兴信B车间")
+                        if row: result.append(row)
+            elif title.startswith("兴信A车间石玉珍"):
+                customer = ""
+                for values in rows[1:]:
+                    customer = _mapping_text(values[0]) or customer
+                    raw = _mapping_text(values[1])
+                    code, _, name = raw.partition("/")
+                    row = _mapping_row("兴信A车间 · 石玉珍", "兴信验货总结表", customer, code, name,
+                                       "石玉珍", "兴信A车间")
                     if row: result.append(row)
-        elif title.startswith("兴信A车间石玉珍"):
-            customer = ""
-            for values in rows[1:]:
-                customer = _mapping_text(values[0]) or customer
-                raw = _mapping_text(values[1])
-                code, _, name = raw.partition("/")
-                row = _mapping_row("兴信A车间 · 石玉珍", "兴信验货总结表", customer, code, name,
-                                   "石玉珍", "兴信A车间")
-                if row: result.append(row)
-        elif title.startswith("兴信A车间李诗妍"):
-            customer = ""
-            for values in rows[2:]:
-                customer = _mapping_text(values[1]) or customer
-                place = _mapping_text(values[3]) or "兴信A车间"
-                row = _mapping_row("兴信A车间 · 李诗妍", "兴信验货总结表", customer, values[2], "",
-                                   "李诗妍", place)
-                if row: result.append(row)
-        elif "华嘉负责货号" in title:
-            customer = ""
-            for values in rows[2:]:
-                customer = _mapping_text(values[1]) or customer
-                row = _mapping_row("华嘉", "兴信验货总结表", customer, values[2], "", "华嘉",
-                                   values[3], "兴信表")
-                if row: result.append(row)
-        elif title.startswith("湖南钟雅娴"):
-            customer = ""
-            place = ""
-            for values in rows[1:]:
-                place = _mapping_text(values[1]) or place or "湖南"
-                customer = _mapping_text(values[2]) or customer
-                owner = _mapping_text(values[7]) or _mapping_text(values[6]) or "钟雅娴"
-                row = _mapping_row("湖南 · 钟雅娴", "湖南验货总结表", customer, values[3], values[4], owner, place)
-                if row: result.append(row)
-        elif title.startswith("湖南砚秋") or title.startswith("湖南Evol"):
-            owner = "吕宇祥" if "吕宇祥" in title else "杨海彬"
-            group = f"湖南 · {owner}"
-            for start in (0, 4, 8, 12, 16):
-                if not rows or start >= len(rows[0]): continue
-                customer = _mapping_text(rows[0][start])
+            elif title.startswith("兴信A车间李诗妍"):
+                customer = ""
                 for values in rows[2:]:
-                    row = _mapping_row(group, "湖南验货总结表", customer,
-                                       values[start] if start < len(values) else None,
-                                       values[start + 1] if start + 1 < len(values) else None,
-                                       owner, "湖南")
+                    customer = _mapping_text(values[1]) or customer
+                    place = _mapping_text(values[3]) or "兴信A车间"
+                    row = _mapping_row("兴信A车间 · 李诗妍", "兴信验货总结表", customer, values[2], "",
+                                       "李诗妍", place)
                     if row: result.append(row)
-        elif title.startswith("河源"):
-            for values in rows:
-                note = "自行做柜"
-                if len(values) > 6 and _mapping_text(values[6]): note += "；" + _mapping_text(values[6])
-                row = _mapping_row("河源", "不参与验货检查", "ZURU", values[0], values[1], values[2],
-                                   "河源", note, True)
-                if row: result.append(row)
-        elif title.startswith("华登"):
-            owners = {"东莞华登": "王远露", "湖南华登": _mapping_text(rows[2][5]) if len(rows) > 2 else ""}
-            customer = _mapping_text(rows[0][0]) if rows else "ZURU"
-            for values in rows[2:]:
-                place = _mapping_text(values[2])
-                row = _mapping_row("华登", "华登验货总结表", customer, values[0], values[1],
-                                   owners.get(place, ""), place)
-                if row: result.append(row)
-    unique = {}
-    for row in result:
-        unique[(row["group_name"], row["product_code"])] = row
-    return list(unique.values())
+            elif "华嘉负责货号" in title:
+                customer = ""
+                for values in rows[2:]:
+                    customer = _mapping_text(values[1]) or customer
+                    row = _mapping_row("华嘉", "兴信验货总结表", customer, values[2], "", "华嘉",
+                                       values[3], "兴信表")
+                    if row: result.append(row)
+            elif title.startswith("湖南钟雅娴"):
+                customer = ""
+                place = ""
+                for values in rows[1:]:
+                    place = _mapping_text(values[1]) or place or "湖南"
+                    customer = _mapping_text(values[2]) or customer
+                    owner = _mapping_text(values[7]) or _mapping_text(values[6]) or "钟雅娴"
+                    row = _mapping_row("湖南 · 钟雅娴", "湖南验货总结表", customer, values[3], values[4], owner, place)
+                    if row: result.append(row)
+            elif title.startswith("湖南砚秋") or title.startswith("湖南Evol"):
+                owner = "吕宇祥" if "吕宇祥" in title else "杨海彬"
+                group = f"湖南 · {owner}"
+                for start in (0, 4, 8, 12, 16):
+                    if not rows or start >= len(rows[0]): continue
+                    customer = _mapping_text(rows[0][start])
+                    for values in rows[2:]:
+                        row = _mapping_row(group, "湖南验货总结表", customer,
+                                           values[start] if start < len(values) else None,
+                                           values[start + 1] if start + 1 < len(values) else None,
+                                           owner, "湖南")
+                        if row: result.append(row)
+            elif title.startswith("河源"):
+                for values in rows:
+                    note = "自行做柜"
+                    if len(values) > 6 and _mapping_text(values[6]): note += "；" + _mapping_text(values[6])
+                    row = _mapping_row("河源", "不参与验货检查", "ZURU", values[0], values[1], values[2],
+                                       "河源", note, True)
+                    if row: result.append(row)
+            elif title.startswith("华登"):
+                owners = {"东莞华登": "王远露", "湖南华登": _mapping_text(rows[2][5]) if len(rows) > 2 else ""}
+                customer = _mapping_text(rows[0][0]) if rows else "ZURU"
+                for values in rows[2:]:
+                    place = _mapping_text(values[2])
+                    row = _mapping_row("华登", "华登验货总结表", customer, values[0], values[1],
+                                       owners.get(place, ""), place)
+                    if row: result.append(row)
+        unique = {}
+        for row in result:
+            unique[(row["group_name"], row["product_code"])] = row
+        return list(unique.values())
+    finally:
+        workbook.close()
 
 
 @app.post("/v1/inspection-mappings/parse")

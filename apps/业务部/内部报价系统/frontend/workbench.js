@@ -2046,7 +2046,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
   const RATE_DEFAULTS = {
     rmb_buy: 0,       // 人民币外购件成本（总额参考，不参与减税）
     tax13: 0,         // 含税13%类成本（成本基数参考，不参与减税；减税在"含税13%类"列）
-    carton: 10,       // 纸箱类
+    carton: 11.5,     // 纸箱类：原成本 / 1.1 × 11.5%
     tax1: 0.99,       // 含税1%
     slush3: 3,        // 搪胶类3%
     sewhair13: 11.5,  // 车发类13%
@@ -2191,8 +2191,13 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     setT4Amt('tax13', tax13Cost);
     setT4Amt('carton', num(ps.t2.carton));                                     // 纸箱类 = 纸箱
     setT4Amt('slush3', num(ps.t1.slush));                                      // 搪胶类3% = 搪胶
-    setT4Amt('sewhair13', num(ps.t1.sewing_hair));                             // 车发类13% = 车发
-    setT4Amt('sewcloth13', num(ps.t1.sewing_cloth));                           // 车衣类13% = 车衣
+    const sewingPayload = typeof window !== 'undefined' && window.__data?.sections
+      ? JSON.parse(window.__data.sections.find(section => section.dept === 'sewing')?.payload_json || '{}') : {};
+    const sewingTaxable = autoFill.sewing_taxable || (typeof window !== 'undefined' && window.SewingTax
+      ? window.SewingTax.taxableAmounts(sewingPayload, ps.t1)
+      : { sewing_hair: num(ps.t1.sewing_hair), sewing_cloth: num(ps.t1.sewing_cloth) });
+    setT4Amt('sewhair13', sewingTaxable.sewing_hair);                             // 车发类13% = 车发
+    setT4Amt('sewcloth13', sewingTaxable.sewing_cloth);                           // 车衣类13% = 车衣
     setT4Amt('suction6', num(ps.t1.suction));                                  // 吸塑类6% = 吸塑
     setT4Amt('freight9', num(ps.t2.freight));                                  // 运费含税9% = 运费
     setT4Amt('tax1', num(ps.t2.plating));                                      // 含税1% = 电镀
@@ -2200,7 +2205,8 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     // 表4：每行 减税额 = 金额 × 税率%；参考列(无税率)不计；填入减税额行 + 合计
     const totalDed = t4Cols.reduce((s, [k]) => {
       if (T4_NO_RATE.has(k)) return s;  // 含税13%类成本为参考列，不重复参与减税
-      const ded = num(ps.t4[k].amt) * num(ps.t4[k].rate) / 100;
+      const basis = num(ps.t4[k].amt) / (k === 'carton' ? 1.1 : 1);
+      const ded = basis * num(ps.t4[k].rate) / 100;
       const cell = host.querySelector('#tk-ded-' + k);
       if (cell) cell.textContent = formatNum(ded);
       return s + ded;
@@ -2445,6 +2451,10 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
       <button class="mini" id="sw-import" type="button" style="margin-left:6px" ${canEdit ? '' : 'disabled title="请先进入编辑模式"'}>📄 导入车缝报价单</button>
       ${canEdit ? '<input id="sw-file" type="file" accept=".xls,.xlsx" style="display:none"/>' : '<small class="muted">进入编辑后可导入 Excel</small>'}
     </h3>
+    <label>车缝报价 <select id="sw-tax-label" ${canEdit ? '' : 'disabled'}>
+      <option value="含税" ${payload.tax_label !== '不含税' ? 'selected' : ''}>含税</option>
+      <option value="不含税" ${payload.tax_label === '不含税' ? 'selected' : ''}>不含税（不退税）</option>
+    </select></label><p class="muted">仅含税车缝费用参与退税；各产品组可单独选择。此选项不改变已填报价金额。</p>
     <div id="sw-import-preview"></div>
     <div id="sw-groups"></div>`;
     const groupsHost = host.querySelector('#sw-groups');
@@ -2465,6 +2475,13 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
             <select class="sw-gcat" data-gi="${gi}" ${canEdit ? '' : 'disabled'}>
               <option value="车衣" ${cat==='车衣'?'selected':''}>车衣</option>
               <option value="车发" ${cat==='车发'?'selected':''}>车发</option>
+            </select>
+          </label>
+          <label style="font-size:13px">税项
+            <select class="sw-gtax" data-gi="${gi}" ${canEdit ? '' : 'disabled'}>
+              <option value="" ${!g.tax_label ? 'selected' : ''}>沿用车缝报价</option>
+              <option value="含税" ${g.tax_label==='含税'?'selected':''}>含税</option>
+              <option value="不含税" ${g.tax_label==='不含税'?'selected':''}>不含税（不退税）</option>
             </select>
           </label>
           <label style="font-size:13px">用量
@@ -2496,6 +2513,12 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
     refreshTotals();
 
     if (!canEdit) return;
+    host.querySelector('#sw-tax-label').onchange = event => { payload.tax_label = event.target.value; onChange(); };
+    host.querySelectorAll('.sw-gtax').forEach(select => select.onchange = () => {
+      const group = payload.sewing_groups[+select.dataset.gi];
+      if (select.value) group.tax_label = select.value; else delete group.tax_label;
+      onChange();
+    });
     host.querySelectorAll('.sw-gname').forEach(inp => inp.oninput = () => {
       payload.sewing_groups[+inp.dataset.gi].name = inp.value; onChange();
     });
@@ -2556,6 +2579,7 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
               note: it.note || '',
             })),
             labor_amount: g.labor_amount || 0,
+            ...(g.tax_label ? { tax_label: g.tax_label } : {}),
           });
           impPreview.querySelector('#sw-imp-replace').onclick = () => {
             payload.sewing_groups = j.groups.map(toGroup);
