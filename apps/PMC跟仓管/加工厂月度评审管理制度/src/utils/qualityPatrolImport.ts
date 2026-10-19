@@ -1,7 +1,7 @@
 import * as XLSX from 'xlsx'
 import { resolveFactoryName } from './factoryName'
 import type { Factory } from '../types/factory'
-import { PATROL_GRADES } from './qualityPatrol'
+import { PATROL_FIELDS, PATROL_GRADES } from './qualityPatrol'
 
 export interface PatrolImportRow {
   rowNo: number
@@ -22,6 +22,7 @@ export interface PatrolImportResult {
 }
 const norm = (v: unknown) => String(v ?? '').replace(/\s+/g, '').replace(/[（]/g, '(').replace(/[）]/g, ')')
 const text = (v: unknown) => String(v ?? '').trim()
+const fieldLabels: Record<string, string> = Object.fromEntries(PATROL_FIELDS.map(f => [f.key, f.label]))
 export function validPatrolDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
   const d = new Date(value + 'T00:00:00Z')
@@ -119,7 +120,7 @@ export function parsePatrolWorkbook(data: ArrayBuffer): PatrolImportResult {
     const labels = Array.from({ length: range.e.c + 1 }, (_, c) => norm(cell(r, c)?.v))
     if (labels.includes('厂名') && labels.includes('员工人数')) { header = r; break }
   }
-  if (header < 0) throw new Error('未找到“厂名、员工人数”表头，请使用9月18日巡查总结模板')
+  if (header < 0) throw new Error('未找到“厂名、员工人数”表头，请使用单次巡查总结表')
   const labels = Array.from({ length: range.e.c + 1 }, (_, c) => {
     const merge = ws['!merges']?.find(m => m.s.r <= header && m.e.r >= header && m.s.c <= c && m.e.c >= c)
     return norm(cell(merge?.s.r ?? header, merge?.s.c ?? c)?.v)
@@ -129,17 +130,29 @@ export function parsePatrolWorkbook(data: ArrayBuffer): PatrolImportResult {
   if (gradeCols.length !== 1) throw new Error('模板须仅包含一次巡查评级，请将不同日期的巡查分别导入')
   const cols: Record<string, number> = {
     factory: col('厂名'), staff: col('员工人数'), lines: col('拉线'), area: col('场地面积（平方）'), grade: gradeCols[0]!,
-    evaluation: col('评价', '本次评价'), correction: col('整改描述', '本次整改描述'), planned_date: col('计划完成时间'),
-    completed_date: col('整改完成时间'), production_type: col('符合类型', '符合生产类型'), notes: col('备注'),
+    evaluation: col('评价', '本次评价'), correction: col('整改描述', '本次整改描述'), planned_date: col('计划完成时间', '计划完成日期', '整改计划完成时间'),
+    completed_date: col('整改完成时间', '整改完成日期'), production_type: col('符合类型', '符合生产类型'), notes: col('备注'),
   }
-  for (const key of ['staff', 'lines', 'area', 'evaluation', 'correction', 'planned_date', 'production_type']) if (cols[key]! < 0) throw new Error(`模板缺少字段：${key}`)
+  for (const key of ['staff', 'lines', 'area', 'evaluation', 'correction', 'production_type']) if (cols[key]! < 0) throw new Error(`模板缺少“${fieldLabels[key]}”列，请检查表头`)
   const title = Array.from({ length: header }, (_, r) => Array.from({ length: range.e.c + 1 }, (_, c) => text(cell(r, c)?.v)).join(' ')).join(' ')
-  const titleDate = title.match(/\d{4}年\d{1,2}月\d{1,2}日/)
-  const checkDate = titleDate ? dateText(titleDate[0], false) : ''
+  const normalizedTitle = title.replace(/\s+/g, '')
+  const titleDate = normalizedTitle.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/)
+  let checkDate = titleDate ? dateText(titleDate[0], false) : ''
+  // A visit period such as 2026年10月14日-16日 is recorded on its final day.
+  const period = normalizedTitle.match(/(\d{4})年(\d{1,2})月(\d{1,2})日[-–—~～至](?:(\d{4})年)?(?:(\d{1,2})月)?(\d{1,2})日/)
+  if (period) {
+    const start = dateText(`${period[1]}年${period[2]}月${period[3]}日`, false)
+    const end = dateText(`${period[4] || period[1]}年${period[5] || period[2]}月${period[6]}日`, false)
+    if (end < start) throw new Error('标题中的巡查结束日期不能早于开始日期，请核对')
+    checkDate = end
+  }
   const gradeDate = labels[gradeCols[0]!]!.match(/(\d{1,2})\/(\d{1,2})/)
   if (checkDate && gradeDate && checkDate.slice(5) !== `${gradeDate[1]!.padStart(2, '0')}-${gradeDate[2]!.padStart(2, '0')}`) throw new Error('标题日期与评级表头日期不一致，请核对模板')
   const region = /湖南/.test(title) ? 'hunan' : /东莞/.test(title) ? 'dongguan' : /河源/.test(title) ? 'heyuan' : ''
   const images = extractPhotos(data, sheetName)
+  for (const key of ['planned_date', 'completed_date']) {
+    if (cols[key]! < 0) images.warnings.push(`未提供“${fieldLabels[key]}”列，该项将留空，不使用其他日期代替。`)
+  }
   const rows: PatrolImportRow[] = []
   const serialCol = col('序号')
   for (let r = header + 1; r <= range.e.r; r++) {
@@ -156,7 +169,7 @@ export function parsePatrolWorkbook(data: ArrayBuffer): PatrolImportResult {
       try {
         values[key] = ['staff', 'lines', 'area'].includes(key) ? numeric(value, key !== 'area')
           : key.endsWith('_date') ? dateText(value, !!wb.Workbook?.WBProps?.date1904) : text(value)
-      } catch (e) { errors.push(`${labels[c] || key}：${(e as Error).message}`) }
+      } catch (e) { errors.push(`${labels[c] || fieldLabels[key]}：${(e as Error).message}`) }
     }
     values.grade = text(values.grade).toUpperCase().replace(/级$/, '')
     if (values.grade && !PATROL_GRADES.includes(values.grade as typeof PATROL_GRADES[number])) errors.push('评级须为 A、B、C、D 或留空')

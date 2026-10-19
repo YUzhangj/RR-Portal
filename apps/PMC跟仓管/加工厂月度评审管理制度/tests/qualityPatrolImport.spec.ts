@@ -27,6 +27,24 @@ function confirm(w: ReturnType<typeof mount>) { return w.find('footer .primary')
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r }); return { promise, resolve } }
 beforeEach(() => { vi.resetAllMocks(); mocks.list.mockResolvedValue([]); mocks.create.mockImplementation(async (form: FormData) => ({ id: String(form.get('factory')), factory: form.get('factory'), check_date: form.get('check_date') })) })
 describe('import preview and persistence', () => {
+  it('clears the previous date and explains a failed replacement file', async () => {
+    const w = mount(QualityPatrolImport, {props:{factories, records:[], regions:['hunan'], initialRegion:'hunan'}})
+    await read(w)
+    expect((w.find('input[type=date]').element as HTMLInputElement).value).toBe('2026-09-18')
+    const file = new File([], '错误.xlsx')
+    Object.defineProperty(file, 'arrayBuffer', {value: async () => { throw new Error('模板缺少“评价”列，请检查表头') }})
+    const input = w.find('input[type=file]')
+    Object.defineProperty(input.element, 'files', {value:[file], configurable:true})
+    await input.trigger('change'); await flushPromises()
+    expect((w.find('input[type=date]').element as HTMLInputElement).value).toBe('')
+    expect(w.text()).toContain('模板缺少“评价”列')
+    expect(w.text()).toContain('请按上方提示调整文件后重新选择')
+    expect(w.text()).not.toContain('请先选择 Excel 文件')
+    expect(confirm(w).attributes('disabled')).toBeDefined()
+    expect(mocks.create).not.toHaveBeenCalled()
+    w.unmount()
+  })
+
   it('requires preview confirmation, skips existing records and never calls update', async () => {
     const existing = [{id:'1',factory:'a',check_date:'2026-09-18 00:00:00Z'}] as any
     mocks.list.mockResolvedValue(existing)

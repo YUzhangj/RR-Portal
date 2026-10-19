@@ -26,6 +26,47 @@ describe('single-visit Excel parser', () => {
     expect(() => parsePatrolWorkbook(workbook([row], '2026年10月16日湖南加工厂检查总结'))).toThrow('不一致')
     expect(validPatrolDate('2026-02-30')).toBe(false)
   })
+  it('accepts October completion dates without inventing planned dates', () => {
+    const headers = [...header]; headers[5] = '10/16评级'; headers[8] = '整改完\n成时间'
+    const result = parsePatrolWorkbook(workbook([row], '2026年10月14日-16日湖南加工厂检查总结', headers))
+    expect(result.checkDate).toBe('2026-10-16')
+    expect(result.rows[0]?.values).toMatchObject({ planned_date: '', completed_date: '2026-10-15' })
+    expect(result.warnings.join('')).toContain('计划完成时间')
+  })
+  it('allows absent date columns and keeps separate date values when both exist', () => {
+    const headers = [...header]; headers[8] = ''
+    expect(parsePatrolWorkbook(workbook([row], undefined, headers)).rows[0]?.values).toMatchObject({ planned_date: '', completed_date: '' })
+    const result = parsePatrolWorkbook(workbook([[...row, 46311]], undefined, [...header, '整改完成日期']))
+    expect(result.rows[0]?.values).toMatchObject({ planned_date: '2026-10-15', completed_date: '2026-10-16' })
+  })
+  it('explains missing required columns in Chinese and rejects invalid date periods', () => {
+    const headers = [...header]; headers[6] = ''
+    expect(() => parsePatrolWorkbook(workbook([row], undefined, headers))).toThrow('评价')
+    const october = [...header]; october[5] = '10/16评级'
+    expect(() => parsePatrolWorkbook(workbook([row], '2026年10月18日-16日湖南加工厂检查总结', october))).toThrow('早于')
+    expect(() => parsePatrolWorkbook(workbook([row], '2026年10月14日-32日湖南加工厂检查总结', october))).toThrow()
+    expect(parsePatrolWorkbook(workbook([row], '2026年9月30日至10月16日湖南加工厂检查总结', october)).checkDate).toBe('2026-10-16')
+  })
+  it('validates both endpoints when whitespace occurs inside the title dates', () => {
+    const march = [...header]; march[5] = '3/2评级'
+    expect(() => parsePatrolWorkbook(workbook([row], '2026 年2 月30 日–3 月2 日湖南加工厂检查总结', march))).toThrow('有效日期')
+    const october = [...header]; october[5] = '10/16评级'
+    expect(() => parsePatrolWorkbook(workbook([row], '2026 年10 月18 日–16 日湖南加工厂检查总结', october))).toThrow('早于')
+    expect(parsePatrolWorkbook(workbook([row], '2026 年10 月14 日–16 日湖南加工厂检查总结', october)).checkDate).toBe('2026-10-16')
+  })
+  it('compares a period against its own start rather than an earlier date in the title', () => {
+    const october = [...header]; october[5] = '10/16评级'
+    expect(() => parsePatrolWorkbook(workbook([row], '2026年9月18日模板 2026年10月18日–16日湖南加工厂检查总结', october))).toThrow('早于')
+  })
+  it.runIf(!!process.env.PATROL_OCTOBER_REFERENCE_XLSX)('reads the supplied October workbook with its visit period and photos', () => {
+    const bytes = fs.readFileSync(process.env.PATROL_OCTOBER_REFERENCE_XLSX!)
+    const result = parsePatrolWorkbook(new Uint8Array(bytes).buffer)
+    expect(result.checkDate).toBe('2026-10-16')
+    expect(result.rows).toHaveLength(39)
+    expect(result.rows.flatMap(r => r.photos)).toHaveLength(78)
+    expect(result.rows.flatMap(r => r.errors)).toEqual([])
+    expect(result.rows[0]?.values).toMatchObject({ planned_date: '', completed_date: '' })
+  })
   it('matches factories, blocks duplicate mappings, and skips existing dates', () => {
     const { rows } = parsePatrolWorkbook(workbook([row, [2, '不明工厂', 10, 1, 100, 'B']]))
     matchPatrolFactories(rows, [{ id: 'f1', name: '华宏' }])
