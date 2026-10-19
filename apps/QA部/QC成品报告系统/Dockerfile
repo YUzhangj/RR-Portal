@@ -17,6 +17,7 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 COPY templates ./templates
 COPY static ./static
+COPY assets ./assets
 RUN mkdir -p /app/storage /app/data && chown -R qc:qc /app
 USER qc
 EXPOSE 3410

@@ -1609,6 +1609,8 @@ def build_unified_pdf_payload(db, report: Report, company_name: str, report_titl
         "result_reason": report.result_reason,
         "generated_at": utcnow().isoformat(),
         "overview": {
+            "inspection_stage": report.inspection_status,
+            "completed_pct": report.completed_pct,
             "customer": snapshot.get("customer_name", ""),
             "factory": snapshot.get("factory_name", ""),
             "country": snapshot.get("country", ""),
