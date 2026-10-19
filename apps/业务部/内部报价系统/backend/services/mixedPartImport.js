@@ -1,7 +1,7 @@
 'use strict';
 const { createHash, randomUUID } = require('node:crypto');
-const { inheritMoldFields, validateConfig, prepareMoldImport, isNonMoldPart, updateEngineeringFields } = require('../../frontend/mixed-molds');
-const {productSerial} = require('../../frontend/mixed-sku');
+const { inheritMoldFields, validateConfig, prepareMoldImport, isNonMoldPart, updateEngineeringFields, engineeringCatalog } = require('../../frontend/mixed-molds');
+const {productPartNumber,partProductCodes,productsForPartCode,repairNumberedSelections} = require('../../frontend/mixed-sku');
 const canonical = value => /^\d+$/.test(String(value).trim()) ? String(Number(value)).padStart(2, '0') : String(value).trim();
 function productNumbers(name) {
   const text = String(name || '').normalize('NFKC').trim();
@@ -22,10 +22,12 @@ function importedParts(molds) {
     mold_no: String(mold.mold_no || part.mold_no || ''), material: part.material || mold.material || '',
   }))).filter(part => !isNonMoldPart(part) && part.name && !/^(制表|审核|批准|签名)\s*[:：]?$/.test(part.name));
 }
+function partCodes(part) { const codes=partProductCodes(part); return codes.length ? codes : productNumbers(part.name); }
+function matchesGroup(config, code) { return productsForPartCode(config,code).length ? productsForPartCode(config,code) : config.products.filter(p => productPartNumber(p) === code); }
 function summarize(molds) {
   const parts = importedParts(molds), groups = new Map(), unmatched = [];
   for (const part of parts) {
-    const codes = productNumbers(part.name);
+    const codes = partCodes(part);
     if (!codes.length) unmatched.push(part.name);
     for (const code of codes) { if (!groups.has(code)) groups.set(code, []); groups.get(code).push(part.name); }
   }
@@ -44,12 +46,25 @@ function unusedPlaceholders(config, payloads) {
       && !(root.mixed_molds || []).some(m => m.parts?.some(part => part.product_id === p.id))))
     .map(p => p.id);
 }
+// Product-sheet imports and mold imports resolve the same numbered references.
+// Keep this inside the normal import transaction, rather than a separate repair UI.
+function reconcileProductSelections(config, engineering, molding) {
+  const catalog = engineeringCatalog(molding, engineering).parts_catalog;
+  if (!catalog) return {engineering, molding, changes:[]};
+  const plan = repairNumberedSelections(config, catalog.selections, catalog.parts);
+  if (plan.unresolved.length) throw new Error(plan.unresolved.join('；'));
+  if (!plan.changes.length) return {engineering, molding, changes:[]};
+  const nextEngineering = structuredClone(engineering), nextMolding = structuredClone(molding);
+  nextEngineering.mixed_part_selections = plan.selections;
+  if (nextMolding.parts_catalog) nextMolding.parts_catalog.selections = structuredClone(plan.selections);
+  return {engineering:nextEngineering, molding:nextMolding, changes:plan.changes};
+}
 function importParts(config, engineering, molds, { replacePlaceholders = false, sourceFile = '', existingParts = [], placeholderIds = [], mode = 'append' } = {}) {
   const summary = summarize(molds);
   if (!summary.product_count) throw new Error('没有识别到配件名称前的产品序号');
   const next = structuredClone(config);
   let root = prepareMoldImport(engineering, existingParts, mode);
-  const removedProducts = mode === 'replace' ? next.products.filter(p => !summary.products.some(group => productSerial(p) === group.code)) : [];
+  const removedProducts = mode === 'replace' ? next.products.filter(p => !summary.products.some(group => matchesGroup({products:[p]},group.code).length > 0)) : [];
   if (removedProducts.length) {
     const removedIds = new Set(removedProducts.map(p => p.id));
     next.products = next.products.filter(p => !removedIds.has(p.id));
@@ -62,8 +77,9 @@ function importParts(config, engineering, molds, { replacePlaceholders = false, 
     next.products = next.products.filter(p => !removed.has(p.id));
   }
   for (const group of summary.products) {
-    const matches = next.products.filter(p => productSerial(p) === group.code);
+    const matches = matchesGroup(next,group.code);
     if (matches.length > 1) throw new Error(`序号 ${group.code} 对应多个现有小产品，请先整理货号`);
+    if (matches.length && !/^\d+$/.test(group.code) && /^\d+$/.test(matches[0].code)) matches[0].code=group.code;
     if (!matches.length) {
       let id = `number_${group.code}`;
       while (next.products.some(p => p.id === id)) id += '_';
@@ -72,6 +88,9 @@ function importParts(config, engineering, molds, { replacePlaceholders = false, 
   }
   validateConfig(next);
   root.mixed_imported_parts ||= []; root.mixed_imported_molds ||= []; root.mixed_part_selections ||= {};
+  const repaired=repairNumberedSelections(next,root.mixed_part_selections,[...existingParts,...root.mixed_imported_parts]);
+  if(repaired.unresolved.length)throw new Error(repaired.unresolved.join('；'));
+  root.mixed_part_selections=repaired.selections;
   const known = new Map([...existingParts, ...root.mixed_imported_parts].map(p => [identity(p),p]));
   let added = 0, assigned = 0, demandsFilled = 0;
   for (const part of importedParts(molds)) {
@@ -99,8 +118,13 @@ function importParts(config, engineering, molds, { replacePlaceholders = false, 
       if (!root.mixed_imported_parts.some(p => p.id === stored.id)) root.mixed_imported_parts.push({...stored});
     }
     root.mixed_deleted_part_ids = (root.mixed_deleted_part_ids || []).filter(id => id !== stored.id);
-    for (const code of productNumbers(part.name)) {
-      const product = next.products.find(p => productSerial(p) === code);
+    if (partProductCodes(stored).length) {
+      const linked=repairNumberedSelections(next,root.mixed_part_selections,[stored]);
+      if(linked.unresolved.length)throw new Error(linked.unresolved.join('；'));
+      root.mixed_part_selections=linked.selections;
+    }
+    for (const code of partCodes(stored)) {
+      const product = matchesGroup(next,code)[0];
       const refs = root.mixed_part_selections[product.id] ||= [];
       if (!refs.some(r => r.part_id === stored.id)) { refs.push({part_id:stored.id,usage:1}); assigned++; }
     }
@@ -111,4 +135,4 @@ function importParts(config, engineering, molds, { replacePlaceholders = false, 
   root.mixed_import_summary = {...summary, source_file:sourceFile};
   return { config:next, engineering:root, summary:{...summary,added,assigned,demands_filled:demandsFilled,total_products:next.products.length,removed_product_ids:removedProducts.map(p => p.id)} };
 }
-module.exports = { productNumbers, summarize, importParts, unusedPlaceholders };
+module.exports = { productNumbers, summarize, importParts, unusedPlaceholders, reconcileProductSelections };

@@ -12,6 +12,7 @@ const XLSX = require('xlsx');
 // 字段 → 关键词候选（越靠前优先级越高）
 // 关键词全部以「去空格 + 大写」比较，故英文关键词写成大写即可同时兼容中英表头
 const FIELD_KEYWORDS = {
+  product_code:   ['小产品编号', '小产品货号', '产品ITEM＃', '产品ITEM#', '产品货号', '产品编号', 'MINI_ITEMNO', 'MINIITEMNO', 'PRODUCTCODE', 'ITEMNO', 'ITEM#', 'ITEM＃'],
   mold_no:        ['模号', '模具编号', '客人模具编号', '编号', 'MOLDNO'],
   part_name:      ['配件名称', 'PARTNAME', 'PART NAME'],
   part_name_cn:   ['中文名称', 'CHINESENAME', 'CHINESE NAME'],
@@ -325,15 +326,15 @@ function tryParseSheet(wb, sheetName) {
   }
   const cols = mapColumns(header);
   const machineHeader = cols.machine >= 0 ? header[cols.machine] : '';
-  // 只展开需求列真实存在的纵向合并区域；普通空白不能沿用上一零件需求。
-  if (cols.production_demand >= 0) {
+  // 只展开真实纵向合并区域；普通空白不能沿用上一零件的货号或需求。
+  for (const key of ['production_demand', 'product_code']) if (cols[key] >= 0) {
     for (const range of ws['!merges'] || []) {
-      if (range.s.c !== cols.production_demand || range.e.c !== cols.production_demand || range.s.r < dataStart) continue;
-      const value = aoa[range.s.r]?.[cols.production_demand];
+      if (range.s.c !== cols[key] || range.e.c !== cols[key] || range.s.r < dataStart) continue;
+      const value = aoa[range.s.r]?.[cols[key]];
       if (value == null || value === '') continue;
       for (let row = range.s.r + 1; row <= range.e.r; row++) {
         aoa[row] ||= [];
-        if (aoa[row][cols.production_demand] == null || aoa[row][cols.production_demand] === '') aoa[row][cols.production_demand] = value;
+        if (aoa[row][cols[key]] == null || aoa[row][cols[key]] === '') aoa[row][cols[key]] = value;
       }
     }
   }
@@ -383,7 +384,7 @@ function tryParseSheet(wb, sheetName) {
   }
   const productGroups = detectProductGroups(ws, cols.image, dataStart, dataRows);
 
-  const hasPartDetailCols = cols.part_name >= 0
+  const hasPartDetailCols = cols.product_code >= 0 || cols.part_name >= 0
     && (cols.part_name_cn >= 0 || (cols.name >= 0 && cols.part_name !== cols.name));
   if (hasPartDetailCols) {
     const detailMolds = applyProductGroups(buildPartDetailMolds(dataRows, cell, machineHeader), productGroups);
@@ -627,6 +628,7 @@ function buildPartDetailMolds(dataRows, cell, machineHeader = '') {
     const g = groups.get(key);
     g.parts.push({
       name: partName,
+      ...(cell(r, 'product_code') ? {source_product_code:cell(r, 'product_code')} : {}),
       production_demand: parseDemand(cell(r, 'production_demand')),
       name_en: partNameEn,
       name_cn: partNameCn,

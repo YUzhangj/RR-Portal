@@ -1,27 +1,85 @@
 (function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory(require('./mixed-molds'));else root.MixedSku=factory(root.MixedMolds);})(typeof globalThis!=='undefined'?globalThis:this,function(molds){
   const serial=value=>/^\d+$/.test(String(value??'').trim())?String(Number(value)).padStart(2,'0'):String(value??'').trim();
   function productSerial(p){return serial(p.source_number || (/^\d+$/.test(String(p.code))?p.code:/^number_(\d+)_*$/.exec(p.id||'')?.[1] || /-(\d+)$/.exec(p.code||'')?.[1] || p.code));}
+  const normalizedCode = value => String(value ?? '').normalize('NFKC').replace(/\s+/g,'').toUpperCase();
+  // NO. is spreadsheet ordering metadata. Numbered mold parts use the official SKU.
+  function productPartNumber(product) {
+    const official = /^BEAUTYM-S3-(\d+)$/.exec(normalizedCode(product.code));
+    return official ? serial(official[1]) : productSerial(product);
+  }
+  function partProductCodes(part) {
+    const raw=String(part?.source_product_code ?? '').normalize('NFKC').trim();
+    if(!raw)return [];
+    const codes=raw.split(/[、,，;；/／\n&＆+＋]+/).map(normalizedCode).filter(Boolean);
+    if(!codes.length || codes.some(code=>!/^[-A-Z0-9_]+$/.test(code)))throw Error(`零件${part.name || ''}的小产品货号格式无效`);
+    return [...new Set(codes)];
+  }
+  function productsForPartCode(config, code) {
+    const official=normalizedCode(code);
+    return config.products.filter(p=>normalizedCode(p.code)===official ||
+      (/^\d+$/.test(String(p.code)) && productPartNumber(p)===productPartNumber({code:official})));
+  }
+  function repairNumberedSelections(config, selections, parts) {
+    const next=JSON.parse(JSON.stringify(selections || {})), changes=[], unresolved=[];
+    const catalog=new Map(parts.map(part=>[part.id,part]));
+    for(const product of config.products) for(const ref of selections?.[product.id] || []) {
+      const part=catalog.get(ref.part_id);
+      const official=partProductCodes(part);
+      if(official.length) {
+        const matches=official.map(code=>productsForPartCode(config,code));
+        if(matches.some(rows=>rows.length!==1)){unresolved.push(`${part.name}：正式货号${official.join('、')}未找到或不唯一`);continue;}
+        const targets=matches.map(rows=>rows[0]);
+        if(targets.some(p=>p.id===product.id))continue;
+        for(const target of targets){
+          const duplicate=(next[target.id] || []).find(r=>r.part_id===ref.part_id);
+          if(duplicate && Number(duplicate.usage)!==Number(ref.usage))throw Error(`${part.name}已被${target.code}选用且用量不同，请核对导入资料`);
+          next[target.id] ||= [];
+          if(!duplicate)next[target.id].push({...ref});
+          changes.push({part_id:ref.part_id,name:part.name,from:product.code,to:target.code});
+        }
+        next[product.id]=next[product.id].filter(r=>r.part_id!==ref.part_id);
+        continue;
+      }
+      const prefix=/^(\d+)\s*[-－–—:：]\s*\S/.exec(String(part?.name || '').normalize('NFKC').trim());
+      if(!prefix)continue;
+      const number=serial(prefix[1]);
+      // Repair only the old NO.-based links; retain explicit manual/shared links.
+      if(productSerial(product)!==number || productPartNumber(product)===number)continue;
+      const matches=config.products.filter(p=>productPartNumber(p)===number);
+      if(matches.length!==1){unresolved.push(`${part.name}：正式货号${number}未找到或不唯一`);continue;}
+      const target=matches[0];
+      const duplicate=(next[target.id] || []).find(r=>r.part_id===ref.part_id);
+      if(duplicate && Number(duplicate.usage)!==Number(ref.usage))throw Error(`${part.name}已被${target.code}选用且用量不同，请手动核对`);
+      next[product.id]=next[product.id].filter(r=>r.part_id!==ref.part_id);
+      next[target.id] ||= [];
+      if(!duplicate)next[target.id].push({...ref});
+      changes.push({part_id:ref.part_id,name:part.name,from:product.code,to:target.code});
+    }
+    return {selections:next,changes,unresolved};
+  }
   function apply(config,records){
-    const next=JSON.parse(JSON.stringify(config)),seen=new Set(),codes=new Set();let matched=0,added=0;
+    const next=JSON.parse(JSON.stringify(config)),seen=new Set(),codes=new Set(),updatedIds=new Set();let matched=0,added=0;
     const withRatios=records.some(r=>Object.hasOwn(r,'na_ratio'));
     if(withRatios && records.some(r=>typeof r.na_ratio!=='number'||!Number.isFinite(r.na_ratio)||r.na_ratio<0)) throw Error('Ratio per capsule 缺失或无效');
     for(const r of records){
       const number=serial(r.source_number);
-      if(!number||!r.code||!r.name||seen.has(number)||codes.has(r.code))throw Error('配比表序号或货号缺失、重复');
-      seen.add(number);codes.add(r.code);
-      const matches=next.products.filter(p=>p.code===r.code||productSerial(p)===number);
+      if(!number||!r.code||!r.name||seen.has(number)||codes.has(normalizedCode(r.code)))throw Error('配比表序号或货号缺失、重复');
+      seen.add(number);codes.add(normalizedCode(r.code));
+      const partNumber=productPartNumber({code:r.code,source_number:r.source_number});
+      const matches=next.products.filter(p=>normalizedCode(p.code)===normalizedCode(r.code)
+        || (/^\d+$/.test(String(p.code)) && productPartNumber(p)===partNumber));
       if(matches.length>1)throw Error(`序号 ${number} 匹配多个产品，请先核对`);
-      if(matches.length){Object.assign(matches[0],{code:r.code,name:r.name,brand:r.brand,source_number:number,...(withRatios?{na_ratio:r.na_ratio}:{})});matched++;}
-      else {let id=`sku_${number}`;while(next.products.some(p=>p.id===id))id+='_';next.products.push({id,code:r.code,name:r.name,brand:r.brand,source_number:number,ratio:1,...(withRatios?{na_ratio:r.na_ratio}:next.na_direct?{na_ratio:0}:{})});added++;}
+      if(matches.length){updatedIds.add(matches[0].id);Object.assign(matches[0],{code:r.code,name:r.name,brand:r.brand,source_number:number,...(withRatios?{na_ratio:r.na_ratio}:{})});matched++;}
+      else {let id=`sku_${number}`;while(next.products.some(p=>p.id===id))id+='_';updatedIds.add(id);next.products.push({id,code:r.code,name:r.name,brand:r.brand,source_number:number,ratio:1,...(withRatios?{na_ratio:r.na_ratio}:next.na_direct?{na_ratio:0}:{})});added++;}
     }
     if(withRatios){
-      const missing=next.products.filter(p=>!seen.has(productSerial(p)));
+      const missing=next.products.filter(p=>!updatedIds.has(p.id));
       if(!next.na_direct && missing.length) throw Error('首次导入NA比例需覆盖全部现有产品，缺少：'+missing.map(p=>p.code).join('、'));
       next.na_direct=true;
       if(!next.products.map(p=>molds.ratioValue(p.na_ratio ?? p.ratio)).some(value=>value>0)) throw Error('NA比例合计必须大于零');
     }
     if(new Set(next.products.map(p=>p.code)).size!==next.products.length)throw Error('导入后货号重复');
-    return {config:next,matched,added,unmatched:next.products.filter(p=>!seen.has(productSerial(p))).map(p=>p.code)};
+    return {config:next,matched,added,unmatched:next.products.filter(p=>!updatedIds.has(p.id)).map(p=>p.code)};
   }
   function planPainting(config,items){
     const groups=new Map(),unmatched=new Set();
@@ -77,5 +135,5 @@
     }
     return {groups:[...groups.values()],unmatched:[...unmatched]};
   }
-  return {serial,productSerial,apply,planPainting,planSupplier,planAssembly};
+  return {serial,productSerial,productPartNumber,partProductCodes,productsForPartCode,repairNumberedSelections,apply,planPainting,planSupplier,planAssembly};
 });

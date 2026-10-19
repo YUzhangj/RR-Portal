@@ -306,11 +306,11 @@
   function showNumberedImport(preview, result, file, root) {
     const groups = result.product_groups;
     if (!groups?.product_count || !config()?.enabled) return false;
-    preview.innerHTML = `<section class="mixed-config"><h4>按配件序号识别到 ${groups.product_count} 个小产品、${groups.part_count} 个配件</h4>
-      <p>多个序号的配件同时分到对应小产品，每款默认用量为 1，可在产品组成中调整。产品名称暂用序号命名，可随后修改。</p>
-      <div class="mixed-scroll"><table><thead><tr><th>小产品序号</th><th>所需配件</th><th>配件数</th></tr></thead><tbody>${groups.products.map(p=>`<tr><td>${esc(p.code)}</td><td>${p.parts.map(esc).join('、')}</td><td>${p.parts.length}</td></tr>`).join('')}</tbody></table></div>
+    preview.innerHTML = `<section class="mixed-config"><h4>识别到 ${groups.product_count} 个小产品、${groups.part_count} 个配件</h4>
+      <p>优先按“产品 Item＃”列的完整货号分配零件；填写多个货号的共用零件同时分配，每款默认用量为 1。旧表未填货号时按配件名称前的编号匹配。</p>
+      <div class="mixed-scroll"><table><thead><tr><th>小产品货号 / 编号</th><th>所需配件</th><th>配件数</th></tr></thead><tbody>${groups.products.map(p=>`<tr><td>${esc(p.code)}</td><td>${p.parts.map(esc).join('、')}</td><td>${p.parts.length}</td></tr>`).join('')}</tbody></table></div>
       ${groups.unmatched.length ? `<p class="mixed-error">未识别归属，保留为待分配配件：${groups.unmatched.map(esc).join('、')}</p>` : ''}
-      <p>导入将保存当前工程草稿，并按配件名称前的编号建立小产品归属。包装数量及现有比例不变。</p>
+      <p>导入将保存当前工程草稿，并按正式货号建立小产品归属；未填货号时按配件编号匹配。包装数量及现有比例不变。</p>
       ${moldImportMode(true)}<button type="button" data-numbered-apply>导入并按序号分配</button> <button type="button" data-numbered-cancel>取消</button><p data-numbered-status role="status"></p></section>`;
     bindMoldImportMode(preview, '[data-numbered-apply]', true);
     preview.querySelector('[data-numbered-cancel]').onclick = () => {preview.innerHTML='';};
@@ -319,7 +319,7 @@
       const mode = preview.querySelector('[data-import-mode]:checked').value;
       if (mode === 'replace') {
         const codes = new Set(groups.products.map(p => String(p.code)));
-        const removed = config().products.filter(p => !codes.has(window.MixedSku.productSerial(p)));
+        const removed = config().products.filter(p => !codes.has(p.code) && !codes.has(window.MixedSku.productPartNumber(p)));
         if (!confirm(`完全替换全部模具和零件，并按文件重建为 ${groups.product_count} 个小产品？\n将移除 ${removed.length} 个旧产品及其各部门明细${removed.length ? '：' + removed.map(p => p.code).join('、') : ''}。\n同编号产品资料保留；移除前保存备份。`)) return;
       }
       const dirty = [...document.querySelectorAll('.dept-tab[title="有未保存修改"]')].some(tab=>tab.dataset.dept!=='engineering');
@@ -861,6 +861,7 @@
       products: [] }));
     const panel = document.createElement('section'); panel.className = 'mixed-config'; host.appendChild(panel);
     let expanded = !!saved?.enabled;
+    let productImport = false;
     const locked = sections.some(s => s.status === 'approved');
     let skuUploadSequence = 0;
     function draw() {
@@ -889,11 +890,11 @@
           if(!active())return;
           if(state!==JSON.stringify(cfg))throw Error('产品配置已修改，请重新选择配比表生成预览');
           const applied=window.MixedSku.apply(cfg,result.records);
-          preview.innerHTML=`<p>按序号匹配 ${applied.matched} 款，新增 ${applied.added} 款。已有模具和部门资料保留；${result.records.some(r=>r.na_ratio!=null)?'同步导入 Ratio per capsule 为 NA 比例；各款乘比例求和，共有费用只计一次。':'本次更新货号、名称和品牌，保留原有比例。'}</p>${applied.unmatched.length?`<p>未匹配的现有产品保留：${applied.unmatched.map(esc).join('、')}</p>`:''}<div class="mixed-scroll"><table><thead><tr><th>序号</th><th>货号</th><th>品牌</th><th>产品名称</th><th>NA比例（Ratio per capsule）</th></tr></thead><tbody>${result.records.map(r=>`<tr><td>${esc(r.source_number)}</td><td>${esc(r.code)}</td><td>${esc(r.brand)}</td><td>${esc(r.name)}</td><td>${r.na_ratio==null?'保留原值':esc(r.na_ratio)+'（'+esc(ratioPercent(r.na_ratio))+'）'}</td></tr>`).join('')}</tbody></table></div><button type="button" data-sku-apply>应用产品资料</button>`;
+          preview.innerHTML=`<p>按正式货号匹配 ${applied.matched} 款，新增 ${applied.added} 款。配比表NO.只作表内序号，已有模具和部门资料保留；${result.records.some(r=>r.na_ratio!=null)?'同步导入 Ratio per capsule 为 NA 比例；各款乘比例求和，共有费用只计一次。':'本次更新货号、名称和品牌，保留原有比例。'}</p>${applied.unmatched.length?`<p>未匹配的现有产品保留：${applied.unmatched.map(esc).join('、')}</p>`:''}<div class="mixed-scroll"><table><thead><tr><th>序号</th><th>货号</th><th>品牌</th><th>产品名称</th><th>NA比例（Ratio per capsule）</th></tr></thead><tbody>${result.records.map(r=>`<tr><td>${esc(r.source_number)}</td><td>${esc(r.code)}</td><td>${esc(r.brand)}</td><td>${esc(r.name)}</td><td>${r.na_ratio==null?'保留原值':esc(r.na_ratio)+'（'+esc(ratioPercent(r.na_ratio))+'）'}</td></tr>`).join('')}</tbody></table></div><button type="button" data-sku-apply>应用产品资料</button>`;
           preview.querySelector('[data-sku-apply]').onclick=()=>{
             if(!active())return;
             if(state!==JSON.stringify(cfg)){++skuUploadSequence;preview.textContent='产品配置已修改，请重新选择配比表生成预览';control.value='';return;}
-            try{const latest=window.MixedSku.apply(cfg,result.records);cfg.products=latest.config.products;cfg.na_direct=latest.config.na_direct;draw();panel.querySelector('.mixed-message').textContent='产品资料及比例已应用，请点击保存混装配置，同步更新汇总。';}
+            try{const latest=window.MixedSku.apply(cfg,result.records);cfg.products=latest.config.products;cfg.na_direct=latest.config.na_direct;productImport=true;draw();panel.querySelector('.mixed-message').textContent='产品资料及比例已应用，请点击保存混装配置，同步更新汇总。';}
             catch(error){preview.textContent=error.message;control.value='';}
           };
         } catch(error){if(active()){preview.textContent=error.message;control.value='';}}
@@ -918,13 +919,14 @@
         const button = event.target, message = panel.querySelector('.mixed-message');
         try {
           window.MixedMolds.validateConfig(cfg);
+          if (productImport && [...document.querySelectorAll('.dept-tab[title="有未保存修改"]')].some(tab => tab.dataset.dept !== 'sales')) throw new Error('请先保存其他部门的修改，再导入产品资料');
           const removed = (saved?.products || []).filter(p => !cfg.products.some(next => next.id === p.id));
           if (removed.length && [...document.querySelectorAll('.dept-tab[title="有未保存修改"]')].some(tab => tab.dataset.dept !== 'sales')) throw new Error('请先保存其他部门的修改，再删除小产品');
           if (removed.length && !window.confirm(`确认删除 ${removed.map(p => p.code).join('、')}？\n将删除这些小产品的全部部门明细和零件选用关系。共用零件及其他小产品会保留。`)) return;
           button.disabled = true;
           const section = sections.find(s => s.dept === 'sales');
           await request('/sections/' + section.id, { method: 'PUT', body: JSON.stringify({ payload, submit: false, base_filled_at: section.filled_at }) });
-          await request(`/quotes/${quote.id}/mixed`, { method: 'PUT', body: JSON.stringify({ config: cfg, expected_config: saved, confirmed_removed_ids: removed.map(p => p.id), expected_sections: Object.fromEntries(sections.filter(s => s.dept !== 'sales').map(s => [s.id, s.filled_at || ''])) }) });
+          await request(`/quotes/${quote.id}/mixed`, { method: 'PUT', body: JSON.stringify({ config: cfg, expected_config: saved, product_import: productImport, confirmed_removed_ids: removed.map(p => p.id), expected_sections: Object.fromEntries(sections.filter(s => s.dept !== 'sales').map(s => [s.id, s.filled_at || ''])) }) });
           location.reload();
         } catch (error) { message.textContent = error.message; message.className = 'mixed-message mixed-error'; button.disabled = false; }
       });
