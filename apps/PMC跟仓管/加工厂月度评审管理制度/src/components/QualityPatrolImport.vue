@@ -44,7 +44,7 @@ const pending = computed(() => rows.value.filter(r => !['已导入', '已存在�
 const disabledReason = computed(() => {
   if (busy.value || reading.value) return ''
   if (!region.value) return '请先选择导入厂区。'
-  if (!source.value) return '请先选择 Excel 文件。'
+  if (!source.value) return error.value ? '请按上方提示调整文件后重新选择。' : '请先选择 Excel 文件。'
   if (conflict.value) return conflict.value
   if (!validPatrolDate(checkDate.value)) return '请填写有效的检查日期。'
   if (!ready.value.length) return invalid.value.length ? '暂无可导入记录，请先处理工厂匹配或行内错误。' : '所有记录均已导入或已存在，无需重复导入。'
@@ -60,7 +60,7 @@ async function readFile(event: Event) {
   const file = input.files?.[0]
   input.value = ''
   if (!file) return
-  source.value = null; fileName.value = file.name; error.value = ''; message.value = ''; reading.value = true
+  source.value = null; checkDate.value = ''; fileName.value = file.name; error.value = ''; message.value = ''; reading.value = true
   try {
     if (!/\.xlsx$/i.test(file.name) || file.size > 50 * 1024 * 1024) throw new Error('请选择不超过50MB的 .xlsx 文件')
     const bytes = await file.arrayBuffer()
@@ -103,7 +103,7 @@ async function confirmImport() {
 <template>
   <div class="overlay"><section :ref="setDialog" class="dialog" tabindex="-1" @keydown="keydown" role="dialog" aria-modal="true" aria-labelledby="import-title">
     <header><h3 id="import-title">导入 Excel 巡查记录</h3><button :disabled="busy || reading" @click="closeImport">关闭</button></header>
-    <p>使用“2026年9月18日湖南加工厂检查总结.xlsx”格式，每行对应一家工厂的一次巡查。导入明细和内嵌现场照片，合计与评级汇总自动重新计算。</p>
+    <p>支持9月18日、10月16日等单次巡查总结表，每行对应一家工厂的一次巡查。计划完成时间、整改完成时间可缺列或留空。导入明细和内嵌现场照片，合计与评级汇总自动重新计算。</p>
     <div class="controls">
       <label>导入厂区<select v-model="region" :disabled="locked || reading"><option value="">请选择厂区</option><option v-for="r in regions" :key="r" :value="r">{{ REGION_LABELS[r] }}</option></select></label>
       <label>选择 Excel<input type="file" accept=".xlsx" :disabled="!region || locked || reading" @change="readFile" /></label>
