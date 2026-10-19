@@ -88,17 +88,19 @@ test('未退税前毛利直接引用货价减不含人工成本',()=>{
  assert.equal(calculateSummaryValues({}, {}, 10, 20).markup_before_tax,0);
 });
 
-test('含税13%成本包含杂项，退税及利润随之更新',()=>{
+test('杂项保留采购成本，但不再参与13%类减税',()=>{
  const {afterTaxComponents,SUMMARY_COLUMNS}=require('../backend/services/quoteSummary');
  const before={misc:100},after=afterTaxComponents(before),values=calculateSummaryValues(before,after,10,200);
- assert.equal(values.tax_13_cost,100);
- assert.equal(values.rebate_reduction,11.5);
- assert.equal(values.cost_after_rebate,88.5);
- assert.equal(values.profit_after_tax,111.5);
+ assert.equal(values.tax_13_cost,0);
+ assert.equal(values.rmb_purchase_cost,100);
+ assert.equal(values.rebate_reduction,0);
+ assert.equal(values.cost_after_rebate,100);
+ assert.equal(values.profit_after_tax,100);
  const ws=buildSummaryWorkbook([{customer:'T',qty:10,quoted_price:200,components_before_tax:before,components:after,summary_values:values,confirmation:{}}]).getWorksheet('各客报价汇总');
  const col=key=>9+SUMMARY_COLUMNS.findIndex(c=>c[0]===key);
- assert.equal(ws.getCell(5,col('tax_13_cost')).formula,'SUM(AE5,AI5,BA5,BU5,X5,BE5,AV5,BY5,CC5)');
- assert.equal(ws.getCell(5,col('tax_13_cost')).result,100);
- assert.equal(ws.getCell(5,col('cost_after_rebate')).formula,`${ws.getColumn(col('cost_with_labor')).letter}5-${ws.getColumn(col('rebate_reduction')).letter}5`);
- assert.equal(ws.getCell(5,col('cost_after_rebate')).result,88.5);
+ const misc=ws.getColumn(col('misc')).letter;
+ assert.ok(!ws.getCell(5,col('tax_13_cost')).formula.includes(misc+'5'));
+ assert.equal(ws.getCell(5,col('tax_13_cost')).result,0);
+ assert.equal(ws.getCell(5,col('rmb_purchase_cost')).result,100);
+ assert.equal(ws.getCell(5,col('cost_after_rebate')).result,100);
 });
