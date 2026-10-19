@@ -4,14 +4,14 @@ const {calculateMixedQuote}=require('../backend/services/mixedQuotation');
 const cfg={enabled:true,mode:'ratio',na_direct:true,units_per_pack:1,products:[{id:'a',code:'A',name:'产品A',ratio:.4,na_ratio:.4},{id:'b',code:'B',name:'产品B',ratio:.6,na_ratio:.6}]};
 const stepGroup=count=>({product:'工序组',qty:12000,team:1,steps:[{name:'装配',count}]});
 const fixture=()=>({mixed_products:{a:{assembly_base_rate:290,assembly_std_time:11,assembly_step_groups:[stepGroup(14)],assembly_labor:[{name:'手填装工',unit_price:.1,qty:1}]},b:{assembly_base_rate:310,assembly_step_groups:[stepGroup(13)]},removed:{assembly_base_rate:999}},mixed_shared:{assembly_base_rate:310,packaging_step_groups:[stepGroup(27)],packaging_materials:[{name:'原资料'}]}});
-function setup(edit=true){
+function setup(edit=true,configuration=cfg){
  const element=()=>({nodes:{},children:[],_html:'',textContent:'',style:{},dataset:{},value:'',hidden:false,
   get innerHTML(){return this._html;},set innerHTML(value){this._html=value;this.nodes={};},
   appendChild(v){this.children.push(v);},insertBefore(v){this.children.push(v);},
   querySelector(key){return this.nodes[key] ||= element();},
-  querySelectorAll(key){if(key==='[data-assembly-product]')return this.nodes.rows ||= [...this._html.matchAll(/data-assembly-product="([^"]+)"/g)].map(()=>({hidden:false}));return [];}});
+  querySelectorAll(key){if(key==='[data-assembly-product]')return this.nodes.rows ||= [...this._html.matchAll(/data-assembly-product="([^"]+)"/g)].map(match=>({dataset:{assemblyProduct:match[1]},hidden:false}));return [];}});
  const root=fixture(),host=element();let changes=0;
- const window={__data:{quote:{id:12,qty:12000},mixed_quote:cfg,sections:[]}};
+ const window={__data:{quote:{id:12,qty:12000},mixed_quote:configuration,sections:[]}};
  vm.runInNewContext(fs.readFileSync(require.resolve('../frontend/mixed-quotation.js'),'utf8'),{window,document:{createElement:element},sessionStorage:{getItem:()=>null,setItem(){}},defaultAssemblyBaseRateForFactory:()=>310,assemblyGroupsTotal});
  window.MixedQuotation.wrap(()=>assert.fail('整体资料不应渲染单款编辑器'),'assembly')(host,root,edit,()=>changes++);
  return {root,host,detail:host.querySelector('.mixed-detail'),api:window.MixedQuotation,changes:()=>changes};
@@ -38,6 +38,35 @@ test('搜索仅影响显示，统一基数覆盖未显示小产品；只读无�
  assert.equal(s.root.mixed_products.b.assembly_base_rate,320);
  const readonly=setup(false);assert.match(readonly.detail.innerHTML,/data-apply-assembly-base disabled/);
  assert.equal(readonly.detail.querySelector('[data-apply-assembly-base]').onclick,undefined);
+});
+
+test('装工自然排序、共有费用置底及搜索保持产品绑定，不改变配置顺序',()=>{
+ const configuration={...cfg,products:[
+  {...cfg.products[0],code:'SKU-2',name:'乙款'},
+  {...cfg.products[1],code:'SKU-10',name:'十号'},
+  {id:'c',code:'SKU-1',name:'一号',ratio:.2,na_ratio:.2},
+ ]};
+ const before=JSON.stringify(configuration),s=setup(true,configuration);
+ const ids=()=>s.detail.querySelectorAll('[data-assembly-product]').map(row=>row.dataset.assemblyProduct);
+ assert.deepEqual(ids(),['c','a','b','__shared__']);
+ assert.match(s.detail.innerHTML,/<tr data-assembly-product="c"><td>SKU-1<\/td>/);
+ assert.match(s.detail.innerHTML,/<tr data-assembly-product="a"><td>SKU-2<\/td>/);
+ assert.match(s.detail.innerHTML,/<tr data-assembly-product="b"><td>SKU-10<\/td>/);
+ for(const [query,expected] of [
+  ['SKU-2',['a']],['十号',['b']],['  sku-1  ',['c','b']],['Sku-',['c','a','b']],
+  ['共有费用',['__shared__']],['不存在',[]],['乙款',['a']],['',['c','a','b','__shared__']],
+ ]){
+  s.detail.querySelector('input[type="search"]').oninput({target:{value:query}});
+  assert.deepEqual(s.detail.querySelectorAll('[data-assembly-product]').filter(row=>!row.hidden).map(row=>row.dataset.assemblyProduct),expected,query);
+ }
+ s.detail.querySelector('input[type="search"]').oninput({target:{value:'SKU-2'}});
+ s.detail.querySelector('[data-assembly-bulk-base]').value='320';
+ s.detail.querySelector('[data-apply-assembly-base]').onclick();
+ for(const id of ['a','b','c'])assert.equal(s.root.mixed_products[id].assembly_base_rate,320);
+ assert.equal(s.root.mixed_shared.assembly_base_rate,320);
+ assert.equal(s.root.mixed_products.removed.assembly_base_rate,999);
+ assert.deepEqual(ids(),['c','a','b','__shared__']);
+ assert.equal(JSON.stringify(configuration),before);
 });
 
 test('空白负数及非法值不可批量写入，零基数可明确应用',()=>{

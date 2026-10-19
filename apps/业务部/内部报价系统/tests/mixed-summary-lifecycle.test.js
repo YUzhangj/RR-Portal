@@ -42,7 +42,7 @@ test('混装汇总迟到成功或失败保留新页面草稿，当前请求失�
     await latest;
     assert.match(f.host.innerHTML, /混装报价汇总 · 测试报价/);
     const input = f.host.inputs[0];
-    assert.equal(input.value, '1');
+    assert.equal(input.value, '1.0000');
     input.value = '0.25';
     f.pending[0][outcome]('过期请求失败');
     await earlier;
