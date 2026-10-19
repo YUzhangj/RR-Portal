@@ -40,14 +40,15 @@ function addMixedTax(ws,result,refs,priceRef,options={}){
    const fraction=components[key].result ? (result.sewing_taxable?.[key] ?? components[key].result)/components[key].result : 0;
    return make(`(${visible[key].ref})*${fraction}`,result.sewing_taxable?.[key] ?? components[key].result);
  };
- const taxes=[['含税13%类成本',tax13,null],['纸箱类',amount('carton'),.1],['含税1%',amount('plating'),.0099],['搪胶类3%',amount('slush'),.03],['车发类13%',sewingAmount('sewing_hair'),.115],['车衣类13%',sewingAmount('sewing_cloth'),.115],['吸塑类6%',amount('suction'),.06],['运费类9%',amount('freight'),.0826],['含税13%类',tax13,.115]];
+ const taxes=[['含税13%类成本',tax13,null],['纸箱类',amount('carton'),.115,1.1],['含税1%',amount('plating'),.0099],['搪胶类3%',amount('slush'),.03],['车发类13%',sewingAmount('sewing_hair'),.115],['车衣类13%',sewingAmount('sewing_cloth'),.115],['吸塑类6%',amount('suction'),.06],['运费类9%',amount('freight'),.0826],['含税13%类',tax13,.115]];
  section('四、减税明细');const h=ws.addRow([...taxes.map(t=>t[0]),'合计减税']);h.height=42;h.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFDCEAF4'}};
  const amounts=ws.addRow(taxes.map(t=>t[1])).number;
  // The first 13% column is a reference only; share its base without a second deduction.
  ws.getCell(amounts,9).value=make(`A${amounts}`,tax13.result);
  const rates=ws.addRow([...taxes.map(t=>t[2]),'税率 %']).number;
- const deduction=ws.addRow(taxes.map((t,i)=>t[2]===null?'—':make(`${ws.getColumn(i+1).letter}${amounts}*${ws.getColumn(i+1).letter}${rates}`,t[1].result*t[2]))).number;
- const ded=taxes.reduce((n,t)=>n+t[1].result*(t[2]||0),0);ws.getCell(deduction,10).value=make(`SUM(B${deduction}:I${deduction})`,ded);
+ const reduction=t=>t[1].result/(t[3]||1)*(t[2]||0);
+ const deduction=ws.addRow(taxes.map((t,i)=>t[2]===null?'—':make(`${ws.getColumn(i+1).letter}${amounts}${t[3]?`/${t[3]}`:''}*${ws.getColumn(i+1).letter}${rates}`,reduction(t)))).number;
+ const ded=taxes.reduce((n,t)=>n+reduction(t),0);ws.getCell(deduction,10).value=make(`SUM(B${deduction}:I${deduction})`,ded);
  for(let i=2;i<=9;i++)ws.getCell(rates,i).numFmt='0.00%';
  ws.getCell(b.after.ref).value=make(`IFERROR(${a.price.ref}/(${c.cost.ref}-J${deduction}),0)`,cost!==ded?price/(cost-ded):0);
  ws.addRow([]);

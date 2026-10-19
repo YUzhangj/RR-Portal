@@ -120,7 +120,7 @@ test('报价汇总按减税明细口径计算各项减税后单价', () => {
   assert.equal(result.components.suction, 9.4);
   assert.equal(result.components.color_box, 8.85);
   assert.equal(result.components.plating, 9.901);
-  assert.equal(result.components.carton, 9);
+  assert.equal(result.components.carton, 8.954545); // 10 - 10 / 1.1 × 11.5%，保留六位
   assert.equal(result.components.freight, 9.174);
   assert.equal(result.components.cabinet, 10);
   assert.equal(result.components.misc, 10);

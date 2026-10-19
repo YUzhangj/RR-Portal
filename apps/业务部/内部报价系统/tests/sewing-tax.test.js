@@ -50,6 +50,19 @@ test('报价详情网页使用已选税项，仅含税基数参与退税',()=>{
  assert.equal(sales.pricing_summary.t4.sewhair13.amt,0);assert.equal(sales.pricing_summary.t4.sewcloth13.amt,0);
 });
 
+test('核价页面入口加载税项模块，未税车缝在页面汇总中不退税',()=>{
+ const html=fs.readFileSync(path.join(__dirname,'../frontend/verification.html'),'utf8');
+ const source=fs.readFileSync(path.join(__dirname,'../frontend/workbench.js'),'utf8');
+ const context=vm.createContext({window:{__data:{sections:sections({sewing:{tax_label:'不含税'}})}},num:v=>Number(v)||0,sum:obj=>Object.values(obj||{}).reduce((a,b)=>a+(Number(b)||0),0),formatNum:String});
+ if (/<script\s+src="\.\/sewing-tax\.js(?:\?[^\"]*)?"/.test(html)) {
+  vm.runInContext(fs.readFileSync(path.join(__dirname,'../frontend/sewing-tax.js'),'utf8'),context);
+ }
+ vm.runInContext(source.slice(source.indexOf('function renderTaxDeductionBlock('),source.indexOf('\nfunction hasSlushCostingInputs(')),context);
+ const sales={};context.renderTaxDeductionBlock({innerHTML:'',querySelector:()=>null},sales,null,{}, {base_price:40,sewing_hair:0,sewing_cloth:20});
+ assert.equal(sales.pricing_summary.t4.sewcloth13.amt,0);
+ assert.ok(html.indexOf('./sewing-tax.js')<html.indexOf('./workbench.js'));
+});
+
 test('报价汇总导出公式和保存值保持不含税结果',async()=>{
  const r=buildQuoteSummary(quote,sections(payload({tax_label:'不含税',sewing_groups:[group(20)]})));
  const wb=buildSummaryWorkbook([r]),saved=new(require('exceljs').Workbook)();await saved.xlsx.load(await wb.xlsx.writeBuffer());
@@ -99,4 +112,21 @@ test('车缝编辑器可以保存整单及分组的不含税选择',()=>{
  assert.match(host.innerHTML,/不含税（不退税）/);
  host.querySelector('#sw-tax-label').onchange({target:{value:'不含税'}});
  assert.equal(data.tax_label,'不含税');assert.equal(changed,1);
+});
+
+test('旧表只有车衣时，未税设置同步移除合计退税和Excel税后成本',async()=>{
+ const {buildVerificationRow,buildVerificationWorkbook}=require('../backend/services/verificationSummary');
+ const cells={},groups=[];
+ const add=(title,row,labels,values)=>{const h=labels.map((_,i)=>'s!'+String.fromCharCode(65+i)+row),v=h.map(id=>id.replace(String(row),String(row+1)));h.forEach((id,i)=>cells[id]={v:labels[i]});v.forEach((id,i)=>cells[id]={v:values[i]});groups.push({title,rows:[h,v]});};
+ add('货价与材料',1,['货价','车衣'],[30,10]);add('包装与外购',4,['纸箱'],[0]);
+ add('人工与成本',7,['总成本','不含人工成本'],[10,10]);add('减税与税后结果',10,['车衣类13%'],[.115]);
+ groups[3].rows.push(['s!A13']);cells['s!A13']={v:1.15};cells['s!K1']={v:1.15};cells['s!K2']={v:8.85};
+ const model={cells,groups,metrics:{price:'s!A2',total:'s!A8',no_labor:'s!B8',deduction:'s!K1',after_cost:'s!K2'}};
+ const s=sections({sales:{legacy_import:{excel_model:model}},sewing:{tax_label:'不含税'}});
+ const r=buildVerificationRow(quote,{id:1,label:'V1',status:'drafting'},s,[{customer:'TOMY',sku:'SEW',qty:100,source:'test'}]);
+ assert.equal(r.values.BI,null);assert.equal(r.values.BJ,null);assert.equal(r.values.CV,null);
+ assert.equal(r.values.BN,10);assert.equal(r.values.CW,0);near(r.values.CY,0);near(r.values.CZ,10);
+ const saved=new(require('exceljs').Workbook)();await saved.xlsx.load(await buildVerificationWorkbook([r]).xlsx.writeBuffer());
+ const ws=saved.getWorksheet('TOMY');near(ws.getCell('CY5').result,0);near(ws.getCell('CZ5').result,10);
+ assert.match(ws.getCell('CY5').formula,/CW5\*11.5%/);assert.doesNotMatch(ws.getCell('CY5').formula,/CV5/);
 });

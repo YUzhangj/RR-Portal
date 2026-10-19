@@ -2046,7 +2046,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
   const RATE_DEFAULTS = {
     rmb_buy: 0,       // 人民币外购件成本（总额参考，不参与减税）
     tax13: 0,         // 含税13%类成本（成本基数参考，不参与减税；减税在"含税13%类"列）
-    carton: 10,       // 纸箱类
+    carton: 11.5,     // 纸箱类：原成本 / 1.1 × 11.5%
     tax1: 0.99,       // 含税1%
     slush3: 3,        // 搪胶类3%
     sewhair13: 11.5,  // 车发类13%
@@ -2205,7 +2205,8 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     // 表4：每行 减税额 = 金额 × 税率%；参考列(无税率)不计；填入减税额行 + 合计
     const totalDed = t4Cols.reduce((s, [k]) => {
       if (T4_NO_RATE.has(k)) return s;  // 含税13%类成本为参考列，不重复参与减税
-      const ded = num(ps.t4[k].amt) * num(ps.t4[k].rate) / 100;
+      const basis = num(ps.t4[k].amt) / (k === 'carton' ? 1.1 : 1);
+      const ded = basis * num(ps.t4[k].rate) / 100;
       const cell = host.querySelector('#tk-ded-' + k);
       if (cell) cell.textContent = formatNum(ded);
       return s + ded;
