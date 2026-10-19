@@ -263,6 +263,14 @@ ShipmentOrderTotals.Apply(extractedPayload, [fullContainer, looseCargo]);
 if (extractedPayload["items"]![0]!["order_total_pieces"]!.GetValue<decimal>() != 888)
     throw new InvalidOperationException("邮件已提取的每单总件数不应被系统汇总覆盖");
 Console.WriteLine("Shipment order total pieces tests passed.");
+var mixedTask = new ShipmentTask { Id=99, Customer="ZURU", ItemsJson="""
+    [{"contract_number":"4500217958","product_code":"9574A","customer_po":"10001835258-3891","pieces":50,"packing_group":"mix","source_file":"mixed.xlsx","source_row":2},
+     {"contract_number":"4500217958","product_code":"9574B","customer_po":"10001835258-3891","pieces":50,"packing_group":"mix","source_file":"mixed.xlsx","source_row":3}]
+    """ };
+var mixedPayload = JsonNode.Parse("""{"customer":"ZURU","items":[{"contract_number":"4500217958","product_code":"9574A","customer_po":"10001835258-3891","pieces":50}]}""")!.AsObject();
+ShipmentOrderTotals.Apply(mixedPayload, [mixedTask]);
+if (mixedPayload["items"]![0]!["order_total_pieces"]!.GetValue<decimal>() != 50)
+    throw new InvalidOperationException("同货号不同款混装的每单总件数不得重复计算");
 
 var categoryProducts = new[] { new ProductInfo { ProductCode="CAT-01", QuantityPerBox=12, ToyCategory="电子" } };
 var categoryItem = JsonNode.Parse("""{"product_code":"CAT01","spec":12}""")!.AsObject();
@@ -308,9 +316,19 @@ validTemplate.IsDefault=false;validTemplate.ShipmentMode="Invalid";
 if (ExportTemplateRules.Validate(validTemplate) is null) throw new InvalidOperationException("无效业务类型应被拒绝");
 Console.WriteLine("Cargo waiting-notification, explicit ship-date and template validation tests passed.");
 
-if (!ExportTemplateRules.CanManage("admin") || !ExportTemplateRules.CanManage("supervisor") || ExportTemplateRules.CanManage("shipping") || ExportTemplateRules.CanManage("warehouse"))
+if (!ExportTemplateRules.CanManage("admin") || !ExportTemplateRules.CanManage("supervisor") || !ExportTemplateRules.CanManage("shipping") || ExportTemplateRules.CanManage("warehouse"))
     throw new InvalidOperationException("模板管理必须允许管理员和主管，拒绝普通船务和仓管");
 Console.WriteLine("Export template role permission tests passed.");
+var specialTemplate = new ExportTemplate { Name="华登特殊表", LayoutKey="SkyCastle", ShipmentMode="Warehouse" };
+if (ExportTemplateRules.Validate(specialTemplate) is null) throw new InvalidOperationException("多柜特殊表不得用于交仓");
+specialTemplate.ShipmentMode="Container";
+if (ExportTemplateRules.Validate(specialTemplate) is not null) throw new InvalidOperationException("做柜特殊版式应被允许");
+validTemplate.ShipmentMode="Container";validTemplate.WeightRule="Exact";
+if (ExportTemplateRules.Validate(validTemplate) is not null) throw new InvalidOperationException("小数模板公式应被允许");
+validTemplate.WeightRule="Truncate";
+if (ExportTemplateRules.Validate(validTemplate) is not null) throw new InvalidOperationException("取整模板公式应被允许");
+validTemplate.WeightRule="Invalid";
+if (ExportTemplateRules.Validate(validTemplate) is null) throw new InvalidOperationException("无效模板公式应被拒绝");
 
 var multiPlan = JsonNode.Parse("""{"fields":{"multi_container":"true","export_template":"sky-castle-multi"},"shipment_groups":[{"group_key":"container-1","so_number":"SO111111","container_type":"40HQ","cutoff_date":"2026-09-27T09:00"},{"group_key":"container-2","so_number":"SO222222","container_type":"40HQ","cutoff_date":"2026-10-02T12:00"}],"items":[{"product_code":"A","pieces":3,"quantity":36,"net_net_weight":14.04,"order_total_pieces":10},{"product_code":"B","pieces":7,"quantity":84,"net_net_weight":32.76,"order_total_pieces":10}]}""")!.AsObject();
 var cabinets = MultiContainerRules.Split(multiPlan);
@@ -444,3 +462,44 @@ if (explicitlyClearedSchedule.Payload["fields"]!["si_deadline"] is not null ||
     explicitlyClearedSchedule.Payload["fields"]!["vessel_name"]!.ToString() != "COMMON-VESSEL")
     throw new InvalidOperationException("分柜明确空船期应覆盖公共值，缺失字段才沿用公共值");
 Console.WriteLine("Explicit cabinet per-group schedules and absent/common metadata tests passed.");
+
+var tripPlan = JsonNode.Parse("""
+{"fields":{"separate_warehouse_so":"true","so_number":"SO-A,SO-B"},"items":[{"product_code":"A","quantity":100,"pieces":10,"volume":40,"gross_weight_per_box":2}],"warehouse_trip_plan":{"confirmed":true,"trips":[{"key":"first","warehouse":"裕泰仓","vehicle_type":"1*8T","allocations":[{"item_index":0,"quantity":"50","pieces":"5","volume":"20"}]},{"key":"second","warehouse":"裕泰仓","vehicle_type":"","allocations":[{"item_index":0,"quantity":"50","pieces":"5","volume":"20"}]}]}}
+""")!.AsObject();
+var tripTasks = WarehouseTripRules.Split(tripPlan);
+if (tripTasks.Count != 2 || tripTasks[0].GroupKey != "truck:first" || tripTasks[0].Payload["items"]![0]!["pieces"]!.ToString() != "5" || tripTasks[0].Payload["items"]![0]!["gross_weight_per_box"]!.ToString() != "2" || tripTasks[0].Payload["fields"]!["so_number"]!.ToString() != "SO-A,SO-B") throw new Exception("分车须保留人工数量、每箱重量和原SO信息");
+foreach(var invalid in new[] {"unconfirmed", "overflow", "missing", "quantity", "duplicate", "tonnes"})
+{
+    var bad = tripPlan.DeepClone().AsObject();
+    var plan = bad["warehouse_trip_plan"]!;
+    if(invalid=="unconfirmed")plan["confirmed"]=false;
+    if(invalid=="overflow")plan["trips"]![0]!["allocations"]![0]!["volume"]=36;
+    if(invalid=="missing")plan["trips"]!.AsArray().RemoveAt(1);
+    if(invalid=="quantity")plan["trips"]![0]!["allocations"]![0]!["quantity"]=51;
+    if(invalid=="duplicate")plan["trips"]![1]!["key"]="first";
+    if(invalid=="tonnes")plan["trips"]![0]!["vehicle_type"]="wrong";
+    try { WarehouseTripRules.Split(bad); throw new Exception($"应拒绝无效分车{invalid}"); } catch(InvalidOperationException) { }
+}
+var exactTrip = tripPlan.DeepClone().AsObject();
+exactTrip["items"]![0]!["volume"]=70;
+foreach(var trip in exactTrip["warehouse_trip_plan"]!["trips"]!.AsArray())trip!["allocations"]![0]!["volume"]=35;
+if(WarehouseTripRules.Split(exactTrip).Count!=2)throw new Exception("裕泰仓35CBM边界应允许确认");
+Console.WriteLine("Warehouse manual truck allocation, 35 CBM limit, conservation and confirmation tests passed.");
+
+var palletTrip=tripPlan.DeepClone().AsObject();palletTrip["items"]![0]!["pallet_count"]=4;
+foreach(var trip in palletTrip["warehouse_trip_plan"]!["trips"]!.AsArray())trip!["allocations"]![0]!["pallet_count"]=2;
+if(WarehouseTripRules.Split(palletTrip).Sum(trip=>decimal.Parse(trip.Payload["items"]![0]!["pallet_count"]!.ToString()))!=4)throw new Exception("分车卡板合计错误");
+palletTrip["warehouse_trip_plan"]!["trips"]![1]!["allocations"]![0]!["pallet_count"]=4;
+try { WarehouseTripRules.Split(palletTrip); throw new Exception("应拒绝重复分配卡板"); } catch(InvalidOperationException) { }
+
+var huadengDisplay = new ExportTemplate { Company="Huadeng",Name="华登普通做柜表",ShipmentMode="Container",Purpose="Shipping",WeightRule="DisplayInteger" };
+if(ExportTemplateRules.Validate(huadengDisplay) is not null)throw new Exception("华登显示整数公式应允许");
+huadengDisplay.Company="Xingxin";
+if(ExportTemplateRules.Validate(huadengDisplay) is null)throw new Exception("华登新增模板公式不得扩散到兴信");
+huadengDisplay.Company="Huadeng";huadengDisplay.LayoutKey="CustomerItem";
+if(ExportTemplateRules.Validate(huadengDisplay) is not null)throw new Exception("华登客户ITEM版应允许");
+huadengDisplay.LayoutKey="CartonMarks";
+if(ExportTemplateRules.Validate(huadengDisplay) is null)throw new Exception("箱唛尺寸版仅限交仓");
+huadengDisplay.ShipmentMode="Warehouse";
+if(ExportTemplateRules.Validate(huadengDisplay) is not null)throw new Exception("华登箱唛交仓版应允许");
+Console.WriteLine("Huadeng layout and formula-version isolation tests passed.");

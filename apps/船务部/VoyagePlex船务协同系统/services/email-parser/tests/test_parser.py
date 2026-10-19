@@ -424,7 +424,7 @@ class ParserTests(unittest.TestCase):
         })
         sheet = openpyxl.load_workbook(BytesIO(content)).active
         self.assertEqual("兴信拖柜，博锐送兴信拼柜，深圳报关", sheet["F1"].value)
-        self.assertEqual("按SO分货，不能混装，箱唛朝向柜门", sheet.cell(sheet.max_row - 1, 1).value)
+        self.assertEqual("按SO分货，不能混装，箱唛朝向柜门", next(cell.value for cell in sheet["N"] if cell.value == "按SO分货，不能混装，箱唛朝向柜门"))
 
     def test_external_factory_does_not_export_bottom_email_note(self):
         content, _ = build_shipment_workbook({
@@ -444,7 +444,7 @@ class ParserTests(unittest.TestCase):
         })
         sheet = openpyxl.load_workbook(BytesIO(content)).active
         self.assertEqual("宏达报关行，客上柜，拼柜，深圳报关", sheet["F1"].value)
-        self.assertEqual("按SO分货", sheet.cell(sheet.max_row - 1, 1).value)
+        self.assertEqual("按SO分货", next(cell.value for cell in sheet["N"] if cell.value == "按SO分货"))
 
     def test_eml_and_attachment_isolation(self):
         msg = EmailMessage()

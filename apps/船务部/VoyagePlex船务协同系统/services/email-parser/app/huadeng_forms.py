@@ -6,7 +6,7 @@ from .attachments import _number, _text, _product_name_and_spec
 
 def parse_huadeng_form(rows, merges):
     header = next((i for i, row in enumerate(rows) if len(row) >= 17 and '玩具' in _text(row[7]) and _text(row[4]) == '货号'), None)
-    if header is None or not any(_text(row[0]) == '华登' for row in rows if row):
+    if header is None or not any(_text(row[0]) in {'华登', '兴信', '新信'} for row in rows if row):
         return None
 
     def identity(row, col):
@@ -37,12 +37,35 @@ def parse_huadeng_form(rows, merges):
             'net_weight_per_box': _number(values[16]), 'packing_group': group, 'source_row': r+1,
         })
     flat = '\n'.join(' '.join(_text(v) for v in row) for row in rows)
+    # Pallets are a separate line below cargo, not an additional product or weight.
+    for r in range(header + 1, len(rows)):
+        line = ' '.join(_text(v) for v in rows[r])
+        match = re.search(r'(?<![\d.])(\d+)\s*(?:卡板|托板|托盘)(?![\u4e00-\u9fff])', line)
+        if match:
+            previous = next((item for item in reversed(items) if item['source_row'] <= r + 1), None)
+            if previous is not None:
+                previous['pallet_count'] = int(match.group(1))
     so = re.search(r'SO\s*#\s*([A-Z0-9-]+)', flat, re.I)
-    country = next((_text(row[6]) for row in rows[header+1:] if len(row)>7 and _text(row[0])=='华登'), '')
-    fields = {'destination_country': country}
+    country = next((_text(row[6]) for row in rows[header+1:] if len(row)>7 and _text(row[0]) in {'华登', '兴信', '新信'}), '')
+    from .rules import consignee_fields
+    fields = {'destination_country': country, **consignee_fields(flat)}
+    customer = next((_text(row[2]) for row in rows[header+1:] if len(row)>2 and _text(row[0]) in {'华登', '兴信', '新信'}), '')
+    fields['customer'] = customer
+    brand = next((re.split(r'品牌\s*[：:]', _text(value), maxsplit=1)[-1].strip() for row in rows for value in row if re.search(r'品牌\s*[：:]', _text(value))), '')
+    fields['brand'] = brand
+    top = '\n'.join(' '.join(_text(v) for v in row) for row in rows[:header])
+    fields['pickup_note'] = ' '.join(dict.fromkeys(_text(value) for row in rows[:header] for value in row
+        if re.search(r'客自提|客上柜|客上车|报关行|带卡板走货', _text(value))))
+    sequence = re.search(r'(\d+)\s*(柜|车)', top)
+    if sequence:
+        fields['sequence_number'] = sequence.group(1)
+        fields['shipment_mode'] = 'Warehouse' if sequence.group(2) == '车' else 'Container'
+    vehicle = re.search(r'\d+\s*[*xX]\s*\d+\s*T\b', top, re.I)
+    if vehicle:
+        fields['vehicle_type'] = re.sub(r'\s+', '', vehicle.group())
     warehouse = warehouse_name('\n'.join(' '.join(_text(v) for v in row) for row in rows[:header]))
     if warehouse:
         fields.update(warehouse=warehouse, delivery_address=warehouse)
     if so:
         fields['so_number'] = so.group(1)
-    return {'kind':'huadeng_shipment_form', 'fields':fields, 'items':items, 'warnings':[] if items else ['华登表格没有识别到货物明细']}
+    return {'kind':'huadeng_shipment_form', 'fields':fields, 'items':items, 'warnings':[] if items else ['走货表没有识别到货物明细']}

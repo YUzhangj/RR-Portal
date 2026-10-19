@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Optional
 from .warehouse_name import warehouse_name
+from .rules import consignee_fields
 
 import openpyxl
 import pdfplumber
@@ -21,6 +22,7 @@ HEADER_ALIASES = {
     "pieces": ("no of carton", "no carton", "no. of cartons", "total carton", "carton qty", "cartons", "ctns", "件数"),
     "spec": ("pc per carton", "pcs/ctn", "case pack", "inners", "每箱"),
     "volume": ("total cbm", "cbm", "volume", "measurement", "体积"),
+    "customer_item_number": ("customer po item no", "customer item no", "customer item number", "客item"),
     "customer_po": ("customer po", "order no", "客人po", "客户po"),
     "contract_number": ("zuru po", "contract", "订单号", "合同号", "po no"),
     "gross_weight": ("gross weight", "g.w", "gw", "毛重"),
@@ -72,6 +74,7 @@ def parse_excel(path: Path) -> dict:
         sheet = _choose_packing_sheet(wb)
         sheet_title = sheet.title
         rows = _read_sheet_rows(sheet)
+        worksheet_path = sheet._worksheet_path
     finally:
         wb.close()
     # Load merge metadata only for a recognized Huadeng form; ordinary packing
@@ -81,15 +84,34 @@ def parse_excel(path: Path) -> dict:
         merged_book = openpyxl.load_workbook(path, data_only=True, read_only=False)
         try:
             merged_sheet = merged_book[sheet_title]
-            return parse_huadeng_form(rows, [(cell.min_row-1, cell.max_row, cell.min_col-1, cell.max_col) for cell in merged_sheet.merged_cells.ranges])
+            result = parse_huadeng_form(rows, [(cell.min_row-1, cell.max_row, cell.min_col-1, cell.max_col) for cell in merged_sheet.merged_cells.ranges])
+            formula_book = openpyxl.load_workbook(path, data_only=False, read_only=True)
+            try:
+                formula_sheet = formula_book[sheet_title]
+                for item in result["items"]:
+                    formula = str(formula_sheet.cell(item["source_row"], 11).value or "").upper()
+                    item["weight_rule"] = "Truncate" if formula.startswith("=INT(") else "Exact"
+                    item["gross_weight_format"] = merged_sheet.cell(item["source_row"], 11).number_format
+                    item["net_weight_format"] = merged_sheet.cell(item["source_row"], 12).number_format
+            finally:
+                formula_book.close()
+            return result
         finally:
             merged_book.close()
+    merges = _sheet_merges(path, worksheet_path)
     header_row, headers = _find_header(rows)
     columns = _column_map(headers)
     _apply_measurement_columns(headers, columns)
     items = []
     blank_streak = 0
-    for row_index, values in enumerate(rows[header_row:], header_row + 1):
+    for row_index, source_values in enumerate(rows[header_row:], header_row + 1):
+        values = list(source_values)
+        for key in ("product_code", "contract_number", "customer_po"):
+            col = columns.get(key)
+            if col is not None and not _value(values, col):
+                for r1, r2, c1, c2 in merges:
+                    if r1 <= row_index-1 < r2 and c1 <= col < c2:
+                        values[col] = _value(rows[r1], c1)
         product = _value(values, columns.get("product_code"))
         if not product or _is_non_cargo_label(product):
             blank_streak += 1
@@ -108,6 +130,7 @@ def parse_excel(path: Path) -> dict:
             "pieces": _pieces(pieces, quantity, specification),
             "spec": specification,
             "volume": _number(_value(values, columns.get("volume"))),
+            "customer_item_number": _text(_value(values, columns.get("customer_item_number"))),
             "customer_po": _text(_value(values, columns.get("customer_po"))),
             "contract_number": _text(_value(values, columns.get("contract_number"))),
             "gross_weight": _number(_value(values, columns.get("gross_weight"))),
@@ -123,9 +146,13 @@ def parse_excel(path: Path) -> dict:
         }
         dims = [_number(_value(values, columns.get(key))) for key in ("length", "width", "height")]
         item["box_dimensions"] = "*".join(_display_number(x) for x in dims) if all(x is not None for x in dims) else ""
+        item["packing_group"] = _packing_group(row_index-1, merges, columns)
+        if item["packing_group"] and pieces is None:
+            item["pieces"] = None
         items.append(item)
     warnings = [] if items else [f"工作表“{sheet_title}”未识别到Packing List明细"]
     fields = {"loading_factory": "兴信"} if _xingxin_is_loading_factory(rows) else {}
+    fields.update(consignee_fields("\n".join(" ".join(_text(value) for value in row) for row in rows)))
     fields["warehouse"] = warehouse_name("\n".join(" ".join(_text(value) for value in row) for row in rows[:12]))
     return {"kind": "packing_list", "fields": fields, "items": items, "warnings": warnings}
 
@@ -139,6 +166,11 @@ def parse_xls(path: Path) -> dict:
     from .huadeng_forms import parse_huadeng_form
     huadeng = parse_huadeng_form(rows, sheet.merged_cells)
     if huadeng:
+        for item in huadeng["items"]:
+            item["weight_rule"] = "Exact"
+            for key, col in (("gross_weight_format", 10), ("net_weight_format", 11)):
+                xf = wb.xf_list[sheet.cell_xf_index(item["source_row"]-1, col)]
+                item[key] = wb.format_map[xf.format_key].format_str
         return huadeng
     flat = "\n".join(" | ".join(_text(value) for value in row) for row in rows)
 
@@ -160,7 +192,14 @@ def parse_xls(path: Path) -> dict:
     )
     columns = _column_map(headers)
     items = []
-    for row_index, values in enumerate(rows[header_index + 1:], header_index + 2):
+    for row_index, source_values in enumerate(rows[header_index + 1:], header_index + 2):
+        values = list(source_values)
+        for key in ("product_code", "contract_number", "customer_po"):
+            col = columns.get(key)
+            if col is not None and not _value(values, col):
+                for r1, r2, c1, c2 in sheet.merged_cells:
+                    if r1 <= row_index-1 < r2 and c1 <= col < c2:
+                        values[col] = rows[r1][c1]
         product = _value(values, columns.get("product_code"))
         if not product or _is_non_cargo_label(product):
             continue
@@ -175,13 +214,42 @@ def parse_xls(path: Path) -> dict:
             "pieces": _pieces(pieces, quantity, specification),
             "spec": specification,
             "volume": _number(_value(values, columns.get("volume"))),
+            "customer_item_number": _text(_value(values, columns.get("customer_item_number"))),
             "customer_po": _text(_value(values, columns.get("customer_po"))),
             "contract_number": _text(_value(values, columns.get("contract_number"))),
+            "gross_weight": _number(_value(values, columns.get("gross_weight"))),
+            "net_weight": _number(_value(values, columns.get("net_weight"))),
+            "pallet_count": _number(_value(values, columns.get("pallet_count"))),
+            "packing_group": _packing_group(row_index-1, sheet.merged_cells, columns),
             "source_row": row_index,
         })
+        if items[-1]["packing_group"] and pieces is None:
+            items[-1]["pieces"] = None
     warehouse = warehouse_name('\n'.join(' '.join(_text(value) for value in row) for row in rows[:header_index]))
     return {"kind": "packing_list_xls", "fields": {"warehouse": warehouse, "delivery_address": warehouse} if warehouse else {}, "items": items,
             "warnings": [] if items else ["旧版XLS未识别到货物明细，已保留表单字段供人工确认"]}
+
+
+def _sheet_merges(path, worksheet_path):
+    from zipfile import ZipFile
+    from xml.etree.ElementTree import iterparse
+    from openpyxl.utils.cell import range_boundaries
+    merges = []
+    with ZipFile(path) as archive, archive.open(worksheet_path.lstrip("/")) as source:
+        for _, element in iterparse(source, events=("end",)):
+            if element.tag.rsplit("}", 1)[-1] == "mergeCell":
+                c1, r1, c2, r2 = range_boundaries(element.attrib["ref"])
+                merges.append((r1-1, r2, c1-1, c2))
+            element.clear()
+    return merges
+
+
+def _packing_group(row, merges, columns):
+    carton_col = columns.get("pieces")
+    for r1, r2, c1, c2 in merges:
+        if carton_col is not None and r2-r1 > 1 and r1 <= row < r2 and c1 <= carton_col < c2:
+            return f"mix-{r1+1}-{r2}"
+    return ""
 
 
 def parse_pdf(path: Path) -> dict:
@@ -207,6 +275,7 @@ def parse_pdf(path: Path) -> dict:
         ]))
     fields = {
         "warehouse": local_warehouse,
+        **consignee_fields(text),
         "delivery_address": delivery_address,
         "customs_cutoff": _near_date(text, r"(?:Port\s*Cargo\s*Cut[\s-]*Off|VGM\s*Cut[\s-]*Off|CY\s*Closing|截重柜时间|截关时间)"),
         "si_deadline": _near_date(text, r"(?:Shipping\s*Instruction|SI\s*Cut[\s-]*Off|截补料时间)"),
@@ -222,6 +291,7 @@ def parse_word(path: Path) -> dict:
     return {
         "kind": "word",
         "fields": {
+            **consignee_fields(text),
             "warehouse": _first(text, [r"(?:仓库地址|送货地址|收货地址)[：:\s]*(.+?)(?:\n|$)"]),
             "so_number": _first(text, [r"SO\s*#?\s*([A-Z0-9]+)"]),
         },
@@ -292,6 +362,7 @@ def _parse_amazon_allocation(wb) -> Optional[list[dict]]:
             "pieces": pieces,
             "spec": specification,
             "volume": _number(cell("total cbm")),
+            "customer_item_number": _text(_value(values, columns.get("customer_item_number"))),
             "customer_po": _text(cell("po")),
             "contract_number": _text(cell("45#")),
             "gross_weight": _number(cell("total g.w")),

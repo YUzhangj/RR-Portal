@@ -273,7 +273,7 @@ app.Use(async (context, next) =>
     db.CurrentUserId = session.User.Id;
     var role = session.User.Role;
     var shippingAllowed = role == "shipping" &&
-        (path.StartsWith("/api/factory-mappings", StringComparison.Ordinal) || path.StartsWith("/api/mail", StringComparison.Ordinal) || path.StartsWith("/api/imports/email", StringComparison.Ordinal) || path.StartsWith("/api/shipments", StringComparison.Ordinal) || path.StartsWith("/api/qc", StringComparison.Ordinal)) &&
+        (path.StartsWith("/api/export-templates", StringComparison.Ordinal) || path.StartsWith("/api/factory-mappings", StringComparison.Ordinal) || path.StartsWith("/api/mail", StringComparison.Ordinal) || path.StartsWith("/api/imports/email", StringComparison.Ordinal) || path.StartsWith("/api/shipments", StringComparison.Ordinal) || path.StartsWith("/api/qc", StringComparison.Ordinal)) &&
         !path.StartsWith("/api/users", StringComparison.Ordinal) &&
         !path.StartsWith("/api/product-infos", StringComparison.Ordinal) &&
         !path.StartsWith("/api/inventory", StringComparison.Ordinal) &&
@@ -284,7 +284,7 @@ app.Use(async (context, next) =>
         ((context.Request.Method == "GET" && (!path.Contains("/export", StringComparison.Ordinal) || path.Contains("export/warehouse", StringComparison.Ordinal) || path.Contains("inventory-adjustment", StringComparison.Ordinal))) ||
          context.Request.Method is "PATCH" or "DELETE" || (context.Request.Method == "POST" && path.Contains("warehouse-locations", StringComparison.Ordinal)));
     var allowed = role is "admin" or "supervisor" || shippingAllowed || warehouseShipmentAllowed ||
-        (role == "warehouse" && path.StartsWith("/api/inventory", StringComparison.Ordinal)) || path is "/api/auth/me" or "/api/auth/logout";
+        (role == "warehouse" && (path.StartsWith("/api/inventory", StringComparison.Ordinal) || (path == "/api/export-templates/available" && context.Request.Method == "GET"))) || path is "/api/auth/me" or "/api/auth/logout";
     if (!allowed) { context.Response.StatusCode = StatusCodes.Status403Forbidden; await context.Response.WriteAsJsonAsync(new { error = "当前账号无权使用此功能" }); return; }
     if (role == "supervisor" && path.StartsWith("/api/users", StringComparison.Ordinal))
     {
@@ -1028,6 +1028,8 @@ app.MapPost("/api/imports/email/confirm", async (JsonObject payload, AppDbContex
     {
         if (reviewed["status"]?.ToString() == "failed") continue;
         if (CargoNotificationRules.Validate(reviewed) is string splitError) return Results.BadRequest(new { error = splitError });
+        try { ShipmentTaskPayloads(reviewed); }
+        catch (Exception error) when (error is InvalidOperationException or OverflowException or ArgumentException) { return Results.BadRequest(new { error = error.Message }); }
         if (reviewed["fields"]?["multi_container"]?.ToString() == "true")
         {
             try { MultiContainerRules.Split(reviewed); }
@@ -1094,7 +1096,7 @@ app.MapPost("/api/imports/email/confirm", async (JsonObject payload, AppDbContex
         }
     }
     await db.SaveChangesAsync(cancellationToken);
-    foreach (var linked in affectedTasks.Where(t => t.SourceGroupKey.StartsWith("container-", StringComparison.Ordinal)).GroupBy(t => t.SourceImportItemId))
+    foreach (var linked in affectedTasks.Where(t => t.SourceGroupKey.StartsWith("container-", StringComparison.Ordinal) || t.SourceGroupKey.StartsWith("truck:", StringComparison.Ordinal)).GroupBy(t => t.SourceImportItemId))
     {
         if (linked.Count() < 2) continue;
         var ordered = linked.ToArray(); var root = ordered.First().BatchRootId > 0 ? ordered.First().BatchRootId : ordered.First().Id;
@@ -1119,6 +1121,8 @@ app.MapPost("/api/imports/email/{batchId:long}/confirm", async (long batchId, Js
     {
         if (reviewed["status"]?.ToString() == "failed") continue;
         if (CargoNotificationRules.Validate(reviewed) is string splitError) return Results.BadRequest(new { error = splitError });
+        try { ShipmentTaskPayloads(reviewed); }
+        catch (Exception error) when (error is InvalidOperationException or OverflowException or ArgumentException) { return Results.BadRequest(new { error = error.Message }); }
         if (reviewed["fields"]?["multi_container"]?.ToString() == "true")
         {
             try { MultiContainerRules.Split(reviewed); }
@@ -1126,6 +1130,7 @@ app.MapPost("/api/imports/email/{batchId:long}/confirm", async (long batchId, Js
         }
     }
 
+    await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
     var affectedTasks = new List<ShipmentTask>();
     foreach (var node in submitted)
     {
@@ -1140,6 +1145,7 @@ app.MapPost("/api/imports/email/{batchId:long}/confirm", async (long batchId, Js
         stored["fields"] = reviewed["fields"]?.DeepClone();
         stored["warehouse_groups"] = reviewed["warehouse_groups"]?.DeepClone();
         stored["items"] = reviewed["items"]?.DeepClone();
+        if (reviewed["warehouse_trip_plan"] is JsonObject reviewedTrips) stored["warehouse_trip_plan"] = reviewedTrips.DeepClone();
         if (reviewed["shipment_groups"] is JsonArray reviewedPlan) stored["shipment_groups"] = reviewedPlan.DeepClone();
         await EnrichEmailProducts(stored, db, true, cancellationToken);
         stored["reviewed_at"] = DateTime.UtcNow;
@@ -1163,13 +1169,14 @@ app.MapPost("/api/imports/email/{batchId:long}/confirm", async (long batchId, Js
     }
     batch.Status = "Confirmed";
     await db.SaveChangesAsync(cancellationToken);
-    foreach (var linked in affectedTasks.Where(t => t.SourceGroupKey.StartsWith("container-", StringComparison.Ordinal)).GroupBy(t => t.SourceImportItemId))
+    foreach (var linked in affectedTasks.Where(t => t.SourceGroupKey.StartsWith("container-", StringComparison.Ordinal) || t.SourceGroupKey.StartsWith("truck:", StringComparison.Ordinal)).GroupBy(t => t.SourceImportItemId))
     {
         if (linked.Count() < 2) continue;
         var ordered = linked.ToArray(); var root = ordered.First().BatchRootId > 0 ? ordered.First().BatchRootId : ordered.First().Id;
         for (var index = 0; index < ordered.Length; index++) { ordered[index].BatchRootId = root; ordered[index].BatchSequence = index + 1; }
     }
     await db.SaveChangesAsync(cancellationToken);
+    await transaction.CommitAsync(cancellationToken);
     return Results.Ok(new { batch_id = batch.Id, status = batch.Status, confirmed_at = DateTime.UtcNow, shipment_task_ids = affectedTasks.Select(task => task.Id).Distinct() });
 });
 
@@ -1522,7 +1529,7 @@ app.MapDelete("/api/shipments/{id:long}", async (long id, AppDbContext db, Cance
     return Results.Ok(new { deleted_task_id = id, deleted_email_records = relatedImports.Count });
 });
 
-app.MapGet("/api/shipments/{id:long}/export", async (long id, AppDbContext db, EmailParserClient parserClient, CancellationToken cancellationToken) =>
+app.MapGet("/api/shipments/{id:long}/export", async (long id, long? templateId, AppDbContext db, EmailParserClient parserClient, CancellationToken cancellationToken) =>
 {
     var task = await db.ShipmentTasks.AsNoTracking().FirstOrDefaultAsync(value => value.Id == id, cancellationToken);
     if (task is null) return Results.NotFound(new { error = "走柜任务不存在" });
@@ -1531,6 +1538,8 @@ app.MapGet("/api/shipments/{id:long}/export", async (long id, AppDbContext db, E
     var payload = JsonNode.Parse(JsonSerializer.Serialize(
         ToShipmentResponse(task, db), new JsonSerializerOptions(JsonSerializerDefaults.Web)))!.AsObject();
     await EnrichShipmentCategories(payload, db, cancellationToken);
+    if (await ExportTemplateEndpoints.ApplyToExport(payload, db, cancellationToken, templateId) is string templateError)
+        return Results.BadRequest(new { error = templateError });
     await EnrichSpecialExportProducts(payload, db, cancellationToken);
     ShipmentOrderTotals.Apply(payload, relatedTasks);
     payload["factoryMappings"] = JsonSerializer.SerializeToNode(await db.FactoryMappings.AsNoTracking().ToListAsync(cancellationToken), new JsonSerializerOptions(JsonSerializerDefaults.Web));
@@ -1540,7 +1549,7 @@ app.MapGet("/api/shipments/{id:long}/export", async (long id, AppDbContext db, E
     return Results.File(exported.Body, exported.ContentType, exported.FileName);
 });
 
-app.MapGet("/api/shipments/{id:long}/export/warehouse", async (long id, AppDbContext db, EmailParserClient parserClient, CancellationToken cancellationToken) =>
+app.MapGet("/api/shipments/{id:long}/export/warehouse", async (long id, long? templateId, AppDbContext db, EmailParserClient parserClient, CancellationToken cancellationToken) =>
 {
     var task = await db.ShipmentTasks.AsNoTracking().FirstOrDefaultAsync(value => value.Id == id, cancellationToken);
     if (task is null) return Results.NotFound(new { error = "走柜任务不存在" });
@@ -1552,6 +1561,8 @@ app.MapGet("/api/shipments/{id:long}/export/warehouse", async (long id, AppDbCon
     payload["exportVariant"] = "warehouse";
     var relatedTasks = await db.ShipmentTasks.AsNoTracking().ToListAsync(cancellationToken);
     await EnrichShipmentCategories(payload, db, cancellationToken);
+    if (await ExportTemplateEndpoints.ApplyToExport(payload, db, cancellationToken, templateId) is string templateError)
+        return Results.BadRequest(new { error = templateError });
     await EnrichSpecialExportProducts(payload, db, cancellationToken);
     ShipmentOrderTotals.Apply(payload, relatedTasks);
     payload["factoryMappings"] = JsonSerializer.SerializeToNode(await db.FactoryMappings.AsNoTracking().ToListAsync(cancellationToken), new JsonSerializerOptions(JsonSerializerDefaults.Web));
@@ -1842,6 +1853,19 @@ static async Task<JsonObject?> PreviousShipmentPayload(AppDbContext db, Shipment
         .FirstOrDefault(value => value.GroupKey == groupKey).Payload;
 }
 
+static void ApplyMailExportDetails(ShipmentTask task, JsonObject fields, bool missingOnly = false)
+{
+    var details = JsonNode.Parse(task.ExportDetailsJson)?.AsObject() ?? new JsonObject();
+    foreach (var (source, target) in new[] {
+        ("consignee", "consignee"), ("consignee_code", "consigneeCode"),
+        ("sequence_number", "sequenceNumber"), ("vehicle_type", "vehicleType"),
+        ("pickup_note", "pickupNote"), ("pickup_mode", "pickupMode"), ("customs_agent", "customsAgent"), ("brand", "brand"), ("shipment_mode", "shipmentMode"), ("truck_type_source", "truckTypeSource") })
+        if (!string.IsNullOrWhiteSpace(fields[source]?.ToString()) &&
+            (!missingOnly || string.IsNullOrWhiteSpace(details[target]?.ToString())))
+            details[target] = fields[source]?.DeepClone();
+    task.ExportDetailsJson = details.ToJsonString();
+}
+
 static void ApplyReviewedEmailToTask(ShipmentTask task, JsonObject stored, bool initializeStatus = true, JsonObject? previousImport = null)
 {
     if (!initializeStatus)
@@ -1855,6 +1879,7 @@ static void ApplyReviewedEmailToTask(ShipmentTask task, JsonObject stored, bool 
             JsonNode.Parse(task.WarehouseGroupsJson)?.AsArray() ?? new JsonArray(),
             stored["warehouse_groups"]?.AsArray() ?? new JsonArray(),
             previousImport?["warehouse_groups"]?.AsArray()).ToJsonString();
+        ApplyMailExportDetails(task, stored["fields"]?.AsObject() ?? new JsonObject(), missingOnly: true);
         task.UpdatedAt = DateTime.UtcNow;
         return;
     }
@@ -1889,6 +1914,7 @@ static void ApplyReviewedEmailToTask(ShipmentTask task, JsonObject stored, bool 
     }
     if (fields["task_type"]?.ToString() != "Delivery" && fields["export_template"]?.ToString() == "sky-castle-multi")
         task.ExportDetailsJson = new JsonObject { ["templateKey"] = "sky-castle-multi", ["vesselName"] = fields["vessel_name"]?.DeepClone() }.ToJsonString();
+    ApplyMailExportDetails(task, fields);
     task.ItemsJson = SanitizeShipmentItems(stored["items"]?.AsArray() ?? new JsonArray()).ToJsonString();
     task.PlannedShipDate = ShipmentWorkflowRules.ResolvePlannedShipDate(
         fields["ship_date"]?.ToString() ?? string.Empty,
@@ -1910,7 +1936,7 @@ static void ApplyReviewedEmailToTask(ShipmentTask task, JsonObject stored, bool 
 
 static List<(string GroupKey, JsonObject Payload)> ShipmentTaskPayloads(JsonObject stored)
 {
-    // Warehouse splitting also preserves the independently reviewed current/waiting scopes.
+    if (stored["warehouse_trip_plan"] is JsonObject) return WarehouseTripRules.Split(stored);
     if (stored["fields"]?["separate_warehouse_so"]?.ToString() == "true") return WarehouseSoRules.Split(stored);
     if (stored["fields"]?["multi_container"]?.ToString() == "true" || stored["fields"]?["explicit_container_allocation"]?.ToString() == "true") return MultiContainerRules.Split(stored);
     var groups = stored["shipment_groups"]?.AsArray();

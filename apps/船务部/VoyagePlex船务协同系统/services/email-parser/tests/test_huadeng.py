@@ -31,14 +31,14 @@ class HuadengTests(unittest.TestCase):
         self.assertFalse(any("东莞兴信" in x for x in values))
         self.assertIn("柜号：FANU1722982",values)
         self.assertIn("船封：HLK4580036",values)
-        self.assertEqual(3680,sheet["J10"].value)
-        self.assertEqual("=K8+J9+J10",sheet["J11"].value)
+        self.assertEqual(3680,sheet["K10"].value)
+        self.assertEqual("=SUM(K8:K10)",sheet["K11"].value)
 
     def test_warehouse_layout(self):
         task=self.task();task["exportDetails"].update(shipmentMode="Warehouse",sequenceNumber="510",warehouse="盐港二号仓",vehicleType="1*5T")
         data,name=build_shipment_workbook(task)
         sheet=openpyxl.load_workbook(BytesIO(data)).active
-        self.assertIn("交仓走货表",name)
+        self.assertIn("交仓表",name)
         self.assertIn("510车",sheet["F2"].value)
         self.assertIn("入盐港二号仓",sheet["E3"].value)
         self.assertIn("1*5T",sheet["E3"].value)
@@ -51,7 +51,7 @@ class HuadengTests(unittest.TestCase):
         self.assertIn("K6:K7",[str(x) for x in sheet.merged_cells.ranges])
         self.assertEqual(42,sheet["J6"].value);self.assertIsNone(sheet["J7"].value)
         self.assertEqual(652.68,sheet["L7"].value)
-        self.assertEqual("=SUM(J6:J7)",sheet["J9"].value)
+        self.assertEqual("=SUM(J6:J8)",sheet["J9"].value)
         task["items"][1]["pieces"]=40
         with self.assertRaises(ValueError):build_shipment_workbook(task)
 

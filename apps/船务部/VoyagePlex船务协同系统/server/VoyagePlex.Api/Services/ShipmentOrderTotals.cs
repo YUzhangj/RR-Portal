@@ -27,7 +27,10 @@ public static class ShipmentOrderTotals
                 // 同一份 Packing List 可能同时附在整柜和拼柜邮件中；有来源行时按文件和行去重。
                 var sourceFile = Normalize(item["source_file"]?.ToString());
                 var sourceRow = Normalize(item["source_row"]?.ToString());
-                var signature = sourceFile.Length > 0 && sourceRow.Length > 0
+                var packingGroup = item["packing_group"]?.ToString().Trim() ?? string.Empty;
+                var signature = packingGroup.Length > 0
+                    ? $"{key}|{(sourceFile.Length > 0 ? sourceFile : $"TASK:{task.Id}")}|GROUP:{packingGroup}"
+                    : sourceFile.Length > 0 && sourceRow.Length > 0
                     ? $"{key}|{sourceFile}|{sourceRow}|{pieces.Value.ToString(CultureInfo.InvariantCulture)}"
                     : $"{key}|TASK:{task.Id}|ROW:{itemIndex}";
                 if (!seenRows.Add(signature)) continue;

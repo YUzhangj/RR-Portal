@@ -39,6 +39,8 @@ def run():
                         body+=self.rfile.read(size); self.rfile.read(2)
                 else: body=self.rfile.read(int(self.headers["Content-Length"]))
                 payload=json.loads(body)
+                if self.path=="/v1/shipment-export":
+                    self.send_payload({"exportPayload":payload});return
                 if self.path=="/v1/mailbox/test":
                     self.send_payload({"connected":payload["auth_code"]=="isolated-test-auth","message":"测试连接成功" if payload["auth_code"]=="isolated-test-auth" else "邮箱登录失败"});return
                 self.calls.append((payload["address"],payload["after_uid"]))
@@ -132,6 +134,11 @@ def run():
             password = secrets.token_urlsafe(20)
             request("/api/auth/setup", {"username": "mailtest", "displayName": "Mail test", "password": password}, expected=201)
             request("/api/auth/login", {"username": "mailtest", "password": password})
+            templates=request("/api/export-templates")
+            assert len(templates)==4 and all(value["company"]=="Xingxin" for value in templates)
+            shipping_template=next(value for value in templates if value["shipmentMode"]=="Container" and value["purpose"]=="Shipping")
+            shipping_template["weightRule"]="Exact"
+            request("/api/export-templates",shipping_template,method="PUT")
             with sqlite3.connect(db_path) as connection:
                 connection.execute("UPDATE MailSystemSettings SET SyncEnabled=0")
                 insert(connection, "ProductInfos", {"ProductCode": "P-1", "QuantityPerBox": 12, "ToyCategory": "电子"})
@@ -141,6 +148,9 @@ def run():
                 old_task = insert(connection, "ShipmentTasks", dict(Customer="Test", SoNumber="SO-OLD", Status="PendingReview",
                     SourceImportItemId=old_source, SourceGroupKey="", SourceEmailsJson="[]", ItemsJson="[]", WarehouseGroupsJson="[]"))
                 new = mail(connection, "2026-10-08", "新增装柜 SO-1")
+                parsed_new=json.loads(connection.execute("SELECT ResultJson FROM ImportEmailItems WHERE Id=?",(new,)).fetchone()[0])
+                parsed_new["fields"].update(consignee="ACTUAL IMPORTER LTD.",consignee_code="ABC-123")
+                connection.execute("UPDATE ImportEmailItems SET ResultJson=? WHERE Id=?",(json.dumps(parsed_new),new))
                 change = mail(connection, "2026-10-08", "变更 SO-1", category="Change")
                 change_json = json.loads(connection.execute("SELECT ResultJson FROM ImportEmailItems WHERE Id=?", (change,)).fetchone()[0])
                 change_json["fields"]["ship_date"] = "2026-10-16"
@@ -194,6 +204,31 @@ def run():
                 assert connection.execute("SELECT HandlingStatus FROM ImportEmailItems WHERE Id=?", (rollback_new,)).fetchone()[0] == "Pending"
             confirmed = request("/api/mail/candidates/batch/confirm", {"ids": [new]})
             task_id = confirmed["taskIds"][0]
+            exported=request(f"/api/shipments/{task_id}/export")["exportPayload"]
+            assert exported["exportTemplate"]["id"]==shipping_template["id"]
+            assert exported["exportTemplate"]["weightRule"]=="Exact"
+            assert exported["exportDetails"]["consignee"]=="ACTUAL IMPORTER LTD."
+            assert exported["exportDetails"]["consigneeCode"]=="ABC-123"
+            chosen=next(value for value in templates if value["shipmentMode"]=="Warehouse" and value["purpose"]=="Shipping")
+            manual=request(f"/api/shipments/{task_id}/export?templateId={chosen['id']}")["exportPayload"]
+            assert manual["exportTemplate"]["id"]==chosen["id"]
+            assert manual["exportDetails"]["shipmentMode"]=="Warehouse", "Manual selection must override detected mode only for this export"
+            assert request(f"/api/shipments/{task_id}")["exportDetails"].get("shipmentMode")!="Warehouse"
+            wrong_purpose=next(value for value in templates if value["purpose"]=="Warehouse")
+            request(f"/api/shipments/{task_id}/export?templateId={wrong_purpose['id']}",expected=400)
+            chosen["isEnabled"]=False;chosen["isDefault"]=False
+            request("/api/export-templates",chosen,method="PUT")
+            request(f"/api/shipments/{task_id}/export?templateId={chosen['id']}",expected=400)
+            chosen["isEnabled"]=True;chosen["isDefault"]=True
+            request("/api/export-templates",chosen,method="PUT")
+            request(f"/api/shipments/{task_id}/export?templateId=999999",expected=400)
+            with sqlite3.connect(db_path) as connection:
+                connection.execute("UPDATE ShipmentTasks SET Status='PendingShipment' WHERE Id=?",(task_id,))
+            warehouse_export=request(f"/api/shipments/{task_id}/export/warehouse")["exportPayload"]
+            assert warehouse_export["exportTemplate"]["purpose"]=="Warehouse"
+            assert warehouse_export["exportTemplate"]["weightRule"]=="Template"
+            with sqlite3.connect(db_path) as connection:
+                connection.execute("UPDATE ShipmentTasks SET Status='PendingReview' WHERE Id=?",(task_id,))
             request("/api/mail/candidates/batch/confirm", {"ids": [new]}, expected=400)
             task = request(f"/api/shipments/{task_id}")
             assert task["items"][0]["category"] == "电子", "Product category was not filled on confirmation"
@@ -260,6 +295,14 @@ def run():
                     "127.0.0.1", False, False, "/", True, False, None, True, None, None, {}))
 
             company("Huadeng")
+            huadeng_templates=request("/api/export-templates")
+            assert len(huadeng_templates)==16 and all(value["company"]=="Huadeng" for value in huadeng_templates)
+            choices=request("/api/export-templates/available?purpose=Shipping")
+            assert len(choices)==8 and all(value["company"]=="Huadeng" and value["purpose"]=="Shipping" for value in choices)
+            default_huadeng=[value for value in huadeng_templates if value["isDefault"]]
+            assert len(default_huadeng)==4 and all(value["layoutKey"]=="Standard" and value["weightRule"]=="DisplayInteger" for value in default_huadeng)
+            assert any(value["layoutKey"]=="CustomerItem" for value in choices)
+            assert any(value["layoutKey"]=="CartonMarks" and value["shipmentMode"]=="Warehouse" for value in choices)
             assert request("/api/shipments") == [], "Huadeng leaked Xingxin tasks"
             request(f"/api/shipments/{task_id}", expected=404)
             request(f"/api/shipments/{task_id}", {"soNumber":"CROSS"}, method="PATCH", expected=404)
@@ -268,6 +311,13 @@ def run():
             assert any(row["productCode"]=="P-1" for row in shared["items"]), "Product library must be shared"
             huadeng_task=request("/api/shipments", {"customer":"Test","soNumber":"SO-1"}, expected=201)
             huadeng_id=huadeng_task["id"]
+            request(f"/api/shipments/{huadeng_id}/export?templateId={shipping_template['id']}",expected=400)
+            special_choice=next(value for value in choices if value["layoutKey"]=="SkyCastle")
+            special_export=request(f"/api/shipments/{huadeng_id}/export?templateId={special_choice['id']}")["exportPayload"]
+            assert special_export["exportDetails"]["templateKey"]=="sky-castle-multi"
+            ordinary_choice=next(value for value in choices if value["layoutKey"]=="Standard" and value["shipmentMode"]=="Container")
+            ordinary_export=request(f"/api/shipments/{huadeng_id}/export?templateId={ordinary_choice['id']}")["exportPayload"]
+            assert "templateKey" not in ordinary_export["exportDetails"]
             assert huadeng_task["company"]=="Huadeng"
             with sqlite3.connect(db_path) as connection:
                 huadeng_batch=insert(connection,"ImportBatches",{"Company":"Huadeng","Kind":"Email","Status":"PendingConfirmation"})
@@ -294,6 +344,10 @@ def run():
             request("/api/auth/login", {"username":"huadengtest","password":password})
             request("/api/shipments", expected=403)
             company("Huadeng")
+            request("/api/export-templates")
+            template=request("/api/export-templates",{"name":"船务权限测试","shipmentMode":"Container","purpose":"Shipping","weightRule":"Exact","version":"1.0","isEnabled":True,"isDefault":False},method="PUT")
+            template["name"]="船务修改模板"
+            request("/api/export-templates",template,method="PUT")
             assert request(f"/api/shipments/{huadeng_id}")["company"]=="Huadeng"
             request(f"/api/shipments/{task_id}", expected=404)
             owner_a = request("/api/auth/me")["id"]
@@ -412,6 +466,10 @@ def run():
                 request("/api/shipments",expected=403)
                 jar.set_cookie(http.cookiejar.Cookie(0,"voyageplex_company",company,None,False,"127.0.0.1",False,False,"/",True,False,None,True,None,None,{}))
                 request("/api/shipments")
+                available=request("/api/export-templates/available?purpose=Warehouse")
+                assert available and all(value["purpose"]=="Warehouse" and value["company"]==company for value in available)
+                request("/api/export-templates/available?purpose=Shipping",expected=403)
+                request("/api/export-templates",expected=403)
                 request("/api/mail/dates",expected=403)
                 request("/api/users",expected=403)
             request("/api/auth/login", {"username":"mailtest","password":password})
@@ -450,6 +508,43 @@ def run():
                 assert sorted(task["batchSequence"] for task in tasks)==list(range(1,8))
                 assert all(len(task["relatedBatchTasks"])==7 and task["exportDetails"]["templateKey"]=="sky-castle-multi" for task in tasks)
                 assert all(item["order_total_pieces"]==1668 for task in tasks for item in task["items"])
+            jar.set_cookie(http.cookiejar.Cookie(0,"voyageplex_company","Xingxin",None,False,"127.0.0.1",False,False,"/",True,False,None,True,None,None,{}))
+            truck_mail={"status":"parsed","fingerprint":"manual-trucks","message":{"subject":"裕泰仓交仓","body_text":"安排交仓"},"fields":{"customer":"ZURU","separate_warehouse_so":"true","so_number":"TRUCK-SO","ship_date":"2026-10-16"},"items":[{"product_code":"TRUCK-ITEM","quantity":100,"pieces":10,"volume":40,"pallet_count":4}],"warehouse_trip_plan":{"confirmed":True,"trips":[{"key":"a","warehouse":"裕泰仓","vehicle_type":"1*8T","allocations":[{"item_index":0,"quantity":"50","pieces":"5","volume":"20","pallet_count":"2"}]},{"key":"b","warehouse":"裕泰仓","vehicle_type":"","allocations":[{"item_index":0,"quantity":"50","pieces":"5","volume":"20","pallet_count":"2"}]}]}}
+            before_ids={task["id"] for task in request("/api/shipments")}
+            bad=json.loads(json.dumps(truck_mail));bad["warehouse_trip_plan"]["trips"][0]["allocations"][0]["volume"]="36"
+            error=request("/api/imports/email/confirm",{"items":[truck_mail,bad],"total":2,"parsed":2},expected=400)
+            assert "35" in error["error"]
+            assert before_ids=={task["id"] for task in request("/api/shipments")}, "Invalid batch must not partially save trucks"
+            created=request("/api/imports/email/confirm",{"items":[truck_mail],"total":1,"parsed":1})["shipment_task_ids"]
+            assert len(created)==2
+            trucks=[request(f"/api/shipments/{task_id}") for task_id in created]
+            assert sum(float(item["volume"]) for task in trucks for item in task["items"])==40
+            assert sum(float(item["pallet_count"]) for task in trucks for item in task["items"])==4
+            assert all(task["exportDetails"]["shipmentMode"]=="Warehouse" and len(task["relatedBatchTasks"])==2 for task in trucks)
+            assert trucks[0]["containerType"]=="1*8T" and trucks[0]["exportDetails"]["truckTypeSource"]=="manual"
+            # Stored-batch confirmation must persist the reviewed per-truck allocations as well.
+            with sqlite3.connect(db_path) as connection:
+                batch_id=insert(connection,"ImportBatches",{"Kind":"Email","Status":"PendingConfirmation","Company":"Xingxin"})
+                fresh=json.loads(json.dumps(truck_mail));fresh["fingerprint"]="stored-truck-mail"
+                item_id=insert(connection,"ImportEmailItems",{"ImportBatchId":batch_id,"Status":"pending","Company":"Xingxin","ResultJson":json.dumps(fresh)})
+                connection.commit()
+            fresh["import_item_id"]=item_id
+            stored_ids=request(f"/api/imports/email/{batch_id}/confirm",{"items":[fresh]})["shipment_task_ids"]
+            assert len(stored_ids)==2 and not set(stored_ids).intersection(created)
+            print("Warehouse trucks: manual allocation, 35 CBM limit, whole-batch rejection, both confirmation routes and linked per-truck tasks passed.")
+            jar.set_cookie(http.cookiejar.Cookie(0,"voyageplex_company","Huadeng",None,False,"127.0.0.1",False,False,"/",True,False,None,True,None,None,{}))
+            stock_templates=request("/api/export-templates")
+            kept=next(value for value in stock_templates if value["isDefault"] and value["shipmentMode"]=="Container" and value["purpose"]=="Shipping")
+            kept.update(weightRule="Exact",name="人工确认的华登版",version="custom-1",notes="请保留人工配置")
+            request("/api/export-templates",kept,method="PUT")
+            stop();start()
+            after_restart=request("/api/export-templates")
+            assert len(after_restart)==len(stock_templates) and {value["id"] for value in after_restart}=={value["id"] for value in stock_templates}, "Template seeding must be idempotent"
+            preserved=next(value for value in after_restart if value["id"]==kept["id"])
+            assert preserved["name"]==kept["name"] and preserved["weightRule"]=="Exact" and preserved["version"]=="custom-1"
+            jar.set_cookie(http.cookiejar.Cookie(0,"voyageplex_company","Xingxin",None,False,"127.0.0.1",False,False,"/",True,False,None,True,None,None,{}))
+            assert len(request("/api/export-templates"))==4, "Huadeng versions must not add Xingxin configs"
+            print("Huadeng template versions: defaults, special layouts, restart idempotence and custom-config preservation passed.")
             print("Multi-container: seven linked tasks, company-neutral rules, carton/quantity conservation and PO totals passed.")
             print("Role permissions: supervisors scoped to company, user grants protected, warehouse company isolation passed.")
             print("Personal mail: server-managed credentials, duplicate binding rejection, owner isolation, cookie tamper rejection, shared tasks, private source redaction and independent settings passed.")

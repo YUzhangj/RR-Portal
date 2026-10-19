@@ -1,0 +1,10 @@
+{
+  "volumeBands": [
+    { "maximumCbm": 10, "tonnes": 3 },
+    { "maximumCbm": 16, "tonnes": 5 },
+    { "maximumCbm": 20, "tonnes": 8 },
+    { "maximumCbm": 30, "tonnes": 10 },
+    { "maximumCbm": 39, "tonnes": 12 },
+    { "maximumCbm": 50, "tonnes": 18 }
+  ]
+}

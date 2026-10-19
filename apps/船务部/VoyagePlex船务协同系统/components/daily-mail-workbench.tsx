@@ -1,14 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { CargoExtraDetails } from "@/components/cargo-extra-details";
+import { CargoExtraDetails, hasLegacyUnitWeights } from "@/components/cargo-extra-details";
 import { ContainerSplitPreview } from "@/components/container-split-preview";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Check, RefreshCw } from "lucide-react";
-import { useEffect, useState } from "react";
 
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
 const apiFetch = (path: string, init?: RequestInit) => fetch(`${basePath}${path}`, init);
+import { useEffect, useState } from "react";
 
 type WorkCategory = "Unclassified"|"Shipment"|"Change"|"FollowUp"|"Other";
 type Cargo = Record<string,unknown>;
@@ -113,6 +113,8 @@ export function DailyMailWorkbench({route=""}:{route?:string}){
   const days=Array.from(new Set([dates.startDate,...(chinaToday()>=dates.startDate?[chinaToday()]:[]),...dates.days.map(day=>day.date)])).sort().reverse();
   const summary=dates.days.find(day=>day.date===date);const parsed=detail?.parsed;const editable=!!detail&&canConfirm(detail);
   const visibleCargoLabels=cargoLabels;
+  const huadeng=typeof document!=="undefined"&&document.cookie.split("; ").includes("voyageplex_company=Huadeng");
+  const cargoExtras=huadeng||parsed?.fields?.export_template==="sky-castle-multi"||Boolean(parsed?.items?.some(hasLegacyUnitWeights));
   const relatedFieldKeys:Record<string,string>={ship_date:"plannedShipDate",container_type:"containerType",cutoff_date:"cutoffDate",si_deadline:"siDeadline",port:"port"};
   return <section className="daily-mail">
     {(error||notice)&&<div className={error?"form-error":"notice"} role={error?"alert":"status"}>{error||notice}</div>}
@@ -131,7 +133,7 @@ export function DailyMailWorkbench({route=""}:{route?:string}){
       <div className="form-grid">{Object.entries(fieldLabels).map(([key,label])=><label key={key} className={key==="special_requirements"?"full-width":""}><span>{label}</span>{key==="special_requirements"?<textarea rows={4} value={parsed?.fields?.[key]||""} disabled={!editable||working} onChange={event=>editField(key,event.target.value)}/>:<input value={parsed?.fields?.[key]||""} disabled={!editable||working} onChange={event=>editField(key,event.target.value)}/>}</label>)}</div>
       {(parsed?.fields?.multi_container==="true"||parsed?.fields?.explicit_container_allocation==="true")&&<div className="review-section"><h3>分柜安排 · {parsed.shipment_groups?.length} 个任务</h3><p>{parsed.fields?.explicit_container_allocation==="true"?"已按附件中的柜归属分组，保留各柜原有产品和数量。":"同款产品优先集中装柜；同柜型容量留空时按总箱数均衡分配。没有产品资料时只建立柜安排，导出普通模板。"}</p>{parsed.shipment_groups?.map((group,index)=><label className="cargo-scope-row" key={group.group_key}><span>{index+1}. {group.so_number} · {group.container_type} · {group.vessel_name} · SI {group.si_deadline} · 截关 {group.cutoff_date}</span>{parsed.fields?.explicit_container_allocation!=="true"&&<input aria-label={`柜${index+1}容量箱数`} type="number" min="1" step="1" disabled={!editable||working} value={group.capacity_boxes||""} placeholder="可装箱数（选填）" onChange={event=>editContainer(index,event.target.value)}/>}</label>)}{editable&&parsed.fields?.explicit_container_allocation!=="true"&&<button className="secondary-button" disabled={working} onClick={addCargo}>补充整批产品</button>}<ContainerSplitPreview payload={parsed}/></div>}
       {!!parsed?.warehouse_groups?.length&&<div className="warehouse-grid">{parsed.warehouse_groups.map((group,index)=><article key={index}><strong>{group.warehouse||"仓库待识别"}</strong><small>{group.container_type} · {group.references?.join("、")||"—"} · {group.items.length} 条明细</small></article>)}</div>}
-      {!!parsed?.items?.length&&<div className="review-section"><h3>货物明细 <small>共 {parsed.items.length} 条，可在确认前修改</small></h3><div className="review-items editable"><div>{Object.values(visibleCargoLabels).map(label=><b key={label}>{label}</b>)}{parsed.fields?.export_template==="sky-castle-multi"&&<b>补充资料</b>}</div>{parsed.items.map((item,index)=><div key={index}>{Object.keys(visibleCargoLabels).map(key=><input key={key} aria-label={`${visibleCargoLabels[key]} ${index+1}`} value={String(item[key]??"")} disabled={!editable||working} onChange={event=>editCargo(index,key,event.target.value)}/>)}<CargoExtraDetails item={item} specialTemplate={parsed.fields?.export_template==="sky-castle-multi"} disabled={!editable||working} onChange={(key,value)=>editCargo(index,key,value)}/></div>)}</div></div>}
+      {!!parsed?.items?.length&&<div className="review-section"><h3>货物明细 <small>共 {parsed.items.length} 条，可在确认前修改</small></h3><div className="review-items editable"><div>{Object.values(visibleCargoLabels).map(label=><b key={label}>{label}</b>)}{cargoExtras&&<b>更多资料</b>}</div>{parsed.items.map((item,index)=><div key={index}>{Object.keys(visibleCargoLabels).map(key=><input key={key} aria-label={`${visibleCargoLabels[key]} ${index+1}`} value={String(item[key]??"")} disabled={!editable||working} onChange={event=>editCargo(index,key,event.target.value)}/>)}{cargoExtras&&<span><CargoExtraDetails item={item} company={huadeng?"Huadeng":"Xingxin"} specialTemplate={parsed.fields?.export_template==="sky-castle-multi"} disabled={!editable||working} onChange={(key,value)=>editCargo(index,key,value)}/></span>}</div>)}</div></div>}
       {parsed?.fields?.cargo_split_required==="true"&&<div className="review-section"><h3>本次出运 / 等待通知分配</h3>{parsed.items?.map((item,index)=><label className="cargo-scope-row" key={index}><span>{String(item.product_code||"")} · {String(item.customer_po||"")} · {String(item.quantity||0)} 个</span><select disabled={!editable||working} value={String(item.shipment_scope||"unassigned")} onChange={event=>editCargo(index,"shipment_scope",event.target.value)}><option value="unassigned">请选择</option><option value="current">本次出运</option><option value="waiting">剩余散货，等待客户通知</option></select></label>)}</div>}
       {!!parsed?.warnings?.length&&<div className="notice">{parsed.warnings.join("；")}</div>}
       <details className="daily-mail-body"><summary>邮件正文及附件（{parsed?.attachments?.length||0}）</summary><pre>{parsed?.message?.body_text||"无正文"}</pre>{parsed?.attachments?.map((attachment,index)=><p key={index}>{attachment.filename}</p>)}</details>
