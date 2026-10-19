@@ -146,7 +146,7 @@ SHARE_AMOUNTS.total_gross_after_tax_rate = 'total_gross_after_tax';
 SHARE_AMOUNTS.total_profit_after_tax_rate = 'total_profit_after_tax';
 const SHARE_UNITS = { abs_material_share: 'abs_material_cost', rmb_purchase_share: 'rmb_purchase_cost' };
 
-function calculateSummaryValues(before, after, qty, price, absMaterialCost = 0) {
+function calculateSummaryValues(before, after, qty, price, absMaterialCost = 0, sewingTaxable = before) {
   const values = {};
   const setComponent = key => {
     values[key] = num(before[key]); values[`${key}_after_tax`] = num(after[key]);
@@ -179,7 +179,7 @@ function calculateSummaryValues(before, after, qty, price, absMaterialCost = 0) 
   values.tax_1_cost = num(before.plating); values.labor_13_cost = laborBefore*0.08;
   values.freight_9_cost = num(before.freight); values.tax_13_cost = num(before.color_box)+num(before.libao)+num(before.hardware)+num(before.battery)+num(before.flocking)+num(before.other_buy)+num(before.paint_material)+num(before.dom_mat)+num(before.misc);
   values.carton_13_cost = num(before.carton); values.slush_3_cost = num(before.slush);
-  values.hair_13_cost = num(before.sewing_hair); values.cloth_13_cost = num(before.sewing_cloth); values.suction_6_cost = num(before.suction);
+  values.hair_13_cost = num(sewingTaxable.sewing_hair); values.cloth_13_cost = num(sewingTaxable.sewing_cloth); values.suction_6_cost = num(before.suction);
   values.rebate_reduction = values.tax_1_cost*0.0099 + values.labor_13_cost*0.115 + values.freight_9_cost*0.0826 + values.tax_13_cost*0.115 + values.carton_13_cost/1.1*0.115 + values.slush_3_cost*0.03 + values.hair_13_cost*0.115 + values.cloth_13_cost*0.115 + values.suction_6_cost*0.06;
   values.cost_after_rebate = values.cost_with_labor-values.rebate_reduction;
   values.markup_after_tax = values.cost_after_rebate ? price/values.cost_after_rebate : 0;
@@ -226,11 +226,12 @@ function parseJson(raw, fallback = {}) {
   try { return JSON.parse(raw || '') || fallback; } catch { return fallback; }
 }
 
-function afterTaxComponents(components) {
+function afterTaxComponents(components, sewingTaxable = components) {
   return Object.fromEntries(QUOTE_COMPONENTS.map(([key]) => {
     const rate = num(TAX_DEDUCTION_RATES[key]);
     const cost = num(components?.[key]);
-    const afterTax = key === 'carton' ? cost - cost / 1.15 * 0.115 : cost * (1 - rate / 100);
+    const afterTax = key === 'carton' ? cost - cost / 1.1 * 0.115
+      : key === 'sewing_hair' || key === 'sewing_cloth' ? cost - num(sewingTaxable?.[key]) * rate / 100 : cost * (1 - rate / 100);
     return [key, +afterTax.toFixed(6)];
   }));
 }
@@ -260,7 +261,10 @@ function buildQuoteSummary(quote, sections) {
     const liveValue = calculated.components[key];
     return [key, calculated.hasSourceData ? num(liveValue) : num(pricing[table]?.[key])];
   }));
-  const components = afterTaxComponents(beforeTaxComponents);
+  const sewingPayload = parseJson((sections || []).find(section => section.dept === 'sewing')?.payload_json);
+  const sewingTaxable = calculated.hasSourceData && calculated.sewing_taxable
+    ? calculated.sewing_taxable : require('../../frontend/sewing-tax').taxableAmounts(sewingPayload, beforeTaxComponents);
+  const components = afterTaxComponents(beforeTaxComponents, sewingTaxable);
   const qty = num(quote.qty);
   const quotedPrice = calculated.hasSourceData ? num(calculated.quotedPrice) : num(pricing.t1?.base_price);
   return {
@@ -273,13 +277,14 @@ function buildQuoteSummary(quote, sections) {
     created_at: quote.created_at,
     quote_status: quote.status,
     quoted_price: quotedPrice,
+    sewing_taxable: sewingTaxable,
     components_before_tax: beforeTaxComponents,
     components,
     component_basis: 'after_tax',
     abs_material_cost: calculated.hasSourceData
       ? num(calculated.components.abs_material) : num(pricing.t3?.abs_cost),
     summary_values: calculateSummaryValues(beforeTaxComponents, components, qty, quotedPrice,
-      calculated.hasSourceData ? calculated.components.abs_material : pricing.t3?.abs_cost),
+      calculated.hasSourceData ? calculated.components.abs_material : pricing.t3?.abs_cost, sewingTaxable),
   };
 }
 
@@ -413,7 +418,8 @@ function buildSummaryWorkbook(rows, filters = {}) {
       const key = QUOTE_COMPONENTS[componentIndex][0];
       const beforeTax = num(row.components_before_tax?.[key]);
       const afterTax = num(row.components?.[key]);
-      const rate = num(TAX_DEDUCTION_RATES[key]);
+      const taxableShare = row.sewing_taxable && ['sewing_hair','sewing_cloth'].includes(key) ? (beforeTax ? num(row.sewing_taxable[key])/beforeTax : 0) : 1;
+      const rate = num(TAX_DEDUCTION_RATES[key]) * taxableShare;
       beforeTaxCell.numFmt = '#,##0.00';
       afterTaxCell.value = {
         formula: rate ? `${beforeTaxCell.address}*(1-${rate}%)` : beforeTaxCell.address,
@@ -577,11 +583,15 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
     const labor=`SUM(${ref('injection_labor',row)},${ref('assembly_labor',row)},${ref('painting_labor',row)})`;
     if (key === 'cost_with_labor') return rawSum;
     if (key === 'cost_without_labor') return `${ref('cost_with_labor',row)}-${labor}`;
-    if (key === 'carton_after_tax') return `${ref('carton',row)}-${ref('carton',row)}/1.15*11.5%`;
+    if (key === 'carton_after_tax') return `${ref('carton',row)}-${ref('carton',row)}/1.1*11.5%`;
     if (key === 'freight_after_tax') return `(${ref('freight',row)}-${ref('freight',row)}*8.26%)+${ref('cabinet',row)}`;
     const componentAfter = key.match(/^(.+)_after_tax$/);
     if (componentAfter && columnByKey[componentAfter[1]]) {
       const base=componentAfter[1], rate=num(TAX_DEDUCTION_RATES[base]);
+      if (['sewing_hair','sewing_cloth'].includes(base) && source.sewing_taxable) {
+        const share=num(source.components_before_tax?.[base]) ? num(source.sewing_taxable[base])/num(source.components_before_tax[base]) : 0;
+        return `${ref(base,row)}*(1-${share}*${rate}%)`;
+      }
       return rate?`${ref(base,row)}*(1-${rate}%)`:ref(base,row);
     }
     const componentAmount = key.match(/^(.+)_amount$/);
@@ -604,7 +614,7 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
       markup_before_tax:`IF(${ref('cost_with_labor',row)}=0,0,${price}/${ref('cost_with_labor',row)})`, tax_1_cost:ref('plating',row), labor_13_cost:`(${labor})*8%`,
       freight_9_cost:ref('freight',row),
       tax_13_cost:`SUM(${['color_box','libao','battery','paint_material','dom_mat','hardware','flocking','other_buy','misc'].map(k=>ref(k,row)).join(',')})`,
-      carton_13_cost:ref('carton',row), slush_3_cost:ref('slush',row), hair_13_cost:ref('sewing_hair',row), cloth_13_cost:ref('sewing_cloth',row), suction_6_cost:ref('suction',row),
+      carton_13_cost:ref('carton',row), slush_3_cost:ref('slush',row), hair_13_cost:`${ref('sewing_hair',row)}*${source.sewing_taxable && num(source.components_before_tax?.sewing_hair) ? num(source.sewing_taxable.sewing_hair)/num(source.components_before_tax.sewing_hair) : source.sewing_taxable ? 0 : 1}`, cloth_13_cost:`${ref('sewing_cloth',row)}*${source.sewing_taxable && num(source.components_before_tax?.sewing_cloth) ? num(source.sewing_taxable.sewing_cloth)/num(source.components_before_tax.sewing_cloth) : source.sewing_taxable ? 0 : 1}`, suction_6_cost:ref('suction',row),
       rebate_reduction:`${ref('tax_1_cost',row)}*0.99%+${ref('labor_13_cost',row)}*11.5%+${ref('freight_9_cost',row)}*8.26%+${ref('tax_13_cost',row)}*11.5%+${ref('carton_13_cost',row)}/1.1*11.5%+${ref('slush_3_cost',row)}*3%+${ref('hair_13_cost',row)}*11.5%+${ref('cloth_13_cost',row)}*11.5%+${ref('suction_6_cost',row)}*6%`,
       cost_after_rebate:`${ref('cost_with_labor',row)}-${ref('rebate_reduction',row)}`,
       markup_after_tax:`IF(${ref('cost_after_rebate',row)}=0,0,${price}/${ref('cost_after_rebate',row)})`,
@@ -666,7 +676,7 @@ function buildDetailedSummaryWorkbook(rows, filters = {}) {
       const workshop=(confirmation.workshops||[]).map(code=>(row.workshop_names?.[code] || (WORKSHOPS.find(x=>x[0]===code)||[,code])[1])).join('、');
       const base={serial:index+1,customer:row.customer,workshop,quote_no:row.quote_no,product_name:row.product_name,created_at:row.created_at?new Date(row.created_at):'',qty,quoted_price:price,
         confirmation_status:confirmation.status==='confirmed'?'已确认':'待确认',confirmed_by:confirmation.confirmed_by||'',confirmed_at:confirmation.confirmed_at?new Date(confirmation.confirmed_at):'',note:confirmation.note||''};
-      const values=calculateSummaryValues(row.components_before_tax,row.components,qty,price,row.abs_material_cost);
+      const values=calculateSummaryValues(row.components_before_tax,row.components,qty,price,row.abs_material_cost,row.sewing_taxable);
       row.summary_values = values;
       columns.forEach(([key,,type],i)=>{
         const c=ws.getCell(rowNo,i+1); const value=Object.hasOwn(base,key)?base[key]:values[key];
