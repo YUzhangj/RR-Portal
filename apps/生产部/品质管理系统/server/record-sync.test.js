@@ -8,7 +8,7 @@ const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const source = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
 const core = vm.runInNewContext(source.slice(source.indexOf('const RECORD_COLS'), source.indexOf('function replaceUsers')) +
-  ';({SCHEMA_SQL,upsertRecords,deleteRecords,mergeRecordChanges,replaceRecords,rowToRecord})');
+  ';({SCHEMA_SQL,upsertRecords,deleteRecords,mergeRecordChanges,replaceRecords,rowToRecord,nextRecordId})');
 const record = (id, extra = {}) => ({ id, productNo: 'item-' + id, updatedAt: '2026-10-19T01:00:00Z', ...extra });
 function database(t) { const db = new DatabaseSync(':memory:'); db.exec(core.SCHEMA_SQL); t.after(() => db.close()); return db; }
 const all = db => db.prepare('SELECT * FROM records ORDER BY id').all().map(r => core.rowToRecord(r));
@@ -41,6 +41,12 @@ test('clear and replacement preserve tombstones against an old full-array save',
   core.replaceRecords(db, [record(2, { productNo: 'explicit-import' })]);
   core.upsertRecords(db, [record(1, { updatedAt: '2099-01-01T00:00:00Z' })]);
   assert.deepEqual(all(db).map(r => r.id), [2]); assert.equal(all(db)[0].productNo, 'explicit-import');
+});
+test('bootstrap high-water id stays above deleted ids so new records can be saved', t => {
+  const db = database(t); core.upsertRecords(db, [record(500)]); core.deleteRecords(db, [500]);
+  assert.equal(core.nextRecordId(db), 501);
+  assert.equal(core.upsertRecords(db, [record(core.nextRecordId(db))]).accepted, 1);
+  assert.deepEqual(all(db).map(r => r.id), [501]);
 });
 test('a bad upsert rolls back the same request deletion and its tombstone', t => {
   const db = database(t); core.upsertRecords(db, [record(1)]);
@@ -96,4 +102,32 @@ test('failed record writes retain pending deletes and a replacement for retry', 
   const { window: w, requests } = browser(); w.__QC_MARK_DELETED([3]); w.__QC_FORCE_REPLACE = 1;
   const pending = w.__QC_SYNC_NOW(); await tick(); requests[0].resolve({ ok: false, status: 500 }); await pending;
   assert.deepEqual(Array.from(w.__QC_PENDING_DELETES), [3]); assert.equal(w.__QC_FORCE_REPLACE, 1);
+});
+
+function appFunction(name, context) {
+  const app = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
+  const start = app.indexOf('function ' + name + '('), body = app.indexOf('{', start);
+  assert.notEqual(start, -1);
+  let depth = 0;
+  for (let i = body; i < app.length; i++) {
+    if (app[i] === '{') depth++;
+    if (app[i] === '}' && --depth === 0) return vm.runInNewContext('(' + app.slice(start, i + 1) + ')', context);
+  }
+  throw new Error('Function boundary not found');
+}
+test('clear acknowledgement followed by new entry uses a fresh id above tombstones', t => {
+  const db = database(t); core.upsertRecords(db, [record(500)]);
+  const state = { records: [record(500)], nextId: 501 };
+  const context = { state, window: {}, recs: () => state.records, _backupConfirm: options => options.onConfirm(),
+    persist: () => core.replaceRecords(db, state.records), showToast() {}, _backupLog() {}, _backupRefreshAll() {} };
+  appFunction('backupClearAll', context)();
+  assert.equal(state.records.length, 0); assert.equal(state.nextId, 501);
+  assert.equal(core.upsertRecords(db, [record(state.nextId++)]).accepted, 1);
+});
+test('backup replace uses the replacement channel and does not reset its allocated ids', () => {
+  const state = { records: [record(500)], nextId: 501 };
+  const context = { state, window: {}, nowIso: () => '2026-10-19T05:00:00Z', persist() {}, showToast() {}, _backupLog() {}, _backupRefreshAll() {} };
+  appFunction('_backupDoImport', context)([{ productNo: 'imported' }], 'replace');
+  assert.equal(state.records[0].id, 501); assert.equal(state.nextId, 502);
+  assert.ok(context.window.__QC_FORCE_REPLACE);
 });

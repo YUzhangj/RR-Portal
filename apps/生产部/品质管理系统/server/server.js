@@ -419,6 +419,11 @@ function rowToRecord(row) {
   return r;
 }
 
+function nextRecordId(db) {
+  const row = db.prepare('SELECT MAX(id) AS id FROM (SELECT id FROM records UNION ALL SELECT id FROM record_tombstones)').get();
+  return Math.max(30, Number(row.id) || 0) + 1;
+}
+
 /* ── 合并写入（事务）：按 id upsert。
    多人/多标签页同时使用时，任何一端都可能用「旧状态的全量数组」推回服务端，
    旧的全量替换会把别人新录的记录整批抹掉（曾发生 74 条变 68 条）。
@@ -651,7 +656,7 @@ migrateLegacyDb();
 /* ════════ 读取全量（供前端开机预加载）════════ */
 function getBootstrap(db) {
   const records = db.prepare('SELECT * FROM records ORDER BY id').all().map(rowToRecord);
-  const nextId  = records.reduce((m, r) => Math.max(m, Number(r.id) || 0), 30) + 1;
+  const nextId  = nextRecordId(db);
   const users   = db.prepare('SELECT * FROM users').all().map(u => Object.assign({}, u, {
     enabled: !!u.enabled,
     perms: (() => { try { return u.perms ? JSON.parse(u.perms) : null; } catch (e) { return null; } })(),

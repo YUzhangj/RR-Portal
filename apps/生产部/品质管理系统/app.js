@@ -5734,8 +5734,9 @@ function _backupDoImport(incoming, mode) {
     }));
 
     if (mode === 'replace') {
+      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;
       state.records = normalized;
-      state.nextId  = normalized.length + 1;
+      state.nextId  = Math.max(state.nextId || 1, normalized.length + 1);
     } else {
       state.records.push(...normalized);
     }
@@ -5797,7 +5798,7 @@ function backupClearAll() {
       const count = recs().length;
       window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 整库清空走 /api/records/replace */
       state.records = [];
-      state.nextId  = 1;
+      state.nextId  = Math.max(1, state.nextId || 1);
       persist();
       showToast(`已清空全部 ${count} 条记录`, 'info');
       _backupLog(`清空数据 ${count} 条记录`, 'warn');
@@ -5822,7 +5823,7 @@ function backupRestoreSeed() {
     onConfirm:   () => {
       window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 整库覆盖走 /api/records/replace */
       state.records = SEED_RECORDS.map(r => Object.assign({}, r));
-      state.nextId  = SEED_RECORDS.length + 1;
+      state.nextId  = Math.max(state.nextId || 1, SEED_RECORDS.length + 1);
       persist();
       showToast(`✓ 已恢复 ${SEED_RECORDS.length} 条示例数据`, 'success');
       _backupLog(`恢复示例数据 ${SEED_RECORDS.length} 条`, 'ok');
@@ -6668,7 +6669,7 @@ function executeImportConfirm() {
     if (plan.mode === 'replace') {
       window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 替换模式导入走 /api/records/replace */
       state.records = plan.records;
-      state.nextId  = plan.records.length + 1;
+      state.nextId  = Math.max(state.nextId || 1, plan.records.length + 1);
     } else {
       state.records.push(...plan.records);
       state.nextId = plan.nextId;
