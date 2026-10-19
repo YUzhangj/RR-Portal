@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {spawn, spawnSync} from 'node:child_process';
-import {chmodSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs';
+import {chmodSync, copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import http from 'node:http';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
+import {createRequire} from 'node:module';
 import core from '../shared/business-sync.cjs';
 import {startBusinessSync} from '../collector/business-sync.mjs';
 
@@ -60,6 +61,98 @@ function inspectContainer(id) {
     '{"running":{{.State.Running}},"oom":{{.State.OOMKilled}},"restarts":{{.RestartCount}},"pid":{{.State.Pid}},"started":{{json .State.StartedAt}},"health":{{json .State.Health.Status}},"memory":{{.HostConfig.Memory}},"swap":{{.HostConfig.MemorySwap}}}', id]));
 }
 
+const memoryFiles = ['memory.max', 'memory.swap.max', 'memory.current', 'memory.peak', 'memory.events'];
+function readContainerMemory(id) {
+  // Use sh/cat rather than another Node process inside the constrained cgroup.
+  const output = docker(['exec', id, 'sh', '-c',
+    'set -eu; for file in memory.max memory.swap.max memory.current memory.peak memory.events; do printf "@@%s\\n" "$file"; cat "/sys/fs/cgroup/$file"; done']);
+  const raw = {};
+  for (const part of output.split(/^@@/m).filter(Boolean)) {
+    const newline = part.indexOf('\n'), name = part.slice(0, newline);
+    assert.ok(memoryFiles.includes(name) && !Object.hasOwn(raw, name), 'Invalid cgroup telemetry field');
+    raw[name] = part.slice(newline + 1).trim();
+  }
+  return raw;
+}
+
+function memoryContract(raw, baseline) {
+  const integer = (value, name) => {
+    assert.ok(typeof value === 'string' && /^(0|[1-9]\d*)$/.test(value), `Invalid ${name}: ${String(value)}`);
+    const number = Number(value);
+    assert.ok(Number.isSafeInteger(number), `Unsafe ${name}: ${value}`);
+    return number;
+  };
+  const memoryMaxBytes = integer(raw['memory.max'], 'memory.max');
+  const swapMaxBytes = integer(raw['memory.swap.max'], 'memory.swap.max');
+  const currentBytes = integer(raw['memory.current'], 'memory.current');
+  const peakBytes = integer(raw['memory.peak'], 'memory.peak');
+  assert.equal(memoryMaxBytes, 512 * MiB, 'The kernel memory limit must remain 512 MiB');
+  assert.equal(swapMaxBytes, 0, 'The kernel must prohibit swap');
+  assert.ok(currentBytes > 0 && currentBytes <= memoryMaxBytes, 'Current cgroup charge must be positive and within the configured limit');
+  assert.ok(peakBytes > 0 && peakBytes >= currentBytes, 'Invalid cgroup peak');
+  assert.equal(typeof raw['memory.events'], 'string', 'Missing memory.events');
+  const events = {};
+  for (const line of raw['memory.events'].split('\n')) {
+    const match = line.match(/^([a-z_]+)\s+(0|[1-9]\d*)$/);
+    assert.ok(match && !Object.hasOwn(events, match[1]), 'Invalid or duplicate memory.events counter');
+    events[match[1]] = integer(match[2], `memory.events ${match[1]}`);
+  }
+  for (const key of ['low', 'high', 'max', 'oom', 'oom_kill']) assert.ok(Object.hasOwn(events, key), `Missing memory.events ${key}`);
+  for (const key of ['oom', 'oom_kill', 'oom_group_kill']) if (Object.hasOwn(events, key)) assert.equal(events[key], 0, `memory.events ${key} must remain zero`);
+  const before = baseline ? memoryContract(baseline) : null;
+  const eventDeltas = {};
+  if (before) for (const [key, value] of Object.entries(before.events)) {
+    assert.ok(Object.hasOwn(events, key) && events[key] >= value, `memory.events ${key} counter decreased`);
+    eventDeltas[key] = events[key] - value;
+    if (['oom', 'oom_kill', 'oom_group_kill'].includes(key)) assert.equal(eventDeltas[key], 0, `memory.events ${key} increased`);
+  }
+  // memory.max may be exceeded temporarily; memory.peak is not a hard-limit
+  // predicate. Retain exact bytes and overshoot for independent review instead.
+  // https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-interface-files
+  return {memoryMaxBytes, swapMaxBytes, currentBytes, peakBytes,
+    overshootBytes: Math.max(0, peakBytes - memoryMaxBytes), events, eventDeltas};
+}
+
+function sampleContainerMemory(t, app, stage, scenario, baseline) {
+  const raw = app.memory();
+  // Emit original sysfs text before parsing or any resource assertion fails.
+  t.diagnostic(JSON.stringify({mode: 'linux-cgroup', scenario, stage, raw, baseline}));
+  return raw;
+}
+
+function failureMemory(t, app, scenario, baseline) {
+  try {sampleContainerMemory(t, app, 'failure', scenario, baseline);}
+  catch (error) {t.diagnostic(JSON.stringify({mode: 'linux-cgroup', scenario, stage: 'failure', raw: null, baseline, telemetryError: error.message}));}
+}
+
+test('cgroup resource contract rejects fake limits, swap, OOM and malformed counters while retaining peak overshoot', () => {
+  const fixture = () => ({'memory.max': String(512 * MiB), 'memory.swap.max': '0',
+    'memory.current': String(300 * MiB), 'memory.peak': String(400 * MiB),
+    'memory.events': 'low 0\nhigh 0\nmax 2\noom 0\noom_kill 0\noom_group_kill 0'});
+  const baseline = fixture(), after = {...fixture(), 'memory.peak': String(512 * MiB + 4096),
+    'memory.events': 'low 0\nhigh 0\nmax 7\noom 0\noom_kill 0\noom_group_kill 0'};
+  const accepted = memoryContract(after, baseline);
+  assert.equal(accepted.peakBytes, 512 * MiB + 4096); assert.equal(accepted.overshootBytes, 4096);
+  assert.equal(accepted.eventDeltas.max, 5); assert.equal(accepted.eventDeltas.oom, 0); assert.equal(accepted.eventDeltas.oom_kill, 0);
+  const older = {...fixture(), 'memory.events': 'low 0\nhigh 0\nmax 2\noom 0\noom_kill 0'};
+  assert.equal(memoryContract(older, older).eventDeltas.oom_kill, 0);
+  const missing = fixture(); delete missing['memory.peak']; assert.throws(() => memoryContract(missing));
+  for (const invalid of [
+    {'memory.max': 'max'}, {'memory.max': String(1024 * MiB)}, {'memory.max': '512m'},
+    {'memory.swap.max': 'max'}, {'memory.swap.max': '4096'},
+    {'memory.current': '0'}, {'memory.current': String(512 * MiB + 1)},
+    {'memory.peak': '0'}, {'memory.peak': 'NaN'}, {'memory.peak': '-1'}, {'memory.peak': '1e9'}, {'memory.peak': '9007199254740992'},
+    {'memory.events': 'low 0\nhigh 0\nmax 2\noom 1\noom_kill 0'},
+    {'memory.events': 'low 0\nhigh 0\nmax 2\noom 0\noom_kill 1'},
+    {'memory.events': 'low 0\nhigh 0\nmax 2\noom 0\noom_kill 0\noom_group_kill 1'},
+    {'memory.events': 'low 0\nhigh 0\nmax 2\noom 0'},
+    {'memory.events': 'low 0\nhigh 0\nmax 2\noom 0\noom_kill 0\noom 0'},
+    {'memory.events': 'low 0\nhigh 0\nmax 2\noom 0\noom_kill NaN'}
+  ]) assert.throws(() => memoryContract({...fixture(), ...invalid}, baseline));
+  assert.throws(() => memoryContract(fixture(), {...fixture(), 'memory.events': 'low 0\nhigh 0\nmax 3\noom 0\noom_kill 0\noom_group_kill 0'}), /counter decreased/);
+  assert.throws(() => memoryContract(fixture(), {...fixture(), 'memory.events': 'low 0\nhigh 0\nmax 2\noom 1\noom_kill 0\noom_group_kill 0'}), /must remain zero/);
+});
+
 function parseAppProcesses(output) {
   const files = {'start.mjs': 'supervisor', 'cloud/server.mjs': 'cloud', 'production/server.js': 'production'};
   const roles = [];
@@ -101,17 +194,27 @@ test('Docker process parsing identifies the three service roles and excludes hea
 
 function watchRss(parentPid) {
   let peakKiB = 0, lastKiB = 0;
+  const processPeakKiB = {};
   const sample = () => {
-    const result = spawnSync('ps', ['-axo', 'pid=,ppid=,rss='], {encoding: 'utf8'});
+    const result = spawnSync('ps', ['-axo', 'pid=,ppid=,rss=,args='], {encoding: 'utf8'});
     if (result.status !== 0) return;
-    const rows = result.stdout.trim().split('\n').map(line => line.trim().split(/\s+/).map(Number));
+    const rows = result.stdout.trim().split('\n').map(line => {
+      const [pid, ppid, rss, ...args] = line.trim().split(/\s+/);
+      return [Number(pid), Number(ppid), Number(rss), args];
+    });
     const app = rows.filter(([pid, ppid]) => pid === parentPid || ppid === parentPid);
     lastKiB = app.reduce((sum, row) => sum + row[2], 0);
     peakKiB = Math.max(peakKiB, lastKiB);
+    for (const [, , rss, args] of app) {
+      const role = ['start.mjs', 'cloud/server.mjs', 'production/server.js'].find(file => args.includes(file));
+      if (role) processPeakKiB[role] = Math.max(processPeakKiB[role] || 0, rss);
+    }
   };
   sample();
   const timer = setInterval(sample, 30);
-  return {sample, read: () => ({currentMiB: lastKiB / 1024, peakMiB: peakKiB / 1024}), close: () => clearInterval(timer)};
+  return {sample, read: () => ({currentMiB: lastKiB / 1024, peakMiB: peakKiB / 1024,
+    processPeakMiB: Object.fromEntries(Object.entries(processPeakKiB).map(([role, rss]) => [role, rss / 1024]))}),
+    close: () => clearInterval(timer)};
 }
 
 async function launch(dir) {
@@ -131,8 +234,7 @@ async function launch(dir) {
       '--env', `COLLECTOR_STATIONS=${stations}`, dockerImage]);
     const address = docker(['port', id, '3100/tcp']).split('\n')[0];
     return {base: `http://${address}`, id, state: () => inspectContainer(id), processes: () => appProcesses(id),
-      peak: () => Number(docker(['exec', id, 'sh', '-c',
-        'if [ -r /sys/fs/cgroup/memory.peak ]; then cat /sys/fs/cgroup/memory.peak; else cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes; fi'])) / MiB,
+      memory: () => readContainerMemory(id),
       concurrentHealth: () => new Promise((resolve, reject) => {
         const child = spawn('docker', ['exec', id, 'node', '-e', healthProbe], {stdio: 'ignore'});
         child.once('error', reject);
@@ -188,12 +290,28 @@ function readState(dir) {
   } finally {db.close(); cloudDb.close();}
 }
 
-async function request(base, route, {data, body, headers = {}} = {}) {
+async function request(base, route, {data, body, headers = {}, timeoutMs = 120000} = {}) {
   const response = await fetch(base + route, {method: data || body ? 'POST' : 'GET',
     headers: {'Content-Type': 'application/json', ...headers}, body: body || (data ? JSON.stringify(data) : undefined),
-    signal: AbortSignal.timeout(120000)});
+    signal: AbortSignal.timeout(timeoutMs)});
   const text = await response.text();
   return {status: response.status, data: JSON.parse(text), bytes: Buffer.byteLength(text), headers: response.headers};
+}
+
+async function waitForCloud(app) {
+  // Docker can publish its port before the cloud listener starts, resetting
+  // connections in that interval. Only the startup health check retries them.
+  const deadline = Date.now() + 15000;
+  let ready = false;
+  do {
+    try {
+      ready = (await fetch(app.base + '/api/health', {signal: AbortSignal.timeout(
+        Math.max(1, Math.min(1000, deadline - Date.now())))})).status === 200;
+    } catch {}
+    if (ready || Date.now() >= deadline || app.child?.exitCode !== null && app.child?.exitCode !== undefined) break;
+    await delay(Math.min(100, deadline - Date.now()));
+  } while (Date.now() < deadline);
+  assert.ok(ready, app.logs());
 }
 
 test('real three-process app preserves images through 21/42 MiB sync, conflicts, success and receipt retry', {timeout: 180000}, async t => {
@@ -202,7 +320,7 @@ test('real three-process app preserves images through 21/42 MiB sync, conflicts,
   const sourceText = JSON.stringify(source), remoteSha = core.fingerprint(remote);
   assert.ok(Buffer.byteLength(sourceText) > 21.39 * MiB && Buffer.byteLength(sourceText) < 21.45 * MiB);
   writeFileSync(path.join(dir, 'production-source.json'), sourceText, {mode: 0o644});
-  let app, windows;
+  let app, windows, memoryBaseline;
   const bridgeDb = new DatabaseSync(':memory:');
   bridgeDb.exec('CREATE TABLE business_sync_base(id INTEGER PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE business_sync_client(id INTEGER PRIMARY KEY,value TEXT NOT NULL)');
   bridgeDb.prepare('INSERT INTO business_sync_base VALUES(1,?)').run(baseline);
@@ -213,23 +331,30 @@ test('real three-process app preserves images through 21/42 MiB sync, conflicts,
   assert.ok(Buffer.byteLength(exchangeBody) > 21 * MiB && Buffer.byteLength(exchangeBody) < 21.1 * MiB);
   try {
     app = await launch(dir);
-    let ready = false;
-    for (let i = 0; i < 150; i++) {
-      try {if ((await fetch(app.base + '/api/health', {signal: AbortSignal.timeout(1000)})).status === 200) {ready = true; break;}} catch {}
-      if (app.child?.exitCode !== null && app.child?.exitCode !== undefined) break;
-      await delay(100);
-    }
-    assert.ok(ready, app.logs());
+    await waitForCloud(app);
+    // Cloud health is independent of production startup. Wait for the real,
+    // non-mutating sync probe before inspecting production-owned tables.
+    const auth = {Authorization: 'Bearer ' + token};
+    const productionDeadline = Date.now() + 15000;
+    let probe;
+    do {
+      probe = await request(app.base, '/api/collector/business-sync', {headers: auth, data: {
+        clientId, probe: true, baseHash: remoteSha, remoteHash: remoteSha},
+        timeoutMs: Math.max(1, productionDeadline - Date.now())});
+      if (probe.status !== 502 || Date.now() >= productionDeadline) break;
+      await delay(Math.min(100, productionDeadline - Date.now()));
+    } while (Date.now() < productionDeadline);
+    assert.equal(probe.status, 200, app.logs()); assert.equal(probe.data.unchanged, false);
     const before = readState(dir), initialContainer = app.id ? app.state() : null;
     const initialProcessInfo = app.id ? app.processes() : null;
     const initialProcesses = initialProcessInfo?.pids;
-    if (app.id) {assert.equal(initialProcesses.length, 3, JSON.stringify(initialProcessInfo.roles)); assert.equal(initialContainer.memory, 512 * MiB); assert.equal(initialContainer.swap, 512 * MiB);}
+    if (app.id) {
+      memoryBaseline = sampleContainerMemory(t, app, 'baseline', '21-42-mib');
+      assert.equal(initialProcesses.length, 3, JSON.stringify(initialProcessInfo.roles)); assert.equal(initialContainer.memory, 512 * MiB); assert.equal(initialContainer.swap, 512 * MiB);
+      memoryContract(memoryBaseline);
+    }
     app.rss?.sample();
     const beforeRss = app.rss?.read();
-    const auth = {Authorization: 'Bearer ' + token};
-    const probe = await request(app.base, '/api/collector/business-sync', {headers: auth, data: {
-      clientId, probe: true, baseHash: remoteSha, remoteHash: remoteSha}});
-    assert.equal(probe.status, 200); assert.equal(probe.data.unchanged, false);
 
     // Real collector implementation against an isolated synthetic Windows HTTP
     // endpoint. The baseline must remain exact when reconciliation is blocked.
@@ -308,14 +433,18 @@ test('real three-process app preserves images through 21/42 MiB sync, conflicts,
       // same cgroup, before claiming the 512 MiB resource regression passed.
       for (let i = 0; i < 150 && app.state().health !== 'healthy'; i++) await delay(100);
       const after = app.state();
+      const memoryRaw = sampleContainerMemory(t, app, 'final', '21-42-mib', memoryBaseline);
       assert.equal(after.health, 'healthy'); assert.equal(after.running, true); assert.equal(after.oom, false); assert.equal(after.restarts, 0);
       assert.equal(after.pid, initialContainer.pid); assert.equal(after.started, initialContainer.started);
       const finalProcessInfo = app.processes();
       assert.deepEqual(finalProcessInfo.pids, initialProcesses, JSON.stringify(finalProcessInfo.roles));
-      const peak = app.peak(); assert.ok(peak > 0 && peak <= 512);
+      const memory = memoryContract(memoryRaw, memoryBaseline);
       t.diagnostic(JSON.stringify({mode: 'linux-cgroup', cloudSnapshotBytes: Buffer.byteLength(sourceText), requestBytes: Buffer.byteLength(exchangeBody),
         responseBytes: results[1].bytes, subsequentRequestBytes: subsequent.requestBytes, subsequentResponseBytes: subsequent.bytes,
-        cgroupPeakMiB: Number(peak.toFixed(1)), memoryMiB: 512, memoryAndSwapMiB: 512, restarts: after.restarts, oomKilled: after.oom, health: after.health}));
+        cgroupPeakBytes: memory.peakBytes, cgroupPeakMiB: memory.peakBytes / MiB, currentBytes: memory.currentBytes,
+        overshootBytes: memory.overshootBytes, events: memory.events, eventDeltas: memory.eventDeltas,
+        memoryMiB: 512, memoryAndSwapMiB: 512, restarts: after.restarts, oomKilled: after.oom, health: after.health,
+        containerPid: after.pid, started: after.started, processRoles: finalProcessInfo.roles}));
     } else {
       app.rss.sample();
       assert.equal(app.child.exitCode, null); assert.equal(app.child.signalCode, null);
@@ -331,6 +460,7 @@ test('real three-process app preserves images through 21/42 MiB sync, conflicts,
       if (app.id) {
         const state = app.state();
         t.diagnostic(JSON.stringify(state));
+        failureMemory(t, app, '21-42-mib', memoryBaseline);
         if (state.running) t.diagnostic(JSON.stringify({processRoles: app.processes().roles}));
       }
     }
@@ -341,5 +471,164 @@ test('real three-process app preserves images through 21/42 MiB sync, conflicts,
     bridgeDb.close();
     await app?.stop();
     rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('real large keep-both sync survives lost response, collector restart and Windows CAS without duplicating images', {timeout: 180000}, async t => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'printlink-large-both-http-'));
+  const {source, remote, baseline} = fixture();
+  remote.records['split-record'] = {_id: 'split-record', date: '2026-10-19', productId: 1, productName: remote.products['1'].name};
+  remote.days['2026-10-19'] = {off: false};
+  writeFileSync(path.join(dir, 'production-source.json'), JSON.stringify(source), {mode: 0o644});
+  const bridgeDb = new DatabaseSync(path.join(dir, 'collector.sqlite'));
+  bridgeDb.exec('CREATE TABLE business_sync_base(id INTEGER PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE business_sync_client(id INTEGER PRIMARY KEY,value TEXT NOT NULL)');
+  bridgeDb.prepare('INSERT INTO business_sync_base VALUES(1,?)').run(baseline);
+  bridgeDb.prepare('INSERT INTO business_sync_client VALUES(1,?)').run(clientId);
+  // Use the real installed Windows adapter, including its disk verification and
+  // compare-and-swap check, with an isolated synthetic business file.
+  for (const [source, target] of [['../legacy/business-sync-adapter.cjs', 'adapter.cjs'],
+    ['../shared/business-sync.cjs', 'business-sync-core.cjs'], ['../shared/json-stream.cjs', 'json-stream.cjs']]) {
+    copyFileSync(new URL(source, import.meta.url), path.join(dir, target));
+  }
+  const adapter = createRequire(import.meta.url)(path.join(dir, 'adapter.cjs'));
+  const windowsFile = path.join(dir, 'windows.json');
+  let windowsData = core.apply(empty(), remote), localWrites = 0, loseResponse = false;
+  writeFileSync(windowsFile, JSON.stringify(windowsData));
+  const initialWindowsSha = sha(readFileSync(windowsFile));
+  const localAuth = 'Basic ' + Buffer.from('synthetic:synthetic').toString('base64');
+  const windows = http.createServer((req, res) => {
+    if (req.headers.authorization !== localAuth) {res.writeHead(401); res.end('{}'); return;}
+    adapter(req, res, {enabled: true, load: () => windowsData,
+      readDisk: () => JSON.parse(readFileSync(windowsFile, 'utf8')),
+      save: next => {localWrites++; windowsData = next; writeFileSync(windowsFile, JSON.stringify(next));}});
+  });
+  let app, runner, memoryBaseline;
+  const results = [];
+  let clientPeakRss = 0, clientPeakHeap = 0;
+  const sampleClient = () => {const memory = process.memoryUsage(); clientPeakRss = Math.max(clientPeakRss, memory.rss); clientPeakHeap = Math.max(clientPeakHeap, memory.heapUsed);};
+  const clientTimer = setInterval(sampleClient, 30);
+  sampleClient();
+  try {
+    app = await launch(dir);
+    await waitForCloud(app);
+    const auth = {Authorization: 'Bearer ' + token};
+    let probe;
+    const deadline = Date.now() + 15000;
+    do {
+      probe = await request(app.base, '/api/collector/business-sync', {headers: auth,
+        data: {clientId, probe: true, baseHash: 'not-equal', remoteHash: 'not-equal'}, timeoutMs: Math.max(1, deadline - Date.now())});
+      if (probe.status !== 502 || Date.now() >= deadline) break;
+      await delay(Math.min(100, deadline - Date.now()));
+    } while (Date.now() < deadline);
+    assert.equal(probe?.status, 200, app.logs()); assert.equal(probe.data.unchanged, false);
+    const before = readState(dir), initialContainer = app.id ? app.state() : null;
+    const initialProcesses = app.id ? app.processes().pids : null;
+    if (app.id) {
+      memoryBaseline = sampleContainerMemory(t, app, 'baseline', 'keep-both-lost-response-cas');
+      assert.equal(initialProcesses.length, 3); assert.equal(initialContainer.memory, 512 * MiB); assert.equal(initialContainer.swap, 512 * MiB);
+      memoryContract(memoryBaseline);
+    }
+    const windowsUrl = await listen(windows);
+    const makeRunner = () => startBusinessSync({config: {url: windowsUrl, username: 'synthetic', password: 'synthetic'}, db: bridgeDb, autoStart: false,
+      call: async (route, data) => {
+        const result = await request(app.base, route, {headers: auth, data});
+        results.push({status: result.status, ok: result.data.ok, requestBytes: Buffer.byteLength(JSON.stringify(data)), responseBytes: result.bytes});
+        assert.equal(result.status, 200);
+        sampleClient();
+        if (loseResponse && !data.probe) {loseResponse = false; throw Error('synthetic response lost after cloud commit');}
+        return result.data;
+      }});
+    runner = makeRunner();
+    await runner.sync();
+    assert.match(runner().error, /未写入/); assert.equal(localWrites, 0);
+    assert.equal(bridgeDb.prepare('SELECT value FROM business_sync_base WHERE id=1').get().value, baseline);
+    const blocked = readState(dir);
+    for (const key of ['snapshotSha', 'imagesSha', 'inventorySha', 'localMetadataSha', 'ledgerSha', 'usersSha', 'ordersSha', 'backupCount']) assert.equal(blocked[key], before[key], key);
+    const login = await request(app.base, '/api/login', {data: {username: 'admin', password}});
+    assert.equal(login.status, 200);
+    const admin = {Cookie: login.headers.get('set-cookie').split(';')[0], 'X-CSRF-Token': login.data.csrf};
+    const status = await request(app.base, '/api/platform/business-sync', {headers: admin});
+    assert.equal(status.status, 200); assert.equal(status.data.conflicts.length, 1);
+    assert.ok(core.canKeepBoth(status.data.conflicts[0]));
+    const choices = status.data.conflicts.map(({id, signature}) => ({id, signature, side: 'both'}));
+    assert.equal((await request(app.base, '/api/platform/business-sync', {headers: admin, data: {choices}})).status, 200);
+    loseResponse = true;
+    await Promise.all([runner.sync(), app.concurrentHealth?.()]);
+    assert.match(runner().error, /response lost/); assert.equal(localWrites, 0);
+    assert.equal(sha(readFileSync(windowsFile)), initialWindowsSha);
+    assert.equal(bridgeDb.prepare('SELECT value FROM business_sync_base WHERE id=1').get().value, baseline);
+    const committed = readState(dir);
+    assert.equal(committed.backupCount, before.backupCount + 1); assert.ok(committed.receipt && committed.lastSuccess);
+    runner.close(); runner = makeRunner();
+    await runner.sync();
+    assert.equal(runner().error, ''); assert.equal(runner().uploaded, 1); assert.equal(localWrites, 1);
+    assert.equal(windowsData.products.length, 43);
+    assert.equal(windowsData.products.find(row => row.id === 1).name, source.products[0].name);
+    assert.equal(windowsData.products.find(row => row.id === 43).name, remote.products['1'].name);
+    assert.equal(windowsData.products.find(row => row.id === 43).image, remote.products['1'].image);
+    for (const product of source.products) assert.equal(windowsData.products.find(row => row.id === product.id).image, product.image);
+    assert.equal(windowsData.records['2026-10-19'].items[0].productId, 43);
+    const common = core.project(windowsData);
+    assert.equal(core.fingerprint(common), core.fingerprint(JSON.parse(bridgeDb.prepare('SELECT value FROM business_sync_base WHERE id=1').get().value)));
+    const retried = readState(dir);
+    assert.equal(retried.snapshotSha, committed.snapshotSha); assert.equal(retried.backupCount, committed.backupCount);
+    assert.deepEqual(retried.receipt, committed.receipt); assert.equal(retried.businessSha, core.fingerprint(common));
+    for (const key of ['inventorySha', 'localMetadataSha', 'ledgerSha', 'usersSha', 'ordersSha']) assert.equal(retried[key], before[key], key);
+    const staleCas = await fetch(windowsUrl + '/api/business-sync', {method: 'POST', headers: {'Content-Type': 'application/json', Authorization: localAuth},
+      body: JSON.stringify({expected: core.fingerprint(remote), data: common})});
+    assert.equal(staleCas.status, 409); assert.equal(localWrites, 1);
+    windowsData.products.find(row => row.id === 2).name = 'Synthetic Windows edit after keep-both';
+    writeFileSync(windowsFile, JSON.stringify(windowsData));
+    await Promise.all([runner.sync(), app.concurrentHealth?.()]);
+    assert.equal(runner().error, ''); assert.equal(localWrites, 1);
+    const subsequent = results.at(-1);
+    assert.ok(subsequent.requestBytes > 43 * MiB && subsequent.requestBytes < 43.2 * MiB);
+    assert.ok(subsequent.responseBytes > 21.5 * MiB);
+    const after = readState(dir);
+    assert.equal(after.businessSha, core.fingerprint(core.project(windowsData)));
+    assert.equal(after.backupCount, committed.backupCount + 1);
+    await runner.sync();
+    assert.equal(runner().error, ''); assert.equal(localWrites, 1);
+    assert.equal(windowsData.products.length, 43); assert.equal(readState(dir).backupCount, after.backupCount);
+    for (const key of ['inventorySha', 'localMetadataSha', 'ledgerSha', 'usersSha', 'ordersSha']) assert.equal(after[key], before[key], key);
+    sampleClient(); app.rss?.sample();
+    const diagnostic = {mode: app.id ? 'linux-cgroup' : 'local-rss-not-cgroup-proof', scenario: 'keep-both-lost-response-cas',
+      requestBytes: results.map(row => row.requestBytes), responseBytes: results.map(row => row.responseBytes),
+      clientOutsideAppCgroup: true,
+      clientPeakRssMiB: Number((clientPeakRss / MiB).toFixed(1)), clientPeakHeapMiB: Number((clientPeakHeap / MiB).toFixed(1)),
+      appRss: app.rss?.read()};
+    if (app.id) {
+      for (let i = 0; i < 150 && app.state().health !== 'healthy'; i++) await delay(100);
+      const state = app.state();
+      const memoryRaw = sampleContainerMemory(t, app, 'final', 'keep-both-lost-response-cas', memoryBaseline);
+      assert.equal(state.health, 'healthy'); assert.equal(state.running, true); assert.equal(state.oom, false); assert.equal(state.restarts, 0);
+      assert.equal(state.pid, initialContainer.pid); assert.equal(state.started, initialContainer.started);
+      const finalProcesses = app.processes(); assert.deepEqual(finalProcesses.pids, initialProcesses);
+      const memory = memoryContract(memoryRaw, memoryBaseline);
+      Object.assign(diagnostic, {cgroupPeakBytes: memory.peakBytes, cgroupPeakMiB: memory.peakBytes / MiB,
+        currentBytes: memory.currentBytes, overshootBytes: memory.overshootBytes, events: memory.events, eventDeltas: memory.eventDeltas,
+        containerPid: state.pid, started: state.started, processRoles: finalProcesses.roles,
+        restarts: state.restarts, oomKilled: state.oom, health: state.health});
+    } else {assert.equal(app.child.exitCode, null); assert.equal(app.child.signalCode, null);}
+    assert.ok(!/子服务退出|heap out of memory|FATAL ERROR/i.test(app.logs()));
+    t.diagnostic(JSON.stringify(diagnostic));
+  } catch (error) {
+    if (app) {
+      t.diagnostic(app.logs());
+      t.diagnostic(JSON.stringify({mode: app.id ? 'linux-cgroup' : 'local-rss-not-cgroup-proof',
+        scenario: 'keep-both-lost-response-cas', appRss: app.rss?.read(), clientOutsideAppCgroup: true,
+        clientPeakRssMiB: clientPeakRss / MiB, clientPeakHeapMiB: clientPeakHeap / MiB}));
+      if (app.id) {
+        const state = app.state(); t.diagnostic(JSON.stringify(state));
+        failureMemory(t, app, 'keep-both-lost-response-cas', memoryBaseline);
+        if (state.running) t.diagnostic(JSON.stringify({processRoles: app.processes().roles}));
+      }
+    }
+    throw error;
+  }
+  finally {
+    clearInterval(clientTimer); runner?.close();
+    windows.closeAllConnections(); await new Promise(resolve => windows.close(resolve));
+    bridgeDb.close(); await app?.stop(); rmSync(dir, {recursive: true, force: true});
   }
 });
