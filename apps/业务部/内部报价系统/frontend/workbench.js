@@ -2095,10 +2095,10 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
       : `<td><span class="tk-readout" data-tbl="t4r" data-key="${k}" title="税率%">${num(ps.t4[k].rate)}</span>%</td>`).join('')
       + '<td></td><td></td>';
     const dedRow = t4Cols.map(([k]) => T4_NO_RATE.has(k) ? '<td class="tk-calc">—</td>'
-      : `<td class="tk-calc" id="tk-ded-${k}" title="减税额=金额×税率">0.0000</td>`).join('')
+      : `<td class="tk-calc" id="tk-ded-${k}" title="${k === 'carton' ? '减税额=金额÷1.1×税率' : '减税额=金额×税率'}">0.0000</td>`).join('')
       + '<td class="tk-sum" id="tk-total-ded">0.00</td>'
       + '<td class="tk-sum" id="tk-after-ded" style="background:#dcfce7;color:#166534;font-weight:700">0.00</td>';
-    return `<div class="tk-block"><div class="tk-title">四、减税明细 <small class="muted">（1=金额，2=税率%，3=减税额=金额×税率；合计减税=Σ减税额；减税后成本 = 总成本 − 合计减税）</small></div>
+    return `<div class="tk-block"><div class="tk-title">四、减税明细 <small class="muted">（1=金额，2=税率%，3=减税额：纸箱金额÷1.1×税率，其余金额×税率；合计减税=Σ减税额；减税后成本 = 总成本 − 合计减税）</small></div>
       <div class="tk-scroll"><table class="tk-table"><thead><tr>${headRow}</tr></thead><tbody>
         <tr>${amtRow}</tr>
         <tr>${rateRow}</tr>
