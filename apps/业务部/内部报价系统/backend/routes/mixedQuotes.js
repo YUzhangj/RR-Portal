@@ -42,6 +42,15 @@ router.put('/:id/mixed', async (req, res) => {
         if (!previous) throw new Error('当前没有混装配置');
         config = { ...previous, enabled: false };
       }
+      let importedLinks;
+      if (req.body.product_import === true && !disabling) {
+        const payloadFor = dept => JSON.parse(sections.find(s => s.dept === dept)?.payload_json || '{}');
+        importedLinks = require('../services/mixedPartImport').reconcileProductSelections(config, payloadFor('engineering'), payloadFor('molding'));
+        if (importedLinks.changes.length) {
+          await db.prepare("INSERT INTO audit_log (quote_id, dept, actor, action, detail) VALUES (?, ?, ?, 'mixed_sku_import_links', ?)")
+            .run(id, req.user.dept, req.user.name, JSON.stringify({changes:importedLinks.changes, sections:sections.filter(s => ['engineering','molding'].includes(s.dept))}));
+        }
+      }
       const nextIds = new Set(config.products.map(p => p.id));
       const removed = (previous?.products || []).filter(p => !nextIds.has(p.id));
       if (removed.length) {
@@ -55,7 +64,8 @@ router.put('/:id/mixed', async (req, res) => {
           .run(id, req.user.dept, req.user.name, JSON.stringify({removed, sections}));
       }
       for (const section of sections) {
-        const payload = require('../services/removeMixedProducts').removeMixedProducts(JSON.parse(section.payload_json || '{}'), removed.map(p => p.id));
+        const importedPayload = importedLinks?.changes.length && importedLinks[section.dept];
+        const payload = require('../services/removeMixedProducts').removeMixedProducts(importedPayload || JSON.parse(section.payload_json || '{}'), removed.map(p => p.id));
         if (section.dept === 'sales') payload.mixed_quote = config;
         else if (!previous && !disabling && config.products.length) {
           // 既有单品完整归入首款，原始根数据留存，但混装计算只读取新结构。

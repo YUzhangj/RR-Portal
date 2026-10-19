@@ -304,7 +304,7 @@ function lookupMaterialPrice(material, grade, prices) {
     if (['name', 'name_cn', 'name_en'].some(key => footer.test(String(part[key] || '').trim()))) return true;
     return /^(五金|五金件|五金部分|外购五金|包装|辅料|电子)(?:部分|配件)?$/.test(String(part.mold_no || '').trim());
   }
-  const ENGINEERING_FIELDS = ['name','mold_no','material','color','weight_g','cavity','sets','cycle_sec','machine','machine_model','target','daily_capacity','production_demand','mold_type','mold_size','price_rmb','price_usd','images','note','source_file'];
+  const ENGINEERING_FIELDS = ['source_product_code','name','mold_no','material','color','weight_g','cavity','sets','cycle_sec','machine','machine_model','target','daily_capacity','production_demand','mold_type','mold_size','price_rmb','price_usd','images','note','source_file'];
   function updateEngineeringFields(existing, incoming) {
     const result = {...existing};
     // 新文件里缺失/留空的字段不清空已有值（缺失 ≠ 删除）；空串也不覆盖。
