@@ -18,7 +18,26 @@
 const http = require('node:http');
 const fs   = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+
+/* ── 门户 SSO 票据（HS256 JWT）校验：与门户 SSO_SECRET 一致 ── */
+function verifyPortalTicket(ticket) {
+  const parts = String(ticket || '').split('.');
+  if (parts.length !== 3) throw new Error('票据格式不正确');
+  const secret = process.env.SSO_SECRET || 'dev-sso-secret-change-me';
+  const expected = crypto.createHmac('sha256', secret).update(parts[0] + '.' + parts[1]).digest();
+  const actual = Buffer.from(parts[2].replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) throw new Error('票据校验失败');
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+  } catch (e) { throw new Error('票据无效'); }
+  if (!payload.exp || Date.now() > payload.exp) throw new Error('票据已过期');
+  if (payload.app !== 'xingxin-qms') throw new Error('票据不属于本系统');
+  if (!payload.sub) throw new Error('票据缺少账号');
+  return payload;
+}
 
 const ROOT      = path.join(__dirname, '..');           // 前端静态根目录
 const DATA_DIR  = process.env.DATA_PATH || path.join(__dirname, 'data');
@@ -405,51 +424,62 @@ function rowToRecord(row) {
    旧的全量替换会把别人新录的记录整批抹掉（曾发生 74 条变 68 条）。
    规则：
    1) 同 id 已存在且服务端 updatedAt 更新 → 跳过这条（旧数据不覆盖新数据）；
-   2) 命中墓碑（该 id 已被删除且删除时间 >= 记录 updatedAt）→ 跳过（防止旧推送复活已删记录）；
-   3) 其余 INSERT OR REPLACE。 ── */
-function upsertRecords(db, records) {
+   2) 命中墓碑 → 跳过；仅显式整库替换可以重用已删除编号；
+   3) 其余 INSERT ... ON CONFLICT UPDATE。 ── */
+function upsertRecords(db, records, transaction = true) {
   const cols = RECORD_COLS.join(',');
   const ph = RECORD_COLS.map(() => '?').join(',');
   const upd = RECORD_COLS.filter(c => c !== 'id').map(c => c + '=excluded.' + c).join(',');
   const ins = db.prepare(`INSERT INTO records(${cols}) VALUES(${ph}) ON CONFLICT(id) DO UPDATE SET ${upd}`);
   const get = db.prepare('SELECT updatedAt FROM records WHERE id = ?');
   const getTomb = db.prepare('SELECT deletedAt FROM record_tombstones WHERE id = ?');
-  const delTomb = db.prepare('DELETE FROM record_tombstones WHERE id = ?');
   let accepted = 0, skippedStale = 0, skippedTomb = 0;
-  db.exec('BEGIN');
+  if (transaction) db.exec('BEGIN');
   try {
     for (const r of records) {
       const id = Number(r.id) || 0;
       if (!id) continue;
       const tomb = getTomb.get(id);
-      if (tomb && (!r.updatedAt || String(r.updatedAt) <= String(tomb.deletedAt))) { skippedTomb++; continue; }
+      // Only the explicit replacement channel may reuse a deleted id. A stale
+      // browser's clock may be ahead of the server's deletion timestamp.
+      if (tomb) { skippedTomb++; continue; }
       const cur = get.get(id);
-      if (cur && cur.updatedAt && r.updatedAt && String(cur.updatedAt) > String(r.updatedAt)) { skippedStale++; continue; }
+      if (cur && cur.updatedAt && (!r.updatedAt || !Number.isFinite(Date.parse(r.updatedAt)) ||
+          Date.parse(cur.updatedAt) >= Date.parse(r.updatedAt))) { skippedStale++; continue; }
       ins.run(...recordValues(r));
-      delTomb.run(id);   /* 明确重建同 id 记录时清掉墓碑 */
       accepted++;
     }
-    db.exec('COMMIT');
-  } catch (e) { db.exec('ROLLBACK'); throw e; }
+    if (transaction) db.exec('COMMIT');
+  } catch (e) { if (transaction) db.exec('ROLLBACK'); throw e; }
   return { accepted, skippedStale, skippedTomb };
 }
 
 /* ── 按 id 删除（写墓碑，防止旧标签页推送复活）── */
-function deleteRecords(db, ids) {
+function deleteRecords(db, ids, transaction = true) {
   const now = new Date().toISOString();
   const del = db.prepare('DELETE FROM records WHERE id = ?');
   const tomb = db.prepare('INSERT OR REPLACE INTO record_tombstones(id, deletedAt) VALUES(?, ?)');
   let count = 0;
-  db.exec('BEGIN');
+  if (transaction) db.exec('BEGIN');
   try {
     for (const id of ids) {
       const n = Number(id) || 0;
       if (!n) continue;
       del.run(n); tomb.run(n, now); count++;
     }
-    db.exec('COMMIT');
-  } catch (e) { db.exec('ROLLBACK'); throw e; }
+    if (transaction) db.exec('COMMIT');
+  } catch (e) { if (transaction) db.exec('ROLLBACK'); throw e; }
   return count;
+}
+
+function mergeRecordChanges(db, records, ids) {
+  db.exec('BEGIN');
+  try {
+    const deleted = deleteRecords(db, ids, false);
+    const result = upsertRecords(db, records, false);
+    db.exec('COMMIT');
+    return { ...result, deleted };
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
 }
 
 /* ── 全量替换（事务）：仅用于「清空数据 / 恢复示例 / 替换模式导入」等显式整库操作 ── */
@@ -458,9 +488,12 @@ function replaceRecords(db, records) {
   const ins = db.prepare(`INSERT INTO records(${RECORD_COLS.join(',')}) VALUES(${ph})`);
   db.exec('BEGIN');
   try {
+    // Keep tombstones for records omitted by a clear/import, so an old tab
+    // cannot undo the explicit replacement on its next ordinary save.
+    db.prepare('INSERT OR REPLACE INTO record_tombstones(id,deletedAt) SELECT id,? FROM records').run(new Date().toISOString());
     db.prepare('DELETE FROM records').run();
-    db.prepare('DELETE FROM record_tombstones').run();
-    for (const r of records) ins.run(...recordValues(r));
+    const clearTomb = db.prepare('DELETE FROM record_tombstones WHERE id=?');
+    for (const r of records) { ins.run(...recordValues(r)); clearTomb.run(toNum(r.id)); }
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
 }
@@ -831,6 +864,27 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { companies: COMPANIES });
     }
 
+    /* ── 门户 SSO 验票（免登，无需鉴权，不分厂区）── */
+    if (p === '/api/sso-verify' && req.method === 'POST') {
+      const body = await readBody(req);
+      try {
+        const claims = verifyPortalTicket(body && body.ticket);
+        return sendJson(res, 200, {
+          ok: true,
+          user: {
+            username: String(claims.sub),
+            name: String(claims.name || claims.sub),
+            dept: String(claims.dept || ''),
+            role: 'admin',
+            perms: claims.perms || null,
+          },
+          companies: Array.isArray(claims.companies) ? claims.companies : null,
+        });
+      } catch (e) {
+        return sendJson(res, 401, { ok: false, error: String(e && e.message || e) });
+      }
+    }
+
     /* ── 数据类路由：解析目标厂区（缺省东莞，兼容旧链接）── */
     const companyId = resolveCompany(url.searchParams);
     if (companyId === null) {
@@ -856,11 +910,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/records' && req.method === 'POST') {
       const body = await readBody(req);
-      const delCount = Array.isArray(body.deletedIds) && body.deletedIds.length
-        ? deleteRecords(db, body.deletedIds) : 0;
-      const r = upsertRecords(db, Array.isArray(body.records) ? body.records : []);
+      const r = mergeRecordChanges(db, Array.isArray(body.records) ? body.records : [],
+        Array.isArray(body.deletedIds) ? body.deletedIds : []);
       return sendJson(res, 200, { ok: true, count: db.prepare('SELECT COUNT(*) c FROM records').get().c,
-        accepted: r.accepted, skippedStale: r.skippedStale, skippedTomb: r.skippedTomb, deleted: delCount });
+        ...r });
     }
     if (p === '/api/records/delete' && req.method === 'POST') {
       const body = await readBody(req);

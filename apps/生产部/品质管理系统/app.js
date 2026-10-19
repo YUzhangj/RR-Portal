@@ -5795,7 +5795,7 @@ function backupClearAll() {
     confirmClass: 'btn-secondary',   /* 不用 btn-primary，减少误操作 */
     onConfirm:   () => {
       const count = recs().length;
-      window.__QC_FORCE_REPLACE = true;   /* 整库清空走 /api/records/replace */
+      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 整库清空走 /api/records/replace */
       state.records = [];
       state.nextId  = 1;
       persist();
@@ -5820,7 +5820,7 @@ function backupRestoreSeed() {
     confirmLabel: '确认恢复',
     confirmClass: 'btn-primary',
     onConfirm:   () => {
-      window.__QC_FORCE_REPLACE = true;   /* 整库覆盖走 /api/records/replace */
+      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 整库覆盖走 /api/records/replace */
       state.records = SEED_RECORDS.map(r => Object.assign({}, r));
       state.nextId  = SEED_RECORDS.length + 1;
       persist();
@@ -6666,7 +6666,7 @@ function executeImportConfirm() {
 
   try {
     if (plan.mode === 'replace') {
-      window.__QC_FORCE_REPLACE = true;   /* 替换模式导入走 /api/records/replace */
+      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 替换模式导入走 /api/records/replace */
       state.records = plan.records;
       state.nextId  = plan.records.length + 1;
     } else {

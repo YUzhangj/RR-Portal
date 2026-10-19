@@ -50,11 +50,16 @@
   /* 待删除记录 id 队列：app.js 删除记录时标记，下次推送时带给服务端按 id 删除。
      （服务端已改为按 id 合并写入，不再全量替换，删除必须显式告知） */
   window.__QC_PENDING_DELETES = [];
+  var deleteRevisions = Object.create(null);
+  var nextDeleteRevision = 0;
+  var recordPushQueue = Promise.resolve();
   window.__QC_MARK_DELETED = function (ids) {
     if (!Array.isArray(ids)) return;
     for (var i = 0; i < ids.length; i++) {
       var n = Number(ids[i]) || 0;
-      if (n && window.__QC_PENDING_DELETES.indexOf(n) === -1) window.__QC_PENDING_DELETES.push(n);
+      if (!n) continue;
+      deleteRevisions[n] = ++nextDeleteRevision;
+      if (window.__QC_PENDING_DELETES.indexOf(n) === -1) window.__QC_PENDING_DELETES.push(n);
     }
   };
 
@@ -110,16 +115,30 @@
   }
 
   function pushRecords() {
+    // Serialize record writes; an earlier replace must finish before a later
+    // ordinary save, and only acknowledge deletion revisions actually sent.
+    recordPushQueue = recordPushQueue.then(sendRecords, sendRecords);
+    return recordPushQueue;
+  }
+  function sendRecords() {
     try {
       var st = JSON.parse(localStorage.getItem(KEY.records) || '{}');
-      /* 整库替换操作（清空数据/恢复示例/替换模式导入）走 replace 通道 */
-      if (window.__QC_FORCE_REPLACE) {
-        return post(API_BASE + '/api/records/replace?company=' + COMPANY, { records: st.records || [] })
-          .then(function (ok) { if (ok) { window.__QC_FORCE_REPLACE = false; window.__QC_PENDING_DELETES = []; } return ok; });
-      }
       var deleted = window.__QC_PENDING_DELETES.slice();
+      var revisions = deleted.map(function (id) { return deleteRevisions[id]; });
+      function acknowledgeDeletes() {
+        window.__QC_PENDING_DELETES = window.__QC_PENDING_DELETES.filter(function (id) {
+          var index = deleted.indexOf(id);
+          return index === -1 || deleteRevisions[id] !== revisions[index];
+        });
+      }
+      /* 整库替换操作（清空数据/恢复示例/替换模式导入）走 replace 通道 */
+      var replacement = window.__QC_FORCE_REPLACE;
+      if (replacement) {
+        return post(API_BASE + '/api/records/replace?company=' + COMPANY, { records: st.records || [] })
+          .then(function (ok) { if (ok) { if (window.__QC_FORCE_REPLACE === replacement) window.__QC_FORCE_REPLACE = false; acknowledgeDeletes(); } return ok; });
+      }
       return post(API_BASE + '/api/records?company=' + COMPANY, { records: st.records || [], deletedIds: deleted })
-        .then(function (ok) { if (ok) window.__QC_PENDING_DELETES = []; return ok; });
+        .then(function (ok) { if (ok) acknowledgeDeletes(); return ok; });
     } catch (e) { console.warn('[QC后端] 读本地记录失败', e); }
     return Promise.resolve(false);
   }
