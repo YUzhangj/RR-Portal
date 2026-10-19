@@ -18,7 +18,8 @@
       <input id="po-file" type="file" name="po_file" accept=".pdf,.xls,.xlsx,.jpg,.jpeg,.png" required>
     </label>
     <div class="privacy-note"><strong>资料边界：</strong>PO 没有的内容保持空白并提示补充，系统不会猜测。照片只用于可见问题分析，跌落、扭力、拉力、电流等测试仍由 QC 手填。</div>
-    <div class="actions" style="margin-top:20px;justify-content:flex-end"><button class="button" type="submit">上传并开始提取 →</button></div>
+    <div class="actions" style="margin-top:20px;justify-content:flex-end"><button class="button" type="submit" id="po-submit-btn">上传并开始提取 →</button></div>
+    <p id="po-submit-hint" style="margin-top:10px;color:#b45309;font-size:.9rem;display:none">⏳ 正在上传并提取，AI 识别需要 1~3 分钟，请耐心等待，<strong>不要重复点击或刷新页面</strong>…</p>
   </form>
 
   {% if imports %}
@@ -38,4 +39,15 @@
   {% endif %}
 </div>
 {% endblock %}
-{% block scripts %}<script>document.querySelector('#po-file')?.addEventListener('change',e=>{document.querySelector('#po-file-name').textContent=e.target.files?.[0]?.name||'请选择文件'});</script>{% endblock %}
+{% block scripts %}<script>
+document.querySelector('#po-file')?.addEventListener('change',e=>{document.querySelector('#po-file-name').textContent=e.target.files?.[0]?.name||'请选择文件'});
+document.querySelector('form.po-drop-card')?.addEventListener('submit',function(e){
+  var btn=document.querySelector('#po-submit-btn');
+  if(btn.disabled){e.preventDefault();return false;}
+  btn.disabled=true;
+  btn.textContent='提取中，请稍候…';
+  btn.style.opacity='.6';
+  btn.style.cursor='not-allowed';
+  document.querySelector('#po-submit-hint').style.display='block';
+});
+</script>{% endblock %}
