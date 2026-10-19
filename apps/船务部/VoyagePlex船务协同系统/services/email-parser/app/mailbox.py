@@ -25,6 +25,22 @@ class OversizedLiteral(ValueError):
     pass
 
 
+class BatchLiteralBudget(ValueError):
+    pass
+
+
+class MailboxUidValidityChanged(RuntimeError):
+    pass
+
+
+def selected_mailbox_uids(values):
+    if (not isinstance(values, list) or not 1 <= len(values) <= MAX_MESSAGES
+            or any(type(uid) is not int or not 1 <= uid <= 4294967295 for uid in values)
+            or len(set(values)) != len(values)):
+        raise ValueError("请选择 1 至 5 个不重复的有效邮件 UID")
+    return sorted(values)
+
+
 class BoundedImap(imaplib.IMAP4_SSL):
     literal_limit = MAX_MESSAGE_BYTES
 
@@ -137,9 +153,13 @@ class BoundedImap(imaplib.IMAP4_SSL):
 
     def read(self, size):
         # Reject the server's literal length before imaplib allocates the body.
-        if size > self.literal_limit:
+        if size > MAX_MESSAGE_BYTES:
             raise OversizedLiteral()
-        return super().read(size)
+        if size > self.literal_limit:
+            raise BatchLiteralBudget()
+        raw = super().read(size)
+        self.literal_limit -= len(raw)
+        return raw
 
 
 class MailboxControl:
@@ -222,6 +242,7 @@ def response_for_uid(parts, uid, body=False):
         current.append(part)
     if current:
         groups.append(current)
+    matched = []
     for group in groups:
         header = b" ".join(part[0] if isinstance(part, tuple) else part for part in group)
         matches = {int(value) for value in re.findall(rb'\bUID ([0-9]+)\b', header)}
@@ -231,15 +252,38 @@ def response_for_uid(parts, uid, body=False):
                     continue
             elif not INTERNAL_DATE.search(header) or not re.search(rb'\bRFC822\.SIZE [0-9]+\b', header):
                 continue
-            return group
-    return []
+            matched.append(group)
+    return matched[0] if len(matched) == 1 else []
 
 
-def fetch_mailbox(after_uid: int = 0, start_date: str = "2026-10-08", company: str = "Xingxin", credentials: dict | None = None, control: MailboxControl | None = None) -> dict:
+def complete_body_literal(parts, uid, size):
+    group = response_for_uid(parts, uid, body=True)
+    literals = [part for part in group if isinstance(part, tuple)]
+    if len(literals) != 1:
+        raise RuntimeError()
+    header, raw = literals[0]
+    declared = re.search(rb'\bBODY\[\] \{([0-9]+)\}$', header)
+    closing = b" ".join(part[0] if isinstance(part, tuple) else part for part in group)
+    if (not declared or not isinstance(raw, bytes) or not raw
+            or len(raw) != int(declared[1]) or not closing.rstrip().endswith(b")")):
+        raise RuntimeError()
+    # Verified 163 responses can report RFC822.SIZE two bytes larger than the
+    # complete BODY[] literal. Its own framing must still match exactly; other
+    # size differences remain transient failures, never partially parsed mail.
+    if size not in (len(raw), len(raw) + 2):
+        raise RuntimeError()
+    return raw
+
+
+def fetch_mailbox(after_uid: int = 0, start_date: str = "2026-10-08", company: str = "Xingxin", credentials: dict | None = None, control: MailboxControl | None = None, selected_uids: list[int] | None = None, expected_uid_validity: int | None = None) -> dict:
     if company not in {"Xingxin", "Huadeng"}:
         raise ValueError("公司板块无效")
+    if selected_uids is not None:
+        selected_uids = selected_mailbox_uids(selected_uids)
+        if type(expected_uid_validity) is not int or not 1 <= expected_uid_validity <= 4294967295:
+            raise ValueError("重试邮件需要原邮箱 UIDVALIDITY")
     prefix = "VOYAGEPLEX_HUADENG_MAIL_" if company == "Huadeng" else "VOYAGEPLEX_MAIL_"
-    first_day = date.fromisoformat(start_date)
+    first_day = date.fromisoformat(start_date) if selected_uids is None else None
     address = (credentials.get("address", "") if credentials is not None else os.environ.get(prefix + "ADDRESS", "")).strip()
     secret = credentials.get("auth_code", "") if credentials is not None else os.environ.get(prefix + "AUTH_CODE", "")
     if not address or not secret:
@@ -267,14 +311,21 @@ def fetch_mailbox(after_uid: int = 0, start_date: str = "2026-10-08", company: s
             raise RuntimeError(folder_failure(_))
         status, response = client.response("UIDVALIDITY")
         validity = int(response[0]) if status == "UIDVALIDITY" and response and response[0] else 0
-        # IMAP SINCE uses server internal dates; search one day earlier and let
-        # the API apply the exact China-time boundary to each fetched message.
-        since = (first_day - timedelta(days=1)).strftime("%d-%b-%Y")
-        control.check(deadline)
-        status, found = client.uid("SEARCH", None, "SINCE", since)
-        if status != "OK":
-            raise RuntimeError("邮箱搜索失败")
-        uids = [int(uid) for uid in (found[0] or b"").split() if int(uid) > after_uid]
+        if selected_uids is not None:
+            # A UID can refer to a different message after an inbox rebuild.
+            # Never fetch a retry until its original namespace is confirmed.
+            if validity != expected_uid_validity:
+                raise MailboxUidValidityChanged("邮箱 UIDVALIDITY 已变化，无法安全重试原邮件")
+            uids = selected_uids
+        else:
+            # IMAP SINCE uses server internal dates; search one day earlier and let
+            # the API apply the exact China-time boundary to each fetched message.
+            since = (first_day - timedelta(days=1)).strftime("%d-%b-%Y")
+            control.check(deadline)
+            status, found = client.uid("SEARCH", None, "SINCE", since)
+            if status != "OK":
+                raise RuntimeError("邮箱搜索失败")
+            uids = [int(uid) for uid in (found[0] or b"").split() if int(uid) > after_uid]
         messages = []
         total_bytes = 0
         blocked_uid = None
@@ -296,13 +347,12 @@ def fetch_mailbox(after_uid: int = 0, start_date: str = "2026-10-08", company: s
             except Exception:
                 if control.cancelled.is_set():
                     raise InterruptedError("邮箱读取已取消")
-                # A known date permits a durable failed item. Without it the API
-                # must commit earlier items only and leave this UID for retry.
+                # Metadata/network failures are transient even when the server
+                # supplied a date. Commit only the preceding completed UIDs.
                 messages.append({"uid": uid, "received_at": received_at, "raw": None,
                                  "error": "无法读取有效的邮件元数据", "failure_kind": "metadata",
-                                 "retryable": not bool(received_at)})
-                if not received_at:
-                    blocked_uid = uid
+                                 "retryable": True})
+                blocked_uid = uid
                 break
             if size > MAX_MESSAGE_BYTES:
                 messages.append({"uid": uid, "received_at": received_at, "raw": None,
@@ -316,9 +366,7 @@ def fetch_mailbox(after_uid: int = 0, start_date: str = "2026-10-08", company: s
                 status, parts = client.uid("FETCH", str(uid), "(BODY.PEEK[])")
                 if status != "OK" or not parts:
                     raise RuntimeError()
-                raw = next((part[1] for part in response_for_uid(parts, uid, body=True) if isinstance(part, tuple)), None)
-                if not raw or len(raw) != size:
-                    raise RuntimeError()
+                raw = complete_body_literal(parts, uid, size)
                 if len(raw) > MAX_MESSAGE_BYTES or total_bytes + len(raw) > MAX_BATCH_BYTES:
                     raise OversizedLiteral()
                 total_bytes += len(raw)
@@ -327,12 +375,15 @@ def fetch_mailbox(after_uid: int = 0, start_date: str = "2026-10-08", company: s
             except Exception as error:
                 if control.cancelled.is_set():
                     raise InterruptedError("邮箱读取已取消")
+                if isinstance(error, BatchLiteralBudget):
+                    break  # Retry with a fresh batch; this is not a terminal oversize mail.
                 messages.append({"uid": uid, "received_at": received_at, "raw": None,
                                  "error": "邮件正文读取失败，已保留收件时间供人工处理",
                                  "failure_kind": "message_size" if isinstance(error, OversizedLiteral) else "body_read",
-                                 "retryable": False})
-                if not isinstance(error, RuntimeError):
-                    break  # A failed literal/socket can leave the stream unsynchronized.
+                                 "retryable": not isinstance(error, OversizedLiteral)})
+                if not isinstance(error, OversizedLiteral):
+                    blocked_uid = uid
+                break  # Never advance across a transient failure or reuse a broken stream.
         return {"configured": True, "address": address, "uid_validity": validity,
                 "messages": messages, "blocked_uid": blocked_uid}
     finally:
