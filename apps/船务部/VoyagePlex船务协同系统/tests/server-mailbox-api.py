@@ -25,8 +25,10 @@ def run():
 
         class ParserStub(BaseHTTPRequestHandler):
             calls = []
+            retry_calls = []
             tested_mailboxes = []
             pause_test = False
+            fail_poll = False
 
             def log_message(self, *args):
                 pass
@@ -54,18 +56,25 @@ def run():
                         assert test_release.wait(15)
                     self.respond({"connected": payload["auth_code"] == "fixture-auth", "message": "本地测试"})
                     return
+                if self.fail_poll:
+                    self.respond({"error": "synthetic-private-parser-detail"}, status=503)
+                    return
                 folder = payload["folder"]
-                self.calls.append((folder, payload["after_uid"]))
-                uids = [11] if folder == "INBOX" else [5, 11]
+                if self.path == "/v1/mailbox/retry":
+                    self.retry_calls.append((payload["address"], payload["selected_uids"], payload["expected_uid_validity"]))
+                    uids = payload["selected_uids"]
+                else:
+                    self.calls.append((folder, payload["after_uid"]))
+                    uids = [uid for uid in ([11] if folder == "INBOX" else [5, 11]) if payload["after_uid"] < uid]
                 items = [{"mailbox_uid": uid, "mailbox_received_at": "2026-10-13T00:00:00Z",
                           "fingerprint": f"fixture-{folder}-{uid}", "status": "parsed",
                           "message": {"subject": folder, "sender": "fixture@example.com"}, "items": []}
-                         for uid in uids if payload["after_uid"] < uid]
+                         for uid in uids]
                 self.respond({"configured": True, "address": payload["address"], "uid_validity": 7,
                               "items": items})
 
-            def respond(self, payload):
-                self.send_response(200)
+            def respond(self, payload, status=200):
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps(payload).encode())
@@ -104,6 +113,8 @@ def run():
                        DOTNET_CLI_TELEMETRY_OPTOUT="1")
             env["VOYAGEPLEX_HUADENG_MAILBOXES_JSON"] = json.dumps([
                 {"username": "fixture-owner", "address": "owner@example.com", "authCode": auth,
+                 "host": "imap.example.com", "folder": folder},
+                {"username": "fixture-other", "address": "other@example.com", "authCode": auth,
                  "host": "imap.example.com", "folder": folder}])
             process = subprocess.Popen(["dotnet", str(DLL)], cwd=ROOT / "server/VoyagePlex.Api",
                                        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -197,6 +208,55 @@ def run():
             with sqlite3.connect(db_path) as db:
                 assert db.execute("SELECT COUNT(*) FROM ImportEmailItems WHERE Company='Huadeng'").fetchone()[0] == 3
 
+            ParserStub.fail_poll = True
+            with sqlite3.connect(db_path) as db:
+                before_cursor = db.execute("SELECT LastUid FROM MailSyncStates WHERE Id=?", (1000 + owner_id,)).fetchone()[0]
+            failure = request("/api/imports/email/mailbox/sync", {}, expected=502)
+            assert failure == {"error": "邮箱同步失败，已保留同步断点，请稍后重试或联系管理员"}
+            assert "synthetic-private-parser-detail" not in json.dumps(failure)
+            request("/api/health")
+            with sqlite3.connect(db_path) as db:
+                assert db.execute("SELECT LastUid FROM MailSyncStates WHERE Id=?", (1000 + owner_id,)).fetchone()[0] == before_cursor
+                assert db.execute("SELECT COUNT(*) FROM ImportEmailItems WHERE Company='Huadeng'").fetchone()[0] == 3
+            ParserStub.fail_poll = False
+
+            # Exercise the actual HTTP authorization, selected-owner scope and
+            # parser retry contract without changing an existing mailbox cursor.
+            other_id = request("/api/users", {"username": "fixture-other", "displayName": "另一船务员",
+                "password": password, "role": "shipping", "companyAccess": "Huadeng"}, expected=201)["id"]
+            request(f"/api/users/{other_id}", {"displayName": "另一船务员", "role": "shipping",
+                "companyAccess": "Huadeng", "mailboxAddress": "other@example.com"}, method="PUT")
+            cookie("voyageplex_mail_owner", other_id)
+            request("/api/mail/settings", {"syncEnabled": False}, method="PATCH")
+            assert request("/api/imports/email/mailbox/sync", {})["imported"] == 1
+            with sqlite3.connect(db_path) as db:
+                item_id, batch_id, result_json = db.execute(
+                    "SELECT Id,ImportBatchId,ResultJson FROM ImportEmailItems WHERE Company='Huadeng' AND MailOwnerId=?",
+                    (other_id,)).fetchone()
+                failed = json.loads(result_json)
+                failed.update(status="failed", error="synthetic body read failure", failure_kind="body_read")
+                db.execute("UPDATE ImportEmailItems SET Status='failed',Error=?,ResultJson=? WHERE Id=?",
+                           (failed["error"], json.dumps(failed), item_id))
+                db.execute("UPDATE ImportBatches SET FailedCount=FailedCount+1,ParsedCount=ParsedCount-1 WHERE Id=?", (batch_id,))
+                retry_cursor = db.execute("SELECT LastUid FROM MailSyncStates WHERE Id=?", (1000 + other_id,)).fetchone()[0]
+                contact_count = db.execute("SELECT MessageCount FROM MailContacts WHERE Company='Huadeng' AND MailOwnerId=?", (other_id,)).fetchone()[0]
+            cookie("voyageplex_mail_owner", owner_id)
+            request("/api/imports/email/mailbox/retry-failed", {"itemIds": [item_id]}, expected=404)
+            request("/api/auth/login", {"username": "fixture-owner", "password": password})
+            cookie("voyageplex_mail_owner", other_id)  # A forged owner cookie cannot grant admin rights.
+            request("/api/imports/email/mailbox/retry-failed", {"itemIds": [item_id]}, expected=403)
+            request("/api/auth/login", {"username": "fixture-admin", "password": password})
+            cookie("voyageplex_mail_owner", other_id)
+            retried = request("/api/imports/email/mailbox/retry-failed", {"itemIds": [item_id]})
+            assert "fixture-auth" not in json.dumps(retried)
+            assert ParserStub.retry_calls[-1] == ("other@example.com", [11], 7)
+            with sqlite3.connect(db_path) as db:
+                assert db.execute("SELECT Status,ImportBatchId FROM ImportEmailItems WHERE Id=?", (item_id,)).fetchone() == ("pending", batch_id)
+                assert db.execute("SELECT LastUid FROM MailSyncStates WHERE Id=?", (1000 + other_id,)).fetchone()[0] == retry_cursor
+                assert db.execute("SELECT FailedCount,ParsedCount,TotalCount FROM ImportBatches WHERE Id=?", (batch_id,)).fetchone() == (0, 1, 1)
+                assert db.execute("SELECT MessageCount FROM MailContacts WHERE Company='Huadeng' AND MailOwnerId=?", (other_id,)).fetchone()[0] == contact_count
+            cookie("voyageplex_mail_owner", owner_id)
+
             bind("reset@example.com")
             bind("owner@example.com")
             ParserStub.pause_test = True
@@ -212,7 +272,7 @@ def run():
                 stored = db.execute("SELECT MailboxTestStatus FROM Users WHERE Id=?", (owner_id,)).fetchone()[0]
             check(stored == "Unknown", "Concurrent rebind stored stale mailbox test status: " + stored)
             assert not failures, "\n".join(failures)
-            print("Server mailbox API: legacy schema/key migration, restart idempotence, credential rotation without duplicates, folder identity and concurrent binding tests passed.")
+            print("Server mailbox API: migration, rotation, safe failures, admin failed-mail retry, owner isolation and concurrent binding tests passed.")
         finally:
             test_release.set()
             stop()
