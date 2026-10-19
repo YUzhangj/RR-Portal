@@ -155,9 +155,15 @@ def parse_excel(path: Path) -> dict:
         sheet_title = sheet.title
         rows = _read_sheet_rows(sheet)
         merges = _sheet_merge_ranges(wb, sheet)
-        from .huadeng_forms import parse_huadeng_form
-        if parse_huadeng_form(rows, []):
-            return parse_huadeng_form(rows, merges)
+        from .huadeng_forms import form_columns, parse_huadeng_form
+        form = parse_huadeng_form(rows, merges)
+        if form:
+            from openpyxl.utils import get_column_letter
+            from .weight_metadata import weight_metadata
+            _, form_cols = form_columns(rows)
+            weight_metadata(wb, sheet, form["items"], {key: get_column_letter(form_cols[key] + 1)
+                            for key in ("gross_weight", "net_weight") if key in form_cols})
+            return form
     finally:
         wb.close()
     header_row, headers = _find_header(rows)
@@ -172,6 +178,8 @@ def parse_excel(path: Path) -> dict:
             if col is not None and not _value(values, col):
                 for r1, r2, c1, c2 in merges:
                     if r1 <= row_index-1 < r2 and c1 <= col < c2:
+                        if col >= len(values):
+                            values.extend([None] * (col + 1 - len(values)))
                         values[col] = _value(rows[r1], c1)
         product = _value(values, columns.get("product_code"))
         if not product or _is_non_cargo_label(product):
@@ -224,14 +232,17 @@ def parse_xls(path: Path) -> dict:
     wb = xlrd.open_workbook(path, formatting_info=True)
     sheet = wb.sheet_by_index(0)
     rows = [[sheet.cell_value(row, col) for col in range(sheet.ncols)] for row in range(sheet.nrows)]
-    from .huadeng_forms import parse_huadeng_form
+    from .huadeng_forms import form_columns, parse_huadeng_form
     huadeng = parse_huadeng_form(rows, sheet.merged_cells)
     if huadeng:
+        _, form_cols = form_columns(rows)
         for item in huadeng["items"]:
             item["weight_rule"] = "Exact"
-            for key, col in (("gross_weight_format", 10), ("net_weight_format", 11)):
-                xf = wb.xf_list[sheet.cell_xf_index(item["source_row"]-1, col)]
-                item[key] = wb.format_map[xf.format_key].format_str
+            for key in ("gross_weight", "net_weight"):
+                if key in form_cols:
+                    xf = wb.xf_list[sheet.cell_xf_index(item["source_row"]-1, form_cols[key])]
+                    item[key + "_format"] = wb.format_map[xf.format_key].format_str
+                    item[key + "_rule"] = "Exact"
         return huadeng
     flat = "\n".join(" | ".join(_text(value) for value in row) for row in rows)
 
@@ -389,6 +400,7 @@ def _parse_amazon_allocation(wb) -> Optional[list[dict]]:
         return None
 
     columns = {value: index for index, value in enumerate(headers) if value}
+    customer_item_column = _column_map(headers).get("customer_item_number")
     items = []
     for row_index, row in enumerate(sheet.iter_rows(min_row=header_row + 1, values_only=True), header_row + 1):
         def cell(name: str):
@@ -409,7 +421,7 @@ def _parse_amazon_allocation(wb) -> Optional[list[dict]]:
             "pieces": pieces,
             "spec": specification,
             "volume": _number(cell("total cbm")),
-            "customer_item_number": _text(_value(values, columns.get("customer_item_number"))),
+            "customer_item_number": _text(_value(row, customer_item_column)),
             "customer_po": _text(cell("po")),
             "contract_number": _text(cell("45#")),
             "gross_weight": _number(cell("total g.w")),

@@ -21,7 +21,7 @@ async function read<T>(response:Response):Promise<T> {
   if(value===undefined)throw new Error("模板服务未返回数据，请重试");
   return value;
 }
-export function TemplateManagement({onBack}:{onBack:()=>void}) {
+export function TemplateManagement({onBack,company}:{onBack:()=>void;company:string}) {
   const [templates,setTemplates]=useState<Template[]>([]);
   const [draft,setDraft]=useState<Template>();
   const [loading,setLoading]=useState(true);const [saving,setSaving]=useState(false);
@@ -42,7 +42,7 @@ export function TemplateManagement({onBack}:{onBack:()=>void}) {
     }catch(reason){setError(reason instanceof Error?reason.message:"保存失败");}
     finally{setSaving(false);}
   }
-  const huadeng=templates.some(item=>item.company==="Huadeng");
+  const huadeng=company==="Huadeng";
   const visible=templates.filter(item=>(!mode||item.shipmentMode===mode)&&(!purpose||item.purpose===purpose));
   return <div className="content">
     <button className="back-button" onClick={onBack}>返回系统设置</button>

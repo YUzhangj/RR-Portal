@@ -587,7 +587,7 @@ function ImportCenter() {
       const email=emailBatch.items[index];
       if(email.status==="failed"||email.fields?.separate_warehouse_so!=="true")continue;
       const plan=email.warehouse_trip_plan;
-      const errors=plan?tripErrors(email.items||[],plan.trips):[];
+      const errors=plan?tripErrors(email.items||[],plan.trips,email.fields?.cargo_split_required==="true"):[];
       if(!plan?.confirmed||errors.length){setSelectedEmailIndex(index);setEmailError(`第${index+1}封邮件：${errors[0]||"请先核对并确认交仓分车"}`);return;}
     }
     setConfirmLoading(true); setEmailError("");
@@ -872,7 +872,7 @@ function SettingsCenter({role}:{role:UserRole}) {
   useEffect(()=>{void loadConfiguredDirectory(role).then(handle=>setLocalFolder(handle?.name||""));},[role]);
   async function chooseLocalFolder(){setDirectoryMessage("");try{const picker=(window as Window & {showDirectoryPicker?:()=>Promise<LocalDirectoryHandle>}).showDirectoryPicker;if(!picker)throw new Error("当前浏览器不支持文件夹授权，请使用最新版 Chrome 或 Edge");const handle=await picker();const permission=await handle.requestPermission({mode:"readwrite"});if(permission!=="granted")throw new Error("未获得文件夹读写权限");await saveLocalDirectory(role,handle);setLocalFolder(handle.name);setDirectoryMessage("本地库存文件夹已保存，仅对当前用户和当前浏览器生效");}catch(reason){if(reason instanceof DOMException&&reason.name==="AbortError")return;setDirectoryMessage(reason instanceof Error?reason.message:"选择文件夹失败");}}
   if (section === "factory-mapping") return <FactoryMappingManagement onBack={()=>setSection("home")} />;
-  if (section === "templates") return <TemplateManagement onBack={()=>setSection("home")} />;
+  if (section === "templates") return <TemplateManagement company={activeCompany()} onBack={()=>setSection("home")} />;
   if (section === "inspection-mapping") return <InspectionMappingSettings onBack={() => setSection("home")} />;
   if (section === "product-info") return <ProductInfoSettings onBack={() => setSection("home")} />;
   return <div className="content"><PageHeading eyebrow="基础配置" title="系统设置" description="按用户权限配置本地文件夹、共享盘目录、导入规则和模板。" />

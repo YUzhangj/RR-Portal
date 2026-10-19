@@ -6,33 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../VoyagePlex.Api/Services/ServerMailboxConfiguration.cs" Link="ServerMailboxConfiguration.cs" />
-    <Compile Include="../VoyagePlex.Api/Entities/AppUser.cs" Link="AppUser.cs" />
-    <Compile Include="../VoyagePlex.Api/Entities/UserSession.cs" Link="UserSession.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/CargoNotificationRules.cs" Link="CargoNotificationRules.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/ExportTemplateRules.cs" Link="ExportTemplateRules.cs" />
-    <Compile Include="../VoyagePlex.Api/Entities/ExportTemplate.cs" Link="ExportTemplate.cs" />
-    <Compile Include="../VoyagePlex.Api/Entities/ICompanyEntity.cs" Link="ICompanyEntity.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/DailyMailRules.cs" Link="DailyMailRules.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/ShipmentWorkflowRules.cs" Link="ShipmentWorkflowRules.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/ProductImportRules.cs" Link="ProductImportRules.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/ProductInfoMatching.cs" Link="ProductInfoMatching.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/UtcDateTime.cs" Link="UtcDateTime.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/ShipmentDeletionRules.cs" Link="ShipmentDeletionRules.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/ShipmentOrderTotals.cs" Link="ShipmentOrderTotals.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/ShipmentImportMerge.cs" Link="ShipmentImportMerge.cs" />
-    <Compile Include="../VoyagePlex.Api/Entities/ProductInfo.cs" Link="ProductInfo.cs" />
-    <Compile Include="../VoyagePlex.Api/Entities/ShipmentTask.cs" Link="ShipmentTask.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/DestinationCountryRules.cs" Link="DestinationCountryRules.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/MailboxDateRules.cs" Link="MailboxDateRules.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/MailClassificationRules.cs" Link="MailClassificationRules.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/MailContactRules.cs" Link="MailContactRules.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/MailInitializationRules.cs" Link="MailInitializationRules.cs" />
-    <Compile Include="../VoyagePlex.Api/Entities/MailContact.cs" Link="MailContact.cs" />
-    <Compile Include="../VoyagePlex.Api/Entities/ImportEmailItem.cs" Link="ImportEmailItem.cs" />
-    <Compile Include="../VoyagePlex.Api/Entities/ImportBatch.cs" Link="ImportBatch.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/MultiContainerRules.cs" Link="MultiContainerRules.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/WarehouseTripRules.cs" Link="WarehouseTripRules.cs" />
-    <Compile Include="../VoyagePlex.Api/Services/WarehouseSoRules.cs" Link="WarehouseSoRules.cs" />
+    <!-- Test the built API rules and real EF/SQLite startup code together. -->
+    <ProjectReference Include="../VoyagePlex.Api/VoyagePlex.Api.csproj" />
   </ItemGroup>
 </Project>

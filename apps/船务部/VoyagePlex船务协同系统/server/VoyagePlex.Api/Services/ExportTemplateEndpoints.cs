@@ -40,7 +40,7 @@ public static class ExportTemplateEndpoints
             UPDATE ExportTemplates SET WeightRule='DisplayInteger', Version='2.0',
                 Name='华登普通' || CASE WHEN ShipmentMode='Container' THEN '做柜' ELSE '交仓' END || CASE WHEN Purpose='Shipping' THEN '船务表' ELSE '仓务表' END,
                 Notes='RR版式；件数×每箱重量，显示整数、保留底层小数；红字品牌。'
-            WHERE Company='Huadeng' AND LayoutKey='Standard' AND WeightRule='Template' AND Version='1.0' AND Notes=''
+            WHERE Company='Huadeng' AND IsEnabled=1 AND IsDefault=1 AND LayoutKey='Standard' AND WeightRule='Template' AND Version='1.0' AND Notes=''
                 AND Name IN ('华登柜船务表','华登柜仓务表','华登车（交仓）船务表','华登车（交仓）仓务表');
             """);
         foreach (var mode in new[] { "Container", "Warehouse" })

@@ -8,7 +8,7 @@ export function WarehouseTripPreview({source,disabled,onChange}:{source:Source;d
   const plan=source.warehouse_trip_plan;
   const items=source.items||[];
   const trips=plan?.trips||[];
-  const errors=plan?tripErrors(items,trips):[];
+  const errors=plan?tripErrors(items,trips,String(source.fields?.cargo_split_required)==="true"):[];
   function edit(next:typeof trips){onChange({confirmed:false,trips:next});}
   return <section className="review-section warehouse-trip-preview"><h3>交仓分车 · 人工确认</h3><p>每车确认后生成一个任务。裕泰仓每车最多35 CBM；系统不自动拆分数量。修改原货物后请重新核对分配合计。</p>{!disabled&&<button className="secondary-button" onClick={()=>edit(initialTrips(source))}>{plan?"重新建立分车草稿":"建立分车草稿"}</button>}{trips.map((trip,index)=>{
     const cargo=allocatedCargo(items,trip);const volume=warehouseCbm(cargo);const recommended=recommendTruck(cargo);

@@ -152,21 +152,20 @@ def build_huadeng_workbook(task, base_builder=None):
             unit = nonnegative_number(item.get(unit_key), "每箱重量")
             if total_key == "gross_weight" and index != first:
                 continue
+            applied = item.get(f"{total_key}_rule", item.get("weight_rule", "Exact")) if rule == "Template" else rule
+            ws.cell(row, column).number_format = (item.get(f"{total_key}_format") or "0") if rule == "Template" else "0.00" if rule == "Exact" else "0"
             units = {str(items[i].get(unit_key)) for i in indices if items[i].get(unit_key) not in (None, "")}
             # Confirmed mixed groups may supply a shared total instead of one common box weight.
             if len(indices) > 1 and (unit is None or total_key == "gross_weight" and len(units) > 1):
-                ws.cell(row, column).number_format = "0"
                 continue
             box = f"{get_column_letter(col['pieces'])}{rows[first]}"
             weight = f"{get_column_letter(unit_col)}{row}"
-            applied = item.get("weight_rule", "Exact") if rule == "Template" else rule
             expression = f"{box}*{weight}"
             if applied == "Truncate":
                 expression = f"INT({expression})"
             if unit is None or items[first].get("pieces") in (None, ""):
                 expression = f'IF(OR({box}="",{weight}=""),"",{expression})'
             ws.cell(row, column, "=" + expression)
-            ws.cell(row, column).number_format = (item.get(f"{total_key}_format") or "0") if rule == "Template" else "0.00" if rule == "Exact" else "0"
         current += 1
         if warehouse and index == indices[-1]:
             count = total_pallets([items[i] for i in indices])
