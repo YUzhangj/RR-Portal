@@ -9,7 +9,7 @@ namespace IndoShipping.Api.Controllers;
 // Mounted at /api/purchase to match old Node route exactly
 [ApiController]
 [Route("api/purchase")]
-public class PurchaseOrdersController(ISqlConnectionFactory factory) : ControllerBase
+public partial class PurchaseOrdersController(ISqlConnectionFactory factory) : ControllerBase
 {
     [HttpGet("blob")]
     public async Task<IActionResult> GetBlob()
@@ -71,6 +71,7 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
                 GROUP BY i.po_id
             )
             SELECT po.*,
+                   ARRAY(SELECT m.po_no FROM purchase_orders m WHERE m.merged_into_id=po.id ORDER BY m.id) AS merged_po_numbers,
                    COALESCE(s.item_count, 0) AS item_count,
                    COALESCE(s.total_amount, 0) AS total_amount,
                    COALESCE(s.received_qty, 0) AS received_qty,
@@ -78,6 +79,7 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
                    GREATEST(COALESCE(s.purchase_qty, 0) - COALESCE(s.received_qty, 0), 0) AS shortage_qty
             FROM purchase_orders po
             LEFT JOIN item_stats s ON s.po_id = po.id
+            WHERE po.merged_into_id IS NULL
             ORDER BY po.created_at DESC");
         return Ok(rows);
     }
@@ -102,7 +104,9 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
                 GROUP BY po_item_id
             )
             SELECT i.*,
-                   po.po_no, po.supplier, po.status, po.order_date, po.delivery_date,
+                   po.po_no, po.supplier, po.status, po.order_date,
+                   CASE WHEN i.has_delivery_date_override THEN i.delivery_date_override
+                        WHEN i.source_po_no IS NOT NULL THEN i.source_delivery_date ELSE po.delivery_date END AS delivery_date,
                    po.notes AS po_notes,
                    COALESCE(r.received_qty, 0) AS received_qty,
                    COALESCE(r.spare_qty, 0) AS spare_qty,
@@ -121,6 +125,8 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
         using var c = factory.Create();
         var po = await c.QueryFirstOrDefaultAsync("SELECT * FROM purchase_orders WHERE id=@id", new { id });
         if (po == null) return NotFound(new { error = "not found" });
+        if (po.merged_into_id != null)
+            return Conflict(new { error = "采购单已合并，请打开合并后的采购单", merged_into_id = po.merged_into_id });
         var items = (await c.QueryAsync(@"
             WITH receipt_totals AS (
                 SELECT po_item_id, SUM(qty) AS received_qty, SUM(spare_qty) AS spare_qty
@@ -142,6 +148,8 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
 
     public class PoBody
     {
+        public int merge_revision { get; set; }
+        public bool apply_delivery_date_all { get; set; }
         public string? po_no { get; set; }
         public string? supplier { get; set; }
         public string? status { get; set; }
@@ -238,12 +246,23 @@ VALUES (@id, @pc, @mid, @mname, @qty, @price, @cur, @notes,
         using var tx = c.BeginTransaction();
         try
         {
+            var previous = await c.QueryFirstOrDefaultAsync(
+                "SELECT delivery_date FROM purchase_orders WHERE id=@id FOR UPDATE", new { id }, tx);
+            DateTime? previousDate = previous == null ? null : (DateTime?)previous.delivery_date;
+            var applyDeliveryDate = body.apply_delivery_date_all || previousDate?.Date != body.delivery_date?.Date;
+            var oldDeliveryDates = (await c.QueryAsync(@"
+                SELECT i.id, i.source_po_no,
+                    CASE WHEN i.has_delivery_date_override THEN i.delivery_date_override
+                         WHEN i.source_po_no IS NOT NULL THEN i.source_delivery_date ELSE @previousDate END AS delivery_date
+                FROM po_items i WHERE i.po_id=@id ORDER BY i.id FOR UPDATE",
+                new { id, previousDate }, tx)).ToList();
             var n = await c.ExecuteAsync(@"UPDATE purchase_orders SET po_no=@po_no, supplier=@supplier,
-                status=@status, order_date=@order_date, delivery_date=@delivery_date, notes=@notes WHERE id=@id",
+                status=@status, order_date=@order_date, delivery_date=@delivery_date, notes=@notes
+                WHERE id=@id AND merged_into_id IS NULL AND merge_revision=@merge_revision",
                 new { id, po_no = body.po_no ?? "", supplier = body.supplier ?? "",
                       status = body.status ?? "draft", order_date = body.order_date,
-                      delivery_date = body.delivery_date, notes = body.notes ?? "" }, tx);
-            if (n == 0) { tx.Rollback(); return NotFound(new { error = "采购单不存在" }); }
+                      delivery_date = body.delivery_date, notes = body.notes ?? "", body.merge_revision }, tx);
+            if (n == 0) { tx.Rollback(); return Conflict(new { error = "采购单不存在或已发生合并，请关闭后重新打开，避免覆盖合并明细" }); }
             var existingIds = (await c.QueryAsync<int>(
                 "SELECT id FROM po_items WHERE po_id=@id FOR UPDATE", new { id }, tx)).ToHashSet();
             var keptIds = new List<int>();
@@ -311,6 +330,15 @@ RETURNING id",
                 await c.ExecuteAsync(
                     "DELETE FROM po_items WHERE po_id=@id AND NOT (id = ANY(@keptIds))",
                     new { id, keptIds = keptIds.ToArray() }, tx);
+            }
+            if (applyDeliveryDate)
+            {
+                await c.ExecuteAsync(@"UPDATE po_items SET delivery_date_override=@deliveryDate,
+                    has_delivery_date_override=TRUE WHERE po_id=@id", new { id, deliveryDate = body.delivery_date }, tx);
+                await this.WriteAsync(c, tx, "purchase", "change_delivery_date", "purchase_order", id,
+                    $"整单修改交货日期：{body.delivery_date?.ToString("yyyy-MM-dd") ?? "未填写"}",
+                    new { id, previous_header_date = previousDate, previous_items = oldDeliveryDates,
+                        delivery_date = body.delivery_date, item_ids = keptIds });
             }
             await this.WriteAsync(c, tx, "purchase", "update", "purchase_order", id,
                 $"修改采购单 {body.po_no ?? ""}",
@@ -637,7 +665,7 @@ RETURNING id",
         var dyn = new DynamicParameters();
         foreach (var k in cols) dyn.Add(k, ParamValues.Normalize(body[k]));
         dyn.Add("id", id);
-        var n = await c.ExecuteAsync($"UPDATE purchase_orders SET {sets} WHERE id=@id", dyn, tx);
+        var n = await c.ExecuteAsync($"UPDATE purchase_orders SET {sets} WHERE id=@id AND merged_into_id IS NULL", dyn, tx);
         if (n == 0)
         {
             tx.Rollback();
@@ -661,6 +689,14 @@ RETURNING id",
         {
             tx.Rollback();
             return NotFound(new { error = "采购单不存在" });
+        }
+        var merged = await c.ExecuteScalarAsync<bool>(@"
+            SELECT EXISTS(SELECT 1 FROM purchase_orders
+                WHERE (id=@id AND (merged_into_id IS NOT NULL OR merge_revision>0)) OR merged_into_id=@id)", new { id }, tx);
+        if (merged)
+        {
+            tx.Rollback();
+            return Conflict(new { error = "采购单有合并来源记录，不能直接删除；可取消采购单并保留追溯记录" });
         }
         // 与入库/出库的写路径同一把锁（po_items 行），防止检查与删除之间被并发写入
         await c.ExecuteAsync("SELECT id FROM po_items WHERE po_id=@id FOR UPDATE", new { id }, tx);

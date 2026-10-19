@@ -46,6 +46,7 @@ async function saveWithLookup(failure?: { status: number; path: string }, materi
     form: { validateFields: async () => ({ po_no: 'SYNTHETIC-PO', supplier: material.supplier,
       order_date: '2026-10-13', delivery_date: '2026-10-28' }) },
     creating: true, editing: { id: 0 }, setCreating: vi.fn(), setEditing: vi.fn(), load: vi.fn(),
+    applyDeliveryDateAll: false, setApplyDeliveryDateAll: vi.fn(),
   })
   runInContext(executable + '\nglobalThis.completed = save()', context)
   await context.completed
