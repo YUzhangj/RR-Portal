@@ -13,6 +13,10 @@
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = value => Number(value || 0).toFixed(4);
   const ratioPercent = value => Number.isFinite(value * 100) ? `${value * 100}%` : `比值 ${value}`;
+  const ratioDisplay = value => {
+    try { return window.MixedMolds.ratioValue(value).toFixed(4); }
+    catch (_) { return String(value ?? ''); }
+  };
   const config = () => window.__data?.mixed_quote;
   const nested = new WeakSet();
   // Shared mold allocations are display-only; never copy them into saved injection rows.
@@ -673,7 +677,7 @@
         }
         if (dept === 'assembly' && selected === '__overall__') {
           host.querySelector('.mixed-help').textContent = '整体资料集中显示各款装工；编辑工序请在上方选择单个产品。成品包装列在共有费用，只计一次。';
-          const products = [...cfg.products, {id:'__shared__',code:'共有费用',name:'成品包装（每包装计一次）'}];
+          const products = [...[...cfg.products].sort((a, b) => String(a.code || '').localeCompare(String(b.code || ''), 'en', {numeric:true, sensitivity:'base'})), {id:'__shared__',code:'共有费用',name:'成品包装（每包装计一次）'}];
           const number = value => Number(value) || 0;
           const bases = [...new Set(products.map(product => {
             const payload = product.id === '__shared__' ? root.mixed_shared : root.mixed_products[product.id];
@@ -898,7 +902,7 @@
     function draw() {
       ++skuUploadSequence;
       panel.innerHTML = `${edit && !locked ? `<label>报价类型 <select class="mixed-type" aria-label="报价类型"><option value="single" ${!expanded ? 'selected' : ''}>单品报价</option><option value="mixed" ${expanded ? 'selected' : ''}>混装报价</option></select></label>` : ''}<h3>${saved?.enabled ? '混装产品配置' : '报价类型：单品报价'}</h3>${!expanded ? `<p>支持多个小产品独立报价、共用模具拆价及混装平均价。</p>${edit && !locked ? '<button type="button" class="mixed-enable">设置为混装报价</button>' : '<p class="muted">解除审核后可设置混装报价。</p>'}` : `
-        <p class="muted">不预设小产品；可在工程/业务导入模具报价单，按配件序号建立小产品，也可手动添加。在此维护小产品和每包装数量。啤工需求量在啤机部手填，报价NA比例可从配比表 Ratio per capsule 列导入，也可在汇总页填写。</p>
+        <p class="muted">不预设小产品；可在工程/业务导入模具报价单，按配件序号建立小产品，也可手动添加。在此维护小产品和每包装数量。啤工需求量在啤机部手填，报价比例可从配比表 Ratio per capsule 列导入，也可在汇总页填写。</p>
         <div class="mixed-fields"><label>每包装小产品数量${input('units_per_pack', cfg.units_per_pack, edit && !locked)}</label></div>
         ${edit && !locked ? `<label>导入产品资料（配比表）<input type="file" class="mixed-sku-file" accept=".xlsx"></label><div class="mixed-sku-preview"></div>` : ''}
         <div class="mixed-scroll"><table><thead><tr><th>小产品货号</th><th>小产品名称</th><th></th></tr></thead><tbody>${cfg.products.map((p, i) => `<tr data-product="${i}"><td>${input('code', p.code, edit && !locked, 'text')}</td><td>${input('name', p.name, edit && !locked, 'text')}</td><td>${edit && !locked ? '<button type="button" class="mini mixed-remove">移除</button>' : ''}</td></tr>`).join('')}</tbody></table></div>
@@ -921,7 +925,7 @@
           if(!active())return;
           if(state!==JSON.stringify(cfg))throw Error('产品配置已修改，请重新选择配比表生成预览');
           const applied=window.MixedSku.apply(cfg,result.records);
-          preview.innerHTML=`<p>按正式货号匹配 ${applied.matched} 款，新增 ${applied.added} 款。配比表NO.只作表内序号，已有模具和部门资料保留；${result.records.some(r=>r.na_ratio!=null)?'同步导入 Ratio per capsule 为 NA 比例；各款乘比例求和，共有费用只计一次。':'本次更新货号、名称和品牌，保留原有比例。'}</p>${applied.unmatched.length?`<p>未匹配的现有产品保留：${applied.unmatched.map(esc).join('、')}</p>`:''}<div class="mixed-scroll"><table><thead><tr><th>序号</th><th>货号</th><th>品牌</th><th>产品名称</th><th>NA比例（Ratio per capsule）</th></tr></thead><tbody>${result.records.map(r=>`<tr><td>${esc(r.source_number)}</td><td>${esc(r.code)}</td><td>${esc(r.brand)}</td><td>${esc(r.name)}</td><td>${r.na_ratio==null?'保留原值':esc(r.na_ratio)+'（'+esc(ratioPercent(r.na_ratio))+'）'}</td></tr>`).join('')}</tbody></table></div><button type="button" data-sku-apply>应用产品资料</button>`;
+          preview.innerHTML=`<p>按正式货号匹配 ${applied.matched} 款，新增 ${applied.added} 款。配比表NO.只作表内序号，已有模具和部门资料保留；${result.records.some(r=>r.na_ratio!=null)?'同步导入 Ratio per capsule 为比例；各款乘比例求和，共有费用只计一次。':'本次更新货号、名称和品牌，保留原有比例。'}</p>${applied.unmatched.length?`<p>未匹配的现有产品保留：${applied.unmatched.map(esc).join('、')}</p>`:''}<div class="mixed-scroll"><table><thead><tr><th>序号</th><th>货号</th><th>品牌</th><th>产品名称</th><th>比例（Ratio per capsule）</th></tr></thead><tbody>${result.records.map(r=>`<tr><td>${esc(r.source_number)}</td><td>${esc(r.code)}</td><td>${esc(r.brand)}</td><td>${esc(r.name)}</td><td>${r.na_ratio==null?'保留原值':esc(r.na_ratio)+'（'+esc(ratioPercent(r.na_ratio))+'）'}</td></tr>`).join('')}</tbody></table></div><button type="button" data-sku-apply>应用产品资料</button>`;
           preview.querySelector('[data-sku-apply]').onclick=()=>{
             if(!active())return;
             if(state!==JSON.stringify(cfg)){++skuUploadSequence;preview.textContent='产品配置已修改，请重新选择配比表生成预览';control.value='';return;}
@@ -980,7 +984,7 @@
     const cell = value => `<td class="${Math.abs(value || 0) > 1e-10 ? 'has-cost' : ''}">${Math.abs(value || 0) > 1e-10 ? fmt(value) : ''}</td>`;
     const row = (item, eng, common) => {
       const breakdown = common ? commonBreakdown : breakdowns.find(entry => entry.item.id === item.id).breakdown;
-      return `<tr${common ? ' class="mixed-common-row"' : ''}><th scope="row">${esc(item.code)}</th><td>${esc(item.name)}</td>${columns.map(([key]) => cell(breakdown.columns[key])).join('')}<td class="mixed-cost-total">${fmt(breakdown.total)}</td><td>${common ? '每包装一次' : `<input type="text" data-na-product="${esc(item.id)}" aria-label="${esc(item.code)} NA比例" value="${esc(result.config.products.find(p => p.id === item.id)?.na_ratio ?? result.config.products.find(p => p.id === item.id)?.ratio ?? '')}" placeholder="例如 =1/6" style="width:110px;min-width:90px"><small class="muted" data-na-share="${esc(item.id)}">${(item.weight * 100).toFixed(2)}%</small>`}</td><td class="mixed-cost-total" ${common ? '' : `data-na-total="${esc(item.id)}" data-na-cost="${breakdown.total}"`}>${common ? '—' : fmt(breakdown.total * item.weight)}</td></tr>`;
+      return `<tr${common ? ' class="mixed-common-row"' : ''}><th scope="row">${esc(item.code)}</th><td>${esc(item.name)}</td>${columns.map(([key]) => cell(breakdown.columns[key])).join('')}<td class="mixed-cost-total">${fmt(breakdown.total)}</td><td>${common ? '每包装一次' : `<input type="text" data-na-product="${esc(item.id)}" aria-label="${esc(item.code)} 比例" value="${esc(ratioDisplay(result.config.products.find(p => p.id === item.id)?.na_ratio ?? result.config.products.find(p => p.id === item.id)?.ratio ?? ''))}" placeholder="例如 =1/6" style="width:110px;min-width:90px"><small class="muted" data-na-share="${esc(item.id)}">${(item.weight * 100).toFixed(2)}%</small>`}</td><td class="mixed-cost-total" ${common ? '' : `data-na-total="${esc(item.id)}" data-na-cost="${breakdown.total}"`}>${common ? '—' : fmt(breakdown.total * item.weight)}</td></tr>`;
     };
     const weightedCell = (key, offset = 0) => {
       const values = Object.fromEntries(breakdowns.map(e => [e.item.id, key === 'total' ? e.breakdown.total : e.breakdown.columns[key] || 0]));
@@ -989,15 +993,15 @@
     };
     const aggregateRow = (average) => {
       const sum = getter => breakdowns.reduce((total, entry) => total + getter(entry) * (average ? entry.item.weight : 1), 0);
-      const label = average ? (result.config?.na_direct || result.config?.mode === 'ratio' ? '全部小产品NA比例合计' : '全部小产品平均价') : '小产品合计';
-      const note = average ? (result.config?.na_direct ? '各款分类金额 × 手填NA比例，再求和' : result.config?.mode === 'ratio' ? '各款分类金额 × 归一化生产配比，再求和' : `各款合计 ÷ ${result.products.length} 款`) : `${result.products.length} 款，不含共有费用`;
+      const label = average ? (result.config?.na_direct || result.config?.mode === 'ratio' ? '全部小产品比例合计' : '全部小产品平均价') : '小产品合计';
+      const note = average ? (result.config?.na_direct ? '各款分类金额 × 手填比例，再求和' : result.config?.mode === 'ratio' ? '各款分类金额 × 归一化生产配比，再求和' : `各款合计 ÷ ${result.products.length} 款`) : `${result.products.length} 款，不含共有费用`;
       return `<tr class="mixed-average-row ${average ? 'mixed-na-average-row' : ''}"><th scope="row">${label}</th><td>${note}</td>${columns.map(([key]) => average ? weightedCell(key) : `<td>${fmt(sum(e => e.breakdown.columns[key] || 0))}</td>`).join('')}${average ? weightedCell('total') : `<td class="mixed-cost-total">${fmt(sum(e => e.breakdown.total))}</td>`}<td>${average ? '每个小产品' : '—'}</td><td class="mixed-cost-total" ${average ? 'data-na-total-sum' : ''}>${average ? fmt(sum(e => e.breakdown.total)) : '—'}</td></tr>`;
     };
     const aggregateRows = result.products.length ? aggregateRow(false) + aggregateRow(true) : '';
     const combined = key => (key === 'total' ? commonBreakdown.total : commonBreakdown.columns[key] || 0) + breakdowns.reduce((sum, e) => sum + (key === 'total' ? e.breakdown.total : e.breakdown.columns[key] || 0) * e.item.weight, 0);
-    const combinedRow = `<tr class="mixed-combined-row"><th scope="row">合计</th><td>NA比例合计＋共有费用</td>${columns.map(([key]) => weightedCell(key, commonBreakdown.columns[key] || 0)).join('')}<td class="mixed-cost-total" data-na-combined data-common-cost="${commonBreakdown.total}">${fmt(combined('total'))}</td><td>—</td><td class="mixed-cost-total" data-na-combined data-common-cost="${commonBreakdown.total}">${fmt(combined('total'))}</td></tr>`;
+    const combinedRow = `<tr class="mixed-combined-row"><th scope="row">合计</th><td>比例合计＋共有费用</td>${columns.map(([key]) => weightedCell(key, commonBreakdown.columns[key] || 0)).join('')}<td class="mixed-cost-total" data-na-combined data-common-cost="${commonBreakdown.total}">${fmt(combined('total'))}</td><td>—</td><td class="mixed-cost-total" data-na-combined data-common-cost="${commonBreakdown.total}">${fmt(combined('total'))}</td></tr>`;
 
-    return `<h3>各小产品报价（未乘NA比例）</h3><p class="muted">各分类及成本合计显示原始金额；右侧合计＝成本合计 × NA比例，底部汇总各款结果。</p><p class="muted">物料金额按五金及工程明细的分类归集，同类合并；产品利宝和彩盒利宝分别列示；金额为 HKD，无费用留空。成本合计未加码点，右侧显示乘NA比例后的成本合计。共有费用单列，每包装计一次。</p><div class="mixed-scroll mixed-cost-matrix"><table aria-label="各小产品费用明细"><thead><tr><th>货号</th><th>品名</th>${columns.map(([,label]) => `<th>${esc(label)}</th>`).join('')}<th>成本合计 HKD</th><th>NA比例</th><th>NA比例后合计 HKD</th></tr></thead><tbody>${result.products.map(item => row(item, engineering.mixed_products?.[item.id], false)).join('')}${aggregateRows}${result.common_components ? row({ code: '共有费用', name: '每包装共有项目', components: result.common_components, price_hkd: result.common_usd * result.pricing.fx, price_usd: result.common_usd }, engineering.mixed_shared, true) : ''}${combinedRow}</tbody></table></div>`;
+    return `<h3>各小产品报价（未乘比例）</h3><p class="muted">各分类及成本合计显示原始金额；右侧合计＝成本合计 × 比例，底部汇总各款结果。</p><p class="muted">物料金额按五金及工程明细的分类归集，同类合并；产品利宝和彩盒利宝分别列示；金额为 HKD，无费用留空。成本合计未加码点，右侧显示乘比例后的成本合计。共有费用单列，每包装计一次。</p><div class="mixed-scroll mixed-cost-matrix"><table aria-label="各小产品费用明细"><thead><tr><th>货号</th><th>品名</th>${columns.map(([,label]) => `<th>${esc(label)}</th>`).join('')}<th>成本合计 HKD</th><th>比例</th><th>比例后合计 HKD</th></tr></thead><tbody>${result.products.map(item => row(item, engineering.mixed_products?.[item.id], false)).join('')}${aggregateRows}${result.common_components ? row({ code: '共有费用', name: '每包装共有项目', components: result.common_components, price_hkd: result.common_usd * result.pricing.fx, price_usd: result.common_usd }, engineering.mixed_shared, true) : ''}${combinedRow}</tbody></table></div>`;
   }
   function shippingSummary(host, result, sales, salesSection, quote, me) {
     const p = result.pricing, c = result.components;
@@ -1023,7 +1027,7 @@
     const selector = (s, index) => `<select data-compare-column="${index}" aria-label="对比运输方式${index}">${choices.map(option => `<option value="${esc(option.key)}" ${option.key === s.key ? 'selected' : ''}>${esc(option.name)}${option.valid ? '' : '（待补资料）'}</option>`).join('')}</select>`;
 
     const row = (label, key, highlight = '') => `<tr class="${highlight}"><td>${label}</td>${visible.map((s, index) => `<td data-compare-cell="${index}" data-price-value="${key}" data-price-scenario="${esc(s.key)}"></td>`).join('')}</tr>`;
-    host.innerHTML = `<h3>🚚 出货价算价</h3><p class="muted">主体小计＝上方“NA比例合计＋共有费用”合计－车缝－电子；主体、车缝、电子分别乘码点，合计后统一除找数。</p>
+    host.innerHTML = `<h3>🚚 出货价算价</h3><p class="muted">主体小计＝上方“比例合计＋共有费用”合计－车缝－电子；主体、车缝、电子分别乘码点，合计后统一除找数。</p>
       <label>报客场景 <select data-container ${editable ? '' : 'disabled'}>${scenarios.map(s => `<option value="${esc(s.key)}" ${s.key === containerKey ? 'selected' : ''} ${s.valid ? '' : 'disabled'}>${esc(s.name)}${s.valid ? '' : '（待补资料）'}</option>`).join('')}</select></label>
       <div class="mixed-scroll"><table class="wb-table ship-table" aria-label="出货价算价"><thead><tr><th>项</th>${visible.map((s, index) => `<th>${s.key === 'factory' ? esc(s.name) : selector(s, index)}</th>`).join('')}</tr></thead><tbody>
       ${row('主体小计 HK$（不含车缝、电子）','main')}${row('运费 HK$','transport')}${row('吊柜费 HK$','cabinet')}${row('含运 HK$','withFreight','hi')}
@@ -1119,24 +1123,38 @@
       const p = result.pricing;
       const salesSection = window.__data.sections.find(section => section.dept === 'sales');
       const sales = JSON.parse(salesSection?.payload_json || '{}');
-      host.innerHTML = `<h3>混装报价汇总 · ${esc(quote.product_name)}</h3><p class="muted">${result.config?.na_direct ? '按手填NA比例求和' : result.config?.mode === 'ratio' ? '按比例平均' : '等量平均'} · 每包装 ${result.units_per_pack || '—'} 个小产品 · 金额按完整精度计算，显示 4 位小数</p>
+      host.innerHTML = `<h3>混装报价汇总 · ${esc(quote.product_name)}</h3><p class="muted">${result.config?.na_direct ? '按手填比例求和' : result.config?.mode === 'ratio' ? '按比例平均' : '等量平均'} · 每包装 ${result.units_per_pack || '—'} 个小产品 · 金额按完整精度计算，显示 4 位小数</p>
         ${result.errors.length ? `<div class="mixed-error"><strong>待补齐，以下为试算结果</strong><ul>${result.errors.map(e => `<li>${esc(e)}</li>`).join('')}</ul></div>` : ''}
         ${detailedSummary(result)}
-        <div style="margin:12px 0"><button type="button" data-save-na>保存NA比例并重新汇总</button> <span class="muted">支持 1/6、=1/6、=(1+2)/6、百分数；直接按填写值相乘求和，不除以比例合计。</span><p data-na-status role="status"></p></div>
+        <div style="margin:12px 0"><button type="button" data-save-na>保存比例并重新汇总</button> <span class="muted">支持 1/6、=1/6、=(1+2)/6、百分数；直接按填写值相乘求和，不除以比例合计。</span><p data-na-status role="status"></p></div>
         ${p ? `
         <section data-mixed-shipping></section>
         <details class="mixed-pricing-detail"><summary>各款码点及摊费计算</summary><div class="mixed-scroll"><table aria-label="各款报价计算"><thead><tr><th>货号</th><th>品名</th><th>主体码点</th><th>电子码点</th><th>车缝码点</th><th>码点后金额 HKD</th><th>除数</th><th>摊费 USD</th><th>报价 USD</th></tr></thead><tbody>${result.products.map(item => `<tr><td>${esc(item.code)}</td><td>${esc(item.name)}</td><td>${p.markup}</td><td>${esc(sales.shipping?.elec_markup_x ?? p.markup)}</td><td>${esc(sales.shipping?.sew_markup_x ?? p.markup)}</td><td>${fmt(item.base_hkd)}</td><td>${p.divisor}</td><td>${fmt(item.amortization_usd)}</td><td>${fmt(item.price_usd)}</td></tr>`).join('')}</tbody></table></div><p class="muted">各款报价 USD＝码点后金额 ÷ 除数 ÷ 汇率 ＋ 本款摊费。参数统一在上方出货价算价表修改。</p></details>
-        <section class="mixed-tax-summary"><p class="muted">以下按每包装成本汇总：小产品按保存的NA比例计入，共有费用计一次。减税沿用单品规则，不再从上方报客价重复扣减。</p><div data-mixed-tax></div></section>` : ''}
+        <section class="mixed-tax-summary"><p class="muted">以下按每包装成本汇总：小产品按保存的比例计入，共有费用计一次。减税沿用单品规则，不再从上方报客价重复扣减。</p><div data-mixed-tax></div></section>` : ''}
         `;
       const naInputs = [...host.querySelectorAll('[data-na-product]')];
       const naStatus = host.querySelector('[data-na-status]');
       const naSave = host.querySelector('[data-save-na]');
+      // The rounded text is a display value. Preserve the saved full-precision
+      // number/expression until the user actually changes this particular field.
+      const ratioFields = new Map(naInputs.map(el => {
+        const product = result.config.products.find(p => p.id === el.dataset.naProduct);
+        return [el, {value:product.na_ratio ?? product.ratio, display:el.value.trim()}];
+      }));
       const naConfig = () => ({ ...result.config, na_direct: true, products: result.config.products.map(product => {
-        const value = naInputs.find(el => el.dataset.naProduct === product.id).value.trim();
-        const previous = product.na_ratio ?? product.ratio;
-        return { ...product, na_ratio: typeof previous === 'number' && value === String(previous) ? previous : value };
+        const el = naInputs.find(input => input.dataset.naProduct === product.id), field = ratioFields.get(el);
+        return {...product, na_ratio:el.value.trim() === field.display ? field.value : el.value.trim()};
       }) });
+      naInputs.forEach(el => el.onblur = () => {
+        const field = ratioFields.get(el);
+        if (el.value.trim() !== field.display) field.value = el.value.trim();
+        try {
+          const display = window.MixedMolds.ratioValue(field.value).toFixed(4);
+          el.value = display; field.display = display;
+        } catch (_) { /* Keep invalid input visible for correction. */ }
+      });
       naInputs.forEach(el => el.oninput = () => {
+        ratioFields.set(el, {value:el.value.trim(), display:el.value.trim()});
         try {
           const shares = window.MixedMolds.pricingWeights(naConfig());
           const weighted = [...host.querySelectorAll('[data-na-weighted]')].map(node => {
@@ -1147,7 +1165,7 @@
           const naTotal = totals.reduce((sum, [, value]) => sum + value, 0);
           const combined = [...host.querySelectorAll('[data-na-combined]')].map(node => [node, naTotal + Number(node.dataset.commonCost)]);
           if (![...weighted, ...totals, ...combined, [null, naTotal]].every(([, value]) => Number.isFinite(value))) {
-            throw new Error('报价金额超出有效计算范围，请核对NA比例、成本和汇率');
+            throw new Error('报价金额超出有效计算范围，请核对比例、成本和汇率');
           }
           host.querySelectorAll('[data-na-share]').forEach(node => {
             const value = shares[node.dataset.naShare];
