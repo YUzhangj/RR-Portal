@@ -66,7 +66,7 @@ def build_sky_castle_workbook(task):
     for row, item in enumerate(items, 8):
         for col, key in enumerate(keys, 1):
             value = item.get(key) if key else None
-            if col == 1: value = "Sky Castle"
+            if col == 1: value = task.get("customer") or "Sky Castle"
             if col == 3: value = "\n".join(str(v) for v in (item.get("product_code"), item.get("product_name")) if v)
             if col == 22: value = _factory_note(item, task.get("factoryMappings") or None)
             ws.cell(row, col, value if value != "" else None)
@@ -85,9 +85,10 @@ def build_sky_castle_workbook(task):
         values = [ws.cell(row, col).value for row in range(8, 8 + len(items))]
         numbers = [Decimal(str(value)) for value in values if isinstance(value, (int, float))]
         ws.cell(total, col, float(sum(numbers)) if numbers else None)
+    details = task.get("exportDetails") or {}
     footer = [(f"截关期 {_display_deadline(task.get('cutoffDate'))}", "柜号："),
               (f"SI：{_display_deadline(task.get('siDeadline'))}", "封条："),
-              ("收货人名称：", "柜重："), ("收货人代码：", ""),
+              (f"收货人名称：{details.get('consignee') or ''}", "柜重："), (f"收货人代码：{details.get('consigneeCode') or ''}", ""),
               ("贸易方式：", "发货人："), ("拼箱：", "")]
     for offset, (left, right) in enumerate(footer, total+1):
         ws.merge_cells(start_row=offset, start_column=1, end_row=offset, end_column=5); ws.cell(offset, 1, left)

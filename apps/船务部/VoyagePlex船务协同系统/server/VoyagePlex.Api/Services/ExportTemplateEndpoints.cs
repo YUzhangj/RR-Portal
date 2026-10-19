@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using VoyagePlex.Api.Data;
 using VoyagePlex.Api.Entities;
 
@@ -6,7 +8,9 @@ namespace VoyagePlex.Api.Services;
 
 public static class ExportTemplateEndpoints
 {
-    public static void EnsureSchema(AppDbContext db) => db.Database.ExecuteSqlRaw("""
+    public static void EnsureSchema(AppDbContext db)
+    {
+        db.Database.ExecuteSqlRaw("""
         CREATE TABLE IF NOT EXISTS ExportTemplates (
             Id INTEGER NOT NULL CONSTRAINT PK_ExportTemplates PRIMARY KEY AUTOINCREMENT,
             Company TEXT NOT NULL, Name TEXT NOT NULL, ShipmentMode TEXT NOT NULL,
@@ -16,22 +20,101 @@ public static class ExportTemplateEndpoints
         CREATE UNIQUE INDEX IF NOT EXISTS IX_ExportTemplates_Default
             ON ExportTemplates (Company, ShipmentMode, Purpose) WHERE IsDefault = 1;
         """);
+        var columns = db.Database.SqlQueryRaw<string>("SELECT name AS Value FROM pragma_table_info('ExportTemplates')").ToList();
+        if (!columns.Contains("WeightRule"))
+            db.Database.ExecuteSqlRaw("ALTER TABLE ExportTemplates ADD COLUMN WeightRule TEXT NOT NULL DEFAULT 'Template'");
+        if (!columns.Contains("LayoutKey"))
+            db.Database.ExecuteSqlRaw("ALTER TABLE ExportTemplates ADD COLUMN LayoutKey TEXT NOT NULL DEFAULT 'Standard'");
+        foreach (var company in new[] { "Xingxin", "Huadeng" })
+        foreach (var mode in new[] { "Container", "Warehouse" })
+        foreach (var purpose in new[] { "Shipping", "Warehouse" })
+        {
+            var name = $"{(company == "Huadeng" ? "华登" : "兴信")}{(mode == "Container" ? "柜" : "车（交仓）")}{(purpose == "Shipping" ? "船务" : "仓务")}表";
+            db.Database.ExecuteSqlInterpolated($"""
+                INSERT INTO ExportTemplates (Company, Name, ShipmentMode, Purpose, Version, Notes, WeightRule, LayoutKey, IsEnabled, IsDefault, UpdatedAt)
+                SELECT {company}, {name}, {mode}, {purpose}, '1.0', '', 'Template', 'Standard', 1, 1, {DateTime.UtcNow}
+                WHERE NOT EXISTS (SELECT 1 FROM ExportTemplates WHERE Company = {company} AND ShipmentMode = {mode} AND Purpose = {purpose})
+                """);
+        }
+        db.Database.ExecuteSqlRaw("""
+            UPDATE ExportTemplates SET WeightRule='DisplayInteger', Version='2.0',
+                Name='华登普通' || CASE WHEN ShipmentMode='Container' THEN '做柜' ELSE '交仓' END || CASE WHEN Purpose='Shipping' THEN '船务表' ELSE '仓务表' END,
+                Notes='RR版式；件数×每箱重量，显示整数、保留底层小数；红字品牌。'
+            WHERE Company='Huadeng' AND IsEnabled=1 AND IsDefault=1 AND LayoutKey='Standard' AND WeightRule='Template' AND Version='1.0' AND Notes=''
+                AND Name IN ('华登柜船务表','华登柜仓务表','华登车（交仓）船务表','华登车（交仓）仓务表');
+            """);
+        foreach (var mode in new[] { "Container", "Warehouse" })
+        foreach (var purpose in new[] { "Shipping", "Warehouse" })
+        foreach (var variant in new[] { (Layout: "Standard", Rule: "Truncate", Label: "INT取整版"), (Layout: "CustomerItem", Rule: "DisplayInteger", Label: "客户ITEM版"), (Layout: "CartonMarks", Rule: "DisplayInteger", Label: "箱唛尺寸版") })
+        {
+            if (variant.Layout == "CartonMarks" && mode != "Warehouse") continue;
+            var name = $"华登{(mode == "Container" ? "做柜" : "交仓")}{(purpose == "Shipping" ? "船务" : "仓务")}表 · {variant.Label}";
+            db.Database.ExecuteSqlInterpolated($"""
+                INSERT INTO ExportTemplates (Company, Name, ShipmentMode, Purpose, Version, Notes, WeightRule, LayoutKey, IsEnabled, IsDefault, UpdatedAt)
+                SELECT 'Huadeng', {name}, {mode}, {purpose}, '2.0', '导出前人工核对版式与公式版本。', {variant.Rule}, {variant.Layout}, 1, 0, {DateTime.UtcNow}
+                WHERE NOT EXISTS (SELECT 1 FROM ExportTemplates WHERE Company='Huadeng' AND ShipmentMode={mode} AND Purpose={purpose} AND LayoutKey={variant.Layout} AND WeightRule={variant.Rule})
+                """);
+        }
+        foreach (var purpose in new[] { "Shipping", "Warehouse" })
+            db.Database.ExecuteSqlInterpolated($"""
+                INSERT INTO ExportTemplates (Company, Name, ShipmentMode, Purpose, Version, Notes, WeightRule, LayoutKey, IsEnabled, IsDefault, UpdatedAt)
+                SELECT 'Huadeng', '华登多柜特殊表', 'Container', {purpose}, '1.0', '', 'Template', 'SkyCastle', 1, 0, {DateTime.UtcNow}
+                WHERE NOT EXISTS (SELECT 1 FROM ExportTemplates WHERE Company='Huadeng' AND LayoutKey='SkyCastle' AND Purpose={purpose})
+                """);
+    }
+
+    public static async Task<string?> ApplyToExport(JsonObject payload, AppDbContext db, CancellationToken cancellationToken, long? templateId = null)
+    {
+        var mode = payload["exportDetails"]?["shipmentMode"]?.ToString();
+        if (mode == "Delivery") return templateId.HasValue ? "送货任务不适用交仓或做柜模板" : null;
+        if (mode is not ("Warehouse" or "Container"))
+            mode = payload["warehouseGroups"] is JsonArray { Count: > 0 } ? "Warehouse" : "Container";
+        var purpose = payload["exportVariant"]?.ToString() == "warehouse" ? "Warehouse" : "Shipping";
+        var candidates = db.ExportTemplates.AsNoTracking().Where(value => value.Company == db.Company && value.Purpose == purpose && value.IsEnabled);
+        var template = templateId.HasValue
+            ? await candidates.SingleOrDefaultAsync(value => value.Id == templateId.Value, cancellationToken)
+            : await candidates.SingleOrDefaultAsync(value => value.ShipmentMode == mode && value.IsDefault, cancellationToken);
+        if (templateId.HasValue && template is null) return "所选模板不可用，请选择本厂区、对应用途的已启用模板";
+        if (template is not null)
+        {
+            payload["exportTemplate"] = JsonSerializer.SerializeToNode(template, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            if (templateId.HasValue)
+            {
+                var details = payload["exportDetails"] as JsonObject ?? new JsonObject();
+                if (payload["exportDetails"] is null) payload["exportDetails"] = details;
+                details["shipmentMode"] = template.ShipmentMode;
+                if (template.LayoutKey == "SkyCastle") details["templateKey"] = "sky-castle-multi";
+                else details.Remove("templateKey");
+            }
+        }
+        return null;
+    }
 
     public static void MapExportTemplates(this WebApplication app)
     {
+        app.MapGet("/api/export-templates/available", async (string purpose, HttpContext context, AppDbContext db, CancellationToken cancellationToken) =>
+        {
+            var role = ((AppUser)context.Items["CurrentUser"]!).Role;
+            if (purpose is not ("Shipping" or "Warehouse")) return Results.BadRequest(new { error = "模板用途无效" });
+            if ((role == "warehouse" && purpose != "Warehouse") || (role == "shipping" && purpose != "Shipping"))
+                return Results.Json(new { error = "当前账号无权使用此用途模板" }, statusCode: 403);
+            return Results.Ok(await db.ExportTemplates.AsNoTracking().Where(value => value.IsEnabled && value.Purpose == purpose)
+                .OrderBy(value => value.ShipmentMode).ThenByDescending(value => value.IsDefault).ThenBy(value => value.Name).ToListAsync(cancellationToken));
+        });
         app.MapGet("/api/export-templates", async (HttpContext context, AppDbContext db, CancellationToken cancellationToken) =>
         {
-            if (!ExportTemplateRules.CanManage(((AppUser)context.Items["CurrentUser"]!).Role)) return Results.Json(new { error = "只有管理员和主管可以管理导出模板" }, statusCode: 403);
+            if (!ExportTemplateRules.CanManage(((AppUser)context.Items["CurrentUser"]!).Role)) return Results.Json(new { error = "只有管理员、主管和船务员可以管理导出模板" }, statusCode: 403);
             return Results.Ok(await db.ExportTemplates.AsNoTracking().OrderBy(value => value.ShipmentMode)
                 .ThenBy(value => value.Purpose).ThenByDescending(value => value.IsDefault).ThenBy(value => value.Name).ToListAsync(cancellationToken));
         });
         app.MapPut("/api/export-templates", async (ExportTemplate input, HttpContext context, AppDbContext db, CancellationToken cancellationToken) =>
         {
-            if (!ExportTemplateRules.CanManage(((AppUser)context.Items["CurrentUser"]!).Role)) return Results.Json(new { error = "只有管理员和主管可以管理导出模板" }, statusCode: 403);
+            if (!ExportTemplateRules.CanManage(((AppUser)context.Items["CurrentUser"]!).Role)) return Results.Json(new { error = "只有管理员、主管和船务员可以管理导出模板" }, statusCode: 403);
             input.Name = input.Name?.Trim() ?? "";
             input.Version = input.Version?.Trim() ?? "";
             input.Notes = input.Notes?.Trim() ?? "";
             if (input.Id < 0) return Results.BadRequest(new { error = "模板编号无效" });
+            input.Company = db.Company;
             if (ExportTemplateRules.Validate(input) is string error) return Results.BadRequest(new { error });
             await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
             var entity = input.Id == 0 ? new ExportTemplate() : await db.ExportTemplates.SingleOrDefaultAsync(value => value.Id == input.Id, cancellationToken);
@@ -43,6 +126,8 @@ public static class ExportTemplateEndpoints
                     .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.IsDefault, false), cancellationToken);
             entity.Name = input.Name; entity.ShipmentMode = input.ShipmentMode; entity.Purpose = input.Purpose;
             entity.Version = input.Version; entity.Notes = input.Notes;
+            entity.WeightRule = input.WeightRule;
+            entity.LayoutKey = input.LayoutKey;
             entity.IsEnabled = input.IsEnabled; entity.IsDefault = input.IsDefault; entity.UpdatedAt = DateTime.UtcNow;
             if (input.Id == 0) db.ExportTemplates.Add(entity);
             await db.SaveChangesAsync(cancellationToken);

@@ -7,7 +7,7 @@ const backend = process.env.VOYAGEPLEX_API_BASE_URL || "http://127.0.0.1:5088";
 export async function GET(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params;
-    const response = await fetch(`${backend}/api/shipments/${id}/export`, { headers:backendHeaders(request), cache: "no-store" });
+    const response = await fetch(`${backend}/api/shipments/${id}/export${request.nextUrl.search}`, { headers:backendHeaders(request), cache: "no-store" });
     const headers = new Headers();
     headers.set("content-type", response.headers.get("content-type") || "application/octet-stream");
     const disposition = response.headers.get("content-disposition");
