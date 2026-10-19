@@ -1,4 +1,7 @@
 using System.Text.Json;
+using System.Security.Claims;
+using IndoShipping.Api.Auth;
+using Microsoft.EntityFrameworkCore;
 using Dapper;
 using IndoShipping.Api.Controllers;
 using IndoShipping.Api.Features.Bootstrap;
@@ -198,6 +201,113 @@ public sealed class PurchaseOrderMergeTests
         Assert.Equal(0, await f.Db.ExecuteScalarAsync<int>("SELECT count(*) FROM po_items WHERE source_po_no IS NOT NULL"));
     }
 
+    [Fact]
+    public async Task Archived_order_cannot_gain_new_shipment_links()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        Assert.IsType<OkObjectResult>(await f.Controller.Merge(new() { ids = [1, 2], target_id = 1 }));
+        Assert.IsType<BadRequestObjectResult>(await f.Shipments.Create(new()
+        { items = [new() { po_no = "20269002", qty = 1 }] }));
+        Assert.Equal(0, await f.Db.ExecuteScalarAsync<int>("SELECT count(*) FROM shipment_items"));
+        Assert.IsType<OkObjectResult>(await f.Shipments.Create(new()
+        { items = [new() { po_no = "20269001", qty = 1 }] }));
+    }
+
+    [Fact]
+    public async Task Shipment_starting_after_merge_check_cannot_attach_to_archived_source()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.Db.ExecuteAsync("""
+            CREATE FUNCTION pause_merge() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+                PERFORM pg_advisory_xact_lock(943, 1); RETURN NEW; END $$;
+            CREATE TRIGGER pause_merge BEFORE UPDATE OF po_id ON po_items
+                FOR EACH ROW EXECUTE FUNCTION pause_merge();
+            """);
+        await using var gate = await f.Db.BeginTransactionAsync();
+        await f.Db.ExecuteAsync("SELECT pg_advisory_xact_lock(943, 1)", transaction: gate);
+        var merge = f.Controller.Merge(new() { ids = [1, 2], target_id = 1 });
+        Task<IActionResult>? shipment = null;
+        try
+        {
+            // Gate is reached only after Merge's occupancy check; no timing-only sleep.
+            await f.WaitForLock("%UPDATE po_items i SET%", "advisory", gate);
+            shipment = f.Shipments.Create(new() { items = [new() { po_no = "20269002", qty = 1 }] });
+            await f.WaitForLock("%WHERE po_no=ANY(%", "transactionid", gate, shipment);
+        }
+        finally { await gate.RollbackAsync(); }
+        Assert.IsType<OkObjectResult>(await merge);
+        Assert.IsType<BadRequestObjectResult>(await shipment!);
+        Assert.Equal(0, await f.Db.ExecuteScalarAsync<int>("SELECT count(*) FROM shipment_items"));
+    }
+
+    [Fact]
+    public async Task Shipment_committing_before_merge_is_seen_after_header_lock()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.Db.ExecuteAsync("""
+            CREATE FUNCTION pause_shipment() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+                PERFORM pg_advisory_xact_lock(943, 2); RETURN NEW; END $$;
+            CREATE TRIGGER pause_shipment BEFORE INSERT ON shipment_items
+                FOR EACH ROW EXECUTE FUNCTION pause_shipment();
+            """);
+        await using var gate = await f.Db.BeginTransactionAsync();
+        await f.Db.ExecuteAsync("SELECT pg_advisory_xact_lock(943, 2)", transaction: gate);
+        var shipment = f.Shipments.Create(new() { items = [new() { po_no = "20269002", qty = 1 }] });
+        Task<IActionResult>? merge = null;
+        try
+        {
+            await f.WaitForLock("%INSERT INTO shipment_items(%", "advisory", gate);
+            merge = f.Controller.Merge(new() { ids = [1, 2], target_id = 1 });
+            await f.WaitForLock("%SELECT * FROM purchase_orders%", "transactionid", gate, merge);
+        }
+        finally { await gate.RollbackAsync(); }
+        Assert.IsType<OkObjectResult>(await shipment);
+        Assert.IsType<ConflictObjectResult>(await merge!);
+        Assert.Equal(2, await f.Db.ExecuteScalarAsync<int>("SELECT po_id FROM po_items WHERE id=2"));
+    }
+
+    [Fact]
+    public async Task Shipment_update_preserves_existing_rows_when_archived_source_is_rejected()
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        Assert.IsType<OkObjectResult>(await f.Shipments.Create(new()
+        { items = [new() { po_no = "UNRELATED", qty = 2 }] }));
+        Assert.IsType<OkObjectResult>(await f.Controller.Merge(new() { ids = [1, 2], target_id = 1 }));
+        Assert.IsType<BadRequestObjectResult>(await f.Shipments.Update(1, new()
+        { items = [new() { po_no = "20269002", qty = 1 }] }));
+        Assert.Equal("UNRELATED", await f.Db.ExecuteScalarAsync<string>("SELECT po_no FROM shipment_items"));
+        Assert.Equal(2m, await f.Db.ExecuteScalarAsync<decimal>("SELECT qty FROM shipment_items"));
+    }
+
+    [Theory]
+    [InlineData("/api/purchase/merge", "POST", true, false, true, 403)]
+    [InlineData("/api/purchase/1", "PUT", true, false, true, 403)]
+    [InlineData("/api/purchase/merge", "POST", false, true, true, 403)]
+    [InlineData("/api/purchase/1", "PUT", false, true, true, 403)]
+    [InlineData("/api/purchase/merge", "POST", true, true, false, 401)]
+    [InlineData("/api/purchase/1", "PUT", true, true, false, 401)]
+    [InlineData("/api/purchase/merge", "POST", true, true, true, 200)]
+    [InlineData("/api/purchase/1", "PUT", true, true, true, 200)]
+    public async Task Merge_and_whole_order_date_require_live_purchase_edit_permission(
+        string path, string method, bool access, bool edit, bool active, int status)
+    {
+        await using var f = await Fixture.Create(); if (f is null) return;
+        await f.Db.ExecuteAsync("""
+            INSERT INTO "Users"("Id","Username","PasswordHash","DisplayName","Userbqrpower","Usereditpower","IsActive","CreatedAt")
+                VALUES (1,'synthetic','unused','Synthetic',@access,@edit,@active,now())
+            """, new { access = access ? "000010000" : "000000000", edit = edit ? "000010000" : "000000000", active });
+        var nextCalled = false;
+        var middleware = new ApiPermissionMiddleware(_ => { nextCalled = true; return Task.CompletedTask; });
+        var context = new DefaultHttpContext
+        { User = new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, "1")], "synthetic")) };
+        context.Request.Path = path; context.Request.Method = method;
+        await using var db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseNpgsql(f.ConnectionString).Options);
+        await middleware.InvokeAsync(context, db);
+        Assert.Equal(status, context.Response.StatusCode);
+        Assert.Equal(status == 200, nextCalled);
+        Assert.Equal(0, await f.Db.ExecuteScalarAsync<int>("SELECT count(*) FROM audit_logs"));
+    }
+
     private sealed class Fixture : IAsyncDisposable
     {
         public required NpgsqlConnection Db { get; init; }
@@ -205,6 +315,25 @@ public sealed class PurchaseOrderMergeTests
         public required string ConnectionString { get; init; }
         public PurchaseOrdersController Controller => new(new SqlConnectionFactory(ConnectionString))
         { ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() } };
+
+        public ShipmentsController Shipments => new(new SqlConnectionFactory(ConnectionString))
+        { ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() } };
+
+        public async Task WaitForLock(string query, string waitEvent, NpgsqlTransaction tx, Task? pending = null)
+        {
+            var until = DateTime.UtcNow.AddSeconds(5);
+            while (DateTime.UtcNow < until)
+            {
+                await Db.ExecuteAsync("SELECT pg_stat_clear_snapshot()", transaction: tx);
+                if (await Db.ExecuteScalarAsync<bool>("""
+                    SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                        WHERE pid<>pg_backend_pid() AND query LIKE @query AND wait_event=@waitEvent)
+                    """, new { query, waitEvent }, tx)) return;
+                if (pending?.IsCompleted == true) break;
+                await Task.Delay(15);
+            }
+            Assert.Fail("Expected synthetic PostgreSQL lock boundary was not reached");
+        }
 
         public async Task<string?> Items() => await Db.ExecuteScalarAsync<string>("""
             SELECT jsonb_agg(to_jsonb(i)-'po_id'-'source_po_no'-'source_delivery_date'-'source_order_date'-'delivery_date_override'-'has_delivery_date_override' ORDER BY id)::text FROM po_items i
@@ -219,6 +348,8 @@ public sealed class PurchaseOrderMergeTests
             await db.OpenAsync();
             await db.ExecuteAsync($"CREATE SCHEMA {schema}");
             await db.ExecuteAsync("""
+                CREATE TABLE "Users"("Id" int PRIMARY KEY,"Username" text,"PasswordHash" text,"DisplayName" text,
+                    "Userbqrpower" text,"Usereditpower" text,"IsActive" bool,"CreatedAt" timestamptz);
                 CREATE TABLE purchase_orders(id serial PRIMARY KEY,po_no text UNIQUE,supplier text,status text DEFAULT 'draft',
                     order_date date,delivery_date date,notes text,created_at timestamp DEFAULT now());
                 CREATE TABLE po_items(id serial PRIMARY KEY,po_id int REFERENCES purchase_orders(id),product_code text,
@@ -228,7 +359,13 @@ public sealed class PurchaseOrderMergeTests
                 CREATE TABLE po_receipts(id serial PRIMARY KEY,po_item_id int REFERENCES po_items(id),qty numeric,spare_qty numeric DEFAULT 0,
                     receipt_date date,batch_no text);
                 CREATE TABLE outbound(po_item_id int REFERENCES po_items(id),po_no text);
-                CREATE TABLE shipment_items(po_no text);
+                CREATE TABLE shipments(id serial PRIMARY KEY,customer text,container_no text,container_count int,
+                    ship_date date,load_date date,bl_no text,rate numeric,status text,created_at timestamp DEFAULT now());
+                CREATE TABLE shipment_items(id serial PRIMARY KEY,shipment_id int REFERENCES shipments(id),outbound_id int,
+                    material_id int,seq int,kg numeric,qty numeric,cartons int,qty_per_carton text,weighing_qty numeric,
+                    purchase_unit text,pallet text,price numeric,currency text,po_no text,po_date date,supplier text,
+                    customs_company text,bl_head text,contract_no text,contract_date date,invoice_no text,invoice_date date,
+                    invoice_price numeric,product_use text,formula_name text,carton_group text,material_snapshot jsonb,carton_no text);
                 CREATE TABLE audit_logs(user_id int,username text,module text,action text,entity_type text,entity_id text,
                     summary text,details jsonb,ip_address text);
                 INSERT INTO purchase_orders(id,po_no,supplier,order_date,delivery_date,notes) VALUES
