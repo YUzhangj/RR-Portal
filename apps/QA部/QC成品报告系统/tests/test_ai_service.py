@@ -1,4 +1,5 @@
 import io
+import copy
 import json
 import socket
 import tempfile
@@ -15,6 +16,7 @@ from ai_service import (
     AIValidationError,
     PO_EXTRACTION_SCHEMA,
     _validate_photo_data,
+    _mock_po_data,
 )
 from task_queue import enqueue
 
@@ -35,6 +37,43 @@ class FakeResponse:
 
 
 class AIServiceContractTest(unittest.TestCase):
+    def live_po(self, data, suffix=".pdf"):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / ("synthetic" + suffix)
+            path.write_bytes(b"%PDF-1.4\n% synthetic" if suffix == ".pdf" else b"PK\x03\x04synthetic")
+            service = AIService(AIConfig(api_key="synthetic-test-only"))
+            with patch.object(service, "_post_responses", return_value=({}, "synthetic-id")), patch("ai_service._extract_structured_json", return_value=copy.deepcopy(data)):
+                return service.extract_po(path).data
+
+    def test_incomplete_evidence_blanks_only_affected_fields_and_forces_review(self):
+        for kind, suffix, source_field in [("page", ".pdf", "page"), ("spreadsheet", ".xlsx", "cell_range")]:
+            with self.subTest(source_kind=kind):
+                data = _mock_po_data(source_kind=kind)
+                field = data["items"][0]["fields"]["item_number"]
+                field["source"][source_field] = None
+                preserved = copy.deepcopy(data["document_fields"]["po_number"])
+                result = self.live_po(data, suffix)
+                missing = result["items"][0]["fields"]["item_number"]
+                self.assertEqual(missing["status"], "missing")
+                self.assertIsNone(missing["raw_value"])
+                self.assertIsNone(missing["normalized_value"])
+                self.assertTrue(missing["needs_review"])
+                self.assertTrue(all(value is None for value in missing["source"].values()))
+                self.assertEqual(result["document_fields"]["po_number"], preserved)
+
+    def test_malformed_model_shapes_remain_typed_validation_errors(self):
+        for mutation in [lambda d: d.update(document_fields=[]), lambda d: d["items"][0].update(fields=[]), lambda d: d["items"][0]["fields"]["item_number"].update(confidence="high")]:
+            data = _mock_po_data(source_kind="page")
+            mutation(data)
+            with self.assertRaises(AIValidationError):
+                self.live_po(data)
+
+    def test_ambiguous_and_low_confidence_fields_always_require_review(self):
+        for status, confidence in [("ambiguous", 0.99), ("found", 0.5)]:
+            data = _mock_po_data(source_kind="page")
+            field = data["items"][0]["fields"]["item_number"]
+            field.update(status=status, confidence=confidence, needs_review=False)
+            self.assertTrue(self.live_po(data)["items"][0]["fields"]["item_number"]["needs_review"])
     def test_mock_pdf_and_spreadsheet_preserve_evidence_and_missing_values(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

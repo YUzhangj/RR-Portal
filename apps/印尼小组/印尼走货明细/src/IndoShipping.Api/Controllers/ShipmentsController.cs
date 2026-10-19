@@ -277,6 +277,18 @@ VALUES (@id, @outbound_id, @material_id, @seq, @kg, @qty, @cartons, @qty_per_car
             if (group.Any(x => x.cartons < 1 || x.cartons == null) || group.Select(x => x.cartons).Distinct().Count() != 1)
                 return "同箱合并的明细必须填写相同的正整数箱数";
         }
+        // A shipment can reference a PO by number without an outbound FK. Share the
+        // header lock with purchase merging so a concurrent save either becomes
+        // visible to Merge's occupancy check, or sees the archived source here.
+        var poNos = items.Select(x => x.po_no).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToArray();
+        if (poNos.Length > 0)
+        {
+            var orders = await connection.QueryAsync(@"
+                SELECT id, merged_into_id FROM purchase_orders
+                WHERE po_no=ANY(@poNos) ORDER BY id FOR SHARE", new { poNos }, transaction);
+            if (orders.Any(po => po.merged_into_id != null))
+                return "采购单已合并，请刷新并使用合并后保留的采购单号";
+        }
         var requested = items
             .Where(x => x.outbound_id is not null)
             .GroupBy(x => x.outbound_id!.Value)

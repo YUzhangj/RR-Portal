@@ -14,7 +14,7 @@ test('SKU资料按序号更新，保留产品标识、比例和模具关联',asy
   assert.equal(result.config.products.length,2);assert.equal(result.config.products[1].code,'BEAUTYM-S3-048-excl');assert.equal(result.engineering.mixed_part_selections.number_03.length,1);assert.equal(result.engineering.mixed_part_selections.number_60.length,1);
  }
  assert.throws(()=>apply(config,[...records,records[0]]),/重复/);
- const ambiguous={...config,products:[...config.products,{id:'other',code:'BEAUTYM-S3-003',name:'另一个',ratio:1}]};assert.throws(()=>apply(ambiguous,records),/多个/);
+ const ambiguous={...config,products:[...config.products,{id:'other',code:'BEAUTYM-S3-003',name:'另一个',ratio:1},{id:'duplicate',code:'BEAUTYM-S3-003',name:'重复正式货号',ratio:1}]};assert.throws(()=>apply(ambiguous,records),/多个/);
  assert.equal(config.products[0].code,'03');
 });
 

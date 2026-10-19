@@ -589,6 +589,75 @@ def _validate_field_evidence(field_value: Mapping[str, Any], *, source_kind: str
         raise AIValidationError("Ambiguous or low-confidence fields must require QC review")
 
 
+def _enforce_review_flags(data: dict[str, Any]) -> None:
+    """确定性执行复核标记规则，不依赖模型自觉遵守：
+
+    - status 为 missing 的字段必须 needs_review=True
+    - status 为 ambiguous 或置信度低于 0.90 的字段同样强制复核
+    """
+
+    def _fix(field_value: Any) -> None:
+        if not isinstance(field_value, dict) or "status" not in field_value:
+            return
+        status = field_value.get("status")
+        confidence = field_value.get("confidence") or 0
+        if status == "missing" or status == "ambiguous" or confidence < 0.90:
+            field_value["needs_review"] = True
+
+    for field_value in (data.get("document_fields") or {}).values():
+        _fix(field_value)
+    for item in data.get("items") or []:
+        if isinstance(item, dict):
+            for field_value in (item.get("fields") or {}).values():
+                _fix(field_value)
+
+
+def _sanitize_field_evidence(data: dict[str, Any], *, source_kind: str) -> None:
+    """确定性规整模型输出的字段证据，避免整单因个别字段不合规而失败：
+
+    - status 为 missing 的字段清空所有值与来源信息（防御模型自相矛盾）
+    - 有值但缺来源摘录 / 缺页码 / 缺表格定位的字段，整体降级为 missing
+      并标记 needs_review，让 QC 校对时人工补充，而不是判定提取失败
+    """
+
+    empty_source = {"page": None, "sheet": None, "cell_range": None, "excerpt": None}
+
+    def _to_missing(field_value: dict[str, Any]) -> None:
+        field_value["status"] = "missing"
+        field_value["raw_value"] = None
+        field_value["normalized_value"] = None
+        field_value["confidence"] = 0
+        field_value["source"] = dict(empty_source)
+        field_value["needs_review"] = True
+
+    def _fix(field_value: Any) -> None:
+        if not isinstance(field_value, dict) or "status" not in field_value:
+            return
+        source = field_value.get("source")
+        if not isinstance(source, dict):
+            source = {}
+            field_value["source"] = source
+        if field_value.get("status") == "missing":
+            _to_missing(field_value)
+            return
+        has_value = bool(field_value.get("raw_value")) and bool(field_value.get("normalized_value"))
+        if not has_value or not source.get("excerpt"):
+            _to_missing(field_value)
+            return
+        if source_kind == "spreadsheet":
+            if not source.get("sheet") or not source.get("cell_range"):
+                _to_missing(field_value)
+        elif source.get("page") is None:
+            _to_missing(field_value)
+
+    for field_value in (data.get("document_fields") or {}).values():
+        _fix(field_value)
+    for item in data.get("items") or []:
+        if isinstance(item, dict):
+            for field_value in (item.get("fields") or {}).values():
+                _fix(field_value)
+
+
 def _validate_po_data(data: dict[str, Any], *, source_kind: str) -> None:
     _check_schema(data, PO_EXTRACTION_SCHEMA)
     if not data["items"] and not data["warnings"]:
@@ -889,6 +958,10 @@ class AIService:
         )
         response, request_id = self._post_responses(payload)
         data = _extract_structured_json(response, request_id=request_id)
+        # Reject malformed containers/types before deterministic normalization.
+        _check_schema(data, PO_EXTRACTION_SCHEMA)
+        _enforce_review_flags(data)
+        _sanitize_field_evidence(data, source_kind=source_kind)
         _validate_po_data(data, source_kind=source_kind)
         return self._live_result(
             data,

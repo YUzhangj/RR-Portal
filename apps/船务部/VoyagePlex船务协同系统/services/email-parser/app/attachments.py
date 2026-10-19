@@ -6,10 +6,12 @@ This module owns its contracts and has no runtime dependency on the legacy tree.
 import re
 from pathlib import Path
 from typing import Optional
+from xml.parsers import expat
+from openpyxl.worksheet.cell_range import CellRange
 from .warehouse_name import warehouse_name
 from .rules import consignee_fields
+from .readonly_workbook import load_values_workbook
 
-import openpyxl
 import pdfplumber
 from docx import Document
 
@@ -60,9 +62,87 @@ def parse_attachment(path: Path, original_name: str) -> dict:
     return {"kind": "unsupported", "fields": {}, "items": [], "warnings": []}
 
 
+def _sheet_merge_ranges(wb, sheet):
+    """Read merge coordinates without constructing cells, images, or a tree.
+
+    openpyxl 3.1.5 ReadOnlyWorksheet keeps the selected worksheet ZIP member
+    in _worksheet_path and the still-open workbook ZIP in _archive. SAX events
+    discard all cell contents; even empty row elements cannot accumulate here.
+    """
+    namespace = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+    worksheet_tag, container_tag, merge_tag = (namespace + name for name in ('worksheet', 'mergeCells', 'mergeCell'))
+    max_bytes, max_depth, max_merges, max_nodes = 64 * 1024 * 1024, 64, 10000, 1000000
+    error = 'XLSX merge metadata is invalid or exceeds safe limits'
+    stack, ranges = [], set()
+    nodes = merges = containers = 0
+
+    def invalid(*_):
+        raise ValueError(error)
+
+    def start(tag, attrs):
+        nonlocal nodes, merges, containers
+        nodes += 1
+        if nodes > max_nodes or len(stack) >= max_depth or (not stack and tag != worksheet_tag):
+            invalid()
+        if stack and stack[-1] == merge_tag:
+            invalid()
+        if stack == [worksheet_tag, container_tag] and tag != merge_tag:
+            invalid()  # Never silently drop a malformed/foreign merge entry.
+        if tag == container_tag:
+            containers += 1
+            if containers != 1 or stack != [worksheet_tag]:
+                invalid()
+        elif tag == merge_tag:
+            merges += 1
+            if merges > max_merges or stack != [worksheet_tag, container_tag]:
+                invalid()
+            cell = CellRange(attrs.get('ref', ''))
+            if (cell.title is not None or not 1 <= cell.min_row <= cell.max_row <= 1048576
+                    or not 1 <= cell.min_col <= cell.max_col <= 16384):
+                invalid()
+            # The full openpyxl reader also constructs a set of CellRange
+            # coordinates. This preserves its de-duplication and iteration order.
+            ranges.add(cell)
+        stack.append(tag)
+
+    def end(tag):
+        if not stack or stack.pop() != tag:
+            invalid()
+
+    try:
+        archive = wb._archive
+        member = sheet._worksheet_path
+        info = archive.getinfo(member)
+        if (not isinstance(member, str) or not 0 < info.file_size <= max_bytes
+                or not 0 <= info.compress_size <= max_bytes):
+            invalid()
+        parser = expat.ParserCreate(namespace_separator='}')
+        parser.StartElementHandler, parser.EndElementHandler = start, end
+        parser.StartDoctypeDeclHandler = invalid
+        parser.EntityDeclHandler = invalid
+        parser.ExternalEntityRefHandler = invalid
+        consumed = 0
+        with archive.open(member) as stream:
+            while True:
+                chunk = stream.read(min(32768, max_bytes - consumed + 1))
+                consumed += len(chunk)
+                if consumed > max_bytes:
+                    invalid()
+                parser.Parse(chunk, not chunk)
+                if not chunk:
+                    break
+        if stack or consumed != info.file_size:
+            invalid()
+        return [(cell.min_row - 1, cell.max_row, cell.min_col - 1, cell.max_col) for cell in ranges]
+    except MemoryError:
+        raise
+    except Exception:
+        raise ValueError(error) from None
+
+
 def parse_excel(path: Path) -> dict:
-    # read_only 模式流式读取单元格值，不加载样式/图形，避免大附件占满容器内存。
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    # Values retain exact date conversions without constructing all style objects.
+    wb = load_values_workbook(path)
     try:
         amazon = _parse_amazon_allocation(wb)
         if amazon:
@@ -74,31 +154,12 @@ def parse_excel(path: Path) -> dict:
         sheet = _choose_packing_sheet(wb)
         sheet_title = sheet.title
         rows = _read_sheet_rows(sheet)
-        worksheet_path = sheet._worksheet_path
+        merges = _sheet_merge_ranges(wb, sheet)
+        from .huadeng_forms import parse_huadeng_form
+        if parse_huadeng_form(rows, []):
+            return parse_huadeng_form(rows, merges)
     finally:
         wb.close()
-    # Load merge metadata only for a recognized Huadeng form; ordinary packing
-    # lists retain the cloud parser's streaming read path.
-    from .huadeng_forms import parse_huadeng_form
-    if parse_huadeng_form(rows, []):
-        merged_book = openpyxl.load_workbook(path, data_only=True, read_only=False)
-        try:
-            merged_sheet = merged_book[sheet_title]
-            result = parse_huadeng_form(rows, [(cell.min_row-1, cell.max_row, cell.min_col-1, cell.max_col) for cell in merged_sheet.merged_cells.ranges])
-            formula_book = openpyxl.load_workbook(path, data_only=False, read_only=True)
-            try:
-                formula_sheet = formula_book[sheet_title]
-                for item in result["items"]:
-                    formula = str(formula_sheet.cell(item["source_row"], 11).value or "").upper()
-                    item["weight_rule"] = "Truncate" if formula.startswith("=INT(") else "Exact"
-                    item["gross_weight_format"] = merged_sheet.cell(item["source_row"], 11).number_format
-                    item["net_weight_format"] = merged_sheet.cell(item["source_row"], 12).number_format
-            finally:
-                formula_book.close()
-            return result
-        finally:
-            merged_book.close()
-    merges = _sheet_merges(path, worksheet_path)
     header_row, headers = _find_header(rows)
     columns = _column_map(headers)
     _apply_measurement_columns(headers, columns)
@@ -228,20 +289,6 @@ def parse_xls(path: Path) -> dict:
     warehouse = warehouse_name('\n'.join(' '.join(_text(value) for value in row) for row in rows[:header_index]))
     return {"kind": "packing_list_xls", "fields": {"warehouse": warehouse, "delivery_address": warehouse} if warehouse else {}, "items": items,
             "warnings": [] if items else ["旧版XLS未识别到货物明细，已保留表单字段供人工确认"]}
-
-
-def _sheet_merges(path, worksheet_path):
-    from zipfile import ZipFile
-    from xml.etree.ElementTree import iterparse
-    from openpyxl.utils.cell import range_boundaries
-    merges = []
-    with ZipFile(path) as archive, archive.open(worksheet_path.lstrip("/")) as source:
-        for _, element in iterparse(source, events=("end",)):
-            if element.tag.rsplit("}", 1)[-1] == "mergeCell":
-                c1, r1, c2, r2 = range_boundaries(element.attrib["ref"])
-                merges.append((r1-1, r2, c1-1, c2))
-            element.clear()
-    return merges
 
 
 def _packing_group(row, merges, columns):

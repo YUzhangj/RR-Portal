@@ -39,20 +39,20 @@ test('所有成本占比使用对应总金额，导出与客户合计一致',()=
  assert.equal(ws.getCell(9,col('amount_share_total')).result,allAmounts/20000);
 });
 
-test('退税后纸箱按成本减去成本除以1.15乘11.5%，金额和占比联动',()=>{
+test('退税后纸箱按成本减去成本除以1.1乘11.5%，金额和占比联动',()=>{
  const {afterTaxComponents,SUMMARY_COLUMNS}=require('../backend/services/quoteSummary');
- const before={carton:1.15},after=afterTaxComponents(before);
- assert.equal(after.carton,1.035);
+ const before={carton:1.1},after=afterTaxComponents(before);
+ assert.equal(after.carton,0.985);
  assert.equal(afterTaxComponents({carton:0}).carton,0);
  const values=calculateSummaryValues(before,after,100,10);
- assert.equal(values.carton_after_tax,1.035);
- assert.ok(Math.abs(values.carton_amount-103.5)<1e-9);
- assert.ok(Math.abs(values.carton_share-0.1035)<1e-9);
+ assert.equal(values.carton_after_tax,0.985);
+ assert.ok(Math.abs(values.carton_amount-98.5)<1e-9);
+ assert.ok(Math.abs(values.carton_share-0.0985)<1e-9);
  const ws=buildSummaryWorkbook([{customer:'T',qty:100,quoted_price:10,components_before_tax:before,components:after,summary_values:values,confirmation:{}}]).getWorksheet('各客报价汇总');
  const col=key=>9+SUMMARY_COLUMNS.findIndex(c=>c[0]===key);
  const carton=ws.getColumn(col('carton')).letter;
- assert.equal(ws.getCell(5,col('carton_after_tax')).formula,`${carton}5-${carton}5/1.15*11.5%`);
- assert.equal(ws.getCell(5,col('carton_after_tax')).result,1.035);
+ assert.equal(ws.getCell(5,col('carton_after_tax')).formula,`${carton}5-${carton}5/1.1*11.5%`);
+ assert.equal(ws.getCell(5,col('carton_after_tax')).result,0.985);
 });
 
 test('退税后运费包含未退税吊柜费，导出公式与页面计算一致',()=>{
@@ -88,17 +88,19 @@ test('未退税前毛利直接引用货价减不含人工成本',()=>{
  assert.equal(calculateSummaryValues({}, {}, 10, 20).markup_before_tax,0);
 });
 
-test('含税13%成本包含杂项，退税及利润随之更新',()=>{
+test('杂项保留采购成本，但不再参与13%类减税',()=>{
  const {afterTaxComponents,SUMMARY_COLUMNS}=require('../backend/services/quoteSummary');
  const before={misc:100},after=afterTaxComponents(before),values=calculateSummaryValues(before,after,10,200);
- assert.equal(values.tax_13_cost,100);
- assert.equal(values.rebate_reduction,11.5);
- assert.equal(values.cost_after_rebate,88.5);
- assert.equal(values.profit_after_tax,111.5);
+ assert.equal(values.tax_13_cost,0);
+ assert.equal(values.rmb_purchase_cost,100);
+ assert.equal(values.rebate_reduction,0);
+ assert.equal(values.cost_after_rebate,100);
+ assert.equal(values.profit_after_tax,100);
  const ws=buildSummaryWorkbook([{customer:'T',qty:10,quoted_price:200,components_before_tax:before,components:after,summary_values:values,confirmation:{}}]).getWorksheet('各客报价汇总');
  const col=key=>9+SUMMARY_COLUMNS.findIndex(c=>c[0]===key);
- assert.equal(ws.getCell(5,col('tax_13_cost')).formula,'SUM(AE5,AI5,BA5,BU5,X5,BE5,AV5,BY5,CC5)');
- assert.equal(ws.getCell(5,col('tax_13_cost')).result,100);
- assert.equal(ws.getCell(5,col('cost_after_rebate')).formula,`${ws.getColumn(col('cost_with_labor')).letter}5-${ws.getColumn(col('rebate_reduction')).letter}5`);
- assert.equal(ws.getCell(5,col('cost_after_rebate')).result,88.5);
+ const misc=ws.getColumn(col('misc')).letter;
+ assert.ok(!ws.getCell(5,col('tax_13_cost')).formula.includes(misc+'5'));
+ assert.equal(ws.getCell(5,col('tax_13_cost')).result,0);
+ assert.equal(ws.getCell(5,col('rmb_purchase_cost')).result,100);
+ assert.equal(ws.getCell(5,col('cost_after_rebate')).result,100);
 });

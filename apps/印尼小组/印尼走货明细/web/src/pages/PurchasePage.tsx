@@ -13,6 +13,7 @@ import PurchaseMaterialPicker from '../components/PurchaseMaterialPicker'
 import { purchaseMaterialBucket, purchaseMaterialLine, purchaseSelectionSource, purchaseSelectionSupplier, type PurchaseMaterialChoice } from '../utils/purchaseMaterialSelection'
 import { linkPurchaseLine, matchingLineSchedules } from '../utils/purchaseScheduleLink'
 import { autoLinkPurchaseMaterials, planPurchaseNetWeight } from '../utils/purchaseNetWeight'
+import { purchaseLineDeliveryDate, purchaseLineSourceKey, purchaseOrderNumbers } from '../utils/purchaseOrderMerge'
 
 interface SchedRow {
   source?: string
@@ -31,6 +32,8 @@ interface SchedRow {
 
 interface PoSummary {
   id: number
+  merge_revision?: number
+  merged_po_numbers?: string[]
   po_no?: string
   supplier?: string
   status?: string
@@ -47,6 +50,11 @@ interface PoSummary {
 
 interface PoItem {
   id?: number
+  source_po_no?: string | null
+  source_delivery_date?: string | null
+  source_order_date?: string | null
+  delivery_date_override?: string | null
+  has_delivery_date_override?: boolean
   product_code?: string
   material_id?: number
   material_name?: string
@@ -370,6 +378,12 @@ export default function PurchasePage() {
   const [mergeSel, setMergeSel] = useState<React.Key[]>([])          // 勾选参与合并的行(索引)
   const [form] = Form.useForm<PoForm>()
   const deliveryDate = Form.useWatch('delivery_date', form)
+  const [applyDeliveryDateAll, setApplyDeliveryDateAll] = useState(false)
+  function changeWholeDeliveryDate(value: dayjs.Dayjs | null) {
+    const date = value?.format('YYYY-MM-DD') || null
+    setApplyDeliveryDateAll(true)
+    setItems(current => current.map(it => ({ ...it, has_delivery_date_override: true, delivery_date_override: date })))
+  }
   const [drawerFull, setDrawerFull] = useState(false)
   const [schedRows, setSchedRows] = useState<SchedRow[]>([])
   const [productCodes, setProductCodes] = useState<string[]>([])
@@ -700,7 +714,7 @@ export default function PurchasePage() {
       // 报价读取失败不阻断采购单生成，生成后仍可手工套用。
     }
     let ok = 0, fail = 0, suppliers = 0, quoteHits = 0
-    const existingNos = rows.map(r => r.po_no || '').concat([])
+    const existingNos = purchaseOrderNumbers(rows)
     for (const [bucketKey, lines] of buckets) {
       const supplier = bucketKey.split('\u0000', 2)[1]
       // 推断实体：用第一条物料的报关公司
@@ -803,6 +817,7 @@ export default function PurchasePage() {
   }
 
   function openCreate() {
+    setApplyDeliveryDateAll(false)
     setCreating(true); setEditing({ id: 0, status: 'draft' }); setItems([]); setMergeUndo(null)
     form.resetFields()
     setTimeout(() => form.setFieldsValue({ status: 'draft', order_date: dayjs().format('YYYY-MM-DD') }), 0)
@@ -877,7 +892,7 @@ export default function PurchasePage() {
       const materials = [...new Map([...linked.values(), ...fallbackMaterials].map(m => [m.id, m])).values()]
       const evidence = resolvePurchaseCustoms(savedItems, detail.supplier || '', materials, dictionaries.suppliers || [])
       const oldNo = detail.po_no || ''
-      const newNo = poCorrectHsyNumber(oldNo, evidence.map(row => row.company), all.map(po => po.po_no || ''))
+      const newNo = poCorrectHsyNumber(oldNo, evidence.map(row => row.company), purchaseOrderNumbers(all))
       return { oldNo, newNo, evidence }
     }
     try {
@@ -915,11 +930,13 @@ export default function PurchasePage() {
     }
   }
   async function openEdit(p: PoSummary) {
+    setApplyDeliveryDateAll(false)
     setCreating(false); setEditing(p)
     form.resetFields()
     setItems([]); setMergeUndo(null)
     try {
       const { data } = await api.get<PoDetail>(`/purchase/${p.id}`)
+      setEditing(data)
       form.setFieldsValue({
         po_no: data.po_no, supplier: data.supplier, status: data.status,
         order_date: data.order_date ? dayjs(data.order_date).format('YYYY-MM-DD') : '',
@@ -998,6 +1015,8 @@ export default function PurchasePage() {
     }
     const payload = {
       ...v,
+      merge_revision: editing?.merge_revision ?? 0,
+      apply_delivery_date_all: applyDeliveryDateAll,
       order_date: normalizeDate(v.order_date),
       delivery_date: normalizeDate(v.delivery_date),
       items: saveItems,
@@ -1013,12 +1032,43 @@ export default function PurchasePage() {
         await api.put(`/purchase/${editing.id}`, payload)
         message.success(`已更新${quoteHits ? `，自动导入报价 ${quoteHits} 行` : ''}`)
       }
+      setApplyDeliveryDateAll(false)
       load()  // 后台刷新列表，不关闭抽屉
     } catch {
       /* 拦截器已提示 */
     }
   }
   const [poSelKeys, setPoSelKeys] = useState<React.Key[]>([])
+  const [mergeOrdersOpen, setMergeOrdersOpen] = useState(false)
+  const [mergeTarget, setMergeTarget] = useState<number>()
+  const [mergingOrders, setMergingOrders] = useState(false)
+  const selectedOrders = rows.filter(po => poSelKeys.includes(po.id))
+  function openOrderMerge() {
+    if (selectedOrders.length < 2) { message.warning('请至少勾选两张采购单'); return }
+    if (selectedOrders.some(po => po.status !== 'draft')) { message.warning('仅支持合并草稿采购单'); return }
+    const first = selectedOrders[0]
+    if (!first.supplier?.trim() || selectedOrders.some(po => po.supplier?.trim() !== first.supplier?.trim())) {
+      message.warning('请选择同一供应商的采购单'); return
+    }
+    if (selectedOrders.some(po => !po.order_date)) {
+      message.warning('请先补齐采购单的下单日期'); return
+    }
+    setMergeTarget(first.id)
+    setMergeOrdersOpen(true)
+  }
+  async function mergeOrders() {
+    if (!mergeTarget || mergingOrders) return
+    setMergingOrders(true)
+    try {
+      const { data } = await api.post<{ id: number; po_no: string; item_count: number }>('/purchase/merge', {
+        target_id: mergeTarget, ids: selectedOrders.map(po => po.id),
+      })
+      setMergeOrdersOpen(false); setPoSelKeys([])
+      message.success(`已合并到 ${data.po_no}，保留 ${data.item_count} 条明细`)
+      await load()
+    } catch { /* 后端校验失败时保留勾选，不修改单据 */ }
+    finally { setMergingOrders(false) }
+  }
   async function delSelected() {
     if (!poSelKeys.length) return
     setLoading(true)
@@ -1055,7 +1105,7 @@ export default function PurchasePage() {
       const dets = await Promise.all(rows.map(p => api.get<PoDetail>(`/purchase/${p.id}`).then(r => r.data).catch(() => null)))
       // 按现有 supplier 分批；customs_company 取第一行物料的 customs（需要查物料）
       // 简化：直接用 supplier，customs_company 留空（除非该 PO notes 含华胜益等）
-      const existingNos: string[] = []
+      const existingNos: string[] = rows.flatMap(po => po.merged_po_numbers || [])
       let renamed = 0, failed = 0
       for (let i = 0; i < rows.length; i++) {
         const po = rows[i]
@@ -1101,6 +1151,9 @@ export default function PurchasePage() {
       for (const it of items) {
         flat.push({
           'PO号':    po.po_no,
+          '来源采购单': it.source_po_no || '',
+          '原下单日期': it.source_order_date?.slice(0, 10) || '',
+          '交货日期': purchaseLineDeliveryDate(it, po.delivery_date),
           '供应商':  po.supplier,
           '状态':    po.status,
           '下单日期': po.order_date,
@@ -1127,6 +1180,7 @@ export default function PurchasePage() {
     const XLSX = await import('xlsx-js-style')
     const v = po || form.getFieldsValue()
     const contractItems = po ? (po.items ?? []) : items
+    const hasMergeSources = contractItems.some(it => it.source_po_no != null)
     const poNo = v.po_no || String(po?.id ?? editing?.id)
     const supplier = v.supplier || ''
     // 实体由 PO 号前缀推断（IRRM→华登全球 / IRRI→华登实业 / 年份→华胜益）
@@ -1169,7 +1223,7 @@ export default function PurchasePage() {
     const merged = new Map<string, any>()
     for (const it of contractItems) {
       const material = findMaterial(it)
-      const k = (it.material_id || '') + '||' + (it.product_code || '') + '||' + (it.material_name || '') + '||' + (it.spec || '')
+      const k = (it.material_id || '') + '||' + (it.product_code || '') + '||' + (it.material_name || '') + '||' + (it.spec || '') + '||' + purchaseLineSourceKey(it)
       const cur = merged.get(k) || {
         code: it.product_code || '',
         matName: it.material_name || '',
@@ -1177,6 +1231,8 @@ export default function PurchasePage() {
         unit: it.ship_unit || 'PCE',
         nameEn: material?.name_en || '',
         materialCode: material?.material_code || '',
+        sourcePo: it.source_po_no || '',
+        deliveryDate: purchaseLineDeliveryDate(it, v.delivery_date),
         totalShipQty: 0,
         totalAmount: 0,
         totalPurchaseQty: 0,
@@ -1209,7 +1265,9 @@ export default function PurchasePage() {
     for (const m of mergedRows) {
       const contractUnit = contractUnitLabel(m.unit)
       // D/F/G 由下方统一写入：数量沿用单位精度，单价按原金额反算。
-      rows.push([m.code, m.matName, m.spec, '', contractUnit, '', '', '数量：' + Number(m.totalPurchaseQty.toFixed(2)) + 'pcs', m.nameEn, m.materialCode])
+      const remark = '数量：' + Number(m.totalPurchaseQty.toFixed(2)) + 'pcs'
+        + (hasMergeSources ? `\n交货：${m.deliveryDate || '待确认'}\n来源：${m.sourcePo || poNo}` : '')
+      rows.push([m.code, m.matName, m.spec, '', contractUnit, '', '', remark, m.nameEn, m.materialCode])
     }
     rows.push(['以下空白！', '按工程签板生产！', '', '', '', '', '', ''])
     const sumRow = rows.length
@@ -1217,7 +1275,7 @@ export default function PurchasePage() {
     rows.push(['', '', '', '', '大写', meta.currency === 'RMB' ? '人民币' : '美金', numToChinese(totalAmount), ''])
     // 交货说明紧接大写金额，避免中间出现无边框的空白格。
     const notesStart = rows.length
-    rows.push(['1.  ' + deliveryDateCN + '前交货', ...PAD(7)])
+    rows.push([hasMergeSources ? '1. 按各明细备注中的交货日期交货；待确认日期须另行确认。' : '1.  ' + deliveryDateCN + '前交货', ...PAD(7)])
     rows.push([meta.priceIncludesVAT ? '2.单价已含 13 %增值税，月结 90 天；' : '2.单价为美金单价，月结 90 天；', ...PAD(7)])
     rows.push(['3、货物及部件质量符合国外现行最新标准', ...PAD(7)])
     rows.push(PAD(8))
@@ -1263,7 +1321,7 @@ export default function PurchasePage() {
     ws['!cols'] = [{ wch: 12 }, { wch: 22 }, { wch: 16 }, { wch: 10 }, { wch: 8 }, { wch: 20 }, { wch: 13 }, { wch: 18 }, { wch: 32 }, { wch: 16 }]
     const rowH: any[] = [{ hpt: 30 }, { hpt: 18 }, { hpt: 18 }, { hpt: 24 }, { hpt: 10 }, { hpt: 22 }, { hpt: 22 }, { hpt: 10 }, { hpt: 26 }]
     // 所有物料明细行使用相同行高；多行名称/规格仍可完整换行显示。
-    for (let r = itemStart; r < itemStart + mergedRows.length; r++) rowH[r] = { hpt: 45 }
+    for (let r = itemStart; r < itemStart + mergedRows.length; r++) rowH[r] = { hpt: hasMergeSources ? 78 : 45 }
     rowH[itemStart + mergedRows.length] = { hpt: 24 }
     ws['!rows'] = rowH
 
@@ -1391,7 +1449,7 @@ export default function PurchasePage() {
     const groups = new Map<string, PoItem[]>(); const order: string[] = []
     items.forEach((it, idx) => {
       if (!sel.has(idx)) return
-      const k = (it.material_name || '').trim() + '||' + (it.spec || '').trim()
+      const k = (it.material_name || '').trim() + '||' + (it.spec || '').trim() + '||' + purchaseLineSourceKey(it)
       if (!groups.has(k)) { groups.set(k, []); order.push(k) }
       groups.get(k)!.push(it)
     })
@@ -1416,7 +1474,7 @@ export default function PurchasePage() {
     const newItems: PoItem[] = []; const inserted = new Set<string>()
     items.forEach((it, idx) => {
       if (!sel.has(idx)) { newItems.push(it); return }
-      const k = (it.material_name || '').trim() + '||' + (it.spec || '').trim()
+      const k = (it.material_name || '').trim() + '||' + (it.spec || '').trim() + '||' + purchaseLineSourceKey(it)
       if (mergedByKey.has(k)) { if (!inserted.has(k)) { newItems.push(mergedByKey.get(k)!); inserted.add(k) } }
       else newItems.push(it)
     })
@@ -1562,6 +1620,7 @@ export default function PurchasePage() {
             <Button onClick={() => setStatsOpen(true)}>📋 PO 数据</Button>
             <Button onClick={exportFiltered}>📤 导出 Excel (按筛选)</Button>
             <Button loading={exportingContracts} onClick={exportContractsByEntity}>合并导出合同（按主体/当前筛选）</Button>
+            <Button disabled={poSelKeys.length < 2} onClick={openOrderMerge}>合并采购单 ({poSelKeys.length})</Button>
             <Popconfirm
               title={`删除选中的 ${poSelKeys.length} 张 PO？不可恢复`}
               onConfirm={delSelected}
@@ -1604,6 +1663,9 @@ export default function PurchasePage() {
                   scroll={{ x: 1250 }}
                   columns={[
                     { title: '货号', dataIndex: 'product_code', width: 120 },
+                    { title: '来源采购单', dataIndex: 'source_po_no', width: 150, render: v => v || '—' },
+                    { title: '原下单日期', dataIndex: 'source_order_date', width: 110, render: v => v ? dayjs(v).format('YYYY-MM-DD') : '—' },
+                    { title: '交货日期', width: 110, render: (_v, r) => purchaseLineDeliveryDate(r, po.delivery_date) || '待确认' },
                     { title: '物料', dataIndex: 'material_name', width: 220, ellipsis: true },
                     { title: '规格', dataIndex: 'spec', width: 160, ellipsis: true, render: v => v || <Typography.Text type="secondary">—</Typography.Text> },
                     { title: '采购数量', width: 110, align: 'right', render: (_v, r) => Number(r.purchase_qty ?? r.qty ?? 0).toLocaleString() },
@@ -1636,7 +1698,10 @@ export default function PurchasePage() {
             },
             {
               title: '交货期', dataIndex: 'delivery_date', width: 110,
-              render: (v) => v ? dayjs(v).format('YYYY-MM-DD') : '-',
+              render: (v, po) => {
+                const dates = [...new Set((itemsByPo.get(po.id) || []).map(it => purchaseLineDeliveryDate(it, v)))]
+                return dates.length > 1 ? '按明细交期' : dates.length ? dates[0] || '-' : v ? dayjs(v).format('YYYY-MM-DD') : '-'
+              },
             },
             {
               title: '累计入库', dataIndex: 'received_qty', width: 120, align: 'right',
@@ -1677,6 +1742,24 @@ export default function PurchasePage() {
           .purchase-row-complete:hover td { background: #eaffdc !important; }
         `}</style>
       </Card>
+
+      <Modal title="合并采购单" open={mergeOrdersOpen} confirmLoading={mergingOrders}
+        okText="确认合并" cancelText="取消" onOk={mergeOrders}
+        onCancel={() => { if (!mergingOrders) setMergeOrdersOpen(false) }}>
+        <p>支持不同下单日期；仅合并同供应商、同币种、同采购主体的草稿，已有入库、出库或走货关联的单据不可合并。</p>
+        <p>保留所选单号及其下单日期，其余采购单归档。明细数量、价格、排期关联、原下单日期及各自交货日期保留。</p>
+        <Select style={{ width: '100%' }} value={mergeTarget} onChange={setMergeTarget} disabled={mergingOrders}
+          options={selectedOrders.map(po => ({ value: po.id, label: `保留单号：${po.po_no}` }))} />
+        <Table size="small" rowKey="id" pagination={false} dataSource={selectedOrders}
+          columns={[
+            { title: '单号', dataIndex: 'po_no' },
+            { title: '下单日期', dataIndex: 'order_date', render: v => v ? dayjs(v).format('YYYY-MM-DD') : '未填写' },
+            { title: '明细', dataIndex: 'item_count' },
+            { title: '金额', dataIndex: 'total_amount', render: v => Number(v || 0).toFixed(2) },
+            { title: '交货日期', dataIndex: 'delivery_date', render: v => v ? dayjs(v).format('YYYY-MM-DD') : '待确认' },
+          ]} />
+        <Typography.Text type="secondary">合并记录包含操作人及原单据内容；合并后的采购单可继续编辑和导出。</Typography.Text>
+      </Modal>
 
       <Drawer
         rootClassName="purchase-editor-drawer"
@@ -1724,10 +1807,11 @@ export default function PurchasePage() {
               </Form.Item>
             </Col>
             <Col span={8}>
-              <Form.Item name="delivery_date" label="交货日期"
+              <Form.Item name="delivery_date" label="交货日期（整单统一修改）"
+                extra={<Button type="link" size="small" onClick={() => changeWholeDeliveryDate(deliveryDate ? dayjs(deliveryDate) : null)}>将此日期应用到整单（保存后生效）</Button>}
                 getValueProps={(val) => ({ value: val ? dayjs(val) : null })}
                 normalize={(val: any) => (val ? dayjs(val).format('YYYY-MM-DD') : '')}>
-                <DatePicker style={{ width: '100%' }} format="YYYY-MM-DD" />
+                <DatePicker style={{ width: '100%' }} format="YYYY-MM-DD" onChange={changeWholeDeliveryDate} />
               </Form.Item>
             </Col>
             <Col span={8}>
@@ -1786,7 +1870,9 @@ export default function PurchasePage() {
                 const amount = Number(r.purchase_qty ?? r.qty ?? 0) * Number(r.price ?? 0)
                 return <b style={{ color: '#2878c8' }}>{shipQty > 0 ? Number((amount / shipQty).toFixed(8)).toString() : '0'}</b>
               } },
-              { title: '交货时间', width: 110, render: () => deliveryDate || '' },
+              { title: '来源采购单', dataIndex: 'source_po_no', width: 150, render: v => v || '—' },
+              { title: '原下单日期', dataIndex: 'source_order_date', width: 110, render: v => v ? dayjs(v).format('YYYY-MM-DD') : '—' },
+              { title: '交货时间', width: 110, render: (_v, r) => purchaseLineDeliveryDate(r, deliveryDate) || '待确认' },
               { title: '关联排期订单', width: 190, render: (_v, r, i) => <Space direction="vertical" size={0}>
                 <Typography.Text style={{ whiteSpace: 'normal' }}>{r.tomy_po || '未关联'}</Typography.Text>
                 <Button type="link" size="small" onClick={() => openLineScheduleLink(i)}>关联排期</Button>

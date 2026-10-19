@@ -6,7 +6,7 @@ from pathlib import Path
 from email.message import EmailMessage
 from app.eml import parse_eml
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, ANY
 import openpyxl
 from app.shipment_export import build_shipment_workbook as ordinary_builder
 from app.huadeng_export import build_huadeng_workbook
@@ -65,9 +65,9 @@ class HuadengTests(unittest.TestCase):
         client.select.return_value=("OK", [])
         client.response.return_value=("UIDVALIDITY", [b"7"])
         client.uid.return_value=("OK", [b""])
-        with patch.dict(os.environ,{"VOYAGEPLEX_HUADENG_MAIL_ADDRESS":"other@example.com","VOYAGEPLEX_HUADENG_MAIL_AUTH_CODE":"other"},clear=True), patch("app.mailbox.imaplib.IMAP4_SSL",return_value=client) as connection:
+        with patch.dict(os.environ,{"VOYAGEPLEX_HUADENG_MAIL_ADDRESS":"other@example.com","VOYAGEPLEX_HUADENG_MAIL_AUTH_CODE":"other"},clear=True), patch("app.mailbox.BoundedImap",return_value=client) as connection:
             result=fetch_mailbox(company="Huadeng",credentials={"address":"mine@example.com","auth_code":"personal-auth","host":"imap.example.com","folder":"Inbox/Shipping"})
-            connection.assert_called_once_with("imap.example.com",993,timeout=30)
+            connection.assert_called_once_with("imap.example.com",993,timeout=20,control=ANY,deadline=ANY)
             client.login.assert_called_once_with("mine@example.com","personal-auth")
             client.select.assert_called_once_with("Inbox/Shipping",readonly=True)
             self.assertEqual("mine@example.com",result["address"])

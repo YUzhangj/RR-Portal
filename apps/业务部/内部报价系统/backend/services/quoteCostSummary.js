@@ -191,7 +191,7 @@ function calculateSingleQuoteCosts(quote, sections) {
   const sewingMarkup = hasValue(sales.shipping, 'sew_markup_x') ? num(sales.shipping.sew_markup_x) : markup;
   const electronicMarkup = hasValue(sales.shipping, 'elec_markup_x') ? num(sales.shipping.elec_markup_x) : markup;
   const quotedPrice = (mainBase + freight + cabinet) * markup + (sewingHair + sewingCloth) * sewingMarkup + electronicTotal * electronicMarkup;
-  return { components, quotedPrice: hasSourceData ? +quotedPrice.toFixed(4) : 0, hasSourceData,
+  return { components, sewing_taxable: require('../../frontend/sewing-tax').taxableAmounts(sewing, components), quotedPrice: hasSourceData ? +quotedPrice.toFixed(4) : 0, hasSourceData,
     rawQuotedPrice: hasSourceData ? quotedPrice : 0 };
 }
 

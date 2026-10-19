@@ -50,7 +50,9 @@ test('CSV export neutralizes spreadsheet formulas in text fields', async t => {
   const baseUrl = `http://127.0.0.1:${port}`;
   await waitForHealth(baseUrl);
   const records = [{
-    id: 1,
+    // POST now merges records; do not overwrite the freshly seeded id 1 with
+    // an intentionally historical timestamp used by this export fixture.
+    id: 10001,
     date: '2026-07-14',
     supplier: '=HYPERLINK("https://example.invalid","click")',
     productNo: '+1+1',
