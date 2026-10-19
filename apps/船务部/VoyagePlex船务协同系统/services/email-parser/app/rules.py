@@ -58,7 +58,28 @@ def parse_body(body: str) -> dict:
         "port": _port(body),
         "special_requirements": _requirements(body),
         "warehouse": warehouse_name(body),
+        **consignee_fields(current),
+        **pickup_fields(current),
     }
+
+
+def pickup_fields(text: str) -> dict:
+    """Extract explicit current-message pickup instructions for human review."""
+    lines = [line for line in text.splitlines() if not re.search(r"不是客|非客|无需客|取消客", line)]
+    current = "\n".join(lines)
+    mode = "CustomerPickup" if "客自提" in current else "CustomerLoading" if re.search(r"客上柜|客上车", current) else ""
+    customs = _first(current, [r"报关行[：:][ \t]*([^\n，,；;]+)", r"([\u4e00-\u9fffA-Za-z]{2,12}报关行)"])
+    return {"pickup_mode": mode, "customs_agent": customs}
+
+
+def consignee_fields(text: str) -> dict:
+    """Read explicitly labelled cargo consignee, never the email's To header."""
+    name = _first(text, [
+        r"(?:收货人(?:名称)?|收貨人(?:名稱)?|\bConsignee(?:\s+Name)?)[ \t]*[：:][ \t]*(?:\n[ \t]*)?([^\n\r]+)",
+    ])
+    name = re.split(r"(?:收货人代码|收貨人代碼|Consignee\s+Code)[ \t]*[：:]", name, flags=re.I)[0].strip()
+    code = _first(text, [r"(?:收货人代码|收貨人代碼|\bConsignee\s+Code)[ \t]*[：:][ \t]*([A-Za-z0-9-]+)"])
+    return {"consignee": name, "consignee_code": code}
 
 
 def _first(text: str, patterns: list[str]) -> str:

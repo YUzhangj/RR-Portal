@@ -82,9 +82,12 @@ class MultiContainerTests(unittest.TestCase):
         content,_=build_shipment_workbook(task)
         self.assertEqual('品牌：',load_workbook(BytesIO(content)).active['C14'].value)
 
-    def test_ordinary_huadeng_matches_existing_ordinary_template(self):
+    def test_ordinary_huadeng_has_independent_factory_template(self):
         task = {'company':'Huadeng','customer':'ZURU','soNumber':'SO111111','items':[]}
         first, _ = build_shipment_workbook(task)
         task['company'] = 'Xingxin'; second, _ = build_shipment_workbook(task)
         a = load_workbook(BytesIO(first)).active; b = load_workbook(BytesIO(second)).active
-        self.assertEqual(list(a.values), list(b.values))
+        self.assertNotEqual(list(a.values), list(b.values))
+        self.assertEqual("TO：余振军", a["A1"].value)
+        self.assertEqual("TO：廖平/王军", b["A1"].value)
+        self.assertIn("RR", a["F2"].value)
