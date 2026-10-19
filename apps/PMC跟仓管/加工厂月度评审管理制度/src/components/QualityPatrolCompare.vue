@@ -35,7 +35,7 @@ const changed = (index: number, key: string) => index > 0 && value(compared.valu
 .overlay { position: fixed; inset: 0; z-index: 1000; background: #17203380; display: grid; place-items: center; padding: 20px; }
 .dialog { background: white; padding: 24px; border-radius: 14px; width: min(1200px, 100%); max-height: 90vh; overflow: auto; }
 header, .dates { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; } header { justify-content: space-between; } h3 { margin: 0 0 16px; }
-label { display: inline-flex; align-items: center; gap: 8px; } select, button { font: inherit; padding: 8px 12px; border: 1px solid #cbd0dc; border-radius: 6px; background: white; } p { color: #596275; line-height: 1.6; }
+label { display: inline-flex; align-items: center; gap: 8px; } select, button { font: inherit; padding: 8px 12px; border: 1px solid #cbd0dc; border-radius: 6px; background: white; color: #202635; } p { color: #596275; line-height: 1.6; }
 .scroll { overflow: auto; max-height: 60vh; margin-top: 18px; } table { border-collapse: separate; border-spacing: 0; width: 100%; } th, td { border-right: 1px solid #d3d7df; border-bottom: 1px solid #d3d7df; padding: 14px; min-width: 240px; max-width: 360px; white-space: pre-wrap; vertical-align: top; line-height: 1.6; }
 th { background: #f3f4f8; } tbody th { position: sticky; left: 0; min-width: 150px; } thead th { position: sticky; top: 0; z-index: 2; } .changed { background: #fff5cc; } img { width: 100px; height: 90px; object-fit: cover; margin: 4px; }
 </style>
