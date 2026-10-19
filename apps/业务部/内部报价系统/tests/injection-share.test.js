@@ -39,20 +39,20 @@ test('所有成本占比使用对应总金额，导出与客户合计一致',()=
  assert.equal(ws.getCell(9,col('amount_share_total')).result,allAmounts/20000);
 });
 
-test('退税后纸箱按成本减去成本除以1.15乘11.5%，金额和占比联动',()=>{
+test('退税后纸箱按成本减去成本除以1.1乘11.5%，金额和占比联动',()=>{
  const {afterTaxComponents,SUMMARY_COLUMNS}=require('../backend/services/quoteSummary');
- const before={carton:1.15},after=afterTaxComponents(before);
- assert.equal(after.carton,1.035);
+ const before={carton:1.1},after=afterTaxComponents(before);
+ assert.equal(after.carton,0.985);
  assert.equal(afterTaxComponents({carton:0}).carton,0);
  const values=calculateSummaryValues(before,after,100,10);
- assert.equal(values.carton_after_tax,1.035);
- assert.ok(Math.abs(values.carton_amount-103.5)<1e-9);
- assert.ok(Math.abs(values.carton_share-0.1035)<1e-9);
+ assert.equal(values.carton_after_tax,0.985);
+ assert.ok(Math.abs(values.carton_amount-98.5)<1e-9);
+ assert.ok(Math.abs(values.carton_share-0.0985)<1e-9);
  const ws=buildSummaryWorkbook([{customer:'T',qty:100,quoted_price:10,components_before_tax:before,components:after,summary_values:values,confirmation:{}}]).getWorksheet('各客报价汇总');
  const col=key=>9+SUMMARY_COLUMNS.findIndex(c=>c[0]===key);
  const carton=ws.getColumn(col('carton')).letter;
- assert.equal(ws.getCell(5,col('carton_after_tax')).formula,`${carton}5-${carton}5/1.15*11.5%`);
- assert.equal(ws.getCell(5,col('carton_after_tax')).result,1.035);
+ assert.equal(ws.getCell(5,col('carton_after_tax')).formula,`${carton}5-${carton}5/1.1*11.5%`);
+ assert.equal(ws.getCell(5,col('carton_after_tax')).result,0.985);
 });
 
 test('退税后运费包含未退税吊柜费，导出公式与页面计算一致',()=>{

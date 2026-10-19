@@ -37,8 +37,8 @@ test('export links customer subtotals and includes pending groups without duplic
 test('customer export calculations use local rows and local detail subtotals',async()=>{
   const rs=[row(1,'Sky Castle','华登',100,10,1000),row(2,'Sky Castle','河源',20,10,200)];
   for(const r of rs){
-    Object.assign(r.values,{H:0.5,I:0.5,J:r.values.D*0.5,K:0.05,L:1,M:1,N:r.values.D,O:0.1,P:0,Q:0,R:0,S:0,AN:2,AO:1.8,AP:1.8*r.values.D,AQ:0.18});
-    Object.assign(r.formulas,{I:'H1',J:'I1*D1',K:'IF(DI1=0,"",J1/DI1)',M:'L1',N:'M1*D1',O:'IF(DI1=0,"",N1/DI1)',Q:'P1',R:'Q1*D1',S:'IF(DI1=0,"",R1/DI1)',AO:'AN1-AN1/1.15*11.5%',AP:'AO1*D1',AQ:'IF(DI1=0,"",AP1/DI1)'});
+    Object.assign(r.values,{H:0.5,I:0.5,J:r.values.D*0.5,K:0.05,L:1,M:1,N:r.values.D,O:0.1,P:0,Q:0,R:0,S:0,AN:2,AO:2-2/1.1*0.115,AP:(2-2/1.1*0.115)*r.values.D,AQ:(2-2/1.1*0.115)/10});
+    Object.assign(r.formulas,{I:'H1',J:'I1*D1',K:'IF(DI1=0,"",J1/DI1)',M:'L1',N:'M1*D1',O:'IF(DI1=0,"",N1/DI1)',Q:'P1',R:'Q1*D1',S:'IF(DI1=0,"",R1/DI1)',AO:'AN1-AN1/1.1*11.5%',AP:'AO1*D1',AQ:'IF(DI1=0,"",AP1/DI1)'});
   }
   const wb=buildWorkbook(rs,columns),ws=wb.getWorksheet('Sky Castle');
   for(const n of [5,8]){

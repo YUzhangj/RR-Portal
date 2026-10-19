@@ -220,6 +220,27 @@ function buildVerificationRow(quote, version, sections, quantities) {
     values.V=s.raw_material_after_tax;values.CE=s.freight_after_tax;
     issues.push('部门核价：按系统既有计算口径');
   }
+  const sewingSection=(sections || []).find(section=>section.dept==='sewing');
+  const sewingPayload=JSON.parse(sewingSection?.payload_json || '{}');
+  const sewingTax=require('../../frontend/sewing-tax');
+  if(sewingTax.hasSetting(sewingPayload)) {
+    const shares=sewingTax.fractions(sewingPayload);
+    let oldDeduction=0,newDeduction=0,complete=true;
+    for(const [input,out,tax,key] of [['BI','BJ','CV','sewing_hair'],['BM','BN','CW','sewing_cloth']]) {
+      if(!numeric(values[input]) || !numeric(values[out])) {complete=false;continue;}
+      oldDeduction+=values[input]-values[out];
+      values[tax]=values[input]*shares[key];
+      formulas[tax]=`${input}1*${shares[key]}`;delete sources[tax];
+      values[out]=values[input]-values[tax]*0.115;
+      formulas[out]=`${input}1-${tax}1*11.5%`;delete sources[out];
+      newDeduction+=values[tax]*0.115;
+    }
+    if(complete&&numeric(values.CY)) {
+      const otherDeduction=values.CY-oldDeduction;
+      values.CY=otherDeduction+newDeduction;
+      formulas.CY=`${otherDeduction}+CV1*11.5%+CW1*11.5%`;delete sources.CY;
+    }
+  }
   // Recalculate report relationships from verification inputs, using the
   // same field meanings as the confirmed quote summary. Source results must
   // not bypass these expressions merely because a cached value exists.
@@ -238,7 +259,7 @@ function buildVerificationRow(quote, version, sections, quantities) {
   }
   // User-confirmed carton rule, shared by the on-screen report and export.
   values.AO=null;delete sources.AO;delete formulas.AO;
-  calc('AO','AN1-AN1/1.15*11.5%',['AN'],x=>x-x/1.15*0.115);
+  calc('AO','AN1-AN1/1.1*11.5%',['AN'],x=>x-x/1.1*0.115);
   subtract('CK','E','G');subtract('CM','E','F');divide('CL','CK','E');divide('CN','CM','E');divide('CO','E','F');
   divide('Z','Y','E');divide('CJ','CI','E');divide('DA','E','CZ');
   subtract('DD','CZ','DC');subtract('DE','E','DD');subtract('DG','E','CZ');divide('DF','DE','E');divide('DH','DG','E');

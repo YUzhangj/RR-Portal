@@ -36,7 +36,11 @@ function addMixedTax(ws,result,refs,priceRef,options={}){
  const visible={...a,...b,...c};
  const amount=k=>make(visible[k].ref,components[k].result);
  const tax13=make(taxable.map(k=>visible[k].ref).join('+'),taxable.reduce((n,k)=>n+components[k].result,0));
- const taxes=[['含税13%类成本',tax13,null],['纸箱类',amount('carton'),.1],['含税1%',amount('plating'),.0099],['搪胶类3%',amount('slush'),.03],['车发类13%',amount('sewing_hair'),.115],['车衣类13%',amount('sewing_cloth'),.115],['吸塑类6%',amount('suction'),.06],['运费类9%',amount('freight'),.0826],['含税13%类',tax13,.115]];
+ const sewingAmount=key=>{
+   const fraction=components[key].result ? (result.sewing_taxable?.[key] ?? components[key].result)/components[key].result : 0;
+   return make(`(${visible[key].ref})*${fraction}`,result.sewing_taxable?.[key] ?? components[key].result);
+ };
+ const taxes=[['含税13%类成本',tax13,null],['纸箱类',amount('carton'),.1],['含税1%',amount('plating'),.0099],['搪胶类3%',amount('slush'),.03],['车发类13%',sewingAmount('sewing_hair'),.115],['车衣类13%',sewingAmount('sewing_cloth'),.115],['吸塑类6%',amount('suction'),.06],['运费类9%',amount('freight'),.0826],['含税13%类',tax13,.115]];
  section('四、减税明细');const h=ws.addRow([...taxes.map(t=>t[0]),'合计减税']);h.height=42;h.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFDCEAF4'}};
  const amounts=ws.addRow(taxes.map(t=>t[1])).number;
  // The first 13% column is a reference only; share its base without a second deduction.

@@ -90,7 +90,7 @@ function calculateMixedQuote(quote, sections, { strict = false } = {}) {
     catch (e) { errors.push(`${product.code} ${e.message}`); }
     const hkd = base / divisor + productAmortization * fx;
     if (!result.hasSourceData && !sharedLabor && !productAmortization) errors.push(`${product.code} ${product.name} 尚未填写报价明细`);
-    return { ...product, weight: weights[product.id], components: result.components,
+    return { ...product, weight: weights[product.id], components: result.components, sewing_taxable: result.sewing_taxable,
       shared_labor: sharedLabor, amortization_usd: productAmortization, base_hkd: base, price_hkd: hkd, price_usd: hkd / fx };
   });
   const common = calculateSingleQuoteCosts(quote, projectSections(sections, '__shared__', quote.qty));
@@ -116,7 +116,8 @@ function calculateMixedQuote(quote, sections, { strict = false } = {}) {
       + common.rawQuotedPrice + (freight + fixedCharge) * markup).toFixed(4),
     freight_scenarios: freightScenarios.map(s => ({ ...s, final_usd: (beforeSurtax + (s.total - freight) * markup / divisor / fx) * (1 + surtax * surtaxMarkup / divisor) })),
     selected_container: selectedFreight.key,
-    components, hasSourceData: true, pricing: { fx, divisor, markup, surtax_markup: surtaxMarkup, tax_mode: taxMode, fixed_charge_hkd: fixedCharge, surtax_pct: surtax * 100 } };
+    sewing_taxable: Object.fromEntries(['sewing_hair','sewing_cloth'].map(key=>[key, common.sewing_taxable[key]+products.reduce((n,p)=>n+p.sewing_taxable[key]*p.weight*costUnits,0)])),
+    common_sewing_taxable: common.sewing_taxable, components, hasSourceData: true, pricing: { fx, divisor, markup, surtax_markup: surtaxMarkup, tax_mode: taxMode, fixed_charge_hkd: fixedCharge, surtax_pct: surtax * 100 } };
   const amounts = [result.average_usd, result.average_hkd, result.common_usd, result.before_surtax_usd,
     result.surcharge_usd, result.final_usd, result.final_hkd, result.quotedPrice,
     ...Object.values(components), ...products.flatMap(p => [p.base_hkd, p.price_hkd, p.price_usd]),
