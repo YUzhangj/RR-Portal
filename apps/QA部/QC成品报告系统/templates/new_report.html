@@ -50,4 +50,13 @@ document.querySelector('form.po-drop-card')?.addEventListener('submit',function(
   btn.style.cursor='not-allowed';
   document.querySelector('#po-submit-hint').style.display='block';
 });
+window.addEventListener('pageshow',function(){
+  var btn=document.querySelector('#po-submit-btn');
+  if(!btn)return;
+  btn.disabled=false;
+  btn.textContent='上传并开始提取 →';
+  btn.style.opacity='';
+  btn.style.cursor='';
+  document.querySelector('#po-submit-hint').style.display='none';
+});
 </script>{% endblock %}

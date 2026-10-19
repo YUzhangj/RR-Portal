@@ -958,6 +958,8 @@ class AIService:
         )
         response, request_id = self._post_responses(payload)
         data = _extract_structured_json(response, request_id=request_id)
+        # Reject malformed containers/types before deterministic normalization.
+        _check_schema(data, PO_EXTRACTION_SCHEMA)
         _enforce_review_flags(data)
         _sanitize_field_evidence(data, source_kind=source_kind)
         _validate_po_data(data, source_kind=source_kind)

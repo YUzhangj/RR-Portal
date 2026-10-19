@@ -162,7 +162,13 @@ def _percentage_value(value: Any) -> str:
 
 def _weight_value(value: Any) -> str:
     rendered = _text_value(value, "-").strip()
-    return rendered
+    if rendered == "-":
+        return rendered
+    return rendered if re.search(r"\bkgs?\b", rendered, re.IGNORECASE) else f"{rendered} kg"
+
+
+def _weights(net: Any, gross: Any) -> str:
+    return f"N.W. {_weight_value(net)} / G.W. {_weight_value(gross)}" if net not in (None, "") or gross not in (None, "") else ""
 
 
 def _timestamp_value(value: Any) -> str:
@@ -545,6 +551,14 @@ def _th_header(c: canvas.Canvas, data: Mapping[str, Any]) -> float:
     return PAGE_H - 84
 
 
+def _th_footer(c: canvas.Canvas, data: Mapping[str, Any], page: int, total: int) -> None:
+    c.setStrokeColor(LINE)
+    c.line(MARGIN, 32, PAGE_W - MARGIN, 32)
+    _draw_text(c, MARGIN, 20, f"{_text_value(data.get('report_no'), 'DRAFT')} | Rev.{_text_value(data.get('revision'), '0')}", size=7, width=CONTENT_W - 90)
+    c.setFont("Helvetica", 7)
+    c.drawRightString(PAGE_W - MARGIN, 20, f"Page {page} of {total}")
+
+
 def _band(c: canvas.Canvas, y: float, title: str, *, x: float = MARGIN, w: float = CONTENT_W, h: float = 17, size: float = 9) -> float:
     c.setFillColor(BAND_BG)
     c.setStrokeColor(TH_BORDER)
@@ -702,6 +716,7 @@ def _draw_page_one(c: canvas.Canvas, data: Mapping[str, Any], total_pages: int, 
     c.rect(MARGIN + label_w, status_top - row_h, value_w, row_h, fill=0, stroke=1)
     _cell(c, MARGIN, status_top, label_w, row_h, "Inspection Status", size=9, bold=True, align="center", border=False)
     stage = _text_value(_first(overview, "inspection_stage", default=_first(data, "inspection_stage", default="")), "").lower()
+    stage = re.sub(r"^final\s+", "", stage)
     cx = MARGIN + label_w + 12
     cy = status_top - row_h / 2
     c.setFont("Helvetica-Bold", 9)
@@ -907,7 +922,7 @@ def _draw_continuation_page(
         c.rect(x, y - 32, w, 16, fill=0, stroke=1)
         _cell(c, x, y - 16, w, 16, label, size=8.5, bold=True, align="center", border=False)
         x += w
-    for row_index, row in enumerate(defects[:40]):
+    for row_index, row in enumerate(defects[:38]):
         row_top = y - 32 - row_index * row_h
         x = MARGIN
         for w, value in zip((cr_w, maj_w, min_w, desc_w), row):
@@ -928,7 +943,7 @@ def _draw_continuation_page(
         c.rect(x, y - 32, w, 16, fill=0, stroke=1)
         _cell(c, x, y - 16, w, 16, label, size=8.5, bold=True, align="center", border=False)
         x += w
-    for row_index, row in enumerate(tests[:40]):
+    for row_index, row in enumerate(tests[:38]):
         row_top = y - 32 - row_index * row_h
         x = tx
         for col_index, (w, value) in enumerate(zip((name_w, std_w, res_w), [_text_value(row[0], ""), _text_value(row[1], ""), _text_value(row[2], "")])):
@@ -954,7 +969,7 @@ def _label_key(label: str) -> str:
     return re.sub(r"[^a-z0-9]", "", label.lower())
 
 
-def _draw_page_two(c: canvas.Canvas, data: Mapping[str, Any], total_pages: int) -> None:
+def _draw_page_two(c: canvas.Canvas, data: Mapping[str, Any], total_pages: int, detail_notes: Sequence[str] = ()) -> list[str]:
     y = _th_header(c, data)
     product, packing = _product_and_packing(data)
     master = _mapping(_first(packing, "master_carton", default={}))
@@ -965,7 +980,7 @@ def _draw_page_two(c: canvas.Canvas, data: Mapping[str, Any], total_pages: int) 
     y = _spec_row(c, y, "Product Size (mm)", _first(product, "size_mm", "product_size", "dimensions"))
     nw = _text_value(_first(product, "net_weight_kg", "nw"), "")
     gw = _text_value(_first(product, "gross_weight_kg", "gw"), "")
-    weight = f"N.W. {nw} kgs / G. W. {gw} kgs" if nw or gw else ""
+    weight = _weights(nw, gw)
     y = _spec_row(c, y, "Product Weight (kg)", weight)
     y = _spec_row(c, y, "Date Code", _first(product, "date_code", "batch_code"))
     y = _spec_row(c, y, "UPC / EAN barcode", _first(product, "barcode", "upc", "ean"))
@@ -982,9 +997,6 @@ def _draw_page_two(c: canvas.Canvas, data: Mapping[str, Any], total_pages: int) 
         if value:
             used_keys.add(key)
         packaging_rows.append((label, value))
-    for label, value in _packaging_items(product, packing):
-        if _label_key(label) not in used_keys and _label_key(label) not in {_label_key(l) for l in _FIXED_PACKAGING_LABELS}:
-            packaging_rows.append((label, value))
     col_w = CONTENT_W / 3
     value_w = 42
     row_h = 19
@@ -1007,7 +1019,7 @@ def _draw_page_two(c: canvas.Canvas, data: Mapping[str, Any], total_pages: int) 
     y = _band(c, y, "MASTER CARTON", h=15, size=8.5)
     master_rows = [
         ("Dimension", _first(master, "dimension", "dimensions", default=_first(packing, "master_carton_dimension"))),
-        ("Carton Weight (kg)", (lambda mnw, mgw: f"N.W. {mnw} kgs / G. W. {mgw} kgs" if mnw or mgw else "")(
+        ("Carton Weight (kg)", _weights(
             _text_value(_first(master, "net_weight_kg", "net_weight", "nw", default=_first(packing, "master_carton_nw")), ""),
             _text_value(_first(master, "gross_weight_kg", "gross_weight", "gw", default=_first(packing, "master_carton_gw")), ""),
         )),
@@ -1021,7 +1033,7 @@ def _draw_page_two(c: canvas.Canvas, data: Mapping[str, Any], total_pages: int) 
     y = _band(c, y, "INNER CARTON", h=15, size=8.5)
     inner_rows = [
         ("Dimension", _first(inner_map, "dimension", "dimensions")),
-        ("Carton Weight (kg)", (lambda inw, igw: f"N.W. {inw} kgs / G. W. {igw} kgs" if inw or igw else "")(
+        ("Carton Weight (kg)", _weights(
             _text_value(_first(inner_map, "net_weight_kg", "net_weight", "nw"), ""),
             _text_value(_first(inner_map, "gross_weight_kg", "gross_weight", "gw"), ""),
         )),
@@ -1043,14 +1055,44 @@ def _draw_page_two(c: canvas.Canvas, data: Mapping[str, Any], total_pages: int) 
         lines = [_text_value(item, "") for item in remarks]
     else:
         lines = [line.strip() for line in _text_value(remarks, "").splitlines() if line.strip()]
+    reason = _text_value(data.get("result_reason"), "")
+    if reason:
+        lines.insert(0, f"Result reason: {reason}")
+    fixed_keys = {_label_key(label) for label in _FIXED_PACKAGING_LABELS}
+    lines.extend(f"Packaging - {label}: {value}" for label, value in _packaging_items(product, packing) if _label_key(label) not in fixed_keys)
+    lines.extend(detail_notes)
+    wrapped_lines = [wrapped for line in lines for wrapped in _wrap(line, CONTENT_W - 12, 8.5)]
     if lines:
         y = _band(c, y, "REMARKS:")
-        for line in lines:
-            for wrapped in _wrap(line, CONTENT_W - 12, 8.5):
-                if y < 44:
-                    return
-                _draw_text(c, MARGIN + 6, y - 10, wrapped, size=8.5, color=colors.black, width=CONTENT_W - 12)
-                y -= 11
+        for index, wrapped in enumerate(wrapped_lines):
+            if y - 10 < 46:
+                return wrapped_lines[index:]
+            _draw_text(c, MARGIN + 6, y - 10, wrapped, size=8.5, color=colors.black, width=CONTENT_W - 12)
+            y -= 11
+    return []
+
+
+def _detail_notes(defects: Sequence[list[Any]], tests: Sequence[list[Any]], evidence: Sequence[_Evidence]) -> list[str]:
+    """Preserve values shortened to fit the classic fixed-height tables/captions."""
+    notes = []
+    for index, row in enumerate(defects, 1):
+        if len(_wrap(row[3], 148, 8)) > 1:
+            notes.append(f"Defect {index}: {_text_value(row[3], '')}")
+    for index, row in enumerate(tests, 1):
+        if any(len(_wrap(value, width, 8)) > 1 for value, width in zip(row, (95, 62, 27))):
+            notes.append(f"Test {index}: " + " | ".join(_text_value(value, "") for value in row))
+    for item in evidence:
+        caption = _evidence_caption(item)
+        if len(_wrap(caption, (CONTENT_W - 10) / 2 - 12, 7)) > 2:
+            notes.append(f"Photo - {item.title}: {caption}")
+    return [line for note in notes for line in _wrap(note, CONTENT_W - 12, 8.5)]
+
+
+def _draw_notes_page(c: canvas.Canvas, data: Mapping[str, Any], lines: Sequence[str]) -> None:
+    y = _band(c, _th_header(c, data), "INSPECTION NOTES (CONTINUED)") - 12
+    for line in lines:
+        _draw_text(c, MARGIN + 6, y, line, size=8.5, color=colors.black)
+        y -= 11
 
 
 # ---------------------------------------------------------------------------
@@ -1107,7 +1149,7 @@ def _pop_all_defects(pool: list[_Evidence]) -> list[_Evidence]:
 
 def _build_photo_pages(evidence: Sequence[_Evidence]) -> list[list[tuple[str, Any]]]:
     """Render every fixed photo slot (empty box when no photo) and never drop photos."""
-    pool = list(evidence)
+    pool = [item for item in evidence if item.path or item.required]
     pages: list[list[tuple[str, Any]]] = []
     for fixed_page in _FIXED_PHOTO_PAGES:
         elements: list[tuple[str, Any]] = []
@@ -1147,6 +1189,18 @@ def _build_photo_pages(evidence: Sequence[_Evidence]) -> list[list[tuple[str, An
     return pages
 
 
+def _evidence_caption(item: _Evidence) -> str:
+    caption = item.caption
+    if item.sample_id:
+        caption += f" | Sample: {item.sample_id}"
+    return caption
+
+
+def _photo_image(c: canvas.Canvas, item: _Evidence, x: float, bottom: float, w: float, h: float) -> None:
+    _draw_image_contain(c, item.path, x + 2, bottom + 24, w - 4, h - 26)
+    _draw_text(c, x + 6, bottom + 16, _evidence_caption(item), size=7, width=w - 12, max_lines=2, leading=8)
+
+
 def _th_photo_cell(c: canvas.Canvas, x: float, top: float, w: float, label: str, item: _Evidence | None) -> None:
     c.setStrokeColor(TH_BORDER)
     c.setLineWidth(0.8)
@@ -1156,11 +1210,11 @@ def _th_photo_cell(c: canvas.Canvas, x: float, top: float, w: float, label: str,
         img_top = top - _PHOTO_LABEL_H
         c.rect(x, img_top - _PHOTO_IMG_H, w, _PHOTO_IMG_H, fill=0, stroke=1)
         if item is not None:
-            _draw_image_contain(c, item.path, x + 2, img_top - _PHOTO_IMG_H + 2, w - 4, _PHOTO_IMG_H - 4)
+            _photo_image(c, item, x, img_top - _PHOTO_IMG_H, w, _PHOTO_IMG_H)
     else:
         c.rect(x, top - _PHOTO_CELL_H, w, _PHOTO_CELL_H, fill=0, stroke=1)
         if item is not None:
-            _draw_image_contain(c, item.path, x + 2, top - _PHOTO_CELL_H + 2, w - 4, _PHOTO_CELL_H - 4)
+            _photo_image(c, item, x, top - _PHOTO_CELL_H, w, _PHOTO_CELL_H)
 
 
 def _draw_photo_page(c: canvas.Canvas, data: Mapping[str, Any], elements: Sequence[tuple[str, Any]], *, first: bool) -> None:
@@ -1182,7 +1236,7 @@ def _draw_photo_page(c: canvas.Canvas, data: Mapping[str, Any], elements: Sequen
                 c.setLineWidth(0.8)
                 c.rect(x, y - _PHOTO_CELL_H, col_w, _PHOTO_CELL_H, fill=0, stroke=1)
                 if item is not None:
-                    _draw_image_contain(c, item.path, x + 2, y - _PHOTO_CELL_H + 2, col_w - 4, _PHOTO_CELL_H - 4)
+                    _photo_image(c, item, x, y - _PHOTO_CELL_H, col_w, _PHOTO_CELL_H)
             y -= _PHOTO_ROW_STEP
         else:
             for col in range(2):
@@ -1205,7 +1259,7 @@ def _draw_final_page(c: canvas.Canvas, data: Mapping[str, Any], warehouse: Seque
         c.setStrokeColor(TH_BORDER)
         c.setLineWidth(0.8)
         c.rect(x, top - _PHOTO_CELL_H, col_w, _PHOTO_CELL_H, fill=0, stroke=1)
-        _draw_image_contain(c, item.path, x + 2, top - _PHOTO_CELL_H + 2, col_w - 4, _PHOTO_CELL_H - 4)
+        _photo_image(c, item, x, top - _PHOTO_CELL_H, col_w, _PHOTO_CELL_H)
 
     # Signature area
     inspector_value = data.get("inspector")
@@ -1217,12 +1271,15 @@ def _draw_final_page(c: canvas.Canvas, data: Mapping[str, Any], warehouse: Seque
     c.setLineWidth(0.9)
     c.setFont("Helvetica-Bold", 10)
     c.setFillColor(colors.black)
-    c.drawString(MARGIN, line_y, f"Inspected By： {inspector_name}")
+    _draw_text(c, MARGIN, line_y, f"Inspected By: {inspector_name}", size=10, bold=True, width=210)
     c.line(MARGIN, line_y - 6, MARGIN + 200, line_y - 6)
     c.drawString(MARGIN + 240, line_y, "Supplier/ Factory Signature:")
     c.line(MARGIN + 240 + pdfmetrics.stringWidth("Supplier/ Factory Signature: ", "Helvetica-Bold", 10), line_y - 6, PAGE_W - MARGIN, line_y - 6)
     if signature:
         _draw_image_contain(c, signature, MARGIN + 30, line_y + 4, 150, 44)
+    signed_at = _first(inspector, "signed_at")
+    if signed_at:
+        _draw_text(c, MARGIN, line_y - 20, f"Signed at: {_timestamp_value(signed_at)}", size=7, width=210)
 
 
 def generate_unified_report_pdf(payload: Mapping[str, Any], destination: str | Path) -> Path:
@@ -1250,9 +1307,14 @@ def generate_unified_report_pdf(payload: Mapping[str, Any], destination: str | P
     page_one_tests = test_rows[:12]
     extra_defects = defect_rows[12:]
     extra_tests = test_rows[12:]
-    continuation_count = max(ceil(len(extra_defects) / 40), ceil(len(extra_tests) / 40)) if extra_defects or extra_tests else 0
+    continuation_count = max(ceil(len(extra_defects) / 38), ceil(len(extra_tests) / 38)) if extra_defects or extra_tests else 0
     photo_pages = _build_photo_pages(evidence)
-    total_pages = 2 + continuation_count + len(photo_pages) + 1
+    # Measure the fixed form's remaining notes with the same renderer. No file
+    # is emitted; this keeps pagination in sync with optional inner-carton rows.
+    detail_notes = _detail_notes(defect_rows, test_rows, [*evidence, *warehouse])
+    remaining_notes = _draw_page_two(canvas.Canvas(BytesIO(), pagesize=A4), data, 0, detail_notes)
+    note_pages = [remaining_notes[index:index + 60] for index in range(0, len(remaining_notes), 60)]
+    total_pages = 2 + continuation_count + len(note_pages) + len(photo_pages) + 1
 
     pdf = canvas.Canvas(str(output), pagesize=A4, pageCompression=1)
     report_no = _text_value(_first(data, "report_no", default="DRAFT"))
@@ -1262,8 +1324,10 @@ def generate_unified_report_pdf(payload: Mapping[str, Any], destination: str | P
     pdf.setSubject("Pre-Shipment Inspection Report")
 
     _draw_page_one(pdf, data, total_pages, page_one_defects, page_one_tests)
+    _th_footer(pdf, data, 1, total_pages)
     pdf.showPage()
-    _draw_page_two(pdf, data, total_pages)
+    _draw_page_two(pdf, data, total_pages, detail_notes)
+    _th_footer(pdf, data, 2, total_pages)
     pdf.showPage()
 
     for index in range(continuation_count):
@@ -1272,18 +1336,26 @@ def generate_unified_report_pdf(payload: Mapping[str, Any], destination: str | P
             data,
             3 + index,
             total_pages,
-            extra_defects[index * 40 : (index + 1) * 40],
-            extra_tests[index * 40 : (index + 1) * 40],
+            extra_defects[index * 38 : (index + 1) * 38],
+            extra_tests[index * 38 : (index + 1) * 38],
         )
+        _th_footer(pdf, data, 3 + index, total_pages)
         pdf.showPage()
 
     page_no = 3 + continuation_count
+    for lines in note_pages:
+        _draw_notes_page(pdf, data, lines)
+        _th_footer(pdf, data, page_no, total_pages)
+        pdf.showPage()
+        page_no += 1
     for page_index, cells in enumerate(photo_pages):
         _draw_photo_page(pdf, data, cells, first=page_index == 0)
+        _th_footer(pdf, data, page_no, total_pages)
         pdf.showPage()
         page_no += 1
 
     _draw_final_page(pdf, data, warehouse)
+    _th_footer(pdf, data, page_no, total_pages)
     pdf.showPage()
     pdf.save()
     return output

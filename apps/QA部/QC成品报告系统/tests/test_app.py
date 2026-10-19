@@ -21,6 +21,7 @@ from app import (
     User,
     create_app,
     file_sha256,
+    build_unified_pdf_payload,
     refresh_result,
 )
 
@@ -86,6 +87,17 @@ class QCSystemTest(unittest.TestCase):
             self.assertEqual(inspect(app.extensions["db_engine"]).get_table_names(), [])
             app.extensions["db_session"].remove()
             app.extensions["db_engine"].dispose()
+
+    def test_pdf_payload_carries_actual_saved_inspection_stage_and_completion(self):
+        report_id = self.create_report()
+        db = self.app.extensions["db_session"]()
+        report = db.get(Report, report_id)
+        report.inspection_status = "Final 2nd"
+        report.completed_pct = 75
+        payload = build_unified_pdf_payload(db, report, "Synthetic", "Synthetic report")
+        self.assertEqual(payload["overview"]["inspection_stage"], "Final 2nd")
+        self.assertEqual(payload["overview"]["completed_pct"], 75)
+        db.close()
 
     def create_report(self):
         self.login()
