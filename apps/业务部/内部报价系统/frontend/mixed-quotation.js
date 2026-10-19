@@ -489,6 +489,20 @@
       note: `${p.note || ''}${p.catalog_usage ? `；本款用量 ${p.catalog_usage}` : ''}` }));
     return { injection, molds };
   }
+  function applyAssemblyBaseRate(root, cfg, value) {
+    if (String(value ?? '').trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0) {
+      throw new Error('请输入大于等于0的有效基数');
+    }
+    const base = Number(value);
+    root.mixed_products ||= {};
+    for (const product of cfg.products) {
+      const payload = root.mixed_products[product.id] ||= {};
+      payload.assembly_base_rate = base;
+    }
+    root.mixed_shared ||= {};
+    root.mixed_shared.assembly_base_rate = base;
+    return base;
+  }
   function wrap(renderer, dept, fixedProductId) {
     return function (host, root, edit, onChange, ...args) {
       const cfg = config();
@@ -661,6 +675,11 @@
           host.querySelector('.mixed-help').textContent = '整体资料集中显示各款装工；编辑工序请在上方选择单个产品。成品包装列在共有费用，只计一次。';
           const products = [...cfg.products, {id:'__shared__',code:'共有费用',name:'成品包装（每包装计一次）'}];
           const number = value => Number(value) || 0;
+          const bases = [...new Set(products.map(product => {
+            const payload = product.id === '__shared__' ? root.mixed_shared : root.mixed_products[product.id];
+            return number(payload?.assembly_base_rate ?? defaultAssemblyBaseRateForFactory());
+          }))];
+          const bulkBase = bases.length === 1 ? bases[0] : '';
           const rows = products.map(product => {
             const payload = product.id === '__shared__' ? root.mixed_shared : (root.mixed_products[product.id] || {});
             const assembly = payload.assembly_step_groups || [];
@@ -675,10 +694,22 @@
             const steps = groups.reduce((total,g) => total + (g.steps || []).length,0);
             return `<tr data-assembly-product="${esc(product.id)}"${product.id === '__shared__' ? ' class="hi"' : ''}><td>${esc(product.code)}</td><td style="white-space:normal;overflow-wrap:anywhere;min-width:140px;max-width:260px">${esc(product.name)}</td><td>${steps}</td><td>${people}</td><td>${targets}</td><td>${esc(payload.assembly_std_time ?? 11)}</td><td>${fmt(base)}</td><td>${fmt(assemblyCost)}</td><td>${fmt(packagingCost)}</td><td><strong>${fmt(assemblyCost + packagingCost)}</strong></td></tr>`;
           });
-          detail.innerHTML = `<h3>混装装工汇总</h3><input type="search" placeholder="查找货号或品名" aria-label="查找装工汇总"><div class="mixed-scroll" role="region" aria-label="混装装工汇总，可横向滚动" tabindex="0"><table class="wb-table"><thead><tr><th>货号</th><th>产品名称</th><th>工序数</th><th>人数</th><th>目标数</th><th>工时 H</th><th>基数 HKD/人</th><th>半成品装工 HKD/PCS</th><th>成品包装 HKD/PCS</th><th>合计 HKD/PCS</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
-          detail.querySelector('input').oninput = event => {
+          detail.innerHTML = `<h3>混装装工汇总</h3><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0">
+            <label>统一基数 HKD/人 <input data-assembly-bulk-base aria-label="统一装工基数 HKD/人" type="number" min="0" step="any" value="${esc(bulkBase)}" placeholder="当前多种基数" style="width:110px" ${edit ? '' : 'disabled'}></label>
+            <button type="button" data-apply-assembly-base ${edit ? '' : 'disabled'}>应用到全部</button>
+            <span class="muted">全部小产品及共有包装工序，不受搜索筛选影响。</span>
+          </div><p data-assembly-base-status role="status" class="muted"></p><input type="search" placeholder="查找货号或品名" aria-label="查找装工汇总"><div class="mixed-scroll" role="region" aria-label="混装装工汇总，可横向滚动" tabindex="0"><table class="wb-table"><thead><tr><th>货号</th><th>产品名称</th><th>工序数</th><th>人数</th><th>目标数</th><th>工时 H</th><th>基数 HKD/人</th><th>半成品装工 HKD/PCS</th><th>成品包装 HKD/PCS</th><th>合计 HKD/PCS</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
+          detail.querySelector('input[type="search"]').oninput = event => {
             const query = event.target.value.trim().toLowerCase();
             detail.querySelectorAll('[data-assembly-product]').forEach((row,i) => { row.hidden = !`${products[i].code} ${products[i].name}`.toLowerCase().includes(query); });
+          };
+          if (edit) detail.querySelector('[data-apply-assembly-base]').onclick = () => {
+            const input = detail.querySelector('[data-assembly-bulk-base]');
+            let base;
+            try { base = applyAssemblyBaseRate(root, cfg, input.value); }
+            catch (error) { detail.querySelector('[data-assembly-base-status]').textContent = error.message; return; }
+            onChange(); draw();
+            detail.querySelector('[data-assembly-base-status]').textContent = `已将全部小产品及共有包装基数更新为 ${fmt(base)} HKD/人；请保存装配部草稿后更新报价汇总。`;
           };
           return;
         }
@@ -1148,5 +1179,5 @@
     }
   }
   const componentNames = { injection_labor: '啤工', assembly_labor: '装配人工', painting_labor: '喷油人工', paint_material: '油料', imp_mat: '进口塑胶', dom_mat: '国产塑胶', blow: '吹气', slush: '搪胶', sewing_hair: '车发', sewing_cloth: '车衣', hardware: '五金', electronic: '电子', motor: '马达', suction: '吸塑', glue_bag: '胶袋', color_box: '彩盒/内咭', battery: '电池', libao: '利宝', plating: '电镀', flocking: '植绒', other_buy: '其他外购', carton: '纸箱', freight: '运费', cabinet: '吊柜', misc: '印尼运费', abs_material: '其中 ABS 材料' };
-  window.MixedQuotation = { previewNumberedImport, wrap, salesPanel, summary, componentNames, renderMoldingAllocation, renderEngineeringSharedMolds, refreshEngineeringSharedMolds };
+  window.MixedQuotation = { applyAssemblyBaseRate, previewNumberedImport, wrap, salesPanel, summary, componentNames, renderMoldingAllocation, renderEngineeringSharedMolds, refreshEngineeringSharedMolds };
 })();
