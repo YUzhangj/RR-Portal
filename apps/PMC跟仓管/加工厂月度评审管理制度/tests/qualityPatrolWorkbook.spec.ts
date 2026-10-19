@@ -47,6 +47,17 @@ describe('single-visit Excel parser', () => {
     expect(() => parsePatrolWorkbook(workbook([row], '2026年10月14日-32日湖南加工厂检查总结', october))).toThrow()
     expect(parsePatrolWorkbook(workbook([row], '2026年9月30日至10月16日湖南加工厂检查总结', october)).checkDate).toBe('2026-10-16')
   })
+  it('validates both endpoints when whitespace occurs inside the title dates', () => {
+    const march = [...header]; march[5] = '3/2评级'
+    expect(() => parsePatrolWorkbook(workbook([row], '2026 年2 月30 日–3 月2 日湖南加工厂检查总结', march))).toThrow('有效日期')
+    const october = [...header]; october[5] = '10/16评级'
+    expect(() => parsePatrolWorkbook(workbook([row], '2026 年10 月18 日–16 日湖南加工厂检查总结', october))).toThrow('早于')
+    expect(parsePatrolWorkbook(workbook([row], '2026 年10 月14 日–16 日湖南加工厂检查总结', october)).checkDate).toBe('2026-10-16')
+  })
+  it('compares a period against its own start rather than an earlier date in the title', () => {
+    const october = [...header]; october[5] = '10/16评级'
+    expect(() => parsePatrolWorkbook(workbook([row], '2026年9月18日模板 2026年10月18日–16日湖南加工厂检查总结', october))).toThrow('早于')
+  })
   it.runIf(!!process.env.PATROL_OCTOBER_REFERENCE_XLSX)('reads the supplied October workbook with its visit period and photos', () => {
     const bytes = fs.readFileSync(process.env.PATROL_OCTOBER_REFERENCE_XLSX!)
     const result = parsePatrolWorkbook(new Uint8Array(bytes).buffer)

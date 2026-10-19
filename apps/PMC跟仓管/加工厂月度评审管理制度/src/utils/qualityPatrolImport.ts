@@ -135,13 +135,15 @@ export function parsePatrolWorkbook(data: ArrayBuffer): PatrolImportResult {
   }
   for (const key of ['staff', 'lines', 'area', 'evaluation', 'correction', 'production_type']) if (cols[key]! < 0) throw new Error(`模板缺少“${fieldLabels[key]}”列，请检查表头`)
   const title = Array.from({ length: header }, (_, r) => Array.from({ length: range.e.c + 1 }, (_, c) => text(cell(r, c)?.v)).join(' ')).join(' ')
-  const titleDate = title.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/)
+  const normalizedTitle = title.replace(/\s+/g, '')
+  const titleDate = normalizedTitle.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/)
   let checkDate = titleDate ? dateText(titleDate[0], false) : ''
   // A visit period such as 2026年10月14日-16日 is recorded on its final day.
-  const period = title.replace(/\s+/g, '').match(/(\d{4})年(\d{1,2})月(\d{1,2})日[-–—~～至](?:(\d{4})年)?(?:(\d{1,2})月)?(\d{1,2})日/)
+  const period = normalizedTitle.match(/(\d{4})年(\d{1,2})月(\d{1,2})日[-–—~～至](?:(\d{4})年)?(?:(\d{1,2})月)?(\d{1,2})日/)
   if (period) {
+    const start = dateText(`${period[1]}年${period[2]}月${period[3]}日`, false)
     const end = dateText(`${period[4] || period[1]}年${period[5] || period[2]}月${period[6]}日`, false)
-    if (end < checkDate) throw new Error('标题中的巡查结束日期不能早于开始日期，请核对')
+    if (end < start) throw new Error('标题中的巡查结束日期不能早于开始日期，请核对')
     checkDate = end
   }
   const gradeDate = labels[gradeCols[0]!]!.match(/(\d{1,2})\/(\d{1,2})/)
