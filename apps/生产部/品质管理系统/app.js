@@ -2471,6 +2471,7 @@ function batchDelete() {
     }
   }
   const idsToDelete = new Set(_selectedIds);
+  if (window.__QC_MARK_DELETED) window.__QC_MARK_DELETED([...idsToDelete]);
   state.records = state.records.filter(r => !idsToDelete.has(r.id));
   persist();
 
@@ -4465,7 +4466,7 @@ function _renderDefectRows() {
              oninput="_defectRows[${i}].qty=parseInt(this.value)||0;_updateDefectSummary()"/>
       <select style="padding:4px 6px;border:1px solid var(--border);border-radius:4px;
                      background:var(--bg-input);color:var(--text);font-size:12px"
-              onchange="_defectRows[${i}].level=this.value">
+              onchange="_defectRows[${i}].level=this.value;_updateDefectSummary()">
         ${DEFECT_LEVELS.map(l => `<option value="${l}" ${row.level===l?'selected':''}>${l||'—等级—'}</option>`).join('')}
       </select>
       <select style="padding:4px 6px;border:1px solid var(--border);border-radius:4px;
@@ -4672,14 +4673,31 @@ function toggleOrderNoNA() {
     inp.focus();
   }
 }
-/* ── AQL 档位多选（pill 按钮）：值存隐藏框 f_aqlLevel，逗号分隔；最多选 2 个 ── */
+/* ── AQL 档位多选（pill 按钮）：值存隐藏框 f_aqlLevel，逗号分隔。
+   规则：MAJ 0.65 与 MAJ 1.0 互斥（同属 MAJ 只能选一）；
+   0.65 / 1.0 / 2.5 三者最多选两个；CR 独立，不受限制。 ── */
 function toggleAqlLevel(btn) {
-  const turningOn = !btn.classList.contains('on');
-  if (turningOn) {
-    const onCount = document.querySelectorAll('#aqlLevelPills .aql-lvl-btn.on').length;
-    if (onCount >= 2) {
-      if (typeof showToast === 'function') showToast('AQL档位最多选择 2 个');
-      return;
+  const lv = btn.dataset.lv;
+  if (!btn.classList.contains('on')) {
+    const on = [...document.querySelectorAll('#aqlLevelPills .aql-lvl-btn.on')].map(b => b.dataset.lv);
+    const isMaj = lv.indexOf('MAJ') === 0;
+    if (isMaj) {
+      /* 选中任一 MAJ 时，自动取消另一个 MAJ（0.65 与 1.0 互斥） */
+      document.querySelectorAll('#aqlLevelPills .aql-lvl-btn.on').forEach(b => {
+        if (b.dataset.lv.indexOf('MAJ') === 0) b.classList.remove('on');
+      });
+    }
+    if (lv !== 'CR') {
+      /* 点击后 trio（0.65/1.0/2.5）预计选中数：MAJ 互斥会先摘掉已选 MAJ */
+      const curTrio = on.filter(v => v !== 'CR');
+      const curMaj = curTrio.filter(v => v.indexOf('MAJ') === 0).length;
+      const projected = curTrio.length - (isMaj ? curMaj : 0) + 1;
+      if (projected > 2) {
+        /* 互斥摘掉的要恢复显示状态（不生效本次点击） */
+        if (typeof showToast === 'function') showToast('0.65 / 1.0 / 2.5 三个档位最多选择两个');
+        syncAqlLevelPills();
+        return;
+      }
     }
   }
   btn.classList.toggle('on');
@@ -4815,7 +4833,8 @@ function saveRecord(options = {}) {
     /* 有明细：用明细合计 */
     fail = failFromDefs;
     if (sample != null && fail > sample) {
-      showToast('不良数量合计不能大于抽查数量。', 'error'); return;
+      /* 退货/全检场景：一个问题就可能占 100%，多个问题合计会超过抽查数，改为可确认的警告 */
+      if (!confirm(`不良数量合计 ${fail} 已超过抽查数量 ${sample}（不良率超 100%）。退货/全检场景属正常，确认继续保存？`)) return;
     }
     pass = sample != null ? Math.max(0, sample - fail) : 0;
 
@@ -4940,6 +4959,7 @@ function deleteRecord(id) {
     showToast('该记录已通过审核并锁定，需先由审核人「反审核」退回后才能删除', 'error'); return;
   }
   if (!confirm('确认删除该验货记录？此操作不可撤销。')) return;
+  if (window.__QC_MARK_DELETED) window.__QC_MARK_DELETED([id]);
   state.records = state.records.filter(r => r.id !== id);
   _selectedIds.delete(id);   /* 清掉已选状态 */
   persist();
@@ -5063,6 +5083,7 @@ function approveRecord(id) {
   r.status   = 'approved';
   r.reviewBy = (u && (u.name || u.username)) || '';
   r.reviewAt = nowIso();
+  r.updatedAt = nowIso();   /* 服务端按 updatedAt 合并：审核动作也要刷新时间戳 */
   r.rejectReason = ''; r.rejectBy = ''; r.rejectAt = '';
   delete r.resubmitted;
   persist();
@@ -5713,8 +5734,9 @@ function _backupDoImport(incoming, mode) {
     }));
 
     if (mode === 'replace') {
+      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;
       state.records = normalized;
-      state.nextId  = normalized.length + 1;
+      state.nextId  = Math.max(state.nextId || 1, normalized.length + 1);
     } else {
       state.records.push(...normalized);
     }
@@ -5774,8 +5796,9 @@ function backupClearAll() {
     confirmClass: 'btn-secondary',   /* 不用 btn-primary，减少误操作 */
     onConfirm:   () => {
       const count = recs().length;
+      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 整库清空走 /api/records/replace */
       state.records = [];
-      state.nextId  = 1;
+      state.nextId  = Math.max(1, state.nextId || 1);
       persist();
       showToast(`已清空全部 ${count} 条记录`, 'info');
       _backupLog(`清空数据 ${count} 条记录`, 'warn');
@@ -5798,8 +5821,9 @@ function backupRestoreSeed() {
     confirmLabel: '确认恢复',
     confirmClass: 'btn-primary',
     onConfirm:   () => {
+      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 整库覆盖走 /api/records/replace */
       state.records = SEED_RECORDS.map(r => Object.assign({}, r));
-      state.nextId  = SEED_RECORDS.length + 1;
+      state.nextId  = Math.max(state.nextId || 1, SEED_RECORDS.length + 1);
       persist();
       showToast(`✓ 已恢复 ${SEED_RECORDS.length} 条示例数据`, 'success');
       _backupLog(`恢复示例数据 ${SEED_RECORDS.length} 条`, 'ok');
@@ -6643,8 +6667,9 @@ function executeImportConfirm() {
 
   try {
     if (plan.mode === 'replace') {
+      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 替换模式导入走 /api/records/replace */
       state.records = plan.records;
-      state.nextId  = plan.records.length + 1;
+      state.nextId  = Math.max(state.nextId || 1, plan.records.length + 1);
     } else {
       state.records.push(...plan.records);
       state.nextId = plan.nextId;

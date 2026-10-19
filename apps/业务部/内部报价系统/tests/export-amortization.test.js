@@ -907,13 +907,13 @@ test('tax deduction UI is read-only and export uses formulas for every calculate
     assert.equal(typeof worksheet.getCell(amountRow, col).value, 'object');
   }
   assert.equal(worksheet.getCell(rateRow, 1).value, null);
-  assert.equal(worksheet.getCell(rateRow, 2).value, 0.1);
+  assert.equal(worksheet.getCell(rateRow, 2).value, 0.115);
   assert.ok(Math.abs(worksheet.getCell(rateRow, 3).value - 0.0099) < 1e-12);
   assert.equal(worksheet.getCell(deductionRow, 1).value, '—');
   for (let col = 2; col <= 9; col += 1) {
     const value = worksheet.getCell(deductionRow, col).value;
     assert.equal(typeof value, 'object');
-    assert.match(value.formula, /^[A-J]\d+\*[A-J]\d+$/);
+    assert.match(value.formula, col === 2 ? /^[A-J]\d+\/1\.1\*[A-J]\d+$/ : /^[A-J]\d+\*[A-J]\d+$/);
   }
   assert.match(worksheet.getCell(deductionRow, 10).value.formula, /^SUM\(A\d+:I\d+\)$/);
 

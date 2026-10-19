@@ -40,19 +40,26 @@ test('after-tax labor directly references unit costs and propagates to amounts',
   }
   assert.equal(r.values.I,1.23456);assert.equal(r.values.Q,0);
 });
-test('carton rebate uses the confirmed fixed formula and updates amount and ratio',()=>{
+test('carton rebate uses divisor 1.1 in report and exported formulas with matching amounts and ratios',async()=>{
   const sections=fixture(),p=JSON.parse(sections[0].payload_json);
   p.legacy_import.excel_model.cells['s!B5']={v:2.95};
   sections[0].payload_json=JSON.stringify(p);
   const r=buildVerificationRow(quote,version,sections,qty);
-  assert.ok(Math.abs(r.values.AO-(2.95-2.95/1.15*0.115))<1e-12);
-  assert.equal(r.formulas.AO,'AN1-AN1/1.15*11.5%');
+  assert.ok(Math.abs(r.values.AO-(2.95-2.95/1.1*0.115))<1e-12);
+  assert.equal(r.formulas.AO,'AN1-AN1/1.1*11.5%');
   assert.ok(Math.abs(r.values.AP-r.values.AO*100)<1e-10);
   assert.equal(r.values.AQ,r.values.AP/r.values.DI);
+  const workbook=buildVerificationWorkbook([r]);
+  const saved=new ExcelJS.Workbook();await saved.xlsx.load(await workbook.xlsx.writeBuffer());
+  const sheet=saved.getWorksheet('ZURU');
+  assert.equal(sheet.getCell('AO5').formula,'IF(COUNT(AN5)=1,AN5-AN5/1.1*11.5%,"")');
+  assert.equal(sheet.getCell('AO5').result,r.values.AO);
+  assert.equal(sheet.getCell('AP5').result,r.values.AP);
+  assert.equal(sheet.getCell('AQ5').result,r.values.AQ);
   for(const value of [0,4]){
     p.excel_native.inputs['s!B5']={v:value,f:null,t:'n'};
     sections[0].payload_json=JSON.stringify(p);
-    assert.ok(Math.abs(buildVerificationRow(quote,version,sections,qty).values.AO-value*0.9)<1e-12);
+    assert.ok(Math.abs(buildVerificationRow(quote,version,sections,qty).values.AO-(value-value/1.1*0.115))<1e-12);
   }
 });
 test('quantity matches customer + sku + current FX, preserves zero and rejects duplicates',()=>{

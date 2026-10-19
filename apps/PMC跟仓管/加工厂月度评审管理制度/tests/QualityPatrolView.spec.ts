@@ -32,18 +32,19 @@ describe('巡查现场', () => {
     expect(w.find('.patrol-table tbody').text()).not.toContain('东莞工厂')
     expect(w.find('.patrol-table tbody').text()).not.toContain('2026-09-18')
     expect(w.find('.grade-summary').text()).toContain('100.00%')
+    expect(w.find('.patrol-table thead').text()).not.toContain('上次')
     await w.findAll('.filters select')[1]!.setValue('2026-09-18')
     expect(w.find('.patrol-table tbody').text()).toContain('35')
   })
   it('blocks duplicate factory/date and preserves photos when editing', async () => {
     const w = mountView(); await flushPromises()
-    await w.find('.toolbar button').trigger('click')
+    await w.findAll('.toolbar button').find(b => b.text() === '新增巡查')!.trigger('click')
     await w.find('.form-grid select').setValue('hn')
     await w.find('form').trigger('submit')
     expect(w.find('[role=dialog]').text()).toContain('已有巡查记录')
     expect(mocks.create).not.toHaveBeenCalled()
     await w.findAll('.form-actions button')[0]!.trigger('click')
-    await w.find('.actions button').trigger('click')
+    await w.find('.patrol-table .actions button').trigger('click')
     await w.find('form').trigger('submit'); await flushPromises()
     expect(mocks.update).toHaveBeenCalled()
     expect(mocks.update.mock.calls[0]![1].getAll('photos')).toContain('photo.jpg')
@@ -57,8 +58,8 @@ describe('巡查现场', () => {
   it('keeps buyer accounts read only', async () => {
     mocks.auth.role = 'buyer_sewing'
     const w = mountView(); await flushPromises()
-    expect(w.find('.toolbar button').exists()).toBe(false)
-    expect(w.find('.actions').exists()).toBe(false)
+    expect(w.findAll('.toolbar button').map(b => b.text())).toEqual(['多次巡查对比'])
+    expect(w.find('.patrol-table .actions').exists()).toBe(false)
   })
   it('counts unknown grades in denominator and distinct factories separately', () => {
     const s = patrolSummary([{ factory: 'a', grade: 'A', staff: 0 }, { factory: 'a', grade: '', staff: null }, { factory: 'b', grade: 'D', staff: 12 }])
@@ -90,7 +91,7 @@ describe('巡查现场', () => {
   })
   it('focuses the modal, wraps Tab in both directions and restores focus on Escape', async () => {
     const w = mountView(); await flushPromises()
-    const opener = w.find('.toolbar button'); (opener.element as HTMLElement).focus(); await opener.trigger('click'); await flushPromises()
+    const opener = w.findAll('.toolbar button').find(b => b.text() === '新增巡查')!; (opener.element as HTMLElement).focus(); await opener.trigger('click'); await flushPromises()
     const first = w.find('.form-grid select'), last = w.find('.form-actions button[type=submit]')
     expect(document.activeElement).toBe(first.element)
     ;(last.element as HTMLElement).focus(); await last.trigger('keydown', { key: 'Tab' })
@@ -103,7 +104,7 @@ describe('巡查现场', () => {
   })
   it('retains edits and kept photos after a failed save', async () => {
     mocks.update.mockRejectedValueOnce(new Error('offline'))
-    const w = mountView(); await flushPromises(); await w.find('.actions button').trigger('click')
+    const w = mountView(); await flushPromises(); await w.find('.patrol-table .actions button').trigger('click')
     await w.findAll('textarea').at(-1)!.setValue('unsaved notes')
     await w.find('form').trigger('submit'); await flushPromises()
     expect(w.find('[role=dialog]').exists()).toBe(true)
@@ -112,7 +113,7 @@ describe('巡查现场', () => {
     expect(w.find('.kept-photos').text()).toContain('photo.jpg')
   })
   it('preserves real zero and sends optional blank numbers as null', async () => {
-    const w = mountView(); await flushPromises(); await w.find('.actions button').trigger('click')
+    const w = mountView(); await flushPromises(); await w.find('.patrol-table .actions button').trigger('click')
     const numbers = w.findAll('input[type=number]')
     await numbers[0]!.setValue('0'); await numbers[1]!.setValue(''); await numbers[2]!.setValue('12.5')
     await w.find('form').trigger('submit'); await flushPromises()
@@ -121,7 +122,7 @@ describe('巡查现场', () => {
   })
   it('returns focus to the form error after a save fails', async () => {
     mocks.update.mockRejectedValueOnce(new Error('offline'))
-    const w = mountView(); await flushPromises(); await w.find('.actions button').trigger('click')
+    const w = mountView(); await flushPromises(); await w.find('.patrol-table .actions button').trigger('click')
     ;(w.find('.form-actions button[type=submit]').element as HTMLElement).focus()
     await w.find('form').trigger('submit'); await flushPromises()
     const alert = w.find('[role=dialog] [role=alert]')
@@ -130,7 +131,7 @@ describe('巡查现场', () => {
     expect(document.activeElement?.closest('[role=dialog]')).toBe(w.find('[role=dialog]').element)
   })
   it('keeps manually entered staff and area when a new patrol date changes', async () => {
-    const w = mountView(); await flushPromises(); await w.find('.toolbar button').trigger('click')
+    const w = mountView(); await flushPromises(); await w.findAll('.toolbar button').find(b => b.text() === '新增巡查')!.trigger('click')
     await w.find('.form-grid select').setValue('hn')
     const numbers = w.findAll('input[type=number]')
     expect((numbers[0]!.element as HTMLInputElement).value).toBe('40')
@@ -138,11 +139,12 @@ describe('巡查现场', () => {
     await w.find('input[type=date]').setValue('2026-10-20')
     expect((numbers[0]!.element as HTMLInputElement).value).toBe('50')
     expect((numbers[2]!.element as HTMLInputElement).value).toBe('150.5')
-    expect((w.findAll('input[type=date]')[1]!.element as HTMLInputElement).value).toBe('2026-10-16')
+    expect((w.findAll('input[type=date]')[1]!.element as HTMLInputElement).value).toBe('')
+    expect(w.find('[role=dialog]').text()).not.toContain('上次')
   })
   it('uploads replacement files while retaining only the explicitly kept old photos', async () => {
     mocks.list.mockResolvedValue([{ id: '1', factory: 'hn', check_date: '2026-10-16 00:00:00Z', photos: ['keep.jpg', 'remove.jpg'] }])
-    const w = mountView(); await flushPromises(); await w.find('.actions button').trigger('click')
+    const w = mountView(); await flushPromises(); await w.find('.patrol-table .actions button').trigger('click')
     await w.findAll('.kept-photos button')[1]!.trigger('click')
     const input = w.find('input[type=file]'), replacement = image('new.png', 8)
     Object.defineProperty(input.element, 'files', { value: [replacement], configurable: true }); await input.trigger('change')
@@ -152,7 +154,7 @@ describe('巡查现场', () => {
     expect(submitted.some(value => typeof value !== 'string' && value.name === 'new.png')).toBe(true)
   })
   it('blocks total new photo bodies above 30MiB without counting existing files', async () => {
-    const w = mountView(); await flushPromises(); await w.find('.actions button').trigger('click')
+    const w = mountView(); await flushPromises(); await w.find('.patrol-table .actions button').trigger('click')
     const input = w.find('input[type=file]')
     Object.defineProperty(input.element, 'files', { value: [0, 1, 2, 3].map(n => image(`${n}.png`, 10 * 1024 * 1024)), configurable: true }); await input.trigger('change')
     expect(w.find('[role=dialog] [role=alert]').text()).toContain('新增照片合计不超过30MB')
@@ -162,7 +164,7 @@ describe('巡查现场', () => {
     expect(w.find('[role=dialog]').text()).toContain('3 张待上传')
   })
   it.each([[11, 1, 'image/png'], [1, 10485761, 'image/png'], [1, 1, 'application/pdf']])('blocks invalid photo count/size/type (%s/%s/%s)', async (count, size, type) => {
-    const w = mountView(); await flushPromises(); await w.find('.actions button').trigger('click')
+    const w = mountView(); await flushPromises(); await w.find('.patrol-table .actions button').trigger('click')
     const input = w.find('input[type=file]')
     Object.defineProperty(input.element, 'files', { value: Array.from({ length: count }, (_, n) => image(`${n}.png`, size, type)) }); await input.trigger('change')
     expect(w.find('[role=dialog] [role=alert]').text()).toContain('最多保存10张照片')
