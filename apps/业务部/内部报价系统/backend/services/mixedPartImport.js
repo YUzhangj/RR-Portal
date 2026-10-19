@@ -1,7 +1,7 @@
 'use strict';
 const { createHash, randomUUID } = require('node:crypto');
 const { inheritMoldFields, validateConfig, prepareMoldImport, isNonMoldPart, updateEngineeringFields, engineeringCatalog } = require('../../frontend/mixed-molds');
-const {productPartNumber,partProductCodes,productsForPartCode,repairNumberedSelections} = require('../../frontend/mixed-sku');
+const {productPartNumber,partProductCodes,productsForPartCode,validateNumberedTargets,repairNumberedSelections} = require('../../frontend/mixed-sku');
 const canonical = value => /^\d+$/.test(String(value).trim()) ? String(Number(value)).padStart(2, '0') : String(value).trim();
 function productNumbers(name) {
   const text = String(name || '').normalize('NFKC').trim();
@@ -76,6 +76,7 @@ function importParts(config, engineering, molds, { replacePlaceholders = false, 
     for (const id of removed) { delete root.mixed_products?.[id]; delete root.mixed_part_selections?.[id]; }
     next.products = next.products.filter(p => !removed.has(p.id));
   }
+  validateNumberedTargets(next,summary.products.map(group=>group.code));
   for (const group of summary.products) {
     const matches = matchesGroup(next,group.code);
     if (matches.length > 1) throw new Error(`序号 ${group.code} 对应多个现有小产品，请先整理货号`);

@@ -76,17 +76,51 @@ test('正式货号导入：两种顺序、旧关联自动同步、重复导入�
   // A missing official target aborts the whole import, including config and audit.
   eng=data.sections.find(s=>s.dept==='engineering');
   await api('/sections/'+eng.id,'PUT',{payload:legacy,submit:false,base_filled_at:eng.filled_at});data=await read(id);
-  const missing=structuredClone(data.mixed_quote);missing.products[0].code='OTHER-037';
+  const missing=structuredClone(data.mixed_quote);missing.products[0].code='OTHER-999';
   const before=data.sections.map(s=>[s.id,s.payload_json,s.filled_at]);
   const failure=await api('/quotes/'+id+'/mixed','PUT',{config:missing,expected_config:data.mixed_quote,product_import:true},409);
   assert.match(failure.error,/正式货号37未找到/);
   const unchanged=await read(id);
   assert.deepEqual(unchanged.mixed_quote,data.mixed_quote);
   assert.deepEqual(unchanged.sections.map(s=>[s.id,s.payload_json,s.filled_at]),before);
+  // Exercise the real product-import route when a shared part already has one
+  // correct link. The missing link must inherit usage, not a new default of 1.
+  const sharedQuote=await api('/quotes','POST',{quote_no:'SKU-SHARED-PARTIAL',product_name:'共用零件补齐',customer:'TEST',quote_type:'mixed'});
+  let sharedData=await read(sharedQuote.id);
+  await saveConfig(sharedQuote.id,sharedData,{...cfg});sharedData=await read(sharedQuote.id);
+  const sharedPart={...part,id:'shared',name:'共用盖',source_product_code:'BEAUTYM-S3-037/BEAUTYM-S3-038'};
+  const sharedEngineering={mixed_imported_parts:[sharedPart],mixed_part_selections:{sku36:[{part_id:'shared',usage:2}]},mixed_shared:legacy.mixed_shared};
+  const sharedMolding={parts_catalog:{parts:[sharedPart],selections:sharedEngineering.mixed_part_selections}};
+  for(const [dept,payload]of [['engineering',sharedEngineering],['molding',sharedMolding]]){
+    const section=sharedData.sections.find(s=>s.dept===dept);
+    await api('/sections/'+section.id,'PUT',{payload,submit:false,base_filled_at:section.filled_at});sharedData=await read(sharedQuote.id);
+  }
+  const moldingBefore=JSON.parse(sharedData.sections.find(s=>s.dept==='molding').payload_json).parts_catalog.parts;
+  await saveConfig(sharedQuote.id,sharedData,sharedData.mixed_quote);sharedData=await read(sharedQuote.id);
+  const expectedShared={sku36:[{part_id:'shared',usage:2}],sku37:[{part_id:'shared',usage:2}]};
+  assert.deepEqual(selections(sharedData),expectedShared);
+  assert.deepEqual(JSON.parse(sharedData.sections.find(s=>s.dept==='molding').payload_json).parts_catalog,{parts:moldingBefore,selections:expectedShared});
+  await saveConfig(sharedQuote.id,sharedData,sharedData.mixed_quote);sharedData=await read(sharedQuote.id);assert.deepEqual(selections(sharedData),expectedShared);
+  const withThird={...sharedData.mixed_quote,products:[...sharedData.mixed_quote.products,{id:'third',code:'BEAUTYM-S3-039',source_number:'38',name:'第三款',ratio:1}]};
+  await saveConfig(sharedQuote.id,sharedData,withThird);sharedData=await read(sharedQuote.id);
+  const conflicting={...sharedEngineering,mixed_part_selections:{sku36:[{part_id:'shared',usage:2}],third:[{part_id:'shared',usage:3}]}};
+  const sharedEng=sharedData.sections.find(s=>s.dept==='engineering');
+  await api('/sections/'+sharedEng.id,'PUT',{payload:conflicting,submit:false,base_filled_at:sharedEng.filled_at});sharedData=await read(sharedQuote.id);
+  const sharedBefore=sharedData.sections.map(s=>[s.id,s.payload_json,s.filled_at]);
+  const conflict=await api('/quotes/'+sharedQuote.id+'/mixed','PUT',{config:sharedData.mixed_quote,expected_config:sharedData.mixed_quote,product_import:true},409);assert.match(conflict.error,/用量不同/);
+  assert.deepEqual((await read(sharedQuote.id)).sections.map(s=>[s.id,s.payload_json,s.filled_at]),sharedBefore);
+  const ambiguousQuote=await api('/quotes','POST',{quote_no:'SKU-AMBIGUOUS',product_name:'占位冲突',customer:'TEST',quote_type:'mixed'});
+  let ambiguousData=await read(ambiguousQuote.id);
+  await saveConfig(ambiguousQuote.id,ambiguousData,{...cfg,products:[{id:'number_37',code:'37',name:'37',ratio:1},{id:'number_99',code:'99',name:'99',ratio:1}]});ambiguousData=await read(ambiguousQuote.id);
+  const ambiguousEng=ambiguousData.sections.find(s=>s.dept==='engineering'),ambiguousBefore=ambiguousData.sections.map(s=>[s.id,s.payload_json,s.filled_at]);
+  const ambiguousFailure=await api('/quotes/'+ambiguousQuote.id+'/mixed/import-molds','POST',{expected_config:ambiguousData.mixed_quote,base_filled_at:ambiguousEng.filled_at,engineering:JSON.parse(ambiguousEng.payload_json||'{}'),molds:[{mold_no:'M',parts:[{name:'共用盖',source_product_code:'BEAUTYM-S3-037/OTHER-S3-037'}]}]},409);
+  assert.match(ambiguousFailure.error,/占位.*多个/);assert.deepEqual((await read(ambiguousQuote.id)).sections.map(s=>[s.id,s.payload_json,s.filled_at]),ambiguousBefore);
   const {DatabaseSync}=require('node:sqlite');
   const database=new DatabaseSync(path.join(temporary,'test.db'));
   const audit=database.prepare("SELECT detail FROM audit_log WHERE quote_id=? AND action='mixed_sku_import_links'").all(id);
   assert.equal(audit.length,1);
   assert.deepEqual(JSON.parse(JSON.parse(audit[0].detail).sections.find(s=>s.dept==='engineering').payload_json),legacy);
+  assert.equal(database.prepare("SELECT COUNT(*) n FROM audit_log WHERE quote_id=? AND action='mixed_sku_import_links'").get(sharedQuote.id).n,1);
+  assert.equal(database.prepare("SELECT COUNT(*) n FROM audit_log WHERE quote_id=? AND action='mixed_part_import'").get(ambiguousQuote.id).n,0);
   database.close();
 });
