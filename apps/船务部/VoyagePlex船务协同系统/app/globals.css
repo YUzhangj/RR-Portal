@@ -617,3 +617,20 @@ main { min-width: 0; }
 .review-items.editable > div,.review-items.candidate-cargo-table > div { grid-template-columns:none; grid-auto-flow:column; grid-auto-columns:minmax(90px,1fr); }
 .shipment-items.editable.shipping-view .shipment-item-table > div,.shipment-items.editable.shipping-view.huadeng-view .shipment-item-table > div { min-width:1980px; }
 .shipment-items.editable.warehouse-view .shipment-item-table > div,.shipment-items.editable.warehouse-view.huadeng-view .shipment-item-table > div { min-width:2300px; }
+
+/* Import preview: manual warehouse truck allocations. */
+.warehouse-trip-preview > p { color:var(--muted); font-size:13px; line-height:1.6; }
+.warehouse-trip-preview article { margin-top:14px; padding:16px; }
+.warehouse-trip-preview h4 { margin:0 0 12px; }
+.warehouse-trip-table { overflow-x:auto; margin:14px 0; border:1px solid var(--line); border-radius:6px; }
+.warehouse-trip-table table { width:100%; min-width:740px; border-collapse:collapse; font-size:13px; }
+.warehouse-trip-table th,.warehouse-trip-table td { text-align:left; padding:8px; border-bottom:1px solid var(--line); }
+.warehouse-trip-table th { background:#f7f7fa; white-space:nowrap; }
+.warehouse-trip-table input,.warehouse-trip-table select { border:1px solid #dfe1e7; border-radius:4px; padding:6px; color:var(--text); background:white; }
+.warehouse-trip-table button { margin:2px; white-space:nowrap; }
+.warehouse-trip-preview > label { display:flex; align-items:center; gap:8px; margin-top:16px; font-size:13px; }
+
+/* Huadeng shipment options use the existing supplemental-data dialog. */
+.cargo-extra-fields select { width:100%; min-width:0; border:1px solid var(--line); border-radius:6px; padding:9px; background:white; color:var(--text); }
+
+.mail-preview-dialog .form-grid select { min-width:0; max-width:100%; width:100%; height:36px; padding:0 10px; border:1px solid #dfe1e7; border-radius:6px; color:var(--text); background:#fafafa; font:inherit; font-size:14px; }

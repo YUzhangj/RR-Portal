@@ -9,6 +9,8 @@ public sealed class ExportTemplate : ICompanyEntity
     public string Purpose { get; set; } = "Shipping";
     public string Version { get; set; } = "1.0";
     public string Notes { get; set; } = "";
+    public string WeightRule { get; set; } = "Template";
+    public string LayoutKey { get; set; } = "Standard";
     public bool IsEnabled { get; set; } = true;
     public bool IsDefault { get; set; }
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;

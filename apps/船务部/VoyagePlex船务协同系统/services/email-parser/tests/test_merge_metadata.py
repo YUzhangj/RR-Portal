@@ -117,6 +117,11 @@ class HuadengBusiness(unittest.TestCase):
             try:
                 values=m._read_sheet_rows(read['华登分柜明细'])
                 old=parse_huadeng_form(values,[(r.min_row-1,r.max_row,r.min_col-1,r.max_col) for r in full['华登分柜明细'].merged_cells.ranges])
+                for item in old['items']:
+                    item['weight_rule'] = 'Exact'
+                    for key, column in [('gross_weight', 11), ('net_weight', 12)]:
+                        item[key + '_rule'] = 'Exact'
+                        item[key + '_format'] = full['华登分柜明细'].cell(item['source_row'], column).number_format
             finally:full.close();read.close()
             loader=m.load_values_workbook;calls=[]
             def only_streaming(*args,**kwargs):

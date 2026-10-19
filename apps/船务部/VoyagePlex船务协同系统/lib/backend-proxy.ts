@@ -24,7 +24,9 @@ export async function proxyResponse(response: Response) {
   if (disposition) headers.set("content-disposition", disposition);
   const setCookie = response.headers.get("set-cookie");
   if (setCookie) headers.set("set-cookie", setCookie);
-  return new NextResponse(await response.arrayBuffer(), { status: response.status, headers });
+  // HTTP forbids a response body for these statuses, including an empty buffer.
+  const body = [204, 205, 304].includes(response.status) ? null : await response.arrayBuffer();
+  return new NextResponse(body, { status: response.status, headers });
 }
 
 export async function requireRole(request: NextRequest, roles: Array<"admin" | "supervisor" | "shipping" | "warehouse">) {
