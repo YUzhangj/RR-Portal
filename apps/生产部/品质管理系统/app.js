@@ -4466,7 +4466,7 @@ function _renderDefectRows() {
              oninput="_defectRows[${i}].qty=parseInt(this.value)||0;_updateDefectSummary()"/>
       <select style="padding:4px 6px;border:1px solid var(--border);border-radius:4px;
                      background:var(--bg-input);color:var(--text);font-size:12px"
-              onchange="_defectRows[${i}].level=this.value">
+              onchange="_defectRows[${i}].level=this.value;_updateDefectSummary()">
         ${DEFECT_LEVELS.map(l => `<option value="${l}" ${row.level===l?'selected':''}>${l||'—等级—'}</option>`).join('')}
       </select>
       <select style="padding:4px 6px;border:1px solid var(--border);border-radius:4px;
@@ -4833,7 +4833,8 @@ function saveRecord(options = {}) {
     /* 有明细：用明细合计 */
     fail = failFromDefs;
     if (sample != null && fail > sample) {
-      showToast('不良数量合计不能大于抽查数量。', 'error'); return;
+      /* 退货/全检场景：一个问题就可能占 100%，多个问题合计会超过抽查数，改为可确认的警告 */
+      if (!confirm(`不良数量合计 ${fail} 已超过抽查数量 ${sample}（不良率超 100%）。退货/全检场景属正常，确认继续保存？`)) return;
     }
     pass = sample != null ? Math.max(0, sample - fail) : 0;
 
