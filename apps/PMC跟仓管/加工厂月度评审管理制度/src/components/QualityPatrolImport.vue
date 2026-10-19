@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { RecordModel } from 'pocketbase'
 import type { Factory } from '../types/factory'
 import { REGION_LABELS, regionOf, type Region } from '../constants/roles'
@@ -19,12 +19,23 @@ const error = ref('')
 const message = ref('')
 const fileName = ref('')
 const existing = ref(props.records.slice())
+let disposed = false
+onBeforeUnmount(() => { disposed = true })
 const { setDialog, keydown } = usePatrolDialog(closeImport, () => busy.value || reading.value)
-const candidates = computed(() => props.factories.filter(f => regionOf(f) === region.value))
+const candidates = computed(() => props.regions.includes(region.value as Region) ? props.factories.filter(f => regionOf(f) === region.value) : [])
 const rows = computed(() => source.value?.rows || [])
 const locked = computed(() => busy.value || rows.value.some(r => r.saved))
-watch(candidates, () => { if (source.value && !locked.value) matchPatrolFactories(rows.value, candidates.value) })
-const status = (row: typeof rows.value[number]) => patrolImportStatus(row, rows.value, existing.value.map(r => ({ factory: r.factory, check_date: r.check_date })), checkDate.value)
+watch(region, () => { if (source.value && !locked.value) matchPatrolFactories(rows.value, candidates.value) })
+watch([candidates, busy], ([available, importing]) => {
+  if (!source.value || importing) return
+  for (const row of rows.value) {
+    if (!row.saved && row.factory && !available.some(f => f.id === row.factory)) row.factory = ''
+  }
+})
+const status = (row: typeof rows.value[number]) => {
+  if (!row.saved && row.factory && !candidates.value.some(f => f.id === row.factory)) return '请选择匹配的工厂'
+  return patrolImportStatus(row, rows.value, existing.value.map(r => ({ factory: r.factory, check_date: r.check_date })), checkDate.value)
+}
 const ready = computed(() => rows.value.filter(r => status(r) === '可导入'))
 const invalid = computed(() => rows.value.filter(r => !['可导入', '已存在，将跳过', '已导入'].includes(status(r))))
 const conflict = computed(() => source.value?.region && source.value.region !== region.value ? '文件标题厂区与所选厂区不一致，请核对。' : '')
@@ -52,20 +63,25 @@ async function readFile(event: Event) {
   source.value = null; fileName.value = file.name; error.value = ''; message.value = ''; reading.value = true
   try {
     if (!/\.xlsx$/i.test(file.name) || file.size > 50 * 1024 * 1024) throw new Error('请选择不超过50MB的 .xlsx 文件')
-    source.value = parsePatrolWorkbook(await file.arrayBuffer())
+    const bytes = await file.arrayBuffer()
+    if (disposed) return
+    source.value = parsePatrolWorkbook(bytes)
     checkDate.value = source.value.checkDate
     matchPatrolFactories(rows.value, candidates.value)
-  } catch (e) { error.value = (e as Error).message || '文件读取失败，请检查文件格式。' }
-  finally { reading.value = false }
+  } catch (e) { if (!disposed) error.value = (e as Error).message || '文件读取失败，请检查文件格式。' }
+  finally { if (!disposed) reading.value = false }
 }
 async function confirmImport() {
-  if (!canConfirm.value) return
+  if (disposed || !canConfirm.value) return
   busy.value = true; error.value = ''; message.value = ''
   let saved = 0
   try {
     // Recheck immediately before writing; existing records are never overwritten.
-    existing.value = await pb.collection('quality_patrols').getFullList({ sort: '-check_date' })
+    const records = await pb.collection('quality_patrols').getFullList({ sort: '-check_date' })
+    if (disposed) return
+    existing.value = records
     for (const row of rows.value) {
+      if (disposed) return
       if (status(row) !== '可导入') { if (status(row) === '已存在，将跳过') row.saveError = ''; continue }
       row.saveError = ''
       const body = new FormData()
@@ -74,13 +90,14 @@ async function confirmImport() {
       for (const photo of row.photos) body.append('photos', photo)
       try {
         const record = await pb.collection('quality_patrols').create(body)
+        if (disposed) return
         existing.value.push(record); row.saved = true; saved++
-      } catch { row.saveError = '保存失败，可重试；同厂同日已存在的记录不会覆盖。' }
+      } catch { if (disposed) return; row.saveError = '保存失败，可重试；同厂同日已存在的记录不会覆盖。' }
     }
     message.value = `本次成功导入 ${saved} 条；${rows.value.filter(r => status(r) === '已存在，将跳过').length} 条已存在并跳过。剩余 ${pending.value.length} 条未导入，处理后可继续导入。${rows.value.some(r => r.saveError) ? '部分记录失败，请查看行内提示后重试。' : ''}`
     emit('saved', checkDate.value, region.value as Region)
-  } catch { error.value = '无法核对已有记录，未开始导入，请重试。' }
-  finally { busy.value = false }
+  } catch { if (!disposed) error.value = '无法核对已有记录，未开始导入，请重试。' }
+  finally { if (!disposed) busy.value = false }
 }
 </script>
 <template>
