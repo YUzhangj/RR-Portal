@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { getTokenPayload, type RecordModel } from 'pocketbase'
 import AppLayout from '../components/AppLayout.vue'
@@ -10,6 +10,10 @@ import { allowedRegions, canEditQuality, canViewCraft } from '../utils/permissio
 import { REGION_LABELS, regionOf, type Region } from '../constants/roles'
 import { PATROL_FIELDS, PATROL_GRADES, PATROL_GUIDANCE, patrolSummary } from '../utils/qualityPatrol'
 
+const QualityPatrolImport = defineAsyncComponent(() => import('../components/QualityPatrolImport.vue'))
+const QualityPatrolCompare = defineAsyncComponent(() => import('../components/QualityPatrolCompare.vue'))
+const importOpen = ref(false)
+const compareOpen = ref(false)
 const tableFields = PATROL_FIELDS.filter(f => f.key !== 'notes')
 const auth = useAuthStore()
 const factories = useFactoriesStore()
@@ -17,7 +21,8 @@ const route = useRoute()
 const region = ref<Region | ''>((route.query.region as Region) || '')
 const regions = computed(() => auth.role ? allowedRegions(auth.role) : [])
 const editable = computed(() => !!auth.role && canEditQuality(auth.role))
-const availableFactories = computed(() => factories.items.filter(f => regions.value.includes(regionOf(f)) && canViewCraft(f.craft) && (!region.value || regionOf(f) === region.value)))
+const authorizedFactories = computed(() => factories.items.filter(f => regions.value.includes(regionOf(f)) && canViewCraft(f.craft)))
+const availableFactories = computed(() => authorizedFactories.value.filter(f => !region.value || regionOf(f) === region.value))
 const records = ref<RecordModel[]>([])
 const date = ref('')
 const search = ref('')
@@ -102,6 +107,12 @@ watch(() => auth.userId, () => { stopPhotoAccess(); photoError.value = '' })
 watch(region, () => { date.value = dates.value[0] || '' })
 onBeforeUnmount(() => { disposed = true; stopPhotoAccess() })
 
+async function onImported(checkDate: string, importedRegion: Region) {
+  region.value = importedRegion
+  await nextTick()
+  date.value = checkDate
+  await load()
+}
 async function load() {
   loading.value = true
   error.value = ''
@@ -151,15 +162,6 @@ function selectFactory() {
   const f = factories.items.find(f => f.id === draft.factory)
   draft.staff = f?.staff_count ?? ''
   draft.area = f?.workshop_area ?? ''
-  selectPrevious()
-}
-function selectPrevious() {
-  if (editingId.value) return
-  const previous = records.value.find(r => r.factory === draft.factory && r.check_date.slice(0, 10) < draft.check_date)
-  for (const [dest, source] of [['previous_date', 'check_date'], ['previous_grade', 'grade'], ['previous_evaluation', 'evaluation'], ['previous_correction', 'correction'], ['previous_type', 'production_type']]) {
-    if (dest && source) draft[dest] = previous?.[source] || ''
-  }
-  draft.previous_date = draft.previous_date.slice(0, 10)
 }
 function choosePhotos(event: Event) {
   const selected = Array.from((event.target as HTMLInputElement).files || [])
@@ -179,7 +181,6 @@ async function save() {
   if (!editable.value || saving.value) return
   formError.value = ''
   if (!draft.factory || !draft.check_date || !availableFactories.value.some(f => f.id === draft.factory)) { formError.value = '请选择加工厂和检查日期。'; return }
-  if (draft.previous_date && draft.previous_date >= draft.check_date) { formError.value = '上次评级日期必须早于本次检查日期。'; return }
   if (records.value.some(r => r.id !== editingId.value && r.factory === draft.factory && r.check_date.slice(0, 10) === draft.check_date)) { formError.value = '该工厂在此日期已有巡查记录，请编辑已有记录。'; return }
   if (draft.below_standard && draft.grade !== 'A') { formError.value = '基本条件未达标的黄色标记仅适用于A级工厂。'; return }
   if (!validPhotos(photos.value)) { formError.value = '请检查照片数量及大小，本次新增照片合计不能超过30MB。'; return }
@@ -213,7 +214,7 @@ async function remove(r: RecordModel) {
 <template>
   <AppLayout>
     <div class="page patrol-page">
-      <div class="toolbar"><div><RouterLink to="/quality">← 品质管理</RouterLink><h2>巡查现场</h2></div><button v-if="editable" ref="addButton" class="primary" :disabled="loading || saving" @click="openForm()">新增巡查</button></div>
+      <div class="toolbar"><div><RouterLink to="/quality">← 品质管理</RouterLink><h2>巡查现场</h2></div><div class="actions"><button :disabled="loading" @click="compareOpen = true">多次巡查对比</button><button v-if="editable" :disabled="loading || saving" @click="importOpen = true">导入 Excel</button><button v-if="editable" ref="addButton" class="primary" :disabled="loading || saving" @click="openForm()">新增巡查</button></div></div>
       <div class="filters">
         <label>厂区<select v-model="region"><option value="">全部授权厂区</option><option v-for="r in regions" :key="r" :value="r">{{ REGION_LABELS[r] }}</option></select></label>
         <label>检查日期<select v-model="date"><option value="">全部日期</option><option v-for="d in dates" :key="d">{{ d }}</option></select></label>
@@ -231,7 +232,7 @@ async function remove(r: RecordModel) {
             <tbody>
               <tr v-for="(r, i) in rows" :key="r.id">
                 <td>{{ i + 1 }}</td><td class="factory-cell" :class="{ visitor: r.visitor_ready }"><strong>{{ factoryName(r.factory) }}</strong><small>{{ r.check_date.slice(0, 10) }}</small></td>
-                <td v-for="f in tableFields" :key="f.key" :class="{ narrative: f.type === 'text', 'grade-cell': f.type === 'grade', warning: f.key === 'staff' && r.below_standard, changed: f.key === 'grade' && r.previous_grade && r.grade !== r.previous_grade }">{{ display(r, f) }}</td>
+                <td v-for="f in tableFields" :key="f.key" :class="{ narrative: f.type === 'text', 'grade-cell': f.type === 'grade', warning: f.key === 'staff' && r.below_standard }">{{ display(r, f) }}</td>
                 <td class="photo-cell"><template v-if="fileToken"><a v-for="name in r.photos || []" :key="name" :href="photoUrl(r, name)" target="_blank" rel="noopener noreferrer"><img :src="photoUrl(r, name)" alt="现场照片" loading="lazy" referrerpolicy="no-referrer" @error="photoFailed" /></a></template><span v-if="r.photos?.length && !fileToken">照片暂不可用</span><span v-if="!r.photos?.length">—</span></td><td class="narrative">{{ r.notes || '—' }}</td>
                 <td v-if="editable"><div class="actions"><button :disabled="saving" @click="openForm(r)">编辑</button><button :disabled="saving" @click="remove(r)">删除</button></div></td>
               </tr>
@@ -245,9 +246,11 @@ async function remove(r: RecordModel) {
         </section>
         <p class="guidance">等级划分执行方式：{{ PATROL_GUIDANCE }}</p>
       </template>
+      <QualityPatrolImport v-if="importOpen && editable" :factories="authorizedFactories" :records="records" :regions="regions" :initial-region="region" @close="importOpen = false" @saved="onImported" />
+      <QualityPatrolCompare v-if="compareOpen" :records="scopedRecords" :factories="availableFactories" :photo-url="photoUrl" :photo-ready="!!fileToken" :photo-error="photoError" @photo-failed="photoFailed" @refresh-photos="refreshPhotoAccess" @close="compareOpen = false" />
       <div v-if="editing" class="patrol-overlay"><section ref="dialog" role="dialog" aria-modal="true" aria-labelledby="patrol-form-title" tabindex="-1" class="patrol-dialog" @keydown="dialogKeydown"><form @submit.prevent="save"><h3 id="patrol-form-title">{{ editingId ? '编辑' : '新增' }}巡查记录</h3><div class="form-grid">
         <label>加工厂<select v-model="draft.factory" required @change="selectFactory"><option value="">请选择加工厂</option><option v-for="f in availableFactories" :key="f.id" :value="f.id">{{ f.name }}</option></select></label>
-        <label>检查日期<input v-model="draft.check_date" type="date" required @change="selectPrevious" /></label>
+        <label>检查日期<input v-model="draft.check_date" type="date" required /></label>
         <label v-for="f in PATROL_FIELDS" :key="f.key" :class="{ wide: f.type === 'text' }">{{ f.label }}<textarea v-if="f.type === 'text'" v-model="draft[f.key]" rows="3" maxlength="10000" /><select v-else-if="f.type === 'grade'" v-model="draft[f.key]"><option value="">未评级</option><option v-for="g in PATROL_GRADES" :key="g" :value="g">{{ g }}</option></select><input v-else v-model="draft[f.key]" :type="f.type" :min="f.type === 'number' ? 0 : undefined" :step="f.key === 'area' ? 'any' : 1" /></label>
         <label class="check"><input v-model="draft.visitor_ready" type="checkbox" />可供客户参观（厂名绿色）</label><label class="check"><input v-model="draft.below_standard" type="checkbox" />A级但基本条件未达标（人数黄色）</label>
         <label class="wide">现场照片（最多10张，每张≤10MB，本次新增合计≤30MB）<input type="file" accept="image/jpeg,image/png,image/webp" multiple @change="choosePhotos" /><span>{{ photos.length }} 张待上传</span></label>
@@ -269,7 +272,7 @@ button { min-height: 44px; min-width: 44px; padding: 8px 14px; border: 1px solid
 .sheet-scroll { overflow: auto; max-height: 65vh; background: white; border: 1px solid #c8ccd5; }
 table { border-collapse: separate; border-spacing: 0; font-size: 14px; }
 th, td { padding: 12px; border-right: 1px solid #bfc4cc; border-bottom: 1px solid #bfc4cc; text-align: center; white-space: pre-wrap; }
-.patrol-table { min-width: 2900px; width: 100%; }
+.patrol-table { min-width: 2100px; width: 100%; }
 .patrol-table thead { position: sticky; top: 0; z-index: 2; }
 th { background: #f2f2f2; color: #202635; }
 .sheet-title { font-size: 20px; padding: 18px; background: #fff; }
