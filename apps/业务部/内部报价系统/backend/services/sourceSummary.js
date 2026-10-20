@@ -120,6 +120,8 @@ function unifiedFromSource(native,columns){
 function sourceQuantity(quote,sections){
   const legacy=JSON.parse(sections.find(s=>s.dept==='sales')?.payload_json||'{}').legacy_import;
   if(!legacy)return null;
+  if(Object.hasOwn(legacy,'source_order_quantity'))return num(legacy.source_order_quantity)
+    ?[{customer:quote.customer,sku:quote.quote_no,qty:legacy.source_order_quantity,source:`${legacy.source_file} / 总表!D${legacy.source_summary_row}（${legacy.source_quantity_label||'接单数量'}）`}] : [];
   const source=sources().find(s=>s.fingerprint===legacy.source_fingerprint);
   const row=source&&matchRow(source,quote,legacy);
   const cols=source?.columns.filter(c=>/接单.*数量|接单数/.test(c.label))||[];

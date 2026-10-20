@@ -28,11 +28,12 @@ test('944及945叠加：纸箱、部分含税车缝和马达胶袋在页面及�
 
 test('真实部门明细的马达从五金分出、胶袋归类，杂项只计采购不计13%退税',()=>{
  const sections=Object.entries({
-  sales:{header:{fx_rmb_hkd:1,fx_hkd_usd:7.8}},
+  sales:{header:{fx_rmb_hkd:1,fx_hkd_usd:7.8},shipping:{scenarios:[]}},
   engineering:{hardware:[{name:'马达',qty:1,unit_price_rmb:9},{name:'五金',qty:1,unit_price_rmb:2}],packaging_materials:[{name:'PE bag',qty:1,unit_price_rmb:10}],indo_pct:10}
  }).map(([dept,payload])=>({dept,payload_json:JSON.stringify(payload)}));
  const row=buildQuoteSummary({qty:10,factory_code:'qingxi'},sections),before=row.components_before_tax;
- near(before.motor,9);near(before.hardware,2);near(before.glue_bag,10);near(before.misc,2.1);
- near(row.summary_values.tax_13_cost,21);near(row.summary_values.rmb_purchase_cost,23.1);
- near(row.summary_values.cost_with_labor,23.1);near(row.summary_values.rebate_reduction,2.415);
+ near(before.motor,9);near(before.hardware,2);near(before.glue_bag,10);const surcharge = require('../backend/services/quoteCostSummary').calculateSingleQuoteCosts({qty:10,factory_code:'qingxi'},sections).detailPricing.surtaxHkd;
+ near(before.misc,2.1+surcharge);
+ near(row.summary_values.tax_13_cost,21);near(row.summary_values.rmb_purchase_cost,23.1+surcharge);
+ near(row.summary_values.cost_with_labor,23.1+surcharge);near(row.summary_values.rebate_reduction,2.415);
 });

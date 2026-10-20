@@ -1,3 +1,4 @@
+const { lockQuote } = require('../services/quoteFreeze');
 const express = require('express');
 const db = require('../db');
 const { quoteAccess } = require('../middleware/auth');
@@ -30,6 +31,7 @@ router.put('/:id/mixed', async (req, res) => {
   } catch (e) { return res.status(400).json({ error: e.message }); }
   try {
     await db.transaction(async () => {
+      await lockQuote(db, id);
       const locked = await db.prepare(`SELECT 1 FROM quote_customer_confirmations WHERE quote_id = ? AND status = 'confirmed'
         UNION SELECT 1 FROM quote_verifications WHERE quote_id = ? LIMIT 1`).get(id, id);
       if (locked) throw new Error('客价已确认，混装配置已锁定');
@@ -90,6 +92,7 @@ router.post('/:id/mixed/import-molds', async (req, res) => {
   const id = Number(req.params.id);
   try {
     const result = await db.transaction(async () => {
+      await lockQuote(db, id);
       const locked = await db.prepare(`SELECT 1 FROM quote_customer_confirmations WHERE quote_id = ? AND status = 'confirmed'
         UNION SELECT 1 FROM quote_verifications WHERE quote_id = ? LIMIT 1`).get(id,id);
       if (locked) throw new Error('客价已确认，混装配置已锁定');

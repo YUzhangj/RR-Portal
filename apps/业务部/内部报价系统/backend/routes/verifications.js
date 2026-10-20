@@ -2,10 +2,14 @@ const {resolveWorkshop, workshopName} = require('../services/verificationWorksho
 const {payloadRevision,validRevision,assertRevision,saveMetadataSql} = require('../services/verificationMetadata');
 const express = require('express');
 const db = require('../db');
-const { requireAuth, quoteAccess } = require('../middleware/auth');
+const { requireAuth, quoteAccess, canEditDepartment, hasMenuPermission } = require('../middleware/auth');
 const { expandEngineeringMolds } = require('../services/engineeringMolds');
 const { sectionRevision, assertSectionRevision, saveVerificationSection, nextSectionTime, withVerificationVersion } = require('../services/verificationSectionSave');
 
+const {DEFAULT_COSTING_BASIS,normalizeCostingBasis,applyCostingBasisPayload}=require('../services/costingBasis');
+const {upgradeLegacySectionsForCalculation}=require('../services/legacyFormula');
+const {prepareWorkbookChanges,prepareNativeSectionPayload}=require('../services/excelWorkbookEdit');
+const {reviewState,prepareWorkbookReview}=require('../services/workbookReview');
 const router = express.Router();
 router.use(requireAuth);
 
@@ -22,6 +26,15 @@ const canOperateDepartment = (user, department) => department === user.dept
   || ['sales', 'engineering'].includes(user.dept) || isAdmin(user);
 const canReviewDepartment = (user, department) => ['supervisor', 'admin'].includes(user.role)
   && canOperateDepartment(user, department);
+const canReviewWorkbookDepartment = (user, department) => canReviewDepartment(user, department)
+  && hasMenuPermission(user, require('../permissions/menu_catalog').DEPT_TO_MENU[department], 'review');
+
+async function assertNativeReviewPermission(user, versionId, dept) {
+  const sales = await db.prepare("SELECT payload_json FROM quote_verification_sections WHERE version_id=? AND dept='sales'").get(versionId);
+  if (parseJson(sales?.payload_json, {}).legacy_import?.excel_model && !canReviewWorkbookDepartment(user, dept)) {
+    throw Object.assign(new Error('没有该部门原表核价的审核权限'), { status: 403 });
+  }
+}
 
 async function loadConfirmedQuote(user, quoteId) {
   const access = await quoteAccess(user, quoteId);
@@ -32,7 +45,17 @@ async function loadConfirmedQuote(user, quoteId) {
   return quote ? { quote } : { error: 409 };
 }
 
-async function createVersion(quoteId, source, user, versionNo, label) {
+async function loadCostingBasis(factoryCode) {
+  const row = await db.prepare(`SELECT data_json FROM factory_ref_tables
+    WHERE factory_code=? AND key='costing_basis'`).get(factoryCode);
+  try {
+    return normalizeCostingBasis(row?.data_json ? JSON.parse(row.data_json) : DEFAULT_COSTING_BASIS);
+  } catch {
+    return normalizeCostingBasis(DEFAULT_COSTING_BASIS);
+  }
+}
+
+async function createVersion(quoteId, source, user, versionNo, label, costingBasis = null) {
   const info = await db.prepare(`INSERT INTO quote_verification_versions
     (quote_id, version_no, label, parent_version_id, source_type, status, created_by)
     VALUES (?, ?, ?, ?, ?, 'drafting', ?) RETURNING id`)
@@ -40,8 +63,23 @@ async function createVersion(quoteId, source, user, versionNo, label) {
   const versionId = Number(info.id);
   const insertSection = db.prepare(`INSERT INTO quote_verification_sections
     (version_id, dept, payload_json, status) VALUES (?, ?, ?, ?)`);
-  for (const section of source.sections) {
-    await insertSection.run(versionId, section.dept, section.payload_json || '{}', source.sectionStatus || 'empty');
+  let preparedSections = source.sections.map(section => ({
+    ...section,
+    payload: parseJson(section.payload_json || '{}', {}),
+  }));
+  if (costingBasis) {
+    // Establish the new version's starting basis before reconciling imported
+    // Excel amounts. Otherwise the basis update itself makes a fresh copy
+    // disagree with the source before anyone has edited it.
+    preparedSections = upgradeLegacySectionsForCalculation(preparedSections
+      .map(section => ({
+        ...section,
+        payload: applyCostingBasisPayload(section.dept, section.payload, costingBasis).payload,
+      })), costingBasis);
+  }
+  for (const section of preparedSections) {
+    const payload = section.payload;
+    await insertSection.run(versionId, section.dept, JSON.stringify(payload), source.sectionStatus || 'empty');
   }
   return versionId;
 }
@@ -87,7 +125,7 @@ async function ensureCaseAndFirstVersion(quote, user) {
         type: 'quote',
         sections: sourceSections,
         sectionStatus: legacyCompleted ? 'approved' : 'empty',
-      }, user, 1, 'V1');
+      }, user, 1, 'V1', legacyCompleted ? null : await loadCostingBasis(quote.factory_code));
       if (legacyCompleted) {
         await db.prepare(`UPDATE quote_verification_versions SET status='completed', completed_by=?,
           completed_at=datetime('now'), updated_at=datetime('now') WHERE id=?`)
@@ -249,7 +287,7 @@ router.post('/:quoteId/versions', async (req, res) => {
   const versionNo = Number(latest?.version_no || 0) + 1;
   const label = `V${versionNo}`;
   const tx = db.transaction(async () => {
-    const versionId = await createVersion(quoteId, source, req.user, versionNo, label);
+    const versionId = await createVersion(quoteId, source, req.user, versionNo, label, await loadCostingBasis(loaded.quote.factory_code));
     await db.prepare(`UPDATE quote_verifications SET status='in_progress', updated_by=?, updated_at=datetime('now') WHERE quote_id=?`)
       .run(actorName(req.user), quoteId);
     await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
@@ -306,7 +344,9 @@ router.get('/:quoteId', async (req, res) => {
   const baseline = parseJson(verification.baseline_json, {});
   const engineering = sections.find(section => section.dept === 'engineering');
   const engineeringPayload = parseJson(engineering?.payload_json, {});
+  const workbookReview=reviewState(selectedVersion,sections,section=>canReviewWorkbookDepartment(req.user,section.dept));
   res.json({
+    can_review_workbook:workbookReview.allowed,workbook_review_ready:workbookReview.ready,workbook_review_token:workbookReview.allowed?workbookReview.token:null,
     quote: loaded.quote,
     baseline,
     versions,
@@ -325,6 +365,43 @@ router.get('/:quoteId', async (req, res) => {
     can_manage_versions: canManageVersions(req.user),
     can_complete: canManageVersions(req.user) && selectedVersion.status === 'ready',
   });
+});
+
+router.put('/versions/:versionId/workbook', async (req, res) => {
+  const versionId = Number(req.params.versionId);
+  const version = await db.prepare('SELECT * FROM quote_verification_versions WHERE id=?').get(versionId);
+  if (!version) return res.status(404).json({ error: '核价版本不存在' });
+  const access = await quoteAccess(req.user, version.quote_id);
+  if (access.status !== 200) return res.status(access.status).json({ error: '无权操作该核价任务' });
+  try {
+    const status = await withVerificationVersion(db,versionId,async lockedVersion => {
+      const current = await db.prepare('SELECT * FROM quote_verification_versions WHERE id=?').get(versionId);
+      if (!current || ['completed', 'cancelled'].includes(current.status)) throw Object.assign(new Error('该核价版本已锁定'), { status: 409 });
+      if(['completed','cancelled'].includes(lockedVersion.status))throw Object.assign(new Error('该核价版本已锁定'),{status:409});
+      const sections = await db.prepare('SELECT * FROM quote_verification_sections WHERE version_id=?').all(versionId);
+      const updates = prepareWorkbookChanges(sections, req.body?.changes,
+        section => section.status !== 'approved' && canOperateDepartment(req.user, section.dept)
+          && canEditDepartment(req.user, section.dept));
+      for (const update of updates) {
+        const source = sections.find(section => Number(section.id) === Number(update.id));
+        assertSectionRevision(source, req.body?.base_revisions?.[update.id]);
+      }
+      for (const update of updates) {
+        const source = sections.find(section => Number(section.id) === Number(update.id));
+        await saveVerificationSection(db, source, update.payload, req.body.submit, actorName(req.user));
+      }
+      const next = await recalculateVersionStatus(versionId);
+      await db.prepare(`UPDATE quote_verifications SET status='in_progress', updated_by=?, updated_at=datetime('now') WHERE quote_id=?`)
+        .run(actorName(req.user), version.quote_id);
+      await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail) VALUES (?, ?, ?, ?, ?)`)
+        .run(version.quote_id, req.user.dept, actorName(req.user), req.body.submit ? 'verification_submit' : 'verification_workbook_save', `${version.label} 整表${req.body.submit ? '提交审核' : '保存'}`);
+      return next;
+    });
+    res.json({ ok: true, status });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    throw error;
+  }
 });
 
 router.put('/versions/:versionId/sections/:sectionId', async (req, res) => {
@@ -348,7 +425,11 @@ router.put('/versions/:versionId/sections/:sectionId', async (req, res) => {
       if (!current) throw Object.assign(new Error('核价部门明细不存在'), { status: 404 });
       assertSectionRevision(current, req.body?.base_revision);
       if (current.status === 'approved') throw Object.assign(new Error('该部门核价已经审核通过，不能修改'), { status: 409 });
-      await saveVerificationSection(db, current, payload, submit, actorName(req.user));
+      const allSections = await db.prepare('SELECT * FROM quote_verification_sections WHERE version_id=?').all(versionId);
+      const preparedPayload = prepareNativeSectionPayload(allSections, current.id, payload,
+        candidate => Number(candidate.id) === Number(current.id) && candidate.status !== 'approved'
+          && canOperateDepartment(req.user, candidate.dept) && canEditDepartment(req.user, candidate.dept));
+      await saveVerificationSection(db, current, preparedPayload, submit, actorName(req.user));
       const status = await recalculateVersionStatus(versionId);
       await db.prepare(`UPDATE quote_verifications SET status='in_progress', updated_by=?, updated_at=datetime('now') WHERE quote_id=?`)
         .run(actorName(req.user), section.quote_id);
@@ -360,6 +441,37 @@ router.put('/versions/:versionId/sections/:sectionId', async (req, res) => {
       const saved = await db.prepare('SELECT * FROM quote_verification_sections WHERE id=? AND version_id=?').get(sectionId, versionId);
       return { ok: true, status, filled_at: saved.filled_at, filled_by: saved.filled_by,
         section_status: saved.status, revision: sectionRevision(saved) };
+    });
+    res.json(result);
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    throw error;
+  }
+});
+
+router.post('/versions/:versionId/workbook/review', async (req, res) => {
+  const versionId = Number(req.params.versionId);
+  const version = await db.prepare('SELECT * FROM quote_verification_versions WHERE id=?').get(versionId);
+  if (!version) return res.status(404).json({ error: '核价版本不存在' });
+  const access = await quoteAccess(req.user, version.quote_id);
+  if (access.status !== 200) return res.status(access.status).json({ error: '无权审核该核价任务' });
+  try {
+    const result = await withVerificationVersion(db,versionId,async lockedVersion => {
+      const current = await db.prepare('SELECT * FROM quote_verification_versions WHERE id=?').get(versionId);
+      if (!current) throw Object.assign(new Error('核价版本不存在'), {status:404});
+      const sections = await db.prepare('SELECT * FROM quote_verification_sections WHERE version_id=?').all(versionId);
+      const pending = prepareWorkbookReview(current, sections,
+        section => canReviewWorkbookDepartment(req.user, section.dept), req.body?.token);
+      for (const section of pending) {
+        await db.prepare(`UPDATE quote_verification_sections SET status='approved', reviewed_by=?,
+          reviewed_at=datetime('now'), review_comment=? WHERE id=?`)
+          .run(actorName(req.user), '导入核价整表一键审核', section.id);
+      }
+      const status = await recalculateVersionStatus(versionId);
+      if (pending.length) await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
+        VALUES (?, ?, ?, 'verification_workbook_approve', ?)`)
+        .run(current.quote_id, req.user.dept, actorName(req.user), `${current.label} 整表一键审核通过：${pending.map(s => s.dept).join('、')}`);
+      return {ok:true, status, approved_count:pending.length};
     });
     res.json(result);
   } catch (error) {
@@ -384,6 +496,7 @@ router.post('/versions/:versionId/sections/:sectionId/review', async (req, res) 
       if (['completed', 'cancelled'].includes(version.status)) throw Object.assign(new Error('该核价版本已锁定'), { status: 409 });
       const current = await db.prepare('SELECT * FROM quote_verification_sections WHERE id=? AND version_id=?').get(sectionId, versionId);
       if (!current) throw Object.assign(new Error('核价部门明细不存在'), { status: 404 });
+      await assertNativeReviewPermission(req.user, versionId, current.dept);
       assertSectionRevision(current, sectionRevision(section));
       if (action === 'approve' && current.status !== 'filled') throw Object.assign(new Error('该部门尚未提交核价审核'), { status: 409 });
       await db.prepare(`UPDATE quote_verification_sections SET status=?, reviewed_by=?,
@@ -417,6 +530,7 @@ router.post('/versions/:versionId/sections/:sectionId/reopen', async (req, res) 
       if (['completed', 'cancelled'].includes(version.status)) throw Object.assign(new Error('该核价版本已锁定'), { status: 409 });
       const current = await db.prepare('SELECT * FROM quote_verification_sections WHERE id=? AND version_id=?').get(sectionId, versionId);
       if (!current) throw Object.assign(new Error('核价部门明细不存在'), { status: 404 });
+      await assertNativeReviewPermission(req.user, versionId, current.dept);
       assertSectionRevision(current, sectionRevision(section));
       if (current.status !== 'approved') throw Object.assign(new Error('只能解除已经审核通过的部门核价'), { status: 409 });
       await db.prepare(`UPDATE quote_verification_sections SET status='filled', review_comment=?, reviewed_at=? WHERE id=?`)

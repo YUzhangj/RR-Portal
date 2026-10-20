@@ -7,6 +7,7 @@ const template = require('./verificationSummaryTemplate.json');
 const { buildQuoteSummary } = require('./quoteSummary');
 const { resolveWorkshop } = require('./verificationWorkshops');
 const columns = template.columns;
+const verificationCustomers=require('../../frontend/verification-customers');
 const normalize = value => String(value ?? '').replace(/\s/g, '').replace(/（/g, '(').replace(/）/g, ')').toUpperCase();
 const label = value => normalize(value).replace(/[()]/g, '');
 const customerKey = value => ({ 'ZANZOON(嘉苏)': 'ZANZOON' }[normalize(value)] || normalize(value));
@@ -287,6 +288,7 @@ function buildVerificationRow(quote, version, sections, quantities) {
   calc('DQ','(H1+L1+P1)*D1',['H','L','P','D'],(a,b,c,q)=>(a+b+c)*q);
   const ratios={K:'J',O:'N',S:'R',X:'W',AE:'AD',AI:'AH',AM:'AL',AQ:'AP',AV:'AU',AZ:'AY',BD:'BC',BH:'BG',BL:'BK',BP:'BO',BT:'BS',BX:'BW',CB:'CA',CG:'CF',DL:'DK',DN:'DM',DP:'DO',DR:'DQ',DT:'DS',DW:'DV',DY:'DX',EA:'DZ',EC:'EB',EE:'ED'};
   for(const [key,amount] of Object.entries(ratios))divide(key,amount,'DI');
+  values.A=verificationCustomers.display(quote.customer);
   const missing=columns.slice(4).filter(c=>values[c.key]===null).map(c=>c.label);
   if(missing.length)issues.push(`${missing.length}个栏目缺少可确认的来源或计算参数`);
   return {id:quote.id,version_id:version.id,version:version.label||`V${version.version_no}`,status:version.status,status_label:statusLabels[version.status]||version.status,
@@ -306,9 +308,8 @@ function customerTotals(rows) {
 }
 
 function buildVerificationWorkbook(rows) {
-  if(!rows.some(r=>r.native))return require('./verificationWorkshopExport').buildWorkbook(rows,columns);
-  const ExcelJS=require('exceljs');
-  const wb=new ExcelJS.Workbook();wb.creator='内部报价系统';wb.calcProperties.fullCalcOnLoad=true;
+  const wb=require('./verificationWorkshopExport').buildWorkbook(rows,columns);
+  if(!rows.some(r=>r.native))return wb;
   const blue='FFD9E2F3',border={style:'thin',color:{argb:'FF8091A5'}};
   function style(ws,count) {
     ws.views=[{state:'frozen',xSplit:3,ySplit:3,showGridLines:false}];
@@ -321,50 +322,6 @@ function buildVerificationWorkbook(rows) {
       if(n===3)cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:blue}};
     }));
     ws.pageSetup={orientation:'landscape',paperSize:9,fitToPage:true,fitToWidth:0,fitToHeight:0,printTitlesRow:'1:3'};
-  }
-  const overview=wb.addWorksheet('各客核价汇总');
-  overview.addRow(['各客核价汇总']);overview.mergeCells('A1:M1');
-  overview.addRow(['按各货号当前核价明细及公式生成；接单数量沿用已匹配的原文件数量，统计期间可能不同。缺项留空，不计成零。']);overview.mergeCells('A2:M2');
-  overview.addRow(['客名','核价款数','已匹配数量款数','接单数量','总生产金额','总生产成本','税前毛利','税前利润','减税金额','税后毛利','税后利润','税后毛利率','税后利润率']);
-  customerTotals(rows).forEach((g,index)=>{
-    const v=g.totals,n=index+4;
-    overview.addRow([g.customer,g.count,g.quantity_count,v.D,v.DI,v.DJ,v.DK,v.DM,v.DU,v.DX,v.DZ,
-      numeric(v.DI)&&v.DI!==0&&numeric(v.DX)?{formula:`J${n}/E${n}`,result:v.DX/v.DI}:null,
-      numeric(v.DI)&&v.DI!==0&&numeric(v.DZ)?{formula:`K${n}/E${n}`,result:v.DZ/v.DI}:null]);
-  });
-  for(let c=1;c<=13;c++){overview.getColumn(c).width=c===1?24:18;overview.getColumn(c).numFmt=c<=4?'#,##0':c>=12?'0.00%':'#,##0.00';}
-  style(overview,13);
-  const used=new Set(['各客核价汇总','不分车间核价明细']);
-  function detail(name,data) {
-    const ws=wb.addWorksheet(name);
-    ws.addRow([name]);ws.mergeCells('A1:L1');
-    ws.addRow(['来源：系统当前核价明细及公式；按栏目名称对应生成。空白表示缺少可确认来源，详见生成提示。']);ws.mergeCells('A2:L2');
-    ws.addRow([...columns.map(c=>c.label),'核价版本','审核状态','生成提示','数量来源']);
-    data.forEach((row,i)=>{
-      const n=i+4;
-      ws.addRow([...columns.map(c=>row.formulas[c.key]&&numeric(row.values[c.key])
-        ?{formula:row.formulas[c.key].replace(/([A-Z]+)1\b/g,`$1${n}`),result:row.values[c.key]}:row.values[c.key]),
-        row.version,row.status_label,row.issues.join('；'),row.sources.D||'未匹配']);
-      ws.getRow(n).height=30;
-    });
-    columns.forEach((c,i)=>{const col=ws.getColumn(i+1);col.width=i===0?22:i===1?28:i===2?32:14;col.hidden=c.hidden;col.numFmt=i<3?'@':i===3?'#,##0':c.percent?'0.00%':'#,##0.00';});
-    for(let c=136;c<=139;c++)ws.getColumn(c).width=c===138?65:c===139?55:14;
-    style(ws,139);
-  }
-  detail('不分车间核价明细',rows);
-  for(const customer of [...new Set(rows.map(r=>r.values.A))]){
-    const base=String(customer||'未填写客户').replace(/[\\/*?:\[\]]/g,'_').slice(0,27);let name=base,i=1;
-    while(used.has(name.toLowerCase())||used.has(name))name=`${base}_${i++}`;
-    used.add(name.toLowerCase());detail(name,rows.filter(r=>r.values.A===customer));
-  }
-  // Default export is the generated report, without original-summary audits.
-  if(!rows.some(r=>r.native)) {
-    const notes=wb.addWorksheet('生成提示');
-    notes.addRow(['客户','货号','提示']);
-    for(const r of rows)for(const issue of r.issues)notes.addRow([r.values.A,r.values.B,issue]);
-    notes.getColumn(1).width=24;notes.getColumn(2).width=28;notes.getColumn(3).width=100;
-    notes.getRow(1).font={bold:true};
-    return wb;
   }
   const audit=wb.addWorksheet('原总表核对');
   audit.addRow(['客户','货号','文件','原单元格','栏目','原表值','系统重算值','差额','核对结果','原公式（文本，供追溯）']);

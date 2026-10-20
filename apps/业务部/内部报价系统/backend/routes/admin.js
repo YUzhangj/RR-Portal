@@ -6,10 +6,59 @@ const { requirePerm } = require('../middleware/perms');
 const { MENUS } = require('../permissions/menu_catalog');
 const { templateFor } = require('../permissions/role_templates');
 const { changeUserFactories, changeUserRole } = require('../services/userFactory');
+const {
+  DEFAULT_COSTING_BASIS,
+  normalizeCostingBasis,
+  syncOpenQuotesToCostingBasis,
+} = require('../services/costingBasis');
 
 const router = express.Router();
 router.use(requireAuth);
 router.use(requirePerm('账号管理', 'admin'));
+
+router.get('/costing-basis', async (req, res) => {
+  const row = await db.prepare(`SELECT data_json, updated_at, updated_by
+    FROM factory_ref_tables WHERE factory_code = ? AND key = 'costing_basis'`)
+    .get(req.user.active_factory_code);
+  let data = DEFAULT_COSTING_BASIS;
+  try { if (row?.data_json) data = normalizeCostingBasis(JSON.parse(row.data_json)); } catch {}
+  res.json({ data, updated_at: row?.updated_at || null, updated_by: row?.updated_by || null });
+});
+
+router.put('/costing-basis', async (req, res) => {
+  const basis = normalizeCostingBasis(req.body?.data);
+  if (!basis.materials.length || !basis.machines.length || !basis.cartons.length) {
+    return res.status(400).json({ error: '料价、机型价和纸箱基准均至少保留一项' });
+  }
+  if (basis.exchange.rmb_hkd <= 0 || basis.exchange.hkd_usd <= 0) {
+    return res.status(400).json({ error: '汇率必须大于 0' });
+  }
+  const actor = `[管理员] ${req.user.name}`;
+  const save = db.transaction(async () => {
+    for (const [key, data] of [
+      ['costing_basis', basis],
+      ['material_prices', basis.materials],
+      ['machine_prices', basis.machines],
+    ]) {
+      await db.prepare(`INSERT INTO factory_ref_tables (factory_code, key, data_json, updated_at, updated_by)
+        VALUES (?, ?, ?, datetime('now'), ?)
+        ON CONFLICT(factory_code,key) DO UPDATE SET
+          data_json = excluded.data_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by`)
+        .run(req.user.active_factory_code, key, JSON.stringify(data), actor);
+    }
+    const stats = await syncOpenQuotesToCostingBasis(db, {
+      factoryCode: req.user.active_factory_code,
+      basis,
+      actor,
+    });
+    await db.prepare(`INSERT INTO audit_log (actor, action, detail)
+      VALUES (?, 'publish_global_costing_basis', ?)`)
+      .run(actor, `${req.user.active_factory_code}; ${basis.version}; 报价同步 ${stats.synced}; 核价同步 ${stats.verification_synced}`);
+    return stats;
+  });
+  const stats = await save();
+  res.json({ ok: true, data: basis, ...stats });
+});
 
 // 工具：把角色模板写入 user_perms（覆盖）
 async function applyTemplate(userId, dept, role) {

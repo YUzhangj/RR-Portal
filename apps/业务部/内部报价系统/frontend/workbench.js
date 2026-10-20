@@ -404,6 +404,369 @@ function formatNum(v) {
   if (typeof v === 'number' && !Number.isNaN(v)) return v.toFixed(Math.abs(v) < 1 ? 4 : 2);
   return String(v ?? '');
 }
+
+function legacyFormulaAmount(item, payload) {
+  if (item?.formula_kind === 'rmb_divided_by_fx') {
+    const salesSection = window.__data?.sections?.find(section => section.dept === 'sales');
+    let sales = {};
+    try { sales = JSON.parse(salesSection?.payload_json || '{}'); } catch {}
+    const fx = num(sales.header?.fx_rmb_hkd) || num(globalCostingBasis().exchange?.rmb_hkd);
+    return fx > 0 ? num(item.formula_rmb_value) / fx : NaN;
+  }
+  if (item?.formula_kind === 'assembly_base_per_output') {
+    const base = num(payload?.assembly_base_rate ?? defaultAssemblyBaseRateForFactory());
+    return base * num(item.people) * (num(item.team) || 1) / Math.max(num(item.output), 1);
+  }
+  if (item?.formula_kind === 'quantity_x_unit') {
+    return num(item.formula_quantity) * num(item.formula_unit_hkd);
+  }
+  return num(item?.current_hkd);
+}
+
+function renderLegacyItems(host, payload, canEdit = false, onChange = () => {}) {
+  const rows = Array.isArray(payload?.legacy_items) ? payload.legacy_items : [];
+  if (!host || !rows.length) return;
+  const money = value => value == null || value === '' || !Number.isFinite(Number(value)) ? '—' : formatNum(Number(value));
+  const formulaMode = rows.some(row => row.formula_kind);
+  const block = document.createElement('section');
+  block.className = 'card legacy-detail-card';
+  block.style.cssText = 'margin-bottom:18px;background:#fffdf2;border:1px solid #f3d98b;overflow:auto';
+  if (formulaMode) {
+    block.innerHTML = `
+      <h3 style="margin:0 0 6px">历史核价计算明细</h3>
+      <div class="muted" style="margin-bottom:10px">已核实的原表公式连接统一核价基准；其余项目沿用可调整的数量与单价，原金额仅作对照。</div>
+      <table class="wb-table" style="min-width:1040px">
+        <thead><tr><th>项目</th><th>成本类别</th><th>原始金额 HK$</th><th>系统计算公式</th><th>公式参数</th><th>当前核价 HK$</th></tr></thead>
+        <tbody>${rows.map((row, index) => {
+          const amount = legacyFormulaAmount(row, payload);
+          row.current_hkd = amount;
+          let controls = '<span class="muted">由部门明细自动计算</span>';
+          if (row.formula_kind === 'quantity_x_unit') {
+            controls = `<label>数量 <input data-legacy-quantity="${index}" type="number" step="any" value="${row.formula_quantity ?? 1}" ${canEdit ? '' : 'disabled'}></label>
+              <label>单价 <input data-legacy-unit="${index}" type="number" step="any" value="${row.formula_unit_hkd ?? 0}" ${canEdit ? '' : 'disabled'}></label>`;
+          } else if (row.formula_kind === 'rmb_divided_by_fx') {
+            const salesSection = window.__data?.sections?.find(section => section.dept === 'sales');
+            let sales = {};
+            try { sales = JSON.parse(salesSection?.payload_json || '{}'); } catch {}
+            const fx = num(sales.header?.fx_rmb_hkd) || num(globalCostingBasis().exchange?.rmb_hkd);
+            controls = `<label>人民币金额 <input data-legacy-rmb="${index}" type="number" step="any" value="${row.formula_rmb_value ?? 0}" ${canEdit ? '' : 'disabled'}></label>
+              <span class="muted">÷ 统一汇率 ${escapeHtml(String(fx || '—'))}</span>`;
+          } else if (row.formula_kind === 'assembly_base_per_output') {
+            controls = `<label>人数 <input data-legacy-people="${index}" type="number" step="any" value="${row.people ?? 0}" ${canEdit ? '' : 'disabled'}></label>
+              <label>小组 <input data-legacy-team="${index}" type="number" step="any" value="${row.team ?? 1}" ${canEdit ? '' : 'disabled'}></label>
+              <label>生产量 <input data-legacy-output="${index}" type="number" step="any" value="${row.output ?? 1}" ${canEdit ? '' : 'disabled'}></label>`;
+          }
+          return `<tr data-legacy-row="${index}">
+            <td>${escapeHtml(row.name || '')}</td><td>${escapeHtml(row.cost_category || '')}</td>
+            <td>${money(row.source_current_hkd)}</td><td>${escapeHtml(row.formula_expression || '')}${row.source_formula ? `<br><small class="muted">原表 ${escapeHtml(row.source_formula_cell || '')}: =${escapeHtml(row.source_formula)}</small>` : ''}</td>
+            <td class="legacy-formula-inputs">${controls}</td><td data-legacy-amount="${index}">${money(amount)}</td></tr>`;
+        }).join('')}</tbody>
+      </table>`;
+    if (canEdit) {
+      const bind = (selector, attribute, key) => block.querySelectorAll(selector).forEach(input => {
+        input.oninput = () => {
+          const index = Number(input.getAttribute(attribute));
+          rows[index][key] = input.value === '' ? null : Number(input.value);
+          const amount = legacyFormulaAmount(rows[index], payload);
+          rows[index].current_hkd = amount;
+          const cell = block.querySelector(`[data-legacy-amount="${index}"]`);
+          if (cell) cell.textContent = money(amount);
+          onChange();
+        };
+      });
+      bind('[data-legacy-quantity]', 'data-legacy-quantity', 'formula_quantity');
+      bind('[data-legacy-unit]', 'data-legacy-unit', 'formula_unit_hkd');
+      bind('[data-legacy-rmb]', 'data-legacy-rmb', 'formula_rmb_value');
+      bind('[data-legacy-people]', 'data-legacy-people', 'people');
+      bind('[data-legacy-team]', 'data-legacy-team', 'team');
+      bind('[data-legacy-output]', 'data-legacy-output', 'output');
+    }
+    host.prepend(block);
+    return;
+  }
+  block.innerHTML = `
+    <h3 style="margin:0 0 6px">历史核价明细（来源工作表）</h3>
+    <div class="muted" style="margin-bottom:10px">以下数据按原 Excel 行保留，用于核对本次核价、上次/参考价与差额。</div>
+    <table class="wb-table" style="min-width:860px">
+      <thead><tr><th>原表行</th><th>项目</th><th>用量/规格</th><th>本次核价 HK$</th><th>上次/参考 HK$</th><th>差额 HK$</th></tr></thead>
+      <tbody>${rows.map(row => `<tr>
+        <td>${escapeHtml(row.source_row ?? '')}</td>
+        <td>${escapeHtml(row.name || '')}</td>
+        <td>${escapeHtml(row.quantity ?? '')}</td>
+        <td>${money(row.current_hkd)}</td>
+        <td>${money(row.previous_hkd)}</td>
+        <td>${money(row.difference_hkd)}</td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+  host.prepend(block);
+}
+
+function renderLegacyPricingTail(host, legacy, live = null) {
+  const sourceRows = Array.isArray(legacy?.pricing_tail) ? legacy.pricing_tail : [];
+  // 有些旧工作表把汇总下方的新一张核价明细也读进 pricing_tail；汇总页只显示
+  // 原表底部的价格换算区，不重复展示部门明细。
+  const nextDetailIndex = sourceRows.findIndex(row => /^(?:NO\.|貨號|货号)/i.test(
+    (row.cells || []).map(value => String(value ?? '').trim()).filter(Boolean).join(' '),
+  ));
+  const rows = (nextDetailIndex > 0 ? sourceRows.slice(0, nextDetailIndex) : sourceRows)
+    .map(row => ({ ...row, cells: [...(row.cells || [])] }));
+  if (!host || !rows.length) return;
+
+  // The ZURU sheets put unrelated comparison figures to the right of the
+  // pricing column. Show only the actual A:C costing result, not that whole
+  // rectangular spreadsheet region.
+  const labelOf = row => String(row.cells?.[1] ?? '').replace(/[\s（）()＄$]/g, '').toUpperCase();
+  const findRow = pattern => rows.find(row => pattern.test(labelOf(row)));
+  const sourceNumber = row => Number(row?.cells?.[2]);
+  const baseRow = findRow(/^TOTALHK$/);
+  const freightRow = findRow(/^运费/);
+  const cabinetRow = findRow(/^吊柜费/);
+  const subtotalRow = findRow(/^小计$/);
+  const markupRow = findRow(/^X$/);
+  const hkdRow = findRow(/^TOTALHK$/) === baseRow
+    ? rows.find(row => row !== baseRow && /^TOTALHK$/.test(labelOf(row))) : null;
+  const feeRow = findRow(/^杂费$/);
+  const usdRow = findRow(/^TOTALUSD$/);
+  if (legacy?.source_sheet === '總表' && baseRow && subtotalRow && markupRow && hkdRow && feeRow && usdRow) {
+    const freight = Number.isFinite(sourceNumber(freightRow)) ? sourceNumber(freightRow) : 0;
+    const cabinet = Number.isFinite(sourceNumber(cabinetRow)) ? sourceNumber(cabinetRow) : 0;
+    const subtotal = live ? num(live.cost) : sourceNumber(subtotalRow);
+    const markup = live ? num(live.markup) : sourceNumber(markupRow);
+    const fee = sourceNumber(feeRow);
+    const hkd = live ? subtotal * markup : sourceNumber(hkdRow);
+    const adjusted = live && fee > 0 ? hkd / fee
+      : sourceNumber(rows.find(row => row.source_row === feeRow.source_row + 1));
+    const usd = live && num(live.fxHkdUsd) > 0 ? adjusted / num(live.fxHkdUsd) : sourceNumber(usdRow);
+    const metrics = [
+      ['TOTAL(HK$)', live ? subtotal - freight - cabinet : sourceNumber(baseRow), 2],
+      ['运费48%', freight, 2], ['吊柜费52%', cabinet, 2], ['小计', subtotal, 2],
+      ['利润 ×', markup, 3], ['TOTAL（HK$）', hkd, 2], ['杂费', fee, 3],
+      ['合计', adjusted, 2], ['TOTAL（USD）', usd, 3],
+    ];
+    const display = (value, digits) => Number.isFinite(value) ? value.toFixed(digits) : '—';
+    const block = document.createElement('section');
+    block.className = 'card legacy-pricing-tail';
+    block.style.cssText = 'margin-top:16px;background:#fffdf2;border:1px solid #f3d98b';
+    block.innerHTML = `<h3 style="margin:0 0 6px">核价汇总</h3>
+      <div class="muted" style="margin-bottom:10px">${live ? '部门明细与统一核价基准变化后，按原表的利润、杂费和汇率关系重算。' : '原表核价结果；历史版本保持不变。'}</div>
+      <table class="wb-table" style="max-width:580px;width:100%"><thead><tr><th>项目</th><th>核价</th></tr></thead>
+      <tbody>${metrics.map(([name, value, digits]) => `<tr><td>${escapeHtml(name)}</td><td>${display(value, digits)}</td></tr>`).join('')}
+      <tr style="background:#fff8cc;font-weight:700"><td>客户参考价</td><td>US$${display(usd, 3)}</td></tr></tbody></table>`;
+    const taxBlock = host.querySelector('#legacy-tax-deduction-block');
+    if (taxBlock) taxBlock.before(block);
+    else host.appendChild(block);
+    return;
+  }
+
+  // 可调整版本仍沿用原 Excel 的精简版式，但把“当前核价”一列替换为实时公式结果。
+  if (live) {
+    const textOf = row => (row.cells || []).map(value => String(value ?? '')).join(' ');
+    const markupIndex = rows.findIndex(row => /^\s*X(?:\s|$)/i.test(textOf(row)));
+    const divisorIndex = rows.findIndex((row, index) => index > markupIndex && /÷/.test(textOf(row)));
+    const totalHkdIndex = rows.findIndex((row, index) => index > markupIndex && /TOTAL.*HK/i.test(textOf(row)));
+    const totalUsdIndex = rows.findIndex((row, index) => index > markupIndex && /TOTAL.*US/i.test(textOf(row)));
+    const currentColumn = 2;
+    const setCurrent = (index, value) => {
+      if (index >= 0 && Number.isFinite(Number(value))) rows[index].cells[currentColumn] = Number(value);
+    };
+    const cost = num(live.cost);
+    const markup = num(live.markup) || 1;
+    const divisor = num(live.divisor)
+      || num(rows[divisorIndex]?.cells?.[currentColumn]) || 0.98;
+    const fxHkdUsd = num(live.fxHkdUsd) || 7.8;
+    const afterMarkup = cost * markup;
+    const totalHkd = afterMarkup / divisor;
+    setCurrent(markupIndex - 1, cost);
+    setCurrent(markupIndex, markup);
+    setCurrent(markupIndex + 1, afterMarkup);
+    setCurrent(divisorIndex, divisor);
+    setCurrent(totalHkdIndex, totalHkd);
+    setCurrent(totalUsdIndex, totalHkd / fxHkdUsd);
+  }
+  const columnCount = Math.max(...rows.map(row => (row.cells || []).length));
+  const display = value => {
+    if (value == null || value === '') return '';
+    return typeof value === 'number' ? formatNum(value) : String(value);
+  };
+  const block = document.createElement('section');
+  block.className = 'card legacy-pricing-tail';
+  block.style.cssText = 'margin-top:16px;background:#fffdf2;border:1px solid #f3d98b;overflow:auto';
+  block.innerHTML = `
+    <h3 style="margin:0 0 6px">核价汇总</h3>
+    <div class="muted" style="margin-bottom:10px">${live ? '保持原 Excel 的汇总格式；修改部门明细或统一核价基准后自动重算。' : '柜运费、码点、找数、港币/美元合计及客人目标价，按来源工作表原行列显示。'}</div>
+    <table class="wb-table" style="min-width:${Math.max(560, columnCount * 110)}px">
+      <thead><tr><th>原表行</th>${Array.from({ length: columnCount }, (_, index) => `<th>${String.fromCharCode(65 + index)}</th>`).join('')}</tr></thead>
+      <tbody>${rows.map(row => {
+        const cells = row.cells || [];
+        const rowText = cells.map(display).join(' ');
+        const background = /客人目标/.test(rowText) ? '#fff200' : (/TOTAL/i.test(rowText) ? '#fff8cc' : '');
+        return `<tr${background ? ` style="background:${background};font-weight:600"` : ''}><td>${escapeHtml(row.source_row ?? '')}</td>${Array.from({ length: columnCount }, (_, index) => `<td>${escapeHtml(display(cells[index]))}</td>`).join('')}</tr>`;
+      }).join('')}</tbody>
+    </table>`;
+  const taxBlock = host.querySelector('#legacy-tax-deduction-block');
+  if (taxBlock) taxBlock.before(block);
+  else host.appendChild(block);
+}
+
+// All imported valuations use one source-style costing/tax layout. The
+// 92125 historical result has an independently captured source snapshot; other
+// imported sheets show a clearly labelled unified-basis calculation.
+function renderLegacyTaxSummary(host, legacy, pricing, costSummary, live) {
+  const ref = legacy?.tax_reference;
+  if (!host || !pricing?.t1 || !pricing?.t2 || !pricing?.t3) return null;
+  const snap = ref?.snapshot;
+  const source = legacy.source_pricing_summary || pricing || {};
+  // Formula-mode imports carry a balancing amount in t2.misc so the generic
+  // cost component sum agrees with the workbook's independently imported
+  // total. That balancing amount is not a taxable miscellaneous purchase.
+  // Remove it from the tax-category view while retaining genuine item deltas.
+  let values = live ? pricing : source;
+  if (live && Number.isFinite(Number(legacy.source_cost_including_labor))) {
+    const sourceComponentTotal = ['t1', 't2', 't3'].reduce((total, table) =>
+      total + Object.entries(source[table] || {}).reduce((sum, [key, value]) =>
+        sum + (key === 'base_price' || key === 'code_before' || key === 'code_after' || key === 'inner_card'
+          || key === 'abs_cost' ? 0 : num(value)), 0), 0);
+    const reconciliation = num(legacy.source_cost_including_labor) - sourceComponentTotal;
+    values = { ...pricing, t2: { ...pricing.t2, misc: num(pricing.t2?.misc) - reconciliation } };
+  }
+  const t1 = values?.t1 || {}, t2 = values?.t2 || {}, t3 = values?.t3 || {};
+  const rmbBuyAmount = num(t1.dom_mat) + num(t1.sewing_hair) + num(t1.sewing_cloth)
+    + num(t1.hardware) + num(t1.electronic) + num(t1.motor) + num(t1.glue_bag)
+    + num(t2.color_box) + num(t2.battery) + num(t2.libao) + num(t2.plating) + num(t2.flocking)
+    + num(t2.other_buy) + num(t2.carton) + num(t2.misc) + num(t3.paint_material);
+  const tax13Amount = num(t1.dom_mat) + num(t1.hardware) + num(t1.motor)
+    + num(t2.color_box) + num(t2.battery) + num(t2.libao)
+    + num(t2.other_buy) + num(t3.paint_material) + num(t1.glue_bag)
+    + num(t2.misc);
+  const rows = [
+    ['人工类13%', num(t2.libao), 11.5],
+    ['纸箱类', num(t2.carton), 10],
+    ['含税1%', num(t2.plating), 3],
+    ['搪胶类3%', num(t1.slush), 11.5],
+    ['车发类13%', num(t1.sewing_hair), 11.5],
+    ['车衣类13%', num(t1.sewing_cloth), 0],
+    ['吸塑类6%', num(t1.suction), 8.26],
+    ['运费含税9%', num(t2.freight), 8.26],
+    ['含税13%类', tax13Amount, 11.5],
+  ];
+  const deductions = rows.map(([, amount, rate]) => amount * rate / 100);
+  const deduction = deductions.reduce((total, amount) => total + amount, 0);
+  const sourceTotal = Number(legacy.source_cost_including_labor);
+  const totalCost = live || !Number.isFinite(sourceTotal) ? num(costSummary?.totalCost) : sourceTotal;
+  const price = num(t1.base_price);
+  const labor = num(t3.injection_labor) + num(t3.painting_labor) + num(t3.assembly_labor);
+  const sourceNoLabor = Number(legacy.source_cost_excluding_labor);
+  const noLaborCost = live || !Number.isFinite(sourceNoLabor) ? totalCost - labor : sourceNoLabor;
+  const afterCost = totalCost - deduction;
+  // The first tax item reduces labor as well as total cost in the source's
+  // post-tax gross-margin calculation (row 95's blue labor reference).
+  const afterGross = price - afterCost + labor - deductions[0];
+  const afterProfit = price - afterCost;
+  const calculated = {
+    deduction, after_cost: afterCost, after_gross: afterGross,
+    gross_pct: price ? afterGross / price * 100 : 0,
+    after_profit: afterProfit, profit_pct: price ? afterProfit / price * 100 : 0,
+  };
+  const current = !live && snap ? snap : calculated;
+  const fmt = (value, suffix = '') => `${Number(value).toFixed(2)}${suffix}`;
+  const mismatches = [];
+  const compare = (name, actual, expected, tolerance = 0.005) => {
+    if (!Number.isFinite(Number(expected)) || !Number.isFinite(Number(actual))) return;
+    if (Math.abs(Number(actual) - Number(expected)) <= tolerance) return;
+    mismatches.push({ name, actual: Number(actual), expected: Number(expected) });
+  };
+  compare('货价', price, source.t1?.base_price);
+  compare('总成本', totalCost, legacy.source_cost_including_labor);
+  compare('不含人工成本', noLaborCost, legacy.source_cost_excluding_labor);
+  const sourceFields = [
+    ['t1', ['进口料', 'imp_mat'], ['国内料', 'dom_mat'], ['吹气', 'blow'], ['搪胶', 'slush'],
+      ['车发', 'sewing_hair'], ['车衣', 'sewing_cloth'], ['五金', 'hardware'], ['电子', 'electronic'],
+      ['马达', 'motor'], ['吸塑', 'suction'], ['胶袋', 'glue_bag']],
+    ['t2', ['彩盒/内咭', 'color_box'], ['电池', 'battery'], ['利宝', 'libao'], ['电镀', 'plating'], ['植绒', 'flocking'],
+      ['其他外购', 'other_buy'], ['纸箱', 'carton'], ['运费', 'freight'], ['吊柜费', 'cabinet'], ['杂项', 'misc']],
+    ['t3', ['啤工', 'injection_labor'], ['喷油工', 'painting_labor'], ['油漆', 'paint_material'],
+      ['装配工', 'assembly_labor']],
+  ];
+  for (const [table, ...fields] of sourceFields) {
+    for (const [name, key] of fields) compare(name, values[table]?.[key], source[table]?.[key], 0.0001);
+  }
+  if (snap) {
+    for (const [name, key, tolerance] of [
+      ['合计减税', 'deduction', 0.005], ['减税后成本', 'after_cost', 0.005],
+      ['减税后毛利', 'after_gross', 0.005], ['减税后毛利率', 'gross_pct', 0.05],
+      ['减税后利润', 'after_profit', 0.005], ['减税后利润率', 'profit_pct', 0.05],
+    ]) compare(name, calculated[key], snap[key], tolerance);
+  }
+  const comparisonNotice = mismatches.length
+    ? `<div role="alert" style="margin:10px 0;padding:10px 12px;background:#fff2db;border:1px solid #e8b65b;border-radius:6px">
+        <strong>⚠ 重算与原表不一致（${mismatches.length} 项）</strong>
+        <div class="muted">可调整版本修改了明细或基数也会出现差异，请核对后确认。</div>
+        <ul style="margin:6px 0 0;padding-left:20px">${mismatches.slice(0, 10).map(item =>
+          `<li>${item.name}：重算 ${item.actual.toFixed(4)} / 原表 ${item.expected.toFixed(4)}，差额 ${(item.actual - item.expected).toFixed(4)}</li>`).join('')}</ul>
+        ${mismatches.length > 10 ? `<div>另有 ${mismatches.length - 10} 项差异</div>` : ''}
+      </div>`
+    : '<div class="muted" style="margin:8px 0">已导入的货价、成本及分类金额与原表一致。</div>';
+  const missingTaxReference = snap ? ''
+    : '<div role="status" style="margin:8px 0;padding:8px 10px;background:#eef5ff;border-left:3px solid #2563eb">原表税后结果未导入，减税和税后结果暂无原表数值可核对。</div>';
+  const matrix = (title, labels, values, digits = 2) => `<div style="margin:12px 0 0;overflow-x:auto">
+    <div style="font-weight:700;margin-bottom:5px">${title}</div>
+    <table class="wb-table" style="min-width:${Math.max(580, labels.length * 94)}px;width:100%">
+      <thead><tr>${labels.map(label => `<th>${label}</th>`).join('')}</tr></thead>
+      <tbody><tr>${values.map((value, index) => `<td>${Number(value).toFixed(Array.isArray(digits) ? digits[index] : digits)}</td>`).join('')}</tr></tbody>
+    </table></div>`;
+  const t1Fields = [
+    ['货价', 'base_price'], ['进口料', 'imp_mat'], ['国内料', 'dom_mat'], ['吹气', 'blow'],
+    ['搪胶', 'slush'], ['车发', 'sewing_hair'], ['车衣', 'sewing_cloth'], ['五金', 'hardware'],
+    ['电子', 'electronic'], ['马达', 'motor'], ['吸塑', 'suction'], ['胶袋', 'glue_bag'],
+  ];
+  const t2Fields = [
+    ['彩盒/内咭', 'color_box'], ['未减税前码数', 'code_before'], ['减税后码数', 'code_after'],
+    ['电池', 'battery'], ['利宝', 'libao'], ['电镀', 'plating'], ['植绒', 'flocking'], ['其他外购', 'other_buy'],
+    ['纸箱', 'carton'], ['运费', 'freight'], ['吊柜费', 'cabinet'], ['杂项', 'misc'],
+  ];
+  const codeBefore = totalCost ? price / totalCost : 0;
+  const codeAfter = current.after_cost ? price / current.after_cost : 0;
+  const t2Values = t2Fields.map(([, key]) => key === 'code_before' ? codeBefore
+    : key === 'code_after' ? codeAfter : num(t2[key]));
+  const taxLabels = ['人民币外购件成本', '含税13%类成本', ...rows.map(([name]) => name)];
+  const taxAmounts = [rmbBuyAmount, tax13Amount, ...rows.map(([, amount]) => amount)];
+  const taxRates = ['—', '—', ...rows.map(([, , rate]) => `${fmt(rate, '%')}`)];
+  const taxDeductions = ['—', '—', ...deductions.map(value => fmt(value))];
+  const block = document.createElement('section');
+  block.className = 'card legacy-tax-summary';
+  block.style.cssText = 'margin-top:12px;background:#fffdf2;border:1px solid #f3d98b';
+  block.innerHTML = `<h3 style="margin:0 0 6px">成本与减税汇总</h3>
+    <div class="muted" style="margin-bottom:10px">${!live && snap
+      ? '原表历史税后结果；分类数据与合计按未四舍五入金额核对。'
+      : '按已导入成本和统一减税口径测算；原工作簿税后公式尚未逐格核实。'}</div>
+    ${comparisonNotice}${missingTaxReference}
+    ${matrix('一、货价与材料', t1Fields.map(([label]) => label), t1Fields.map(([, key]) => num(t1[key])))}
+    ${matrix('二、包装与外购', t2Fields.map(([label]) => label), t2Values,
+      t2Fields.map(([, key]) => key === 'code_before' || key === 'code_after' ? 3 : 2))}
+    ${matrix('三、人工与总成本',
+      ['啤工', '喷油工', '油漆', '装配工', '不含人工成本', '人工比例%', '毛利', '毛利率%', '利润', '利润率%', '总成本'],
+      [num(t3.injection_labor), num(t3.painting_labor), num(t3.paint_material), num(t3.assembly_labor),
+        noLaborCost, price ? labor / price * 100 : 0, price - noLaborCost,
+        price ? (price - noLaborCost) / price * 100 : 0, price - totalCost,
+        price ? (price - totalCost) / price * 100 : 0, totalCost],
+      [2, 2, 2, 2, 2, 1, 2, 1, 2, 1, 3])}
+    <div style="margin:12px 0 0;overflow-x:auto"><div style="font-weight:700;margin-bottom:5px">四、减税明细</div>
+      <table class="wb-table" style="min-width:1160px;width:100%"><thead><tr><th>项目</th>${taxLabels.map(label => `<th>${label}</th>`).join('')}</tr></thead>
+        <tbody><tr><th>计税金额</th>${taxAmounts.map(value => `<td>${fmt(value)}</td>`).join('')}</tr>
+          <tr><th>税率</th>${taxRates.map(value => `<td>${value}</td>`).join('')}</tr>
+          <tr><th>减税额</th>${taxDeductions.map(value => `<td>${value}</td>`).join('')}</tr></tbody></table></div>
+    <table class="wb-table" style="max-width:580px;width:100%;margin-top:12px"><thead><tr><th>项目</th><th>减税 / 核价</th></tr></thead><tbody>
+      <tr style="background:#fff8cc;font-weight:700"><td>合计减税</td><td>HK$${fmt(current.deduction)}</td></tr>
+      <tr><td>减税后成本</td><td>HK$${fmt(current.after_cost)}</td></tr>
+      <tr><td>减税后毛利 / 毛利率</td><td>HK$${fmt(current.after_gross)} · ${fmt(current.gross_pct, '%')}</td></tr>
+      <tr style="background:#fff8cc;font-weight:700"><td>减税后利润 / 利润率</td><td>HK$${fmt(current.after_profit)} · ${fmt(current.profit_pct, '%')}</td></tr>
+    </tbody></table>`;
+  const hiddenDetail = host.querySelector('#legacy-tax-deduction-block');
+  if (hiddenDetail) hiddenDetail.before(block);
+  else host.appendChild(block);
+  return { totalDeduction: num(current.deduction), afterDeduction: num(current.after_cost) };
+}
+
 function num(v) { return Number(v) || 0; }
 function sum(arr, fn) { return arr.reduce((a, r) => a + (fn(r) || 0), 0); }
 function blowUsage(row) {
@@ -1664,10 +2027,38 @@ function renderMoldCosts(host, mc, onChange, canEdit) {
   paint();
 }
 
+function legacyFormulaComponents(payloads) {
+  const sales = payloads.sales || {};
+  const legacy = sales.legacy_import || {};
+  const components = { ...(legacy.formula_offsets || {}) };
+  const add = (key, value) => { components[key] = num(components[key]) + num(value); };
+  const molding = payloads.molding || {};
+  const loss = 1 + num(molding.injection_loss_pct ?? 3) / 100;
+  (molding.injection || []).forEach(row => {
+    const material = String(row.material || '').trim();
+    const materialCost = num(row.weight_g) * loss * num(row.material_unit_price);
+    add(/^(PVC|TPR|TPE)\b/i.test(material) ? 'dom_mat' : 'imp_mat', materialCost);
+    add('injection_labor', num(row.shot_price));
+    if (/^ABS\b/i.test(material)) add('abs_cost', materialCost);
+  });
+  Object.entries(payloads).forEach(([dept, payload]) => {
+    (payload.legacy_items || []).forEach(item => {
+      if (!item.include_in_summary) return;
+      item.current_hkd = legacyFormulaAmount(item, payload);
+      add(item.cost_category || (dept === 'assembly' ? 'assembly_labor' : 'other_buy'), item.current_hkd);
+    });
+  });
+  return components;
+}
+
 // ============== 汇总面板 ==============
 function renderSummaryPane(host, sections, quote, me) {
   if (window.__data?.mixed_quote?.enabled && window.MixedQuotation && !window.__WORKBENCH_EMBED__) {
     return window.MixedQuotation.summary(host, quote, me);
+  }
+  const nativeSales = sections.find(section => section.dept === 'sales');
+  if (nativeSales && JSON.parse(nativeSales.payload_json || '{}').legacy_import?.excel_model && window.ExcelValuation) {
+    return window.ExcelValuation.renderSummary(host, sections);
   }
   const get = (dept) => {
     const s = sections.find(x => x.dept === dept);
@@ -1683,6 +2074,87 @@ function renderSummaryPane(host, sections, quote, me) {
   const electronic = get('electronic');
   const fxRH = num(sales.header?.fx_rmb_hkd) || 0.85;
   const fxHU = num(sales.header?.fx_hkd_usd) || 7.8;
+
+  if (sales.legacy_import?.formula_mode === 'itemized_v1') {
+    const legacy = sales.legacy_import;
+    const components = legacyFormulaComponents({
+      engineering: eng, molding: mold, painting: pnt, assembly: asm, sales,
+      slush, sewing, electronic,
+    });
+    const totalBeforeMarkup = Object.entries(components)
+      .filter(([key]) => key !== 'abs_cost')
+      .reduce((total, [, value]) => total + num(value), 0);
+    const autoFill = {
+      ...components,
+      base_price: totalBeforeMarkup * (num(legacy.formula_markup_x) || 1),
+      // Match live itemized report/export tax; keep other costing modes unchanged.
+      itemized_labor13_basis: (num(components.injection_labor)
+        + num(components.painting_labor) + num(components.assembly_labor)) * 0.08,
+    };
+    host.innerHTML = '<div id="legacy-tax-deduction-block"></div>';
+    renderLegacyPricingTail(host, legacy, {
+      cost: totalBeforeMarkup,
+      markup: num(legacy.formula_markup_x) || 1,
+      divisor: sales.shipping?.divisor,
+      fxHkdUsd: fxHU,
+    });
+    const salesSec = sections.find(x => x.dept === 'sales');
+    const taxSummary = renderTaxDeductionBlock(host.querySelector('#legacy-tax-deduction-block'), sales, salesSec, me, autoFill);
+    return {
+      material: num(autoFill.imp_mat) + num(autoFill.dom_mat) + num(autoFill.hardware)
+        + num(autoFill.electronic) + num(autoFill.motor) + num(autoFill.suction)
+        + num(autoFill.glue_bag) + num(autoFill.paint_material),
+      labor: num(autoFill.blow) + num(autoFill.slush) + num(autoFill.sewing_hair)
+        + num(autoFill.sewing_cloth) + num(autoFill.injection_labor)
+        + num(autoFill.painting_labor) + num(autoFill.assembly_labor),
+      packing: num(autoFill.color_box) + num(autoFill.battery) + num(autoFill.libao)
+        + num(autoFill.plating) + num(autoFill.flocking) + num(autoFill.other_buy) + num(autoFill.carton)
+        + num(autoFill.freight) + num(autoFill.cabinet) + num(autoFill.misc),
+      total: num(taxSummary?.totalCost),
+      totalDeduction: num(taxSummary?.totalDeduction),
+      afterDeduction: num(taxSummary?.afterDeduction),
+      financial: taxSummary.financial,
+    };
+  }
+
+  // 历史核价的汇总值以原表为准；若已导入货号明细，各部门页会另行显示原表逐行数据。
+  // 此时直接按导入值展示，避免旧公式差异把已确认的历史成本改写。
+  if (sales.legacy_import?.summary_only) {
+    const legacy = sales.legacy_import;
+    const pricing = sales.pricing_summary || {};
+    const from = (table, key) => num(pricing[table]?.[key]);
+    const autoFill = {
+      base_price: from('t1', 'base_price'), imp_mat: from('t1', 'imp_mat'), dom_mat: from('t1', 'dom_mat'),
+      blow: from('t1', 'blow'), slush: from('t1', 'slush'), sewing_hair: from('t1', 'sewing_hair'),
+      sewing_cloth: from('t1', 'sewing_cloth'), hardware: from('t1', 'hardware'), electronic: from('t1', 'electronic'),
+      motor: from('t1', 'motor'), suction: from('t1', 'suction'), glue_bag: from('t1', 'glue_bag'),
+      color_box: from('t2', 'color_box'), battery: from('t2', 'battery'), libao: from('t2', 'libao'),
+      plating: from('t2', 'plating'), flocking: from('t2', 'flocking'), other_buy: from('t2', 'other_buy'), carton: from('t2', 'carton'),
+      freight: from('t2', 'freight'), cabinet: from('t2', 'cabinet'), misc: from('t2', 'misc'),
+      injection_labor: from('t3', 'injection_labor'), painting_labor: from('t3', 'painting_labor'),
+      paint_material: from('t3', 'paint_material'), assembly_labor: from('t3', 'assembly_labor'),
+    };
+    const legacyDetailText = legacy.detail_imported
+      ? `已同步货号工作表明细（${num(legacy.source_detail_rows)} 行）`
+      : '部门逐行明细未在原总表中提供';
+    host.innerHTML = '<div id="legacy-tax-deduction-block" class="hidden"></div>';
+    renderLegacyPricingTail(host, legacy);
+    const salesSec = sections.find(x => x.dept === 'sales');
+    const taxSummary = renderTaxDeductionBlock(host.querySelector('#legacy-tax-deduction-block'), sales, salesSec, me, autoFill);
+    const importedTax = renderLegacyTaxSummary(host, legacy, sales.pricing_summary, taxSummary, false);
+    return {
+      material: autoFill.imp_mat + autoFill.dom_mat + autoFill.hardware + autoFill.electronic
+        + autoFill.motor + autoFill.suction + autoFill.glue_bag + autoFill.paint_material,
+      labor: autoFill.blow + autoFill.slush + autoFill.sewing_hair + autoFill.sewing_cloth
+        + autoFill.injection_labor + autoFill.painting_labor + autoFill.assembly_labor,
+      packing: autoFill.color_box + autoFill.battery + autoFill.libao + autoFill.plating + autoFill.flocking
+        + autoFill.other_buy + autoFill.carton + autoFill.freight + autoFill.cabinet + autoFill.misc,
+      total: num(legacy.source_cost_including_labor),
+      totalDeduction: num(importedTax?.totalDeduction),
+      afterDeduction: num(importedTax?.afterDeduction),
+      financial: { ...taxSummary.financial, totalCost: num(legacy.source_cost_including_labor), noLabor: num(legacy.source_cost_excluding_labor), totalDeduction: num(importedTax?.totalDeduction), afterDeduction: num(importedTax?.afterDeduction) },
+    };
+  }
 
   // 电子明细：优先用「电子部」section，回退工程部（与导出一致）
   const elecSrc = (electronic.electronics && electronic.electronics.length) ? electronic.electronics : (eng.electronics || []);
@@ -1987,7 +2459,22 @@ function renderSummaryPane(host, sections, quote, me) {
     // 即把最终总价还原到找数前；包含主体、车缝、电子及该场景运费/吊柜费。
     base_price: shippingCalc.customerBeforeDivisorHkd,
   };
-  renderTaxDeductionBlock(taxHost, sales, salesSec, me, autoFill);
+  const taxSummary = renderTaxDeductionBlock(taxHost, sales, salesSec, me, autoFill);
+  return {
+    material: num(autoFill.imp_mat) + num(autoFill.dom_mat) + num(autoFill.hardware)
+      + num(autoFill.electronic) + num(autoFill.motor) + num(autoFill.suction)
+      + num(autoFill.glue_bag) + num(autoFill.paint_material),
+    labor: num(autoFill.blow) + num(autoFill.slush) + num(autoFill.sewing_hair)
+      + num(autoFill.sewing_cloth) + num(autoFill.injection_labor)
+      + num(autoFill.painting_labor) + num(autoFill.assembly_labor),
+    packing: num(autoFill.color_box) + num(autoFill.battery) + num(autoFill.libao)
+      + num(autoFill.plating) + num(autoFill.flocking) + num(autoFill.other_buy) + num(autoFill.carton)
+      + num(autoFill.freight) + num(autoFill.cabinet) + num(autoFill.misc),
+    total: num(taxSummary?.totalCost),
+    totalDeduction: num(taxSummary?.totalDeduction),
+    afterDeduction: num(taxSummary?.afterDeduction),
+    financial: taxSummary.financial,
+  };
 }
 
 // ============== 汇总 · 减税明细 4 表 ==============
@@ -1995,12 +2482,13 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
   salesPayload.pricing_summary = salesPayload.pricing_summary || {};
   const ps = salesPayload.pricing_summary;
   autoFill = autoFill || {};
+  const itemizedLaborTax = Object.hasOwn(autoFill, 'itemized_labor13_basis');
   // 减税明细只读：每次均以各部门实时金额覆盖历史手工值。
   ps.overrides = ps.overrides || {};
   const applyAuto = (tbl, key, val) => {
     if (val == null) return;                    // 仅未计算(undefined/null)时跳过；0 要写回以清掉旧残留值
     ps[tbl] = ps[tbl] || {};
-    ps[tbl][key] = +val.toFixed(4);
+    ps[tbl][key] = num(val);
   };
   applyAuto('t1', 'base_price', autoFill.base_price);
   applyAuto('t1', 'imp_mat', autoFill.imp_mat);
@@ -2054,6 +2542,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     suction6: 6,      // 吸塑类6%
     freight9: 8.26,   // 运费含税9%
     tax13b: 11.5,     // 含税13%类
+    ...(itemizedLaborTax ? { labor13: 11.5 } : {}),
   };
   ps.t4 = ps.t4 || {};
   Object.keys(RATE_DEFAULTS).forEach(k => {
@@ -2071,6 +2560,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     ['carton', '纸箱'], ['freight', '运费'], ['cabinet', '吊柜费'], ['misc', '杂项'],
   ];
   const t4Cols = [
+    ...(itemizedLaborTax ? [['labor13', '人工类13%（人工×8%）']] : []),
     ['tax13', '含税13%类成本'], ['carton', '纸箱类'],
     ['tax1', '含税1%'], ['slush3', '搪胶类3%'], ['sewhair13', '车发类13%'], ['sewcloth13', '车衣类13%'],
     ['suction6', '吸塑类6%'], ['freight9', '运费类9%'], ['tax13b', '含税13%类'],
@@ -2150,6 +2640,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     ${buildT3()}
     ${buildT4()}`;
 
+  let calculatedSummary = null;
   function recalc() {
     const sum = (obj) => Object.values(obj).reduce((s, v) => s + num(v), 0);
     // 与参考格式及导出一致：不含人工成本 = 表1（除货价）+ 表2（除码数）+ 油漆。
@@ -2179,10 +2670,11 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     const laborPct = basePrice ? laborCost / basePrice : 0;
     // 四、减税明细 各列自动填
     const setT4Amt = (key, val) => {
-      ps.t4[key].amt = +num(val).toFixed(4);
+      ps.t4[key].amt = num(val);
       const inp = host.querySelector(`[data-tbl="t4a"][data-key="${key}"]`);
       if (inp) inp.textContent = formatNum(ps.t4[key].amt);
     };
+    if (itemizedLaborTax) setT4Amt('labor13', autoFill.itemized_labor13_basis);
     setT4Amt('rmb_buy', rmbBuyCost);                                           // 人民币外购件成本
     // 含税13%类成本 = 国内料 + 五金 + 马达 + 彩盒/内咭 + 电池 + 利宝 + 其他外购 + 油漆 + 胶袋
     const tax13Cost = num(ps.t1.dom_mat) + num(ps.t1.hardware) + num(ps.t1.motor)
@@ -2228,9 +2720,19 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     ps.t2.code_after = +codeAfter.toFixed(4);
     const codeAfterInp = host.querySelector('[data-tbl="t2"][data-key="code_after"]');
     if (codeAfterInp) codeAfterInp.textContent = formatNum(ps.t2.code_after);
+    const taxLabels = { ...(itemizedLaborTax ? { labor13: '人工类13%（人工×8%）' } : {}), tax13: '含税13%类成本', carton: '纸箱类', tax1: '含税1%', slush3: '搪胶类3%', sewhair13: '车发类13%', sewcloth13: '车衣类13%', suction6: '吸塑类6%', freight9: '运费含税9%', tax13b: '含税13%类' };
+    calculatedSummary = { totalCost, totalDeduction: totalDed, afterDeduction: afterDed,
+      financial: {
+        fields: { ...ps.t1, ...ps.t2, ...ps.t3 },
+        totalCost, totalDeduction: totalDed, afterDeduction: afterDed, noLabor: noLaborCost,
+        taxRows: Object.entries(taxLabels).map(([key, label]) => ({ key, label,
+          base: num(ps.t4[key]?.amt), rate: num(ps.t4[key]?.rate),
+          deduction: num(ps.t4[key]?.amt) / (key === 'carton' ? 1.1 : 1) * num(ps.t4[key]?.rate) / 100 })),
+      },
+    };
   }
   recalc();
-
+  return calculatedSummary;
 }
 
 function hasSlushCostingInputs(row) {
@@ -2274,6 +2776,7 @@ function renderSlush(host, payload, canEdit, onChange, fxRmbHkd) {
     <div class="muted">按模板参数自动计算：料价、搪工、批工、色粉、柴油、电费、运费/胶袋 → 合计 × 码点 = 货价。</div>
     <div id="slush-import-preview"></div>
     <div id="wb-slush-table" style="margin-top:8px"></div>`;
+  renderLegacyItems(host, payload, canEdit, onChange);
   const cols = [
     { key: 'images', label: '图片', width: '150px',
       renderCell: (td, row, context) => { td.className = 'mold-img-cell'; renderImageCell(td, row, !context.readonly, context.onChange); } },
@@ -2457,6 +2960,7 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
     </select></label><p class="muted">仅含税车缝费用参与退税；各产品组可单独选择。此选项不改变已填报价金额。</p>
     <div id="sw-import-preview"></div>
     <div id="sw-groups"></div>`;
+    renderLegacyItems(host, payload, canEdit, onChange);
     const groupsHost = host.querySelector('#sw-groups');
 
     payload.sewing_groups.forEach((g, gi) => {
@@ -2615,7 +3119,7 @@ function renderCartonCalc(host, c, canEdit, onChange) {
   });
   // 删除老的顶层 flat_cards
   delete c.flat_cards;
-  c.paper_rate = c.paper_rate ?? 2.75;  // 纸价系数（可调）
+  c.paper_rate = c.paper_rate ?? defaultCartonRate(c.cartons?.[0]?.ka_label || c.ka_label);  // 纸价系数（可调）
 
   const rate = () => c.paper_rate == null || c.paper_rate === ''
     ? 2.75
@@ -3053,6 +3557,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
     <div id="wb-pkmat"></div>
     <div id="wb-carton-calc" style="margin-top:14px"></div>
   `;
+  renderLegacyItems(host, payload, canEdit, onChange);
 
   renderMolds(host.querySelector('#wb-molds'), payload.molds, onChange, canEdit, fxRmbHkd, fxHkdUsd);
   window.MixedQuotation?.renderEngineeringSharedMolds(host.querySelector('#wb-molds-shared'), payload);
@@ -3654,6 +4159,7 @@ function lookupMaterialPrice(material, grade, prices) {
   return exact || candidates[0];
 }
 
+
 function isBlankInjectionPrice(value) {
   return value === null || value === undefined || value === '';
 }
@@ -3870,6 +4376,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       </div>
     </details>
   `;
+  renderLegacyItems(host, payload, canEdit, onChange);
 
   // 料价表
   const mpCols = [
@@ -4396,9 +4903,11 @@ function renderPainting(host, payload, canEdit, onChange, fxRmbHkd) {
       <button class="mini" id="pp-import" type="button" ${canEdit ? '' : 'disabled title="请先进入编辑模式"'}>📄 导入喷油核价表</button>
       ${canEdit ? '<input id="pp-file" type="file" accept=".xls,.xlsx" style="display:none"/>' : '<small class="muted">进入编辑后可导入 Excel</small>'}
     </h3>
+    <p class="muted">各工序单价按当前产品实际报价填写，金额按数量 × 单价计算。</p>
     <div id="pp-import-preview"></div>
     <div id="wb-pp"></div>
   `;
+  renderLegacyItems(host, payload, canEdit, onChange);
 
   const wrappedOnChange = (() => { const fns = []; const w = () => { fns.forEach(f => f()); onChange(); }; w._fns = fns; return w; })();
   renderPaintingTable(host.querySelector('#wb-pp'), payload, wrappedOnChange, canEdit);
@@ -4477,8 +4986,28 @@ function currentFactoryCode() {
     || 'qingxi';
 }
 
+function globalCostingBasis() {
+  return window.__costingBasis || {};
+}
+
 function defaultAssemblyBaseRateForFactory() {
-  return currentFactoryCode() === 'heyuan' ? 260 : 310;
+  const configured = num(globalCostingBasis().assembly?.base_rate_hkd);
+  return configured || (currentFactoryCode() === 'heyuan' ? 260 : 310);
+}
+
+function defaultExchangeRates() {
+  return {
+    rmb_hkd: num(globalCostingBasis().exchange?.rmb_hkd) || 0.87,
+    hkd_usd: num(globalCostingBasis().exchange?.hkd_usd) || 7.8,
+  };
+}
+
+function defaultCartonRate(label) {
+  const basis = globalCostingBasis();
+  const target = String(label || basis.default_carton_label || 'A=A').replace(/\s+/g, '').toUpperCase();
+  const row = (basis.cartons || []).find(item => String(item.label || '').replace(/\s+/g, '').toUpperCase() === target)
+    || (basis.cartons || []).find(item => item.label === basis.default_carton_label);
+  return num(row?.rate) || 2.75;
 }
 
 function defaultMachinePricesForFactory() {
@@ -4791,6 +5320,7 @@ function renderAssembly(host, payload, canEdit, onChange, fxRmbHkd) {
     <div id="wb-pkg-groups"></div>
     <div id="wb-pkg-grand"></div>
   `;
+  renderLegacyItems(host, payload, canEdit, onChange);
   payload.packaging_step_groups = payload.packaging_step_groups || [];
 
   // 总表：组装+包装 各产品的 总人数 / 合计人工PCS 汇总（明细在下方各段工序细表）
@@ -5808,7 +6338,10 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
 }
 
 function renderSales(host, payload, quote, canEditHeader, canEditPricing, allSections, onChange, onHeaderChange) {
-  payload.header = payload.header || { currency: 'HKD', fx_hkd_usd: 7.8, fx_rmb_hkd: 0.85 };
+  const defaultFx = defaultExchangeRates();
+  payload.header = payload.header || { currency: 'HKD', fx_hkd_usd: defaultFx.hkd_usd, fx_rmb_hkd: defaultFx.rmb_hkd };
+  payload.header.fx_hkd_usd = payload.header.fx_hkd_usd ?? defaultFx.hkd_usd;
+  payload.header.fx_rmb_hkd = payload.header.fx_rmb_hkd ?? defaultFx.rmb_hkd;
   payload.pricing = payload.pricing || { mgmt_fee_pct: 0, profit_pct: 10, tax_pct: 13, shipping_per_pcs: 0, mold_amortization_qty: quote.qty || 10000 };
   payload.shipping = payload.shipping || {
     freight_pct: 48, lifting_pct: 52, markup_x: 1.20, divisor: 0.98,
@@ -6010,6 +6543,13 @@ async function renderQuotePage() {
   };
   const data = await api('/quotes/' + id);
   const { quote, sections } = data;
+  const quoteLocked = Boolean(data.quote_locked);
+  try {
+    const basisResponse = await api('/refs/costing_basis');
+    window.__costingBasis = basisResponse.data || {};
+  } catch {
+    window.__costingBasis = {};
+  }
   let authorizedCustomers = [];
   if (me.dept === 'engineering') {
     try { authorizedCustomers = (await api('/quotes/customers')).customers || []; }
@@ -6034,7 +6574,7 @@ async function renderQuotePage() {
   const payload = mySec.payload_json ? JSON.parse(mySec.payload_json) : {};
   const canEdit = mySec.status !== 'approved' && me.dept !== 'sales' ? true : false;
   // 业务部门 section 永远可编辑（除非已审）
-  const canEditMine = mySec.status !== 'approved' && canEditDepartment(me, mySec.dept);
+  const canEditMine = !quoteLocked && mySec.status !== 'approved' && canEditDepartment(me, mySec.dept);
 
   const host = document.getElementById('sections'); host.innerHTML = '';
   const dirtyByDept = new Map();
@@ -6155,10 +6695,10 @@ async function renderQuotePage() {
     <div class="wb-bar">
       ${canEditMine ? `<button id="btn-save" title="快捷键：Ctrl+S / Command+S">保存草稿（Ctrl/⌘+S）</button>
                        <button id="btn-submit">提交审核</button>` : ''}
-      ${hasPerm(me, DEPT_MENU[mySec.dept], 'review') && (me.role === 'supervisor' || me.role === 'admin') && mySec.status === 'filled'
+      ${!quoteLocked && hasPerm(me, DEPT_MENU[mySec.dept], 'review') && (me.role === 'supervisor' || me.role === 'admin') && mySec.status === 'filled'
         ? `<button id="btn-approve">审核通过</button>
            <button id="btn-reject" class="danger">驳回</button>` : ''}
-      ${hasPerm(me, DEPT_MENU[mySec.dept], 'review') && mySec.status === 'approved'
+      ${!quoteLocked && hasPerm(me, DEPT_MENU[mySec.dept], 'review') && mySec.status === 'approved'
         ? `<button id="btn-reopen" class="mini">🔓 解除审核 / 重新编辑</button>` : ''}
       ${mySec.review_comment ? `<span class="muted">${mySec.review_comment}</span>` : ''}
     </div>`;
@@ -6189,7 +6729,7 @@ async function renderQuotePage() {
       const headerHost = document.createElement('div');
       const engineeringHost = document.createElement('div');
       body.append(headerHost, engineeringHost);
-      renderEngineeringQuoteHeader(headerHost, quote, authorizedCustomers, patch =>
+      if (!quoteLocked) renderEngineeringQuoteHeader(headerHost, quote, authorizedCustomers, patch =>
         api('/quotes/' + id + '/header', { method: 'PUT', body: JSON.stringify(patch) }));
       renderEngineering(engineeringHost, payload, canEditMine, onChange, fx, fxHU, quote.qty, quote.customer);
     }
@@ -6216,7 +6756,7 @@ async function renderQuotePage() {
       // 例外：工程/业务部门由业务查看时直接可编辑（两者同属，免点按钮）；其他部门仍只读。
       // 工程/业务直接可编辑：仅在「未提交审核」(status=empty) 时自动进入编辑；
       // 已提交(filled) 则退出编辑、露出 审核通过/驳回 按钮（否则跳不出审核界面）
-      const mayEdit = canEditDepartment(me, s.dept);
+      const mayEdit = !quoteLocked && canEditDepartment(me, s.dept);
       const mayReview = hasPerm(me, DEPT_MENU[s.dept], 'review') && ['supervisor','admin'].includes(me.role);
       let inEdit = mayEdit && (s.dept === 'engineering' && (me.dept === 'sales' || me.dept === 'engineering') && s.status === 'empty');
       const c = document.createElement('div'); c.className = 'card section-pane';
@@ -6502,6 +7042,7 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }
 
+// 核价页复用报价页的部门明细渲染器，但不执行报价详情页入口。
 if (window.MixedQuotation && !window.__WORKBENCH_EMBED__) {
   renderEngineering = window.MixedQuotation.wrap(renderEngineering, 'engineering');
   renderElectronic = window.MixedQuotation.wrap(renderElectronic, 'electronic');
@@ -6526,6 +7067,7 @@ window.VerificationWorkbench = {
   renderSewing,
   renderAssembly,
   renderSales,
+  renderSummaryPane,
 };
 
 if (!window.__WORKBENCH_EMBED__) renderQuotePage().catch(error => {

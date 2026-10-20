@@ -4,6 +4,7 @@ const {requireAuth,quoteAccess}=require('../middleware/auth');
 const {columns,template,buildVerificationRow,customerTotals,buildVerificationWorkbook}=require('../services/verificationSummary');
 const {sourceQuantity}=require('../services/sourceSummary');
 const {payloadRevision,validRevision,assertRevision,saveMetadataSql}=require('../services/verificationMetadata');
+const verificationCustomers=require('../../frontend/verification-customers');
 const router=express.Router();router.use(requireAuth);
 const canEditQuantity=u=>Boolean(u.perms?.['账号管理']?.can_admin)||u.role==='admin'||['sales','engineering'].includes(u.dept);
 router.put('/quantity',async(req,res)=>{
@@ -45,9 +46,9 @@ async function loadRows(user,filters={}) {
     WHERE q.deleted_at IS NULL AND q.factory_code=?${scope} ORDER BY q.customer,q.quote_no,q.id`).all(...params);
   const result=[];
   for(const q of rows){
-    if(filters.customer&&q.customer!==filters.customer)continue;
+    if(filters.customer&&verificationCustomers.display(q.customer)!==verificationCustomers.display(filters.customer))continue;
     if(filters.status&&q.verification_status!==filters.status)continue;
-    if(filters.search&&!`${q.customer} ${q.quote_no} ${q.product_name}`.toLowerCase().includes(String(filters.search).toLowerCase()))continue;
+    if(filters.search&&!`${verificationCustomers.display(q.customer)} ${q.customer} ${q.quote_no} ${q.product_name}`.toLowerCase().includes(String(filters.search).toLowerCase()))continue;
     const sections=await db.prepare('SELECT dept,payload_json FROM quote_verification_sections WHERE version_id=?').all(q.verification_version_id);
     // Every cost comes from the current verification detail. The original
     // summary supplies order quantity only, never cost overrides or comparisons.

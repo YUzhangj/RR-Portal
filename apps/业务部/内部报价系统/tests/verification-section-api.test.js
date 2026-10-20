@@ -71,7 +71,7 @@ async function fixture(t) {
   const filename = path.join(__dirname, '../backend/routes/verifications.js');
   const realRequire = createRequire(filename), module = {exports:{}};
   vm.runInNewContext(fs.readFileSync(filename,'utf8'), {module,require:id => id === '../db' ? db :
-    id === '../middleware/auth' ? {requireAuth(req,_res,next){req.user={name:'Fixture user',dept:req.headers['x-dept']||'assembly',role:req.headers['x-role']||'staff'};next();},quoteAccess:async()=>({status:200})} : realRequire(id)});
+    id === '../middleware/auth' ? {requireAuth(req,_res,next){req.user={name:'Fixture user',dept:req.headers['x-dept']||'assembly',role:req.headers['x-role']||'staff',edit:req.headers['x-can-edit']!=='0',review:req.headers['x-can-review']!=='0'};next();},quoteAccess:async()=>({status:200}),canEditDepartment:user=>user.edit,hasMenuPermission:user=>user.review} : realRequire(id)});
   const express = require('express'), app = express();
   app.use(express.json());
   app.use('/api/verifications',module.exports);
@@ -210,4 +210,24 @@ test('verification revision retains PostgreSQL microseconds during round trip', 
   const response=await f.api('/sections/1',{payload:{precise:true},base_revision:sectionRevision(initial)});
   assert.equal(response.status,200);
   assert.equal(response.body.revision,sectionRevision(await f.read()));
+});
+
+
+test('native workbook department endpoints enforce the same edit and review menus as whole-sheet actions', async t => {
+  const f=await fixture(t);
+  const sales={legacy_import:{excel_model:{sheet:'S',cells:{'S!A1':{v:1,t:'n',owner:'assembly'}}}},excel_native:{inputs:{}}};
+  const payload={excel_native:{inputs:{}}};
+  await f.db.prepare("INSERT INTO quote_verification_sections(id,version_id,dept,payload_json,status) VALUES(2,1,'sales',?,'filled')").run(JSON.stringify(sales));
+  await f.db.prepare("UPDATE quote_verification_sections SET payload_json=? WHERE id=1").run(JSON.stringify(payload));
+  const body={payload:{excel_native:{inputs:{'S!A1':{v:2}}}},base_revision:sectionRevision(await f.read()),submit:true};
+  assert.equal((await f.api('/sections/1',body,{'x-can-edit':'0'})).status,403);
+  assert.deepEqual(JSON.parse((await f.read()).payload_json),payload);
+  assert.equal((await f.api('/sections/1',body)).status,200);
+  const denied={'x-role':'supervisor','x-can-review':'0'};
+  assert.equal((await f.api('/sections/1/review',{action:'approve'},denied)).status,403);
+  assert.equal((await f.read()).status,'filled');
+  assert.equal((await f.api('/sections/1/review',{action:'approve'},{'x-role':'supervisor'})).status,200);
+  assert.equal((await f.api('/sections/1/reopen',{},denied)).status,403);
+  assert.equal((await f.read()).status,'approved');
+  assert.equal((await f.api('/sections/1/reopen',{}, {'x-role':'supervisor'})).status,200);
 });

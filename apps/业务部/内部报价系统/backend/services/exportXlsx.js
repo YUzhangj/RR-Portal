@@ -438,7 +438,9 @@ async function buildWorkbook({ quote, sections }) {
   const pricing = sales.pricing || {};
   const header = sales.header || {};
   // 运输费 = 减税明细 印尼运费 (HKD)；× fxRH 当 RMB（后面 /fxRH 还原 HKD）
-  const shipping = num(sales.pricing_summary?.indo_freight) * fxRH;
+  const liveCosts = require('./quoteCostSummary').calculateSingleQuoteCosts(quote, sections);
+  const shipping = liveCosts.indoFreight * fxRH;
+  (sales.shipping?.scenarios || []).forEach((scenario,index)=>{scenario._freight_rate=liveCosts.detailPricing.scenarioRates[index];});
   // 注塑是 HKD，换算成 RMB
   const injSubtotalRmb = injSubtotal * fxRH;
   // 模具分摊：从工程"模具费用"表取 套产品分摊

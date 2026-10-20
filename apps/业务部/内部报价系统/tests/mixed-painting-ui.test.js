@@ -73,7 +73,7 @@ test('one mixed painting table retains per-product and shared freight costs', ()
   assert.equal(summaries.every(row => !row.indo.readonly), true);
   assert.equal(summaries[0].title.includes('<img'), false);
   assert.match(summaries[0].title, /&lt;img/);
-  const costs = payload => calculateSingleQuoteCosts({ qty: 5000 }, [{ dept: 'painting', payload_json: JSON.stringify(payload) }]).components.misc;
+  const costs = payload => calculateSingleQuoteCosts({ qty: 5000 }, [{ dept: 'painting', payload_json: JSON.stringify(payload) }], {mixed:true}).components.misc;
   assert.equal(costs(root.mixed_products.a), .36);
   summaries[0].indo.host.indo_pct = 25; summaries[0].indo.onChange();
   summaries[2].indo.host.indo_pct = 30; summaries[2].indo.onChange();

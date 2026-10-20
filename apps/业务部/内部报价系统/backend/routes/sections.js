@@ -1,3 +1,4 @@
+const { quoteWriteRoute } = require('../services/quoteFreeze');
 const express = require('express');
 const db = require('../db');
 const { requireAuth, quoteAccess, canEditDepartment } = require('../middleware/auth');
@@ -6,7 +7,7 @@ const router = express.Router();
 router.use(requireAuth);
 
 // PUT /api/sections/:id  填写本部门 section
-router.put('/:id', async (req, res) => {
+router.put('/:id', quoteWriteRoute(db, async req => (await db.prepare('SELECT quote_id FROM quote_sections WHERE id=?').get(Number(req.params.id)))?.quote_id, async (req, res) => {
   const id = Number(req.params.id);
   const sec = await db.prepare('SELECT * FROM quote_sections WHERE id = ?').get(id);
   if (!sec) return res.status(404).json({ error: '不存在' });
@@ -14,6 +15,9 @@ router.put('/:id', async (req, res) => {
   // 客户可见范围校验（防跨客户越权写）
   const acc = await quoteAccess(req.user, sec.quote_id);
   if (acc.status !== 200) return res.status(acc.status).json({ error: acc.status === 404 ? '不存在' : '无权操作该客户的报价单' });
+  const locked = await db.prepare(`SELECT 1 FROM quote_customer_confirmations WHERE quote_id = ? AND status = 'confirmed'
+    UNION SELECT 1 FROM quote_verifications WHERE quote_id = ? LIMIT 1`).get(sec.quote_id, sec.quote_id);
+  if (locked) return res.status(409).json({ error: '客价已确认，原报价已锁定；请到核价中心填写核价' });
   // 业务 / 工程 可操作所有 section；其他部门只能操作自己
   if (sec.dept !== req.user.dept && !['sales', 'engineering'].includes(req.user.dept)) {
     return res.status(403).json({ error: '只能填写本部门部分' });
@@ -108,6 +112,6 @@ router.put('/:id', async (req, res) => {
 
   const after = await db.prepare('SELECT filled_at FROM quote_sections WHERE id = ?').get(id);
   res.json({ ok: true, filled_at: after && after.filled_at, conflict, last_by: conflict ? sec.filled_by : null, last_at: conflict ? sec.filled_at : null });
-});
+}));
 
 module.exports = router;

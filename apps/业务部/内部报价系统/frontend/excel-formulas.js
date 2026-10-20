@@ -55,7 +55,7 @@
         const name = tokens[i++].value;
         if (name === 'TRUE' || name === 'FALSE') node = { type: 'value', value: name === 'TRUE' };
         else {
-          if (!['SUM', 'AVERAGE', 'HLOOKUP'].includes(name)) throw new Error(`暂不支持函数 ${name}`);
+          if (!['SUM', 'AVERAGE', 'AVERAGEA', 'HLOOKUP', 'TRUNC', 'IFERROR'].includes(name)) throw new Error(`暂不支持函数 ${name}`);
           take('('); const args = [];
           if (!peek(')')) { do { if (peek(',')) i++; args.push(expression(0)); } while (peek(',')); }
           take(')'); node = { type: 'call', name, args };
@@ -109,7 +109,32 @@
           case '<': return a < b; case '>': return a > b; case '<=': return a <= b; case '>=': return a >= b;
         }
       }
+      // IFERROR must evaluate its fallback lazily; otherwise a valid result
+      // would fail when only the unused fallback contains an error.
+      if (node.name === 'IFERROR') {
+        if (node.args.length !== 2) throw new Error('#VALUE! IFERROR 需要两个参数');
+        try { return evaluate(node.args[0]); } catch { return evaluate(node.args[1]); }
+      }
       const args = node.args.map(evaluate);
+      if (node.name === 'TRUNC') {
+        if (args.length < 1 || args.length > 2) throw new Error('#VALUE! TRUNC 参数数量错误');
+        const n = numeric(args[0]), digits = Math.trunc(numeric(args[1] ?? 0));
+        const factor = 10 ** Math.abs(digits);
+        if (!Number.isFinite(factor)) return digits > 0 ? n : 0;
+        return digits < 0 ? Math.trunc(n / factor) * factor : Math.trunc(n * factor) / factor;
+      }
+      if (node.name === 'AVERAGEA') {
+        const numbers = [];
+        args.forEach((arg, i) => {
+          const reference = ['ref', 'range'].includes(node.args[i].type);
+          for (const v of [arg].flat(Infinity)) {
+            if (v == null) continue;
+            numbers.push(reference && typeof v === 'string' ? 0 : numeric(v));
+          }
+        });
+        if (!numbers.length) throw new Error('#DIV/0! 没有可平均的数值');
+        return numbers.reduce((sum, n) => sum + n, 0) / numbers.length;
+      }
       if (node.name === 'SUM' || node.name === 'AVERAGE') {
         const numbers = args.flat(Infinity).filter(v => typeof v === 'number');
         const sum = numbers.reduce((s, n) => s + n, 0);

@@ -45,13 +45,16 @@ function completedBeforeEffective(row, effectiveAt) {
 }
 
 async function syncOpenQuotes(db, { factoryCode, prices, effectiveAt, actor }) {
+  await require('./quoteFreeze').lockFactoryQuotes(db, factoryCode);
   const rows = await db.prepare(`
     SELECT s.id AS section_id, s.quote_id, s.payload_json, s.status AS section_status,
            q.status AS quote_status,
            (SELECT MAX(reviewed_at) FROM quote_sections x WHERE x.quote_id = q.id) AS fully_approved_at
     FROM quote_sections s
     JOIN quotes q ON q.id = s.quote_id
-    WHERE q.factory_code = ? AND s.dept = 'molding'
+    WHERE q.factory_code = ? AND s.dept = 'molding' AND q.deleted_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM quote_customer_confirmations c WHERE c.quote_id=q.id AND c.status='confirmed')
+      AND NOT EXISTS (SELECT 1 FROM quote_verifications v WHERE v.quote_id=q.id)
   `).all(factoryCode);
 
   const stats = { scanned: rows.length, synced: 0, skipped_approved: 0, reopened: 0, injection_rows_changed: 0 };

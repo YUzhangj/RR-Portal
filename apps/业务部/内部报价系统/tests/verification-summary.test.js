@@ -151,7 +151,7 @@ test('XLSX contains template columns, customer sheets, formulas, frozen panes an
   assert.equal(ws.getCell('DQ5').formula,'IF(COUNT(H5,L5,P5,D5)=4,(H5+L5+P5)*D5,"")');assert.equal(ws.getCell('DI5').result,2000);
   assert.equal(ws.views[0].xSplit,3);assert.equal(ws.views[0].ySplit,3);assert.equal(ws.getCell('EE3').value,columns[134].label);
   assert.equal(ws.getCell('Y5').value,null);assert.equal(ws.getCell('T5').value,4.5);
-  assert.equal(ws.getColumn('I').hidden,true);assert.equal(ws.getColumn('H').hidden,false);
+  assert.equal(ws.getColumn('I').hidden,require('../backend/services/verificationExportLayout.json').profiles.customer.columns[8].hidden);assert.equal(ws.getColumn('H').hidden,false);
 });
 test('summary and export share latest-version, customer and factory scope',async()=>{
   const {DatabaseSync}=require('node:sqlite'),db=new DatabaseSync(':memory:');
@@ -163,7 +163,7 @@ test('summary and export share latest-version, customer and factory scope',async
     INSERT INTO quote_verification_versions VALUES(1,1,'V1','completed',1),(2,1,'V2','drafting',2),(3,1,'V3','cancelled',3),(4,2,'V1','completed',1),(5,3,'V1','completed',1),(6,4,'V1','completed',1);
     INSERT INTO user_customers VALUES(7,'A');`);
   const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path'),mod={exports:{}};
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../backend/routes/verificationSummary.js'),'utf8'),{module:mod,require:id=>id==='../db'?db:id==='../middleware/auth'?{requireAuth:()=>{}}:id==='../services/verificationMetadata'?require('../backend/services/verificationMetadata'):id==='../services/sourceSummary'?require('../backend/services/sourceSummary'):id==='../services/verificationSummary'?{buildVerificationRow:(q,v)=>({id:q.id,version:v.label})}:require(id)});
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../backend/routes/verificationSummary.js'),'utf8'),{module:mod,require:id=>id==='../../frontend/verification-customers'?require('../frontend/verification-customers'):id==='../db'?db:id==='../middleware/auth'?{requireAuth:()=>{}}:id==='../services/verificationMetadata'?require('../backend/services/verificationMetadata'):id==='../services/sourceSummary'?require('../backend/services/sourceSummary'):id==='../services/verificationSummary'?{buildVerificationRow:(q,v)=>({id:q.id,version:v.label})}:require(id)});
   const load=mod.exports.loadRows,user={id:7,active_factory_code:'qingxi',perms:{}};
   assert.equal(JSON.stringify(await load(user)),JSON.stringify([{id:1,version:'V2',quantity_revision:null}]));
   assert.equal((await load(user,{customer:'B'})).length,0);

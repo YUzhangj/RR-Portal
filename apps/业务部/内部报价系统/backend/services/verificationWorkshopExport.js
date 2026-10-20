@@ -1,11 +1,13 @@
 'use strict';
 const ExcelJS=require('exceljs');
 const G=require('../../frontend/verification-report-groups');
+const layout=require('./verificationExportLayout.json');
+const clone=value=>JSON.parse(JSON.stringify(value));
 const quoteSheet=name=>`'${name.replace(/'/g,"''")}'`;
+const letter=index=>{let s='';for(let n=index;n;n=Math.floor((n-1)/26))s=String.fromCharCode(65+(n-1)%26)+s;return s;};
 function localFormula(expression,row){
   const refs=[...new Set(expression.match(/\b[A-Z]+1\b/g)||[])].map(ref=>ref.replace(/1$/,row));
   const formula=expression.replace(/([A-Z]+)1\b/g,`$1${row}`);
-  // An empty quantity or cost is not zero, including after Excel edits.
   return refs.length?`IF(COUNT(${refs.join(',')})=${refs.length},${formula},"")`:formula;
 }
 function buildWorkbook(rows,columns){
@@ -24,63 +26,86 @@ function buildWorkbook(rows,columns){
     while(used.has(name.toLowerCase()))name=`${base}_${i++}`;
     used.add(name.toLowerCase());plans.push([name,G.reportRows(items,'customer-detail')]);
   }
-  for(const [name] of plans)wb.addWorksheet(name,{properties:{tabColor:{argb:plans.findIndex(p=>p[0]===name)<6?'FF83D32D':'FF4472C4'}}});
-  const customerRows=new Map();
-  for(const [name,items] of plans.slice(6))items.forEach((r,i)=>{if(!r.kind)customerRows.set(r,{name,row:i+4});});
-  const subtotalRefs=new Map();
-  for(const [name,items] of plans.slice(6))items.forEach((r,i)=>{if(r.kind==='total')subtotalRefs.set(`${r.values.A}\u0000${r.workshop}`,{name,row:i+4});});
-  for(const [name,items] of plans){
-    const ws=wb.getWorksheet(name);
-    const isCustomer=plans.slice(6).some(p=>p[0]===name);
+  const profiles=new Map(plans.map(([name],i)=>[name,layout.profiles[i<6?name:'customer']]));
+  const customerRows=new Map(),subtotalRefs=new Map();
+  for(const [name,items] of plans.slice(6))items.forEach((r,i)=>{
+    if(!r.kind)customerRows.set(r,{name,row:i+4});
+    if(r.kind==='total')subtotalRefs.set(`${r.values.A}\u0000${r.workshop}`,{name,row:i+4});
+  });
+  const reference=(name,key,row,qualified=false)=>{
+    const i=profiles.get(name).columns.findIndex(c=>c.key===key);
+    if(i<0)throw Error(`导出模板缺少栏目 ${name}: ${key}`);
+    return `${qualified?quoteSheet(name)+'!':''}${letter(i+1)}${row}`;
+  };
+  const mappedFormula=(expression,name,row)=>{
+    const mapped=expression.replace(/\b([A-Z]+)1\b/g,(_,key)=>reference(name,key,1));
+    return localFormula(mapped,row);
+  };
+  const year=new Intl.DateTimeFormat('en',{timeZone:'Asia/Shanghai',year:'numeric'}).format(new Date());
+  for(const [planIndex,[name,items]] of plans.entries()){
+    const profile=profiles.get(name),summary=planIndex<5,isCustomer=planIndex>=6;
+    const ws=wb.addWorksheet(name,{properties:{tabColor:profile.tabColor||{argb:isCustomer?'FF4472C4':'FF83D32D'}}});
+    const visibleColumns=profile.columns.flatMap((c,i)=>c.hidden?[]:[i+1]);
+    const titleEnd=letter(visibleColumns[Math.min(11,visibleColumns.length-1)]||12);
+    const headingEnd=letter(visibleColumns[Math.min(2,visibleColumns.length-1)]||3);
     const localRows=new Map(items.flatMap((r,i)=>!r.kind?[[r,i+4]]:[]));
-    ws.addRow([name]);ws.mergeCells('A1:L1');
-    ws.addRow(['当前核价明细生成。单价栏合计为各款单价之和；金额按接单数量计算，占比由合计重算。数量期间沿用原文件，缺项留空。']);ws.mergeCells('A2:L2');
-    ws.addRow([...columns.map(c=>c.key==='D'?'接单数量（原文件期间）':c.label),'车间','核价版本','审核状态','生成提示','数量来源','车间来源']);
+    ws.addRow([`${year}年 各客产品核价汇总表 · ${name}${summary?'（金额单位：万港币；单价：港币）':'（金额及单价：港币）'}`]);ws.mergeCells(`A1:${titleEnd}1`);
+    ws.addRow(profile.columns.map((c,i)=>i===0?'负责人':c.owner||null));
+    ws.addRow(profile.columns.map(c=>c.label));
     items.forEach((r,i)=>{
       const n=i+4;
-      if(r.kind==='heading'){ws.addRow([r.title]);ws.mergeCells(`A${n}:EE${n}`);return;}
-      const row=columns.map(c=>{
-        const v=r.values[c.key];
-        if(['A','B','C'].includes(c.key)||v!=null&&!G.numeric(v))return v??null;
+      if(r.kind==='heading'){ws.addRow([r.title]);ws.mergeCells(`A${n}:${headingEnd}${n}`);return;}
+      ws.addRow(profile.columns.map(c=>{
+        const key=c.key,v=r.values[key],scale=c.scale||1;
+        if(['A','B','C'].includes(key)||v!=null&&!G.numeric(v))return v??null;
+        const result=G.numeric(v)?v/scale:'';
         if(r.kind==='total'){
-          if(G.ratios[c.key])return {formula:localFormula(r.formulas[c.key],n),result:v??''};
+          // Ratios are recalculated from the corresponding display columns.
+          // Both monetary numerator and denominator share the same 10,000 scale.
+          if(G.ratios[key])return {formula:mappedFormula(r.formulas[key],name,n),result};
           const subtotal=subtotalRefs.get(`${r.values.A}\u0000${r.workshop}`);
-          if(subtotal&&plans.slice(0,5).some(p=>p[0]===name)){
-            const ref=`${quoteSheet(subtotal.name)}!${c.key}${subtotal.row}`;
-            return {formula:`IF(ISNUMBER(${ref}),${ref},"")`,result:v??''};
-          }
-          const refs=plans.slice(0,5).some(p=>p[0]===name)
-            ?[...new Set(r.members.map(m=>{const s=subtotalRefs.get(`${m.values.A}\u0000${G.workshop(m)}`);return `${quoteSheet(s.name)}!${c.key}${s.row}`;}))]
-            :r.members.map(m=>{if(localRows.has(m))return `${c.key}${localRows.get(m)}`;const s=customerRows.get(m);return `${quoteSheet(s.name)}!${c.key}${s.row}`;});
-          return {formula:`IF(COUNT(${refs.join(',')})=${refs.length},SUM(${refs.join(',')}),"")`,result:v??''};
+          let refs;
+          if(subtotal&&summary)refs=[reference(subtotal.name,key,subtotal.row,true)];
+          else if(summary)refs=[...new Set(r.members.map(m=>{const s=subtotalRefs.get(`${m.values.A}\u0000${G.workshop(m)}`);return reference(s.name,key,s.row,true);}))];
+          else refs=r.members.map(m=>{if(localRows.has(m))return reference(name,key,localRows.get(m));const s=customerRows.get(m);return reference(s.name,key,s.row,true);});
+          const amount=`SUM(${refs.join(',')})`;
+          return {formula:`IF(COUNT(${refs.join(',')})=${refs.length},${amount}${scale===1?'':'/'+scale},"")`,result};
         }
-        // Customer sheets own inputs and calculations. Green detail sheets
-        // consume their results; no customer formula may reference a green tab.
-        if(!isCustomer){const s=customerRows.get(r),ref=`${quoteSheet(s.name)}!${c.key}${s.row}`;return {formula:`IF(ISNUMBER(${ref}),${ref},"")`,result:v??''};}
-        if(r.formulas[c.key])return {formula:localFormula(r.formulas[c.key],n),result:v??''};
+        if(!isCustomer){const s=customerRows.get(r),ref=reference(s.name,key,s.row,true);return {formula:`IF(ISNUMBER(${ref}),${ref},"")`,result};}
+        if(r.formulas[key])return {formula:mappedFormula(r.formulas[key],name,n),result};
         return v??null;
-      });
-      ws.addRow([...row,r.workshop||G.pending,r.version||'',r.status_label||'',r.kind==='total'?`${r.quantity_count}/${r.count}款有数量`:(r.issues||[]).join('；'),r.sources.D||'',r.workshop_source||'']);
+      }));
     });
-    columns.forEach((c,i)=>{const col=ws.getColumn(i+1);col.width=i===0?23:i===1?25:i===2?30:16;col.hidden=c.hidden;col.numFmt=i<3?'@':i===3?'#,##0':c.percent?'0.00%':'#,##0.00';});
-    [18,14,14,65,55,65].forEach((width,i)=>ws.getColumn(136+i).width=width);
-    ws.views=[{state:'frozen',xSplit:3,ySplit:3,showGridLines:false}];
+    profile.columns.forEach((c,i)=>{const col=ws.getColumn(i+1);col.width=c.width;col.hidden=c.hidden;});
+    ws.views=[{state:'frozen',xSplit:summary?5:3,ySplit:3,showGridLines:false}];
     ws.eachRow((row,n)=>{
-      row.height=n===2?42:n===3?66:28;
       const item=items[n-4],heading=item?.kind==='heading',total=item?.kind==='total';
+      row.height=n<=3?profile.heights[n-1]:heading?42:profile.heights[3];
       row.eachCell({includeEmpty:true},(cell,c)=>{
-        cell.font={name:'Arial',size:10,bold:n===1||n===3||heading||total,color:{argb:total?'FF174E91':'FF203047'}};
-        cell.alignment={vertical:'middle',horizontal:n===3?'center':c>3?'right':'left',wrapText:n<=3||c<=3};
-        if(n>=3)cell.border={bottom:{style:'thin',color:{argb:'FFD5DEEA'}},right:{style:'thin',color:{argb:'FFD5DEEA'}}};
-        if(n===3||heading||total)cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:total?'FFBDD7EE':heading?'FFE2EFDA':'FFD9E2F3'}};
+        const column=profile.columns[c-1];if(!column)return;
+        const styleId=n===1?profile.titleStyle:n===2?column.ownerStyle:n===3?column.header:total?column.total:column.body;
+        cell.style=clone(layout.styles[styleId]);
+        cell.alignment={...cell.alignment,vertical:'middle',wrapText:true};
+        if(n===1){cell.font={...cell.font,size:24};cell.alignment.horizontal='left';cell.alignment.wrapText=false;}
+        if(n===3)cell.alignment.horizontal='center';
+        if(n>3&&!heading){
+          const field=columns.find(f=>f.key===column.key);
+          if(field?.percent)cell.numFmt='0.00%';
+          if(['A','B','C'].includes(column.key))cell.numFmt='@';
+          if(summary&&column.scale===10000)cell.numFmt='#,##0.00;[Red](#,##0.00)';
+          if(total){cell.font={...cell.font,bold:true};cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFE2EFDA'}};}
+        }
+        if(heading){cell.font={name:'宋体',size:20,bold:true};cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFD9EAD3'}};cell.alignment.horizontal='left';}
       });
     });
-    ws.pageSetup={orientation:'landscape',paperSize:8,scale:80,fitToPage:false,printTitlesRow:'1:3',printTitlesColumn:'A:C',printArea:`A1:EE${Math.max(3,ws.rowCount)}`};
+    ws.autoFilter={from:{row:3,column:1},to:{row:Math.max(3,ws.rowCount),column:135}};
+    ws.pageSetup={orientation:'landscape',paperSize:9,scale:profile.printScale,fitToPage:false,printTitlesRow:'1:3',printTitlesColumn:'A:C',printArea:`A1:EE${Math.max(3,ws.rowCount)}`};
     ws.headerFooter.oddFooter='第 &P 页 / 共 &N 页';
   }
-  const notes=wb.addWorksheet('生成提示');notes.addRow(['客户','货号','车间','提示']);
-  for(const r of rows){if(G.workshop(r)===G.pending)notes.addRow([r.values.A,r.values.B,G.pending,r.workshop_source||'未明确分配']);for(const issue of r.issues||[])notes.addRow([r.values.A,r.values.B,G.workshop(r),issue]);}
-  [24,28,18,100].forEach((w,i)=>notes.getColumn(i+1).width=w);notes.getRow(1).font={bold:true};notes.views=[{state:'frozen',ySplit:1}];
+  // Keep workflow/source details off the very wide template report.
+  const notes=wb.addWorksheet('生成提示');notes.addRow(['客户','货号','车间','核价版本','审核状态','数量来源','车间来源','提示']);
+  for(const r of rows)notes.addRow([r.values.A,r.values.B,G.workshop(r),r.version||'',r.status_label||'',r.sources.D||'',r.workshop_source||'',(r.issues||[]).join('；')]);
+  [24,28,18,14,14,55,55,100].forEach((w,i)=>notes.getColumn(i+1).width=w);notes.getRow(1).font={bold:true};notes.views=[{state:'frozen',ySplit:1}];
   return wb;
 }
 module.exports={buildWorkbook,localFormula};

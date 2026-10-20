@@ -222,6 +222,148 @@ let taskRequestSequence = 0;
 let comparisonState = { quoteId: null, baseline: 'quote', targets: null, dept: 'all', changedOnly: true, query: '' };
 let comparisonRefreshToken = 0;
 const versionCache = new Map();
+let costingBasisState = null;
+let costingBasisMeta = {};
+let costingBasisExpanded = false;
+
+const COSTING_BASIS_COLUMNS = {
+  materials: [['name', '料名'], ['model', '型号'], ['price', 'HK$/Lb', 'number']],
+  machines: [['model', '机型'], ['normal', '普通机'], ['price', 'HK$/台班', 'number']],
+  cartons: [['label', '纸箱类别'], ['rate', '系数', 'number']],
+};
+
+function canManageCostingBasis() {
+  return me?.role === 'admin' || Boolean(me?.perms?.['账号管理']?.can_admin);
+}
+
+function costingBasisTable(key, editable) {
+  const columns = COSTING_BASIS_COLUMNS[key];
+  const rows = costingBasisState?.[key] || [];
+  return `<div data-basis-table="${key}"><table class="wb-table verification-basis-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join('')}${editable ? '<th></th>' : ''}</tr></thead>
+    <tbody>${rows.map((row, index) => `<tr data-basis-row="${index}">${columns.map(([field, label, type]) => `<td><input data-basis-field="${field}" aria-label="第 ${index + 1} 行 ${esc(label)}" type="${type || 'text'}" step="any" value="${esc(row[field])}" ${editable ? '' : 'disabled'}></td>`).join('')}${editable ? `<td><button type="button" class="mini danger" data-basis-delete aria-label="删除第 ${index + 1} 行">×</button></td>` : ''}</tr>`).join('')}</tbody></table>
+    ${editable ? `<button type="button" class="mini" data-basis-add="${key}">＋ 增加</button>` : ''}</div>`;
+}
+
+function basisInput(id, label, value, editable, type = 'number') {
+  return `<label>${label}<input id="${id}" type="${type}" step="any" value="${esc(value)}" ${editable ? '' : 'disabled'}></label>`;
+}
+
+function renderCostingBasis() {
+  const host = $('verification-costing-basis');
+  if (!costingBasisState) {
+    host.innerHTML = '<section class="card verification-basis-card"><span class="muted">统一核价基准暂时无法读取</span></section>';
+    return;
+  }
+  const editable = canManageCostingBasis();
+  const basis = costingBasisState;
+  const updated = costingBasisMeta.updated_at ? formatDate(costingBasisMeta.updated_at) : '系统预设';
+  host.innerHTML = `<details class="card verification-basis-card" ${costingBasisExpanded ? 'open' : ''}>
+    <summary>
+      <div><h2>核价基准 · ${esc(basis.version)}</h2>
+        <p>${esc(basis.title)} · 更新 ${esc(updated)}</p></div>
+      <div class="verification-basis-kpis"><span>RMB→HKD <b>${basis.exchange.rmb_hkd}</b></span><span>HKD→USD <b>${basis.exchange.hkd_usd}</b></span><span>ABS 750SW <b>${basis.materials.find(row => row.model === '750SW')?.price ?? '—'}</b></span></div>
+    </summary>
+    <div class="verification-basis-body">
+      <div class="verification-basis-note">${editable ? '管理员可在此调整；保存后同步未完成核价，已完成历史版本不变。' : '当前为只读；统一核价基准仅管理员可以调整。'}</div>
+      <div class="wb-grid2 verification-basis-fields">
+        ${basisInput('vb-version', '基准日期', basis.version, editable, 'date')}
+        ${basisInput('vb-title', '基准名称', basis.title, editable, 'text')}
+        ${basisInput('vb-rmb-hkd', '人民币折港币', basis.exchange.rmb_hkd, editable)}
+        ${basisInput('vb-hkd-usd', '美元兑换港币', basis.exchange.hkd_usd, editable)}
+        ${basisInput('vb-assembly-base', '装工基数 HKD/人', basis.assembly.base_rate_hkd, editable)}
+        ${basisInput('vb-hunan-freight', '湖南产品运费 %（参考）', basis.assembly.hunan_freight_pct, false)}
+        ${basisInput('vb-wage-factor', '装工系数 1（参考）', basis.assembly.wage_factor, false)}
+        ${basisInput('vb-social-factor', '装工系数 2（参考）', basis.assembly.social_factor, false)}
+        ${basisInput('vb-overhead-factor', '装工系数 3（参考）', basis.assembly.overhead_factor, false)}
+        ${basisInput('vb-sewing-tax', '车缝不含税起点 %（参考）', basis.tax.sewing_exclusion_pct, false)}
+        ${basisInput('vb-electronic-tax', '电子不含税起点 %（参考）', basis.tax.electronic_exclusion_pct, false)}
+        <label>默认纸箱类别<select id="vb-default-carton" ${editable ? '' : 'disabled'}>${basis.cartons.map(row => `<option value="${esc(row.label)}" ${row.label === basis.default_carton_label ? 'selected' : ''}>${esc(row.label)}</option>`).join('')}</select></label>
+      </div>
+      <p class="muted">标注“参考”的参数仅供查阅，不参与本次基准同步；工价按装工基数计算，减税按现有分类规则计算。</p>
+      <h3>喷油标准（HK$/次）</h3>
+      <div class="wb-grid2 verification-basis-fields">
+        ${basisInput('vb-paint-pad', '移印', basis.painting.pad, editable)}
+        ${basisInput('vb-paint-edge', '边模', basis.painting.edge, editable)}
+        ${basisInput('vb-paint-clamp', '夹模', basis.painting.clamp, editable)}
+      </div>
+      <div class="verification-basis-tables">
+        <div><h3>原料价</h3>${costingBasisTable('materials', editable)}</div>
+        <div><h3>机型价</h3>${costingBasisTable('machines', editable)}</div>
+        <div><h3>纸箱报价</h3>${costingBasisTable('cartons', editable)}</div>
+      </div>
+      ${editable ? '<div class="verification-basis-actions"><button id="verification-basis-save" type="button">保存并同步</button><span id="verification-basis-msg" class="msg"></span></div>' : ''}
+    </div>
+  </details>`;
+  const details = host.querySelector('details');
+  details.ontoggle = () => { costingBasisExpanded = details.open; };
+  if (!editable) return;
+  host.querySelectorAll('[data-basis-delete]').forEach(button => button.onclick = () => {
+    collectCostingBasis();
+    const tableHost = button.closest('[data-basis-table]');
+    const key = tableHost?.dataset.basisTable;
+    if (!key) return;
+    costingBasisState[key].splice(Number(button.closest('tr').dataset.basisRow), 1);
+    costingBasisExpanded = true;
+    renderCostingBasis();
+  });
+  host.querySelectorAll('[data-basis-add]').forEach(button => button.onclick = () => {
+    collectCostingBasis();
+    const key = button.dataset.basisAdd;
+    const columns = COSTING_BASIS_COLUMNS[key];
+    costingBasisState[key].push(Object.fromEntries(columns.map(([field,, type]) => [field, type === 'number' ? 0 : ''])));
+    costingBasisExpanded = true;
+    renderCostingBasis();
+  });
+  $('verification-basis-save').onclick = saveCostingBasis;
+}
+
+function collectBasisRows(key) {
+  const table = document.querySelector(`[data-basis-table="${key}"]`);
+  return [...(table?.querySelectorAll('tbody tr') || [])].map(row => {
+    const value = {};
+    row.querySelectorAll('[data-basis-field]').forEach(input => {
+      value[input.dataset.basisField] = input.type === 'number' ? Number(input.value) : input.value.trim();
+    });
+    return value;
+  });
+}
+
+function collectCostingBasis() {
+  if (!costingBasisState || !canManageCostingBasis()) return costingBasisState;
+  const n = id => num($(id)?.value);
+  costingBasisState = {
+    version: $('vb-version').value,
+    title: $('vb-title').value.trim(),
+    materials: collectBasisRows('materials'),
+    machines: collectBasisRows('machines'),
+    cartons: collectBasisRows('cartons'),
+    default_carton_label: $('vb-default-carton').value,
+    exchange: { rmb_hkd: n('vb-rmb-hkd'), hkd_usd: n('vb-hkd-usd') },
+    assembly: { ...costingBasisState.assembly, base_rate_hkd: n('vb-assembly-base') },
+    painting: { pad: n('vb-paint-pad'), edge: n('vb-paint-edge'), clamp: n('vb-paint-clamp') },
+    tax: { ...costingBasisState.tax },
+  };
+  return costingBasisState;
+}
+
+async function saveCostingBasis() {
+  if (!confirm('确认保存统一核价基准？未冻结报价和未完成核价会同步更新并退回重审，已冻结报价、已完成版本和原表公式版本保持不变。')) return;
+  const button = $('verification-basis-save');
+  const message = $('verification-basis-msg');
+  button.disabled = true;
+  try {
+    const result = await api('/admin/costing-basis', { method: 'PUT', body: JSON.stringify({ data: collectCostingBasis() }) });
+    versionCache.clear();
+    await loadList();
+    costingBasisExpanded = true;
+    renderCostingBasis();
+    $('verification-basis-msg').style.color = 'green';
+    $('verification-basis-msg').textContent = `✓ 已保存；报价同步 ${result.synced} 个部门，核价同步 ${result.verification_synced || 0} 个部门，退回重审 ${(result.reopened || 0) + (result.verification_reopened || 0)} 个`;
+  } catch (error) {
+    message.textContent = error.message;
+    button.disabled = false;
+  }
+}
 
 let canAssignWorkshop = false;
 let workshopSavePending = false;
@@ -272,7 +414,7 @@ function filteredList() {
   const status = $('verification-status-filter').value;
   const customer = $('verification-customer-filter').value;
   return listState.filter(row => (!status || row.verification_status === status)
-    && (!customer || row.customer === customer)
+    && (!customer || window.VerificationCustomers.display(row.customer) === customer)
     && (!$('workshop-filter').value || row.workshop === $('workshop-filter').value)
     && [row.quote_no, row.product_name, row.customer, row.version, row.current_version_label, row.current_version_category].join(' ').toLowerCase().includes(query));
 }
@@ -301,13 +443,18 @@ function renderList() {
 
 async function loadList({refreshSelection=true}={}) {
   const sequence=++listRequestSequence;
-  const [user, result] = await Promise.all([api('/auth/me'), api('/verifications')]);
+  const [user, result, basis] = await Promise.all([api('/auth/me'), api('/verifications'), api('/refs/costing_basis').catch(() => null)]);
   if(sequence!==listRequestSequence)return;
   me = user; listState = result.rows;
+  costingBasisState = basis?.data || null;
+  costingBasisMeta = basis || {};
+  window.__costingBasis = costingBasisState;
+  renderCostingBasis();
   canAssignWorkshop = Boolean(result.can_assign_workshop);
   $('workshop-assignment').hidden = !canAssignWorkshop;
   $('who-chip').textContent = `${me.dept_name} · ${me.display_name || me.username}`;
-  const customers = [...new Set(listState.map(row => row.customer).filter(Boolean))].sort();
+  const names = listState.map(row => window.VerificationCustomers.display(row.customer));
+  const customers = me.role === 'admin' || me.perms?.['账号管理']?.can_admin ? window.VerificationCustomers.options(names) : [...new Set(names)].sort();
   const selectedCustomer=$('verification-customer-filter').value;
   $('verification-customer-filter').innerHTML = '<option value="">全部客户</option>'
     + customers.map(customer => `<option value="${esc(customer)}">${esc(customer)}</option>`).join('');
@@ -464,6 +611,7 @@ function calculateFinancial(source) {
   try {
     window.__data = { quote: taskState.quote, sections: source.sections, me: me || {} };
     const result = workbench.renderSummaryPane(host, source.sections, taskState.quote, { dept: 'verification_readonly', role: 'staff' }) || {};
+    if (result?.financial) return result.financial;
     const readNumber = selector => {
       const element = host.querySelector(selector);
       const text = element && 'value' in element ? element.value : element?.textContent || '';
@@ -609,6 +757,11 @@ async function switchVersion(versionId) {
   }
 }
 
+function hasOriginalWorkbook() {
+  return taskState.sections.some(s => s.dept === 'sales'
+    && parseJson(s.payload_json, {}).legacy_import?.excel_model);
+}
+
 function renderDetail() {
   const quote = taskState.quote;
   const version = taskState.selected_version;
@@ -632,6 +785,7 @@ function renderDetail() {
     <div class="verification-sticky-navigation">
       <nav class="verification-mode-tabs" aria-label="核价工作模式">
         <button data-detail-mode="workflow" class="${detailMode === 'workflow' ? 'active' : ''}">部门核价流程</button>
+        ${hasOriginalWorkbook() ? `<button data-detail-mode="workbook" class="${detailMode === 'workbook' ? 'active' : ''}">原核价表</button>` : ''}
         <button data-detail-mode="compare" class="${detailMode === 'compare' ? 'active' : ''}">报价 / 核价版本对比</button>
       </nav>
       <div id="verification-workflow-navigation"></div>
@@ -660,6 +814,7 @@ function renderDetail() {
   bindCreateVersion(taskState, 'detail-version');
   bindVersionCategory(taskState, 'detail-version');
   if (detailMode === 'workflow') renderWorkflow();
+  else if (detailMode === 'workbook' && hasOriginalWorkbook()) { $('verification-workflow-navigation').innerHTML=''; renderImportedWorkbook($('verification-detail-content')); }
   else renderComparison();
 }
 
@@ -697,6 +852,80 @@ function renderWorkflow() {
     };
   });
   renderDepartmentWorkbench();
+}
+
+function renderImportedWorkbook(host) {
+  const version = taskState.selected_version;
+  const fullyReviewed = taskState.sections.length > 0 && taskState.sections.every(s => s.status === 'approved');
+  host.innerHTML = `<div id="verification-original-workbook"></div>
+    <div class="card excel-review-panel"><div class="excel-review-row"><strong>核价审核</strong>
+      <span>${fullyReviewed ? '整表已审核' : taskState.sections.every(s => ['filled','approved'].includes(s.status)) ? '待审核' : '请先提交整表审核'}</span>
+      ${taskState.can_review_workbook && !fullyReviewed ? `<button id="workbook-review-all" ${taskState.workbook_review_ready ? '' : 'disabled'}>一键审核</button>` : ''}</div></div>
+    <details class="card excel-review-panel"><summary>查看审核明细（${taskState.sections.filter(s => s.status === 'approved').length}/${taskState.sections.length}）</summary>
+      ${taskState.sections.map(s => `<div class="excel-review-row"><strong>${esc(s.dept_name)}</strong><span>${SECTION_STATUS[s.status]}</span>
+        ${s.can_review && s.status === 'filled' ? `<button class="mini" data-grid-review="${s.id}" data-action="approve">通过</button><button class="mini" data-grid-review="${s.id}" data-action="reject">驳回</button>` : ''}
+        ${s.can_review && s.status === 'approved' ? `<button class="mini" data-grid-reopen="${s.id}">解除审核</button>` : ''}</div>`).join('')}
+    </details>
+    ${taskState.can_complete ? '<button id="workbook-complete-version">完成当前版本</button>' : ''}`;
+  window.ExcelGrid.render($('verification-original-workbook'), taskState.sections, {
+    onDirty: () => { sectionDirty = true; },
+    onSave: async (changes, submit) => {
+      if(sectionSavePending)return;sectionSavePending=true;
+      const grid = $('verification-original-workbook');
+      grid.inert = true;
+      try {
+        await api(`/verifications/versions/${version.id}/workbook`, { method: 'PUT', body: JSON.stringify({ changes, submit, base_revisions: Object.fromEntries(taskState.sections.map(s => [s.id, s.revision])) }) });
+        versionCache.clear();
+        taskState = await fetchTask(taskState.quote.id, version.id);
+        sectionDirty = false;
+        if (submit) renderDetail();
+      } finally { grid.inert = false;sectionSavePending=false; }
+    },
+  });
+  if ($('workbook-review-all')) $('workbook-review-all').onclick = async () => {
+    if (sectionDirty) { alert('表格有未保存修改，请先保存并提交审核。'); return; }
+    if (!confirm(`确认一键通过 ${version.label} 的整张导入核价表？已审核部分保持不变。`)) return;
+    const button = $('workbook-review-all'); button.disabled = true;
+    try {
+      await api(`/verifications/versions/${version.id}/workbook/review`, {method:'POST',body:JSON.stringify({token:taskState.workbook_review_token})});
+      versionCache.clear();
+      taskState = await fetchTask(taskState.quote.id, version.id);
+      renderDetail();
+    } catch (error) { alert(error.message); button.disabled = false; }
+  };
+  const leaveEdits = () => !sectionDirty || confirm('有未保存的表格修改，继续将放弃修改。确认继续？');
+  host.querySelectorAll('[data-grid-review]').forEach(button => {
+    button.onclick = async () => {
+      if (!leaveEdits()) return;
+      const section = taskState.sections.find(s => Number(s.id) === Number(button.dataset.gridReview));
+      const comment = button.dataset.action === 'reject' ? await requestText('请输入驳回理由') : '';
+      if (button.dataset.action === 'reject' && !comment?.trim()) return;
+      sectionDirty = false;
+      await reviewSection(section, button.dataset.action, comment);
+    };
+  });
+  host.querySelectorAll('[data-grid-reopen]').forEach(button => {
+    button.onclick = async () => {
+      if (!leaveEdits()) return;
+      const reason = await requestText('请输入解除审核理由');
+      if (!reason?.trim()) return;
+      try {
+        await api(`/verifications/versions/${version.id}/sections/${button.dataset.gridReopen}/reopen`, { method: 'POST', body: JSON.stringify({ reason }) });
+        sectionDirty = false;
+        taskState = await fetchTask(taskState.quote.id, version.id);
+        renderDetail();
+      } catch (error) { alert(error.message); }
+    };
+  });
+  if ($('workbook-complete-version')) $('workbook-complete-version').onclick = async () => {
+    if (!confirm(`完成后 ${version.label} 将停止编辑；后续可创建新的核价版本。确认继续？`)) return;
+    try {
+      await api(`/verifications/versions/${version.id}/complete`, { method: 'POST', body: JSON.stringify({ note: version.note || '' }) });
+      versionCache.clear();
+      taskState = await fetchTask(taskState.quote.id, version.id);
+      renderDetail();
+    } catch (error) { alert(error.message); }
+  };
 }
 
 function rendererForDepartment(department) {
@@ -759,7 +988,8 @@ function renderDepartmentWorkbench() {
   const fxRmbHkd = num(salesPayload.header?.fx_rmb_hkd) || 0.85;
   const fxHkdUsd = num(salesPayload.header?.fx_hkd_usd) || 7.8;
   const onChange = () => { sectionDirty = true; };
-  if (!renderer) {
+  if(salesPayload.legacy_import?.excel_model && section._draft.excel_native){window.ExcelValuation.renderDepartment(body,section._draft,sections,editable,onChange);}
+  else if (!renderer) {
     body.innerHTML = '<div class="summary-empty">该部门暂未配置核价表单</div>';
   } else if (section.dept === 'sales') {
     renderer(body, section._draft, taskState.quote, false, editable, sections, onChange, async () => {});
@@ -908,8 +1138,10 @@ function comparisonTargetOptions(selected, baseline) {
 }
 
 function comparisonRows(source) {
+  const sales = parseJson(source.sections.find(s => s.dept === 'sales')?.payload_json, {});
+  const native = sales.legacy_import?.excel_model ? window.ExcelValuation.comparisonPayloads(source.sections) : null;
   return source.sections.flatMap(section => {
-    const normalized = { ...section, payload: parseJson(section.payload_json, {}) };
+    const normalized = { ...section, payload: native?.[section.dept] || parseJson(section.payload_json, {}) };
     return collectCostFields(normalized).map(row => ({
       ...row,
       dept: section.dept,

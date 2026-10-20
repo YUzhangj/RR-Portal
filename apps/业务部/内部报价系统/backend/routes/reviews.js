@@ -1,3 +1,4 @@
+const { quoteWriteRoute } = require('../services/quoteFreeze');
 const express = require('express');
 const db = require('../db');
 const { requireAuth, quoteAccess, hasMenuPermission } = require('../middleware/auth');
@@ -6,7 +7,7 @@ const router = express.Router();
 router.use(requireAuth);
 
 // POST /api/reviews/:section_id   { action: 'approve'|'reject', comment? }
-router.post('/:section_id', async (req, res) => {
+router.post('/:section_id', quoteWriteRoute(db, async req => (await db.prepare('SELECT quote_id FROM quote_sections WHERE id=?').get(Number(req.params.section_id)))?.quote_id, async (req, res) => {
   if (!['supervisor', 'admin'].includes(req.user.role)) return res.status(403).json({ error: '仅主管可审核' });
   const id = Number(req.params.section_id);
   const { action, comment } = req.body || {};
@@ -17,6 +18,7 @@ router.post('/:section_id', async (req, res) => {
   if (!hasMenuPermission(req.user, require('../permissions/menu_catalog').DEPT_TO_MENU[sec.dept], 'review')) return res.status(403).json({ error: '没有该部门的审核权限' });
   const acc = await quoteAccess(req.user, sec.quote_id);
   if (acc.status !== 200) return res.status(acc.status).json({ error: acc.status === 404 ? '不存在' : '无权审核该客户的报价单' });
+  if (await require('../services/quoteFreeze').quoteFrozen(db, sec.quote_id)) return res.status(409).json({error:'客价已确认，原报价已锁定；请到核价中心操作'});
   if (sec.dept !== req.user.dept && !['sales', 'engineering'].includes(req.user.dept)) {
     return res.status(403).json({ error: '只能审核本部门' });
   }
@@ -54,11 +56,11 @@ router.post('/:section_id', async (req, res) => {
     .run(sec.quote_id, sec.dept, actor, action, comment || null);
 
   res.json({ ok: true, all_approved: approvedAll });
-});
+}));
 
 // POST /api/reviews/:section_id/reopen  { reason? }
 // 主管把已审 section 退回到"已填"以便修改；同时若报价单已 fully_approved 则回退到 drafting
-router.post('/:section_id/reopen', async (req, res) => {
+router.post('/:section_id/reopen', quoteWriteRoute(db, async req => (await db.prepare('SELECT quote_id FROM quote_sections WHERE id=?').get(Number(req.params.section_id)))?.quote_id, async (req, res) => {
   const id = Number(req.params.section_id);
   const reason = (req.body && req.body.reason) || null;
 
@@ -67,6 +69,7 @@ router.post('/:section_id/reopen', async (req, res) => {
   if (!hasMenuPermission(req.user, require('../permissions/menu_catalog').DEPT_TO_MENU[sec.dept], 'review')) return res.status(403).json({ error: '没有该部门的审核权限' });
   const acc = await quoteAccess(req.user, sec.quote_id);
   if (acc.status !== 200) return res.status(acc.status).json({ error: acc.status === 404 ? '不存在' : '无权操作该客户的报价单' });
+  if (await require('../services/quoteFreeze').quoteFrozen(db, sec.quote_id)) return res.status(409).json({error:'客价已确认，原报价已锁定；请到核价中心操作'});
   if (sec.dept !== req.user.dept && !['sales', 'engineering'].includes(req.user.dept)) {
     return res.status(403).json({ error: '只能操作本部门' });
   }
@@ -87,6 +90,6 @@ router.post('/:section_id/reopen', async (req, res) => {
     .run(sec.quote_id, sec.dept, reopenActor, reason || null);
 
   res.json({ ok: true });
-});
+}));
 
 module.exports = router;

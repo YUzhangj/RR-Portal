@@ -78,7 +78,7 @@ function calculateMixedQuote(quote, sections, { strict = false } = {}) {
   const weights = molds.pricingWeights(config), units = Number(config.units_per_pack);
   const costUnits = config.na_direct ? 1 : units;
   const products = config.products.map(product => {
-    const result = calculateSingleQuoteCosts(quote, projectSections(sections, product.id, quote.qty));
+    const result = calculateSingleQuoteCosts(quote, projectSections(sections, product.id, quote.qty), {mixed:true});
     const sharedLabor = data.molding?.parts_catalog ? 0 : molding.productCosts[product.id];
     result.components.injection_labor += sharedLabor;
     // 共模啤价也参与该款设置的印尼运费基数。
@@ -93,7 +93,7 @@ function calculateMixedQuote(quote, sections, { strict = false } = {}) {
     return { ...product, weight: weights[product.id], components: result.components, sewing_taxable: result.sewing_taxable,
       shared_labor: sharedLabor, amortization_usd: productAmortization, base_hkd: base, price_hkd: hkd, price_usd: hkd / fx };
   });
-  const common = calculateSingleQuoteCosts(quote, projectSections(sections, '__shared__', quote.qty));
+  const common = calculateSingleQuoteCosts(quote, projectSections(sections, '__shared__', quote.qty), {mixed:true});
   const average = products.reduce((n, p) => n + p.price_usd * p.weight, 0);
   let commonAmortization = amortization;
   try { commonAmortization += amortizedUsd(data.engineering?.mixed_shared, quote.qty); }
