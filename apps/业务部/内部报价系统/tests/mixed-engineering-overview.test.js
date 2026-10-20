@@ -10,6 +10,15 @@ function calculations(){
  return context;
 }
 const calculators=calculations(),totals=calculators.engineeringSummaryTotals;
+test('旧报价未存纸价时按服务端固定回退计算，不套用今日工厂默认值',()=>{
+ const oldDefault=calculators.defaultCartonRate;
+ calculators.defaultCartonRate=()=>9.5;
+ try {
+  const c={cartons:[{cl:10,cw:8,ch:6,qty:12,flat_cards:[]}]};
+  assert.equal(calculators.engineeringCartonDetails(c)[0].rate,2.75);
+  assert.equal(totals({carton_calc:c},.85,7.8).carton,(10+8+2)*(8+6+1)*2*2.75/1000/12);
+ } finally {calculators.defaultCartonRate=oldDefault;}
+});
 const cfg={enabled:true,mode:'equal',units_per_pack:1,products:[{id:'a',code:'SKU-001',name:'第一款',ratio:1},{id:'b',code:'SKU-002',name:'第二款',ratio:1}]};
 const fixture=()=>({mixed_products:{a:{hardware:[{name:'螺丝',qty:2,unit_price_rmb:.85}],aux_materials:[{name:'其他',is_subtotal:true,amount:.3}],packaging_materials:[{name:'彩盒',qty:1,source_currency:'USD',unit_price_usd:.2}],indo_pct:10,molds:[{mold_no:'M1',name:'瓶',parts:[{name:'盖'},{name:'身'}]}],mold_costs:{items:[{price_rmb:100}]}},b:{}},mixed_shared:{packaging_materials:[{name:'胶袋',qty:1,unit_price:.1}]}});
 
@@ -96,15 +105,15 @@ test('纸箱平卡逐行合计与总计相同；模费分摊沿用单款公式',
  assert.equal(c.sumUsd,125);assert.equal(c.perPcsUsd,1);assert.equal(c.perPcsRmb,8.5);assert.equal(c.prototypePerPcsUsd,.05);assert.equal(c.testingPerPcsUsd,.05);
 });
 
-test('生产模具费用只列共有费用，小产品页面不创建或显示费用表单，普通单款仍显示',()=>{
+test('新小产品不创建模费，历史本款模费保留可见编辑且按原比例计费，共有模费计一次',()=>{
  const s=setup();
  s.root.mixed_shared.mold_costs={items:[{name:'共用模费',price_rmb:200}]};
  s.detail.querySelector('[data-engineering-search]').oninput({target:{value:''}});
  const html=s.tables.innerHTML;
  const fees=html.slice(html.indexOf('<section data-engineering-category="mold_costs">'),html.indexOf('<section data-engineering-category="hardware">'));
  assert.match(fees,/共用模费/);assert.match(fees,/200\.0000/);
- assert.ok(!fees.includes('SKU-001'));assert.ok(!fees.includes('100.0000'));
- assert.match(html,/模具费用 RMB 200\.0000/);
+ assert.match(fees,/SKU-001/);assert.match(fees,/100\.0000/);assert.match(fees,/历史本款费用，按本款比例计入/);
+ assert.match(html,/模具费用 RMB 300\.0000/);
  const source=fs.readFileSync(require.resolve('../frontend/workbench.js'),'utf8');
  const start=source.indexOf('function renderEngineering('),next=source.slice(start+1).search(/^function /m);
  const stop=new Error('stop after form rendering');
@@ -119,6 +128,15 @@ test('生产模具费用只列共有费用，小产品页面不创建或显示�
  assert.equal(s.window.MixedQuotation.showsEngineeringMoldCosts(s.root.mixed_products.b),false);
  assert.ok(!inspect(s.root.mixed_products.b).includes('生产模具费用'));
  assert.equal(s.root.mixed_products.b.mold_costs,undefined);
+ s.detail.children[0].querySelector('button').onclick();
+ s.tables.querySelectorAll('[data-open-engineering-product]').find(button=>button.dataset.openEngineeringProduct==='a').onclick();
+ assert.equal(s.window.MixedQuotation.showsEngineeringMoldCosts(s.root.mixed_products.a),true);
+ assert.match(inspect(s.root.mixed_products.a),/生产模具费用/);
+ s.root.mixed_products.b.hardware=[{name:'第二款五金',qty:1,unit_price:1}];
+ const sections=Object.entries({sales:{mixed_quote:cfg,header:{fx_rmb_hkd:.85,fx_hkd_usd:7.8}},engineering:s.root}).map(([dept,p])=>({dept,payload_json:JSON.stringify(p)}));
+ const result=calculateMixedQuote({qty:100},sections,{strict:true});
+ assert.ok(result.products[0].amortization_usd>0);
+ assert.ok(result.amortization_usd>0);
  // Return and open the shared editor through the normal selector workflow.
  s.detail.children[0].querySelector('button').onclick();
  s.tables.querySelectorAll('[data-open-engineering-product]').find(button=>button.dataset.openEngineeringProduct==='__shared__').onclick();

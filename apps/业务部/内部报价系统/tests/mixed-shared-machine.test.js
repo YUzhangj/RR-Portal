@@ -103,3 +103,15 @@ test('页面将同模三列合并，输入一次同步整模，搜索保留合�
   assert.equal(rows[0].hidden,false);assert.equal(rows[1].hidden,false);assert.equal(rows[2].hidden,true);
   assert.match(render(false).host.innerHTML,/data-field="target"[^>]*disabled/);
 });
+
+
+test('changing a whole mold to a different model stores every matching machine consistently', () => {
+  const root=fixture(),[a,b]=root.parts_catalog.parts;
+  Object.assign(a,{machine_model:'20A',machine:'200T'});Object.assign(b,{machine_model:'20A',machine:'200T'});
+  root.machine_prices.push({model:'20A',normal:'200T',price:1400});
+  M.updateCatalogMoldField(root,a,'machine_model','14A');
+  assert.deepEqual([a.machine_model,b.machine_model],['14A','14A']);
+  assert.deepEqual([a.machine,b.machine],['150T','150T']);
+  const restored=JSON.parse(JSON.stringify(root));
+  assert.deepEqual(restored.parts_catalog.parts.slice(0,2).map(part=>part.machine),['150T','150T']);
+});

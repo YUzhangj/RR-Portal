@@ -213,10 +213,12 @@ function lookupMaterialPrice(material, grade, prices) {
   }
   function updateCatalogMoldField(root, part, key, value) {
     if (!['machine_model','target'].includes(key)) throw new Error('不支持的共用模具参数');
-    for (const peer of catalogMoldParts(root, part)) {
-      peer[key] = value;
-      if (key === 'machine_model') peer.machine = catalogMachineReference(root, peer)?.normal || '';
-    }
+    const peers = catalogMoldParts(root, part);
+    for (const peer of peers) peer[key] = value;
+    // Resolve only after every peer has the new model; a half-updated group
+    // temporarily looks conflicting and would clear the first row's machine.
+    if (key === 'machine_model') for (const peer of peers)
+      peer.machine = catalogMachineReference(root, peer)?.normal || '';
   }
   function catalogMachinePrice(root, part) {
     if (part.machine_price != null && part.machine_price !== '') return Number(part.machine_price);

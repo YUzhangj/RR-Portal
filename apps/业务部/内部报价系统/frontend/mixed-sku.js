@@ -35,7 +35,8 @@
       }
     }
   }
-  function repairNumberedSelections(config, selections, parts) {
+  function repairNumberedSelections(config, selections, parts, {missingTargetIds = null} = {}) {
+    const allowedMissing = missingTargetIds == null ? null : new Set(missingTargetIds);
     const next=JSON.parse(JSON.stringify(selections || {})), changes=[], unresolved=[];
     const catalog=new Map(parts.map(part=>[part.id,part])), handled=new Set();
     for(const product of config.products) for(const ref of selections?.[product.id] || []) {
@@ -49,7 +50,12 @@
         const targets=matches.map(rows=>rows[0]);
         const targetIds=new Set(targets.map(p=>p.id));
         const sources=config.products.flatMap(p=>(selections?.[p.id] || []).filter(r=>r.part_id===part.id).map(r=>({product:p,ref:r})));
-        const missing=targets.filter(p=>!(next[p.id] || []).some(r=>r.part_id===part.id));
+        // An explicit SKU list describes eligible owners, not consent to undo
+        // a manual deselection during an unrelated product/ratio update.
+        const wrongOwner=sources.some(source=>!targetIds.has(source.product.id));
+        const missing=targets.filter(p=>!(next[p.id] || []).some(r=>r.part_id===part.id) &&
+          (allowedMissing === null || allowedMissing.has(p.id) || wrongOwner));
+        const missingIds=new Set(missing.map(p=>p.id));
         if(missing.length && new Set(sources.map(s=>Number(s.ref.usage))).size>1)throw Error(`${part.name}的现有用量不同，无法确定新增共用关系的用量`);
         for(const source of sources.filter(s=>!targetIds.has(s.product.id)))for(const target of targets){
           const duplicate=(next[target.id] || []).find(r=>r.part_id===part.id);
@@ -58,7 +64,7 @@
         for(const target of targets){
           const duplicate=(next[target.id] || []).find(r=>r.part_id===part.id);
           next[target.id] ||= [];
-          if(!duplicate){next[target.id].push({...ref});changes.push({part_id:part.id,name:part.name,from:product.code,to:target.code});}
+          if(!duplicate && missingIds.has(target.id)){next[target.id].push({...ref});changes.push({part_id:part.id,name:part.name,from:product.code,to:target.code});}
         }
         for(const source of sources.filter(s=>!targetIds.has(s.product.id))){
           next[source.product.id]=next[source.product.id].filter(r=>r.part_id!==part.id);

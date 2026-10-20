@@ -87,7 +87,7 @@ test('正式货号导入：两种顺序、旧关联自动同步、重复导入�
   // correct link. The missing link must inherit usage, not a new default of 1.
   const sharedQuote=await api('/quotes','POST',{quote_no:'SKU-SHARED-PARTIAL',product_name:'共用零件补齐',customer:'TEST',quote_type:'mixed'});
   let sharedData=await read(sharedQuote.id);
-  await saveConfig(sharedQuote.id,sharedData,{...cfg});sharedData=await read(sharedQuote.id);
+  await saveConfig(sharedQuote.id,sharedData,{...cfg,products:cfg.products.map(p=>p.id==='sku37'?{...p,code:'WAITING-999'}:p)});sharedData=await read(sharedQuote.id);
   const sharedPart={...part,id:'shared',name:'共用盖',source_product_code:'BEAUTYM-S3-037/BEAUTYM-S3-038'};
   const sharedEngineering={mixed_imported_parts:[sharedPart],mixed_part_selections:{sku36:[{part_id:'shared',usage:2}]},mixed_shared:legacy.mixed_shared};
   const sharedMolding={parts_catalog:{parts:[sharedPart],selections:sharedEngineering.mixed_part_selections}};
@@ -96,13 +96,27 @@ test('正式货号导入：两种顺序、旧关联自动同步、重复导入�
     await api('/sections/'+section.id,'PUT',{payload,submit:false,base_filled_at:section.filled_at});sharedData=await read(sharedQuote.id);
   }
   const moldingBefore=JSON.parse(sharedData.sections.find(s=>s.dept==='molding').payload_json).parts_catalog.parts;
-  await saveConfig(sharedQuote.id,sharedData,sharedData.mixed_quote);sharedData=await read(sharedQuote.id);
+  await saveConfig(sharedQuote.id,sharedData,{...sharedData.mixed_quote,products:sharedData.mixed_quote.products.map(p=>p.id==='sku37'?{...p,code:'BEAUTYM-S3-038'}:p)});sharedData=await read(sharedQuote.id);
   const expectedShared={sku36:[{part_id:'shared',usage:2}],sku37:[{part_id:'shared',usage:2}]};
   assert.deepEqual(selections(sharedData),expectedShared);
   assert.deepEqual(JSON.parse(sharedData.sections.find(s=>s.dept==='molding').payload_json).parts_catalog,{parts:moldingBefore,selections:expectedShared});
   await saveConfig(sharedQuote.id,sharedData,sharedData.mixed_quote);sharedData=await read(sharedQuote.id);assert.deepEqual(selections(sharedData),expectedShared);
+  // A user deliberately deselects the second eligible SKU. Neither reimporting
+  // ratios nor adding an unrelated third SKU may silently add that cost back.
+  for(const dept of ['engineering','molding']) {
+    const section=sharedData.sections.find(s=>s.dept===dept), payload=JSON.parse(section.payload_json);
+    if(dept==='engineering')payload.mixed_part_selections.sku37=[];
+    else payload.parts_catalog.selections.sku37=[];
+    await api('/sections/'+section.id,'PUT',{payload,submit:false,base_filled_at:section.filled_at});sharedData=await read(sharedQuote.id);
+  }
+  const manualSelections=structuredClone(selections(sharedData));
+  const ratioUpdate=structuredClone(sharedData.mixed_quote);ratioUpdate.products[0].ratio=2;
+  await saveConfig(sharedQuote.id,sharedData,ratioUpdate);sharedData=await read(sharedQuote.id);
+  assert.deepEqual(selections(sharedData),manualSelections);
   const withThird={...sharedData.mixed_quote,products:[...sharedData.mixed_quote.products,{id:'third',code:'BEAUTYM-S3-039',source_number:'38',name:'第三款',ratio:1}]};
   await saveConfig(sharedQuote.id,sharedData,withThird);sharedData=await read(sharedQuote.id);
+  assert.deepEqual(selections(sharedData),manualSelections);
+  assert.deepEqual(JSON.parse(sharedData.sections.find(s=>s.dept==='molding').payload_json).parts_catalog.selections,manualSelections);
   const conflicting={...sharedEngineering,mixed_part_selections:{sku36:[{part_id:'shared',usage:2}],third:[{part_id:'shared',usage:3}]}};
   const sharedEng=sharedData.sections.find(s=>s.dept==='engineering');
   await api('/sections/'+sharedEng.id,'PUT',{payload:conflicting,submit:false,base_filled_at:sharedEng.filled_at});sharedData=await read(sharedQuote.id);

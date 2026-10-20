@@ -51,7 +51,7 @@ function unusedPlaceholders(config, payloads) {
 function reconcileProductSelections(config, engineering, molding, { updatedProductIds = [] } = {}) {
   const catalog = engineeringCatalog(molding, engineering).parts_catalog;
   if (!catalog) return {engineering, molding, changes:[]};
-  const plan = repairNumberedSelections(config, catalog.selections, catalog.parts);
+  const plan = repairNumberedSelections(config, catalog.selections, catalog.parts, {missingTargetIds:updatedProductIds});
   if (plan.unresolved.length) throw new Error(plan.unresolved.join('；'));
   // A newly added or completed official SKU may now resolve a previously
   // unassigned part. Only fill links for those products: a ratio-only update
@@ -61,7 +61,8 @@ function reconcileProductSelections(config, engineering, molding, { updatedProdu
     const targets = new Map();
     for (const code of partCodes(part)) {
       const matches = matchesGroup(config, code);
-      if (matches.length > 1) throw new Error(`${part.name}对应多个小产品，请核对正式货号`);
+      if (matches.length > 1 && matches.some(product => updated.has(product.id)))
+        throw new Error(`${part.name}对应多个小产品，请核对正式货号`);
       if (matches.length === 1 && updated.has(matches[0].id)) targets.set(matches[0].id, matches[0]);
     }
     const missing = [...targets.values()].filter(product =>

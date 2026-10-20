@@ -30,9 +30,16 @@
       if (payload) renderEngineeringSharedMolds(box, payload);
     });
   }
+  function hasExistingEngineeringMoldCosts(payload) {
+    // Historical product fees still contribute to the final quote. Keep their
+    // editor available; moving them to shared costs would change ratio pricing.
+    const mc = payload.mold_costs;
+    return !!(mc && ((mc.items || []).some(item => Number(item.price_rmb) !== 0 && item.price_rmb != null && item.price_rmb !== '') ||
+      ['customer_subsidy_usd','prototype_fee_usd','prototype_fee_rmb','testing_fee_usd','testing_fee_rmb'].some(key => Number(mc[key]) !== 0 && mc[key] != null && mc[key] !== '')));
+  }
   function showsEngineeringMoldCosts(payload) {
     const context = engineeringContexts.get(payload);
-    return !context || context.productId === '__shared__';
+    return !context || context.productId === '__shared__' || hasExistingEngineeringMoldCosts(payload);
   }
   function renderEngineeringSharedMolds(host, payload) {
     engineeringHosts.set(host, payload);
@@ -594,12 +601,12 @@
         value(part.catalog_usage ?? part.usage),value(part.machine_model),value(part.machine),value(part.target),value(part.daily_capacity),value(part.note),value(part.source_file)])).join('')+
         (parts.length?row(record,[`本款小计：${record.moldCount} 个模号，${parts.length} 条零件引用`,...Array(20).fill('')],true):'');
     }).join('');
-    const fees=records.filter(record=>record.product.id === '__shared__').map(record=>{
+    const fees=records.filter(record=>record.product.id === '__shared__' || hasExistingEngineeringMoldCosts(record.payload)).map(record=>{
       const mc=record.payload.mold_costs;
       if(!mc)return '';
-      const c=window.engineeringMoldCostTotals({...mc,items:mc.items || []});
+      const c=window.engineeringMoldCostTotals({...mc,items:mc.items || [],amortization_qty:mc.amortization_qty ?? (window.__data.quote.qty || 1)});
       return (mc.items || []).map(item=>row(record,[value(item.name),fmt(item.price_rmb),fmt(number(item.price_rmb)/.85/c.fx),'','','','','',value(mc.fx_rmb_usd ?? 7.75)])).join('')+
-        row(record,['本款模费小计 / 分摊',fmt(c.sumRmb),fmt(c.sumUsd),fmt(c.customerUsd),value(c.qty),fmt(c.perPcsRmb),fmt(c.perPcsUsd),'',value(c.fx)],true)+
+        row(record,['本款模费小计 / 分摊',fmt(c.sumRmb),fmt(c.sumUsd),fmt(c.customerUsd),value(c.qty),fmt(c.perPcsRmb),fmt(c.perPcsUsd),record.product.id === '__shared__' ? '每包装计一次' : '历史本款费用，按本款比例计入',value(c.fx)],true)+
         row(record,['手板费','',fmt(c.prototypeFeeUsd),'',value(c.prototypeQty),fmt(c.prototypePerPcsRmb),fmt(c.prototypePerPcsUsd),'',value(c.fx)])+
         row(record,['测试费','',fmt(c.testingFeeUsd),'',value(c.testingQty),fmt(c.testingPerPcsRmb),fmt(c.testingPerPcsUsd),'',value(c.fx)]);
     }).join('');
@@ -610,7 +617,7 @@
         fmt(item.unit),fmt(item.amount),value(c.pl_mm ?? (c.pl_cm != null ? number(c.pl_cm)*10 : c.pl == null ? null : number(c.pl)*25.4)),value(c.pw_mm ?? (c.pw_cm != null ? number(c.pw_cm)*10 : c.pw == null ? null : number(c.pw)*25.4)),value(c.ph_mm ?? (c.ph_cm != null ? number(c.ph_cm)*10 : c.ph == null ? null : number(c.ph)*25.4))])).join('')+
         (rows.length?row(record,['本款小计','','','','','','','','','',fmt(record.costs.carton),'','',''],true):'');
     }).join('');
-    const total=key=>sum(records,r=>key === 'mold_rmb' && r.product.id !== '__shared__' ? 0 : r.costs[key]);
+    const total=key=>sum(records,r=>r.costs[key]);
     const categories=[['molds','模具'],['mold_costs','模具费用'],['hardware','五金'],['aux_materials','辅助材料'],['packaging_materials','包装材料'],['cartons','纸箱 / 平卡']];
     return `<div class="mixed-engineering-totals"><strong>当前产品原值合计 HKD ${fmt(total('total'))}</strong><span>物料 ${fmt(total('hardware')+total('auxiliary')+total('packaging'))}</span><span>纸箱 / 平卡 ${fmt(total('carton'))}</span><span>印尼运费 ${fmt(total('indo'))}</span><span>模具费用 RMB ${fmt(total('mold_rmb'))}</span></div>
       <nav class="mixed-engineering-nav" aria-label="工程明细分类">${categories.map(([key,label])=>`<button type="button" class="mini" data-jump-engineering="${key}">${label}</button>`).join('')}</nav>
@@ -620,7 +627,7 @@
       ${material('hardware','三、五金明细')}${material('aux_materials','四、辅助材料明细')}${material('packaging_materials','五、包装材料明细')}
       ${group('cartons','六、纸箱及平卡明细',['类型','名称','所属纸箱','长 inch','宽 inch','高 inch','装箱数 / 平卡用量','纸质','纸价系数','箱价 / 平卡单价 HKD','金额 HKD/PCS','产品长 mm','产品宽 mm','产品高 mm'],cartons,`${fmt(total('carton'))} HKD`)}
       </div>
-      <details class="mixed-engineering-product-totals"><summary>各款分类汇总（当前 ${records.length} 项）</summary><div class="mixed-scroll mixed-engineering-overview"><table class="wb-table"><thead><tr><th>货号</th><th>产品名称</th><th>模具数</th><th>零件数</th><th>模具费用 RMB</th><th>五金 HKD</th><th>辅助材料 HKD</th><th>包装材料 HKD</th><th>纸箱 HKD</th><th>印尼运费 HKD</th><th>工程物料合计 HKD</th></tr></thead><tbody>${records.map(record=>`<tr data-engineering-product="${esc(record.product.id)}">${cells([link(record.product),esc(record.product.name),record.moldError?'待核对':record.moldCount,record.moldError?'待核对':record.partCount,...['mold_rmb','hardware','auxiliary','packaging','carton','indo','total'].map(key=>key === 'mold_rmb' && record.product.id !== '__shared__' ? '—' : fmt(record.costs[key]))])}</tr>`).join('')}</tbody></table></div></details>`;
+      <details class="mixed-engineering-product-totals"><summary>各款分类汇总（当前 ${records.length} 项）</summary><div class="mixed-scroll mixed-engineering-overview"><table class="wb-table"><thead><tr><th>货号</th><th>产品名称</th><th>模具数</th><th>零件数</th><th>模具费用 RMB</th><th>五金 HKD</th><th>辅助材料 HKD</th><th>包装材料 HKD</th><th>纸箱 HKD</th><th>印尼运费 HKD</th><th>工程物料合计 HKD</th></tr></thead><tbody>${records.map(record=>`<tr data-engineering-product="${esc(record.product.id)}">${cells([link(record.product),esc(record.product.name),record.moldError?'待核对':record.moldCount,record.moldError?'待核对':record.partCount,...['mold_rmb','hardware','auxiliary','packaging','carton','indo','total'].map(key=>fmt(record.costs[key]))])}</tr>`).join('')}</tbody></table></div></details>`;
   }
   function wrap(renderer, dept, fixedProductId) {
     return function (host, root, edit, onChange, ...args) {

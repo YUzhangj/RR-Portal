@@ -3125,7 +3125,9 @@ function engineeringSummaryTotals(payload, fxRmbHkd, fxHkdUsd) {
 }
 function engineeringCartonDetails(c) {
   const boxes = c.cartons?.length ? c.cartons : (c.cl ? [{cl:c.cl,cw:c.cw,ch:c.ch,qty:c.qty,flat_cards:c.flat_card ? [{l:c.cl,w:c.cw,qty:1}] : []}] : []);
-  const rate = c.paper_rate == null ? defaultCartonRate(boxes[0]?.ka_label || c.ka_label) : c.paper_rate === '' ? 2.75 : num(c.paper_rate);
+  // Read-only totals use the stored quote's fallback, as the server does.
+  // Current factory defaults apply only when the editor initializes new data.
+  const rate = c.paper_rate == null || c.paper_rate === '' ? 2.75 : num(c.paper_rate);
   return boxes.filter(box => num(box.cl) || num(box.cw) || num(box.ch)).flatMap((box,index) => [
     {type:'纸箱',name:box.name || `纸箱 ${index + 1}`,l:box.cl,w:box.cw,h:box.ch,qty:box.qty,rate,
       ka_label:box.ka_label || c.ka_label,unit:cartonBoxPrice(box,rate),amount:cartonBoxPrice(box,rate)/Math.max(num(box.qty),1)},
