@@ -64,14 +64,14 @@ router.put('/workshops', async (req, res) => {
 
 async function accessibleQuoteRows(user) {
   if (isAdmin(user)) {
-    return db.prepare('SELECT * FROM quotes WHERE factory_code = ? AND deleted_at IS NULL ORDER BY customer, id DESC')
+    return db.prepare(`SELECT q.* FROM quotes q WHERE q.factory_code = ? AND q.deleted_at IS NULL ${HIDE_IMPORTED_VERIFICATIONS} ORDER BY q.customer, q.id DESC`)
       .all(user.active_factory_code);
   }
   const customers = (await db.prepare('SELECT customer FROM user_customers WHERE user_id = ?').all(user.id))
     .map(row => row.customer);
   if (!customers.length) return [];
   const placeholders = customers.map(() => '?').join(',');
-  return db.prepare(`SELECT * FROM quotes WHERE factory_code = ? AND deleted_at IS NULL AND customer IN (${placeholders}) ORDER BY customer, id DESC`)
+  return db.prepare(`SELECT q.* FROM quotes q WHERE q.factory_code = ? AND q.deleted_at IS NULL AND q.customer IN (${placeholders}) ${HIDE_IMPORTED_VERIFICATIONS} ORDER BY q.customer, q.id DESC`)
     .all(user.active_factory_code, ...customers);
 }
 
