@@ -73,9 +73,26 @@ with tempfile.TemporaryDirectory(prefix='qc-import-check-') as tmp:
             row = ['2026/1/7(三)','Customer','C1','PO1','ITEM1','Toy','1764','147','HOLD','','reason','note']
             second = row.copy(); second[6] = '1032'; second[7] = '86'
             status, result = upload([row, second, row]); assert status == 200 and result['inserted'] == 2 and result['duplicatesSkipped'] == 1, result
+            first_batch = result['batchId']
+            def batch_details(batch_id, site='兴信', kind=''):
+                return request(f'/api/inspection-imports/{batch_id}?site=' + urllib.parse.quote(site) + '&kind=' + urllib.parse.quote(kind))
+            status, details = batch_details(first_batch)
+            assert status == 200 and details['inserted'] == 2 and len(details['items']) == 2, details
+            first_ids = {item['recordId'] for item in details['items']}
+            assert {item['kind'] for item in details['items']} == {'新增'}
+            assert batch_details(first_batch, site='湖南')[0] == 404
             status, result = upload([row, second]); assert status == 200 and result['unchanged'] == 2 and result['updated'] == 0, result
+            current_list = request('/api/legacy-inspections?site=' + urllib.parse.quote('兴信'))[1]
+            assert current_list['latestImport'] is None and current_list['importRecordIds'] == []
             changed = row.copy(); changed[8] = 'PASS'; changed[10] = ''; changed[11] = ''
             result = upload([changed, second])[1]; assert result['updated'] == 1 and result['resultChanged'] == 1, result
+            changed_batch = result['batchId']
+            details = batch_details(changed_batch, kind='变更')[1]
+            assert details['updated'] == 1 and details['resultChanged'] == 1 and len(details['items']) == 1
+            assert '洋行结果：HOLD → PASS' in details['items'][0]['summary'], details
+            assert details['items'][0]['record']['internalResult'] == 'PASS'
+            # Batch snapshots remain accurate after later changes, and result categories never cross factories.
+            assert batch_details(first_batch)[1]['items'][0]['record']['internalResult'] == 'HOLD'
             saved = records(); assert len(saved) == 2 and next(r for r in saved if r['quantity'] == 1032)['internalResult'] == 'HOLD'
             assert next(r for r in saved if r['quantity'] == 1764)['holdRejectReason'] == ''
             # New dates/quantities are independent even without including old batches in the file.
@@ -99,6 +116,9 @@ with tempfile.TemporaryDirectory(prefix='qc-import-check-') as tmp:
             status, result = upload([new_order,invalid,conflict1,conflict2])
             assert status == 200 and result['inserted'] == 3 and result['pendingReviewCount'] == 1 and result['duplicatesSkipped'] == 0, result
             assert {issue['row'] for issue in result['issues']} == {3}, result
+            mixed_batch = result['batchId']
+            details = batch_details(mixed_batch)[1]
+            assert len(details['items']) == 3 and details['pendingReviewCount'] == 1 and details['issues'][0]['row'] == 3, details
             assert any(r['contractNumber'] == 'C2' for r in records())
             assert not any(r['contractNumber'] == 'BAD' for r in records())
             assert sum(r['contractNumber'] == 'CONFLICT' for r in records()) == 2
@@ -201,6 +221,111 @@ with tempfile.TemporaryDirectory(prefix='qc-import-check-') as tmp:
             assert request(f"/api/inspections/{original['id']}/reinspection", b'', method='POST')[1]['id'] == child['id']
             assert request(f"/api/inspections/{child['id']}/result", result_body, method='PUT')[0] == 200
             assert next(r for r in records() if r['id'] == original['id'])['internalResult'] == 'REJ'
+            metadata = row.copy(); metadata[2] = 'BATCH-METADATA'
+            assert upload([metadata])[1]['inserted'] == 1
+            metadata[5] = 'Renamed toy'
+            metadata_batch = upload([metadata])[1]['batchId']
+            details = batch_details(metadata_batch)[1]
+            assert details['updated'] == 1 and details['resultChanged'] == 0
+            assert batch_details(metadata_batch, kind='结果变更')[1]['total'] == 0
+            assert batch_details(changed_batch, kind='结果变更')[1]['total'] == 1
+            changed_id = details['items'][0]['recordId']
+            # An unchanged Excel row may withdraw a pending result edit; the batch must explain that work.
+            pending_body = json.dumps({'internalResult':'PASS','thirdPartyResult':'','holdRejectReason':'','note':'proposed','inspectedQuantity':1}).encode()
+            assert request(f"/api/inspections/{changed_id}/result", pending_body, method='PUT')[1]['pendingApproval']
+            withdrawn_batch = upload([metadata])[1]['batchId']
+            withdrawn = batch_details(withdrawn_batch)[1]
+            assert withdrawn['updated'] == 1 and withdrawn['resultChanged'] == 0
+            assert '旧结果修改申请已撤回' in withdrawn['items'][0]['summary'], withdrawn
+            listing = request('/api/legacy-inspections?site=' + urllib.parse.quote('兴信'))[1]
+            assert listing['latestImport']['id'] == withdrawn_batch and listing['importRecordIds'] == [changed_id]
+            assert upload([metadata])[1]['updated'] == 0
+            assert request('/api/legacy-inspections?site=' + urllib.parse.quote('兴信'))[1]['latestImport'] is None
+            with sqlite3.connect(tmp+'/test.db') as db:
+                stored = db.execute('SELECT ItemsJson FROM InspectionImportBatches WHERE Id=?', (metadata_batch,)).fetchone()
+                assert json.loads(stored[0])[0]['RecordId'] == changed_id
+            overview_path = '/api/inspection-overview?site=' + urllib.parse.quote('兴信')
+            unread_before = request(overview_path)[1]['unreadAlerts'].copy()
+            assert unread_before.get('验货结果变更', 0) > 0
+            # Viewing any category leaves the entire current batch and yellow marks visible until another upload.
+            read_rows = []
+            for index in range(101):
+                item = row.copy(); item[2] = f'READ-PAGE-{index}'; read_rows.append(item)
+            read_batch = upload(read_rows)[1]['batchId']
+            def mark_read(batch_id, ids, site='兴信'):
+                return request(f'/api/inspection-imports/{batch_id}/read?site=' + urllib.parse.quote(site), json.dumps(ids).encode(), method='POST')
+            first_page = batch_details(read_batch)[1]
+            assert len(first_page['items']) == 100 and first_page['totalPages'] == 2
+            page_ids = [item['recordId'] for item in first_page['items']]
+            assert mark_read(read_batch, page_ids, site='湖南')[0] == 404
+            assert mark_read(read_batch, [-1])[0] == 400
+            assert mark_read(read_batch, page_ids)[0] == 200
+            listing = request('/api/legacy-inspections?site=' + urllib.parse.quote('兴信'))[1]
+            assert listing['latestImport']['inserted'] == 101 and len(listing['importRecordIds']) == 101, listing
+            last_page = request(f'/api/inspection-imports/{read_batch}?site=' + urllib.parse.quote('兴信') + '&page=2')[1]
+            overflow_page = request(f'/api/inspection-imports/{read_batch}?site=' + urllib.parse.quote('兴信') + '&page=2147483647')[1]
+            assert overflow_page['page'] == 2 and overflow_page['items'] == last_page['items']
+            zero_page = request(f'/api/inspection-imports/{read_batch}?site=' + urllib.parse.quote('兴信') + '&page=0')[1]
+            assert zero_page['page'] == 1 and zero_page['items'] == first_page['items']
+            assert mark_read(read_batch, [item['recordId'] for item in last_page['items']])[0] == 200
+            listing = request('/api/legacy-inspections?site=' + urllib.parse.quote('兴信'))[1]
+            assert listing['latestImport']['inserted'] == 101 and len(listing['importRecordIds']) == 101
+            # Reading the new-import category must not clear other unread message categories.
+            assert request(overview_path)[1]['unreadAlerts'] == unread_before
+            with sqlite3.connect(tmp+'/test.db') as db:
+                columns = [entry[1] for entry in db.execute('pragma table_info(InspectionAlerts)') if entry[1] != 'Id']
+                selection = ["'验货期变更'" if name == 'Type' else '0' if name == 'IsRead' else '"'+name+'"' for name in columns]
+                date_alert = db.execute('INSERT INTO InspectionAlerts ('+','.join('"'+name+'"' for name in columns)+') SELECT '+','.join(selection)+' FROM InspectionAlerts LIMIT 1').lastrowid
+            read_path = '/api/inspection-notifications/read?site=' + urllib.parse.quote('兴信')
+            payload = json.dumps({'alertIds':[date_alert], 'approvalIds':[]}).encode()
+            assert request(read_path, payload, method='POST')[0] == 204
+            overview = request(overview_path)[1]
+            assert overview['unreadAlerts'].get('验货期变更',0) == 1
+            assert overview['unreadAlerts']['验货结果变更'] == unread_before['验货结果变更']
+            assert overview['alerts']['验货期变更'] == 1  # Read status does not resolve business work.
+            assert request('/api/inspection-notifications/read?site=' + urllib.parse.quote('湖南'), payload, method='POST')[0] == 400
+            results = request('/api/inspection-alerts?site=' + urllib.parse.quote('兴信') + '&type=' + urllib.parse.quote('验货结果变更'))[1]
+            assert request(read_path, json.dumps({'alertIds':[item['id'] for item in results], 'approvalIds':[]}).encode(), method='POST')[0] == 204
+            assert request(overview_path)[1]['unreadAlerts'].get('验货结果变更',0) == unread_before['验货结果变更']
+            assert mark_read(read_batch, page_ids)[0] == 200  # Idempotent across refresh/retry.
+            assert upload(read_rows)[1]['inserted'] == 0
+            listing = request('/api/legacy-inspections?site=' + urllib.parse.quote('兴信'))[1]
+            assert listing['latestImport'] is None and listing['importRecordIds'] == []
+            # Pending issues are not resolved by viewing other rows, but a clean next upload replaces them.
+            issue_batch = upload([invalid, read_rows[0]])[1]['batchId']
+            assert mark_read(issue_batch, [])[0] == 200
+            assert request('/api/legacy-inspections?site=' + urllib.parse.quote('兴信'))[1]['latestImport']['pendingReviewCount'] == 1
+            upload([read_rows[0]])
+            assert request('/api/legacy-inspections?site=' + urllib.parse.quote('兴信'))[1]['latestImport'] is None
+            # Recreate the pre-PR database shape with populated business rows, then prove additive,
+            # idempotent startup upgrades preserve every original persisted value.
+            proc.terminate(); proc.wait(timeout=10)
+            with sqlite3.connect(tmp+'/test.db') as db:
+                db.execute('DROP TABLE InspectionImportBatches')
+                db.execute('ALTER TABLE InspectionAlerts DROP COLUMN IsRead')
+                db.execute('ALTER TABLE InspectionResultApprovals DROP COLUMN IsRead')
+                original_tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+                original_columns = {table:[r[1] for r in db.execute(f'PRAGMA table_info("{table}")')] for table in original_tables}
+                def preserved_rows(connection):
+                    return {table:sorted(connection.execute('SELECT '+','.join('"'+c+'"' for c in columns)+' FROM "'+table+'"').fetchall(), key=repr) for table,columns in original_columns.items()}
+                original_rows = preserved_rows(db)
+            for restart in range(2):
+                proc = subprocess.Popen([shutil.which('dotnet'), str(ROOT / 'server/QcInspection.Api/bin/Debug/net8.0/QcInspection.Api.dll')], cwd=tmp, env=env, stdout=log, stderr=log)
+                for attempt in range(100):
+                    try:
+                        if request('/api/health')[0] == 200: break
+                    except (OSError, urllib.error.URLError): pass
+                    if proc.poll() is not None: raise AssertionError('Upgrade API failed to start')
+                    time.sleep(.1)
+                else: raise AssertionError('Upgrade API not ready')
+                with sqlite3.connect(tmp+'/test.db') as db:
+                    assert preserved_rows(db) == original_rows, 'Startup upgrade changed existing business values'
+                    assert db.execute('SELECT COUNT(*) FROM InspectionImportBatches').fetchone()[0] == 0
+                    for table in ['InspectionAlerts', 'InspectionResultApprovals']:
+                        assert all(r[0] == 0 for r in db.execute(f'SELECT IsRead FROM {table}'))
+                if restart == 0: proc.terminate(); proc.wait(timeout=10)
+            assert request('/api/legacy-inspections?site=' + urllib.parse.quote('兴信'))[1]['latestImport'] is None
+            post_upgrade_batch = upload([read_rows[0]])[1]['batchId']
             real_file = os.environ.get('QC_REAL_WORKBOOK')
             if real_file:
                 contents = pathlib.Path(real_file).read_bytes()
@@ -213,7 +338,10 @@ with tempfile.TemporaryDirectory(prefix='qc-import-check-') as tmp:
             status, _ = request('/api/users', json.dumps({'username':'qc-local','displayName':'QC','department':'QC','role':'QC文员','dataScope':'兴信','password':'Test-only-12345'}).encode()); assert status in (200,201)
             token = request('/api/auth/login', b'{"username":"qc-local","password":"Test-only-12345"}')[1]['accessToken']
             assert upload([row],site='湖南')[0] == 403
-            print('PASS: partial imports, unchanged skips, separate dates/quantities, empty fields, weekday dates, result updates, conflict details with existing matches, duplicate history, factory isolation, JAZ finished inspections, DPI exclusion, immutable REJ history and reinspection result entry')
+            assert batch_details(first_batch, site='湖南')[0] == 403
+            assert mark_read(read_batch, page_ids, site='湖南')[0] == 403
+            assert batch_details(post_upgrade_batch)[0] == 200
+            print('PASS: populated old-database upgrade and repeated startup preservation, extreme pagination, pending-approval withdrawal summaries, persisted import batches, site-isolated details, change/result filters and highlight IDs, partial imports, unchanged skips, separate dates/quantities, empty fields, weekday dates, result updates, conflict details with existing matches, duplicate history, factory isolation, JAZ finished inspections, DPI exclusion, immutable REJ history and reinspection result entry')
         except Exception:
             log.flush(); log.seek(0); print(log.read()[-5000:]); raise
         finally:
