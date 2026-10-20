@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { scheduleManualPlaced, toggleScheduleManual, scheduleAutoPlaced,
-  scheduleProductionOverride, scheduleActualProduction } from './scheduleLineStatus'
+  scheduleProductionOverride, scheduleActualProduction, schedulePurchasePlaced } from './scheduleLineStatus'
 
 const oldRow = { orderNo: 'MA', code: '47712A', _scheduleLineId: 'line:old',
   _legacyPlacedEligible: true, _legacyProductionEligible: true }
@@ -48,5 +48,34 @@ describe('schedule line status isolation', () => {
     expect(scheduleManualPlaced(row, keys)).toBe(false)
     expect(scheduleAutoPlaced(row, keys)).toBe(false)
     expect(toggleScheduleManual(row, keys)).toEqual(keys)
+  })
+})
+
+
+describe('shared schedule and order picker status', () => {
+  it('line-level manual marks are counted and hidden by the purchase picker', () => {
+    const manual = toggleScheduleManual(newRow, new Set())
+    const rows = [oldRow, newRow]
+    const placed = (r: typeof oldRow) => schedulePurchasePlaced(r, new Set(), manual)
+    expect(rows.filter(placed)).toEqual([newRow])
+    expect(rows.filter(r => !placed(r))).toEqual([oldRow])
+    expect(schedulePurchasePlaced(newRow, new Set(), toggleScheduleManual(newRow, manual))).toBe(false)
+  })
+  it('legacy manual and actual purchase keys never hide a newly added duplicate', () => {
+    const legacy = new Set(['MA|47712A'])
+    for (const [auto, manual] of [[legacy, new Set<string>()], [new Set<string>(), legacy]]) {
+      expect([oldRow, newRow].filter(r => !schedulePurchasePlaced(r, auto, manual))).toEqual([newRow])
+    }
+  })
+  it('a separately marked new duplicate does not inherit status after cancellation', () => {
+    const legacy = new Set(['MA|47712A'])
+    const marked = toggleScheduleManual(newRow, legacy)
+    expect([oldRow, newRow].filter(r => schedulePurchasePlaced(r, new Set(), marked))).toHaveLength(2)
+    const cancelled = toggleScheduleManual(newRow, marked)
+    expect([oldRow, newRow].filter(r => !schedulePurchasePlaced(r, new Set(), cancelled))).toEqual([newRow])
+  })
+  it('production picker keeps new duplicate visible when an old MA production order exists', () => {
+    const actual = new Set(['MA'])
+    expect([oldRow, newRow].filter(r => !scheduleActualProduction(r, actual))).toEqual([newRow])
   })
 })

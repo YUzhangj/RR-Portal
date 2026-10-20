@@ -6,7 +6,7 @@ import dayjs from 'dayjs'
 import { api } from '../api/client'
 import { scheduleSheetToRawGrid } from '../utils/scheduleImport'
 import { scheduleLineKey, scheduleManualPlaced, toggleScheduleManual, scheduleAutoPlaced,
-  scheduleActualProduction, scheduleProductionOverride } from '../utils/scheduleLineStatus'
+  scheduleActualProduction, scheduleProductionOverride, schedulePurchasePlaced } from '../utils/scheduleLineStatus'
 
 interface ScheduleSummary {
   id: number
@@ -389,8 +389,7 @@ function DetailView({ detail }: { detail: ScheduleDetail }) {
 
   // 已下单：自动(采购单命中) 或 手动标记
   const isAutoPlaced = useCallback((r: SchedRow) => scheduleAutoPlaced(r, placedKeys), [placedKeys])
-  const isManualPlaced = useCallback((r: SchedRow) => scheduleManualPlaced(r, manualKeys), [manualKeys])
-  const isPlaced = useCallback((r: SchedRow) => isAutoPlaced(r) || isManualPlaced(r), [isAutoPlaced, isManualPlaced])
+  const isPlaced = useCallback((r: SchedRow) => schedulePurchasePlaced(r, placedKeys, manualKeys), [placedKeys, manualKeys])
   const isActualProductionPlaced = useCallback((r: SchedRow) => scheduleActualProduction(r, productionPlacedPos), [productionPlacedPos])
   // 手动覆盖优先；未单独设置时生产状态跟随采购，真实生产单始终为已下。
   const isProductionPlaced = useCallback((r: SchedRow) => {

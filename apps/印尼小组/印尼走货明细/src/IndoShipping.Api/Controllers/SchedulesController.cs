@@ -100,14 +100,17 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;",
     public async Task<IActionResult> Get(int id)
     {
         using var c = factory.Create();
-        var row = await c.QueryFirstOrDefaultAsync("SELECT * FROM schedules WHERE id=@id", new { id });
+        c.Open();
+        using var tx = c.BeginTransaction(System.Data.IsolationLevel.RepeatableRead);
+        var row = await c.QueryFirstOrDefaultAsync("SELECT * FROM schedules WHERE id=@id", new { id }, tx);
         if (row == null) return NotFound(new { error = "not found" });
         // Rebuild old stored diffs too: legacy GroupBy(...).Last() discarded duplicate lines.
-        var history = await LoadHistory(c);
+        var history = await LoadHistory(c, tx);
         var view = history.Single(x => x.Snapshot.Id == id);
         var result = (IDictionary<string, object>)row;
         result["raw_rows"] = JsonSerializer.Serialize(view.Rows);
         result["diff_from_prev"] = JsonSerializer.Serialize(view.Diff);
+        tx.Commit();
         return Ok(result);
     }
 
@@ -125,7 +128,13 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;",
         c.Open();
         using var tx = c.BeginTransaction();
         await MaterialTrackingHistory.CaptureAsync(c, tx);
-        var rawRowsStr = body.raw_rows?.GetRawText() ?? "[]";
+        // Freeze the current read-only identities before a backfill can change history order.
+        // Store metadata separately so existing material-completion hashes remain valid.
+        var oldSnapshots = await LoadSnapshots(c, tx);
+        var oldLedger = await LoadLedger(c, tx);
+        var oldHistory = ScheduleLineHistory.Build(oldSnapshots, oldLedger);
+        var ledger = ScheduleLineHistory.Freeze(oldHistory, oldLedger);
+        var rawRowsStr = JsonSerializer.Serialize(ScheduleLineHistory.Parse(body.raw_rows?.GetRawText()));
         // Upsert by week_label (overwrite on re-upload of same week)
         var id = await c.ExecuteScalarAsync<int>(@"
 INSERT INTO schedules(week_label, upload_date, raw_rows, diff_from_prev)
@@ -136,10 +145,19 @@ ON CONFLICT (week_label) DO UPDATE SET
     diff_from_prev = EXCLUDED.diff_from_prev
 RETURNING id;",
             new { wl = body.week_label, ud = body.upload_date, rr = rawRowsStr, df = "{}" }, tx);
-        var history = await LoadHistory(c, tx);
+        var snapshots = await LoadSnapshots(c, tx);
+        var current = snapshots.Single(x => x.Id == id);
+        var oldPeriod = oldHistory.FirstOrDefault(x => x.Snapshot.Id == id);
+        if (oldPeriod is not null)
+            ledger.Snapshots[id] = ScheduleLineHistory.Replacement(current, oldPeriod.Rows);
+        var history = ScheduleLineHistory.Build(snapshots, ledger);
         var diff = history.Single(x => x.Snapshot.Id == id).Diff;
         await c.ExecuteAsync("UPDATE schedules SET diff_from_prev=CAST(@df AS jsonb) WHERE id=@id",
             new { id, df = JsonSerializer.Serialize(diff) }, tx);
+        await c.ExecuteAsync(@"
+INSERT INTO settings(key,value) VALUES ('schedule_line_identities',@value)
+ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value;",
+            new { value = JsonSerializer.Serialize(ScheduleLineHistory.Freeze(history, ledger)) }, tx);
         await MaterialTrackingHistory.CaptureAsync(c, tx);
         tx.Commit();
         return Ok(new { ok = true, id, diff });
@@ -154,8 +172,18 @@ RETURNING id;",
 
     private static async Task<List<ScheduleLineHistory.View>> LoadHistory(System.Data.IDbConnection c, System.Data.IDbTransaction? tx = null)
     {
+        var snapshots = await LoadSnapshots(c, tx);
+        return ScheduleLineHistory.Build(snapshots, await LoadLedger(c, tx));
+    }
+
+    private static async Task<ScheduleLineHistory.Ledger> LoadLedger(System.Data.IDbConnection c, System.Data.IDbTransaction? tx = null) =>
+        ScheduleLineHistory.ReadLedger(await c.ExecuteScalarAsync<string?>(
+            "SELECT value FROM settings WHERE key='schedule_line_identities'", transaction: tx));
+
+    private static async Task<List<ScheduleLineHistory.Snapshot>> LoadSnapshots(System.Data.IDbConnection c, System.Data.IDbTransaction? tx = null)
+    {
         var rows = await c.QueryAsync<(int id, string? week_label, DateTime? upload_date, string? raw_rows)>(
             "SELECT id, week_label, upload_date, raw_rows FROM schedules", transaction: tx);
-        return ScheduleLineHistory.Build(rows.Select(r => new ScheduleLineHistory.Snapshot(r.id, r.week_label, r.upload_date, r.raw_rows)));
+        return rows.Select(r => new ScheduleLineHistory.Snapshot(r.id, r.week_label, r.upload_date, r.raw_rows)).ToList();
     }
 }

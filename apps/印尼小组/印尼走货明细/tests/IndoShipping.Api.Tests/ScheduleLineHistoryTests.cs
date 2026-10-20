@@ -127,4 +127,165 @@ public class ScheduleLineHistoryTests
         Assert.NotEqual(Id(views[0].Rows[0]), Id(views[2].Rows[0]));
         Assert.False(Eligible(views[2].Rows[0]));
     }
+
+    [Fact]
+    public void First_period_quantity_edit_and_reorder_preserve_saved_ids_and_owners()
+    {
+        var original = Snapshot(1, "2026-W42", Row(), Row(200));
+        var before = ScheduleLineHistory.Build([original]);
+        var ledger = ScheduleLineHistory.Freeze(before);
+        var replacement = Snapshot(1, "2026-W42", Row(200), Row(150));
+        ledger.Snapshots[1] = ScheduleLineHistory.Replacement(replacement, before[0].Rows);
+        var after = ScheduleLineHistory.Build([replacement], ledger);
+        Assert.Equal(Id(before[0].Rows[1]), Id(after[0].Rows[0]));
+        Assert.Equal(Id(before[0].Rows[0]), Id(after[0].Rows[1]));
+        Assert.All(after[0].Rows, r => Assert.False(Eligible(r)));
+    }
+
+    [Fact]
+    public void Earlier_backfill_cannot_take_frozen_ids_or_legacy_ownership()
+    {
+        var existing = new[] { Snapshot(1, "2026-W42", Row()), Snapshot(2, "2026-W43", Row()) };
+        var before = ScheduleLineHistory.Build(existing);
+        var ledger = ScheduleLineHistory.Freeze(before);
+        var after = ScheduleLineHistory.Build(existing.Append(Snapshot(3, "2026-W41", Row())), ledger);
+        Assert.Equal(Id(before[0].Rows[0]), Id(after[1].Rows[0]));
+        Assert.Equal(Id(before[1].Rows[0]), Id(after[2].Rows[0]));
+        Assert.Equal(Id(before[0].Rows[0]), Id(after[0].Rows[0]));
+        Assert.True(Eligible(after[0].Rows[0]));
+        Assert.True(after[0].Rows[0]["_legacyProductionEligible"]!.GetValue<bool>());
+        Assert.True(Eligible(after[1].Rows[0]));
+        Assert.True(after[1].Rows[0]["_legacyProductionEligible"]!.GetValue<bool>());
+        Assert.All(after.Skip(1), view => { Assert.Empty(view.Diff.added); Assert.Empty(view.Diff.removed); Assert.Empty(view.Diff.changed); });
+    }
+
+    [Fact]
+    public void Deleted_identity_is_not_reused_by_same_period_reintroduction()
+    {
+        var original = Snapshot(1, "2026-W42", Row());
+        var before = ScheduleLineHistory.Build([original]);
+        var ledger = ScheduleLineHistory.Freeze(before);
+        var empty = Snapshot(1, "2026-W42");
+        ledger.Snapshots[1] = ScheduleLineHistory.Replacement(empty, before[0].Rows);
+        ledger = ScheduleLineHistory.Freeze(ScheduleLineHistory.Build([empty], ledger), ledger);
+        ledger.Snapshots[1] = ScheduleLineHistory.Replacement(original, []);
+        var restored = ScheduleLineHistory.Build([original], ledger);
+        Assert.NotEqual(Id(before[0].Rows[0]), Id(restored[0].Rows[0]));
+        Assert.False(Eligible(restored[0].Rows[0]));
+        Assert.False(restored[0].Rows[0]["_legacyProductionEligible"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void New_exact_row_cannot_collide_with_identity_preserved_by_an_edit()
+    {
+        var before = ScheduleLineHistory.Build([Snapshot(1, "2026-W42", Row())]);
+        var ledger = ScheduleLineHistory.Freeze(before);
+        var edited = Snapshot(1, "2026-W42", Row(200));
+        ledger.Snapshots[1] = ScheduleLineHistory.Replacement(edited, before[0].Rows);
+        var current = ScheduleLineHistory.Build([edited], ledger);
+        ledger = ScheduleLineHistory.Freeze(current, ledger);
+        var added = Snapshot(1, "2026-W42", Row(200), Row());
+        ledger.Snapshots[1] = ScheduleLineHistory.Replacement(added, current[0].Rows);
+        var after = ScheduleLineHistory.Build([added], ledger);
+        Assert.Equal(Id(before[0].Rows[0]), Id(after[0].Rows[0]));
+        Assert.NotEqual(Id(after[0].Rows[0]), Id(after[0].Rows[1]));
+        Assert.False(Eligible(after[0].Rows[1]));
+    }
+
+    [Fact]
+    public void Same_period_delete_and_restore_cannot_revive_an_id_from_an_earlier_period()
+    {
+        var first = Snapshot(1, "2026-W42", Row());
+        var second = Snapshot(2, "2026-W43", Row());
+        var before = ScheduleLineHistory.Build([first, second]);
+        var ledger = ScheduleLineHistory.Freeze(before);
+        var empty = Snapshot(2, "2026-W43");
+        ledger.Snapshots[2] = ScheduleLineHistory.Replacement(empty, before[1].Rows);
+        var removed = ScheduleLineHistory.Build([first, empty], ledger);
+        ledger = ScheduleLineHistory.Freeze(removed, ledger);
+        ledger.Snapshots[2] = ScheduleLineHistory.Replacement(second, []);
+        var restored = ScheduleLineHistory.Build([first, second], ledger);
+        Assert.NotEqual(Id(before[1].Rows[0]), Id(restored[1].Rows[0]));
+        Assert.False(Eligible(restored[1].Rows[0]));
+        Assert.False(restored[1].Rows[0]["_legacyProductionEligible"]!.GetValue<bool>());
+        Assert.Single(restored[1].Diff.added);
+        Assert.Single(restored[1].Diff.removed);
+        var reread = ScheduleLineHistory.Build([first, second], ScheduleLineHistory.Freeze(restored, ledger));
+        Assert.Equal(Id(restored[1].Rows[0]), Id(reread[1].Rows[0]));
+        Assert.Single(reread[1].Diff.added);
+        Assert.Single(reread[1].Diff.removed);
+    }
+
+    [Fact]
+    public void Stale_ledger_is_rejected_and_client_identity_metadata_is_ignored()
+    {
+        var original = Snapshot(1, "2026-W42", Row());
+        var ledger = ScheduleLineHistory.Freeze(ScheduleLineHistory.Build([original]));
+        Assert.Throws<InvalidOperationException>(() => ScheduleLineHistory.Build([Snapshot(1, "2026-W42", Row(200))], ledger));
+        var forged = Row(); forged["_scheduleLineId"] = "line:forged";
+        forged["_legacyPlacedEligible"] = false; forged["_legacyProductionEligible"] = false;
+        var actual = ScheduleLineHistory.Build([Snapshot(1, "2026-W42", forged)])[0].Rows[0];
+        Assert.NotEqual("line:forged", Id(actual));
+        Assert.True(Eligible(actual));
+        Assert.DoesNotContain(ScheduleLineHistory.Parse(JsonSerializer.Serialize(new[] { forged }))[0], p => p.Key.StartsWith("_schedule") || p.Key.StartsWith("_legacy"));
+    }
+
+    [Fact]
+    public void Backfill_does_not_cross_an_empty_period_or_calendar_gap()
+    {
+        var existing = new[] { Snapshot(1, "2026-W42"), Snapshot(2, "2026-W43", Row()) };
+        var before = ScheduleLineHistory.Build(existing);
+        var ledger = ScheduleLineHistory.Freeze(before);
+        var after = ScheduleLineHistory.Build(existing.Append(Snapshot(3, "2026-W41", Row())), ledger);
+        Assert.NotEqual(Id(after[0].Rows[0]), Id(after[2].Rows[0]));
+        Assert.False(Eligible(after[0].Rows[0]));
+        var onlyLater = new[] { Snapshot(2, "2026-W43", Row()) };
+        var laterLedger = ScheduleLineHistory.Freeze(ScheduleLineHistory.Build(onlyLater));
+        var gap = ScheduleLineHistory.Build(onlyLater.Append(Snapshot(3, "2026-W41", Row())), laterLedger);
+        Assert.NotEqual(Id(gap[0].Rows[0]), Id(gap[1].Rows[0]));
+    }
+
+    [Fact]
+    public void Backfill_cannot_merge_two_established_identities()
+    {
+        var existing = new[] { Snapshot(1, "2026-W40", Row()), Snapshot(2, "2026-W41"), Snapshot(3, "2026-W44", Row()) };
+        var before = ScheduleLineHistory.Build(existing);
+        var ledger = ScheduleLineHistory.Freeze(before);
+        // First extend the earlier identity to W42; W44's identity remains a separate order.
+        var firstFill = existing.Append(Snapshot(4, "2026-W42", Row())).ToArray();
+        var intermediate = ScheduleLineHistory.Build(firstFill, ledger);
+        ledger = ScheduleLineHistory.Freeze(intermediate, ledger);
+        var final = ScheduleLineHistory.Build(firstFill.Append(Snapshot(5, "2026-W43", Row())), ledger);
+        var current = final.Single(v => v.Snapshot.Id == 5);
+        Assert.Equal(Id(intermediate.Single(v => v.Snapshot.Id == 4).Rows[0]), Id(current.Rows[0]));
+        Assert.NotEqual(Id(current.Rows[0]), Id(final.Single(v => v.Snapshot.Id == 3).Rows[0]));
+        Assert.Equal(Id(before[2].Rows[0]), Id(final.Single(v => v.Snapshot.Id == 3).Rows[0]));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Backfill_does_not_guess_among_identical_duplicate_occurrences(bool duplicatesInBackfill)
+    {
+        var next = duplicatesInBackfill ? Snapshot(1, "2026-W42", Row()) : Snapshot(1, "2026-W42", Row(), Row());
+        var before = ScheduleLineHistory.Build([next]);
+        var ledger = ScheduleLineHistory.Freeze(before);
+        var earlier = duplicatesInBackfill ? Snapshot(2, "2026-W41", Row(), Row()) : Snapshot(2, "2026-W41", Row());
+        var after = ScheduleLineHistory.Build([next, earlier], ledger);
+        Assert.DoesNotContain(after[0].Rows, r => before[0].Rows.Any(old => Id(old) == Id(r)));
+        Assert.All(after[0].Rows, r => Assert.False(Eligible(r)));
+    }
+
+    [Fact]
+    public void Backfill_cannot_ignore_a_pending_replacement_duplicate_when_counting_exact_candidates()
+    {
+        var original = Snapshot(1, "2026-W42", Row());
+        var before = ScheduleLineHistory.Build([original]);
+        var ledger = ScheduleLineHistory.Freeze(before);
+        var replacement = Snapshot(1, "2026-W42", Row(), Row());
+        ledger.Snapshots[1] = ScheduleLineHistory.Replacement(replacement, before[0].Rows);
+        var after = ScheduleLineHistory.Build([replacement, Snapshot(2, "2026-W41", Row())], ledger);
+        Assert.DoesNotContain(after[1].Rows, row => Id(row) == Id(after[0].Rows[0]));
+        Assert.Equal(Id(before[0].Rows[0]), Id(after[1].Rows[0]));
+    }
 }

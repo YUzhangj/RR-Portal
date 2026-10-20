@@ -29,6 +29,11 @@ export function scheduleAutoPlaced(r: ScheduleStatusRow, keys: Set<string>): boo
   return !!scheduleLineKey(r) && !!r.orderNo && !!r.code && r._legacyPlacedEligible === true && keys.has(scheduleLegacyKey(r))
 }
 
+// All schedule views use the same line-level status, including purchase pickers.
+export function schedulePurchasePlaced(r: ScheduleStatusRow, autoKeys: Set<string>, manualKeys: Set<string>): boolean {
+  return scheduleAutoPlaced(r, autoKeys) || scheduleManualPlaced(r, manualKeys)
+}
+
 export function scheduleActualProduction(r: ScheduleStatusRow, pos: Set<string>): boolean {
   return !!scheduleLineKey(r) && !!r.orderNo && r._legacyProductionEligible === true && pos.has(r.orderNo.trim())
 }

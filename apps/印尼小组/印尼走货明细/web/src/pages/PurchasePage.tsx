@@ -14,8 +14,9 @@ import { purchaseMaterialBucket, purchaseMaterialLine, purchaseSelectionSource, 
 import { linkPurchaseLine, matchingLineSchedules } from '../utils/purchaseScheduleLink'
 import { autoLinkPurchaseMaterials, planPurchaseNetWeight } from '../utils/purchaseNetWeight'
 import { purchaseLineDeliveryDate, purchaseLineSourceKey, purchaseOrderNumbers } from '../utils/purchaseOrderMerge'
+import { schedulePurchasePlaced, type ScheduleStatusRow } from '../utils/scheduleLineStatus'
 
-interface SchedRow {
+interface SchedRow extends ScheduleStatusRow {
   source?: string
   customer?: string
   country?: string
@@ -387,7 +388,6 @@ export default function PurchasePage() {
   const [drawerFull, setDrawerFull] = useState(false)
   const [schedRows, setSchedRows] = useState<SchedRow[]>([])
   const [productCodes, setProductCodes] = useState<string[]>([])
-  const [placedTomyPos, setPlacedTomyPos] = useState<Set<string>>(new Set())
   const [schedPickerOpen, setSchedPickerOpen] = useState(false)
   const [lineScheduleLink, setLineScheduleLink] = useState<{ index: number; original: PoItem } | null>(null)
   const [lineLinkRows, setLineLinkRows] = useState<SchedRow[]>([])
@@ -404,7 +404,9 @@ export default function PurchasePage() {
   })), [materialSelection])
   const [schedPickerFilter, setSchedPickerFilter] = useState('')
   const [pickerSelKeys, setPickerSelKeys] = useState<React.Key[]>([])
-  const [placedSet, setPlacedSet] = useState<Set<string>>(new Set())  // 已下单(自动+手动) orderNo|code
+  const [placedSet, setPlacedSet] = useState<Set<string>>(new Set())  // 自动 PO + 货号匹配
+  const [manualPlacedSet, setManualPlacedSet] = useState<Set<string>>(new Set())
+  const isSchedulePlaced = useCallback((r: SchedRow) => schedulePurchasePlaced(r, placedSet, manualPlacedSet), [placedSet, manualPlacedSet])
   const [hidePlaced, setHidePlaced] = useState(false)                 // 部分物料下单后仍可补选剩余物料
   const [receiptItem, setReceiptItem] = useState<PurchaseItemRow | null>(null)
   const [receiptRows, setReceiptRows] = useState<ReceiptRecord[]>([])
@@ -426,10 +428,6 @@ export default function PurchasePage() {
       ])
       setRows(Array.isArray(data) ? data : [])
       setItemRows(Array.isArray(detailRows) ? detailRows : [])
-      // Track placed TOMY POs by po_no (used to grey out rows in picker)
-      const placed = new Set<string>()
-      for (const p of data) if (p.po_no) placed.add(p.po_no)
-      setPlacedTomyPos(placed)
     } finally { setLoading(false) }
   }
 
@@ -559,11 +557,11 @@ export default function PurchasePage() {
         for (const po of pos) for (const c of codes) set.add(`${po}|${c}`)
       }
     } catch {}
+    setPlacedSet(set)
     try {
       const { data } = await api.get<string[]>('/schedules/placed-manual')
-      for (const k of (Array.isArray(data) ? data : [])) set.add(k)
+      setManualPlacedSet(new Set(Array.isArray(data) ? data : []))
     } catch {}
-    setPlacedSet(set)
   }
   useEffect(() => { load(); loadLatestSchedule(); loadProductCodes(); loadPlaced() }, [])
 
@@ -2083,7 +2081,7 @@ export default function PurchasePage() {
 
       <Modal
         open={schedPickerOpen}
-        title={`从排期选 TOMY PO 下单（未下单 ${schedRows.filter(r => !(r.orderNo && r.code && placedSet.has(`${r.orderNo}|${r.code}`))).length} 行 · 已选 ${pickerSelKeys.length} 行）`}
+        title={`从排期选 TOMY PO 下单（未下单 ${schedRows.filter(r => !isSchedulePlaced(r)).length} 行 · 已选 ${pickerSelKeys.length} 行）`}
         width="80vw"
         onCancel={() => { setSchedPickerOpen(false); setPickerSelKeys([]) }}
         footer={null}
@@ -2114,7 +2112,7 @@ export default function PurchasePage() {
             preserveSelectedRowKeys: true,   // 跨搜索/翻页保留勾选，可一次选多个货号的行
           }}
           dataSource={schedRows.map((r, i) => ({ ...r, _origIdx: i })).filter(r => {
-            if (hidePlaced && r.orderNo && r.code && placedSet.has(`${r.orderNo}|${r.code}`)) return false  // 隐藏已下单
+            if (hidePlaced && isSchedulePlaced(r)) return false  // 隐藏已下单
             if (!schedPickerFilter) return true
             const s = schedPickerFilter.toLowerCase()
             return ((r.code || '') + (r.productName || '') + (r.orderNo || '') + (r.endCustomer || ''))
@@ -2122,7 +2120,7 @@ export default function PurchasePage() {
           })}
           pagination={{ pageSize: 30 }}
           scroll={{ x: 1300, y: 480 }}
-          rowClassName={(r) => r.orderNo && placedTomyPos.has(r.orderNo) ? 'po-row-done' : ''}
+          rowClassName={(r) => isSchedulePlaced(r) ? 'po-row-done' : ''}
           columns={[
             {
               title: '操作', width: 60, fixed: 'left',
@@ -2135,7 +2133,7 @@ export default function PurchasePage() {
             { title: '品名', dataIndex: 'productName', width: 200, ellipsis: true },
             {
               title: 'TOMY PO', dataIndex: 'orderNo', width: 130,
-              render: (v) => v ? (placedTomyPos.has(v) ? <Tag color="default">{v} · 已下</Tag> : <Tag color="blue">{v}</Tag>) : '',
+              render: (v, r) => v ? (isSchedulePlaced(r) ? <Tag color="default">{v} · 已下</Tag> : <Tag color="blue">{v}</Tag>) : '',
             },
             { title: 'CUST PO', dataIndex: 'customerPO', width: 130 },
             { title: '数量', dataIndex: 'qty', width: 80, align: 'right' },
