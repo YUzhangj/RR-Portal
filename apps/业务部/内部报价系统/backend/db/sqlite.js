@@ -3,6 +3,9 @@ const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
+const { AsyncLocalStorage } = require('node:async_hooks');
+const transactionStore = new AsyncLocalStorage();
+let transactionTail = Promise.resolve();
 const {
   appendMissingRefDefaults,
   appendMissingRefDefaultsToSectionPayloads,
@@ -486,9 +489,18 @@ if (!db.prepare('SELECT 1 FROM app_migrations WHERE key = ?').get(retireHeyuanFa
 // 包装：transaction(fn) 在 BEGIN/COMMIT/ROLLBACK 中运行 fn
 db.transaction = function (fn) {
   return async (...args) => {
-    db.exec('BEGIN');
-    try { const r = await fn(...args); db.exec('COMMIT'); return r; }
-    catch (e) { db.exec('ROLLBACK'); throw e; }
+    if (transactionStore.getStore()) return fn(...args);
+    const run = async () => {
+      db.exec('BEGIN');
+      try {
+        const result = await transactionStore.run(true, () => fn(...args));
+        db.exec('COMMIT');
+        return result;
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+    };
+    const current = transactionTail.then(run, run);
+    transactionTail = current.then(() => {}, () => {});
+    return current;
   };
 };
 

@@ -2087,8 +2087,11 @@ function renderSummaryPane(host, sections, quote, me) {
     const autoFill = {
       ...components,
       base_price: totalBeforeMarkup * (num(legacy.formula_markup_x) || 1),
+      // Match live itemized report/export tax; keep other costing modes unchanged.
+      itemized_labor13_basis: (num(components.injection_labor)
+        + num(components.painting_labor) + num(components.assembly_labor)) * 0.08,
     };
-    host.innerHTML = '<div id="legacy-tax-deduction-block" class="hidden"></div>';
+    host.innerHTML = '<div id="legacy-tax-deduction-block"></div>';
     renderLegacyPricingTail(host, legacy, {
       cost: totalBeforeMarkup,
       markup: num(legacy.formula_markup_x) || 1,
@@ -2097,7 +2100,6 @@ function renderSummaryPane(host, sections, quote, me) {
     });
     const salesSec = sections.find(x => x.dept === 'sales');
     const taxSummary = renderTaxDeductionBlock(host.querySelector('#legacy-tax-deduction-block'), sales, salesSec, me, autoFill);
-    const importedTax = renderLegacyTaxSummary(host, legacy, sales.pricing_summary, taxSummary, true);
     return {
       material: num(autoFill.imp_mat) + num(autoFill.dom_mat) + num(autoFill.hardware)
         + num(autoFill.electronic) + num(autoFill.motor) + num(autoFill.suction)
@@ -2109,9 +2111,9 @@ function renderSummaryPane(host, sections, quote, me) {
         + num(autoFill.plating) + num(autoFill.flocking) + num(autoFill.other_buy) + num(autoFill.carton)
         + num(autoFill.freight) + num(autoFill.cabinet) + num(autoFill.misc),
       total: num(taxSummary?.totalCost),
-      totalDeduction: num(importedTax?.totalDeduction),
-      afterDeduction: num(importedTax?.afterDeduction),
-      financial: { ...taxSummary.financial, totalDeduction: num(importedTax?.totalDeduction), afterDeduction: num(importedTax?.afterDeduction) },
+      totalDeduction: num(taxSummary?.totalDeduction),
+      afterDeduction: num(taxSummary?.afterDeduction),
+      financial: taxSummary.financial,
     };
   }
 
@@ -2480,6 +2482,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
   salesPayload.pricing_summary = salesPayload.pricing_summary || {};
   const ps = salesPayload.pricing_summary;
   autoFill = autoFill || {};
+  const itemizedLaborTax = Object.hasOwn(autoFill, 'itemized_labor13_basis');
   // 减税明细只读：每次均以各部门实时金额覆盖历史手工值。
   ps.overrides = ps.overrides || {};
   const applyAuto = (tbl, key, val) => {
@@ -2539,6 +2542,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     suction6: 6,      // 吸塑类6%
     freight9: 8.26,   // 运费含税9%
     tax13b: 11.5,     // 含税13%类
+    ...(itemizedLaborTax ? { labor13: 11.5 } : {}),
   };
   ps.t4 = ps.t4 || {};
   Object.keys(RATE_DEFAULTS).forEach(k => {
@@ -2556,6 +2560,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     ['carton', '纸箱'], ['freight', '运费'], ['cabinet', '吊柜费'], ['misc', '杂项'],
   ];
   const t4Cols = [
+    ...(itemizedLaborTax ? [['labor13', '人工类13%（人工×8%）']] : []),
     ['tax13', '含税13%类成本'], ['carton', '纸箱类'],
     ['tax1', '含税1%'], ['slush3', '搪胶类3%'], ['sewhair13', '车发类13%'], ['sewcloth13', '车衣类13%'],
     ['suction6', '吸塑类6%'], ['freight9', '运费类9%'], ['tax13b', '含税13%类'],
@@ -2669,6 +2674,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
       const inp = host.querySelector(`[data-tbl="t4a"][data-key="${key}"]`);
       if (inp) inp.textContent = formatNum(ps.t4[key].amt);
     };
+    if (itemizedLaborTax) setT4Amt('labor13', autoFill.itemized_labor13_basis);
     setT4Amt('rmb_buy', rmbBuyCost);                                           // 人民币外购件成本
     // 含税13%类成本 = 国内料 + 五金 + 马达 + 彩盒/内咭 + 电池 + 利宝 + 其他外购 + 油漆 + 胶袋
     const tax13Cost = num(ps.t1.dom_mat) + num(ps.t1.hardware) + num(ps.t1.motor)
@@ -2714,7 +2720,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     ps.t2.code_after = +codeAfter.toFixed(4);
     const codeAfterInp = host.querySelector('[data-tbl="t2"][data-key="code_after"]');
     if (codeAfterInp) codeAfterInp.textContent = formatNum(ps.t2.code_after);
-    const taxLabels = { tax13: '含税13%类成本', carton: '纸箱类', tax1: '含税1%', slush3: '搪胶类3%', sewhair13: '车发类13%', sewcloth13: '车衣类13%', suction6: '吸塑类6%', freight9: '运费含税9%', tax13b: '含税13%类' };
+    const taxLabels = { ...(itemizedLaborTax ? { labor13: '人工类13%（人工×8%）' } : {}), tax13: '含税13%类成本', carton: '纸箱类', tax1: '含税1%', slush3: '搪胶类3%', sewhair13: '车发类13%', sewcloth13: '车衣类13%', suction6: '吸塑类6%', freight9: '运费含税9%', tax13b: '含税13%类' };
     calculatedSummary = { totalCost, totalDeduction: totalDed, afterDeduction: afterDed,
       financial: {
         fields: { ...ps.t1, ...ps.t2, ...ps.t3 },

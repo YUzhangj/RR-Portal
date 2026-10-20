@@ -1,3 +1,4 @@
+const { quoteWriteRoute } = require('../services/quoteFreeze');
 const express = require('express');
 const db = require('../db');
 const { requireAuth, quoteAccess } = require('../middleware/auth');
@@ -225,7 +226,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // PUT /api/quotes/:id/header  修改表头（产品名/客户/数量）— 业务+工程可改
-router.put('/:id/header', async (req, res) => {
+router.put('/:id/header', quoteWriteRoute(db, req => Number(req.params.id), async (req, res) => {
   if (!require('../middleware/auth').canEditDepartment(req.user, 'sales')) return res.status(403).json({ error: '没有报价基本资料的编辑权限' });
   if (!['sales', 'engineering'].includes(req.user.dept)) {
     return res.status(403).json({ error: '只有业务或工程可改表头' });
@@ -265,7 +266,7 @@ router.put('/:id/header', async (req, res) => {
   await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail) VALUES (?, ?, ?, 'edit_header', ?)`)
     .run(id, req.user.dept, req.user.name, JSON.stringify(req.body || {}));
   res.json({ ok: true });
-});
+}));
 
 // GET /api/quotes/:id  报价单详情 + 所有 section（按可见性过滤）
 router.get('/:id', async (req, res) => {

@@ -271,6 +271,7 @@ async function syncOpenVerificationVersionsToCostingBasis(db, { factoryCode, bas
 
 async function syncOpenQuotesToCostingBasis(db, { factoryCode, basis: rawBasis, actor }) {
   const basis = normalizeCostingBasis(rawBasis);
+  await require('./quoteFreeze').lockFactoryQuotes(db, factoryCode);
   const rows = await db.prepare(`
     SELECT s.id AS section_id, s.quote_id, s.dept, s.payload_json, s.status AS section_status,
            q.status AS quote_status

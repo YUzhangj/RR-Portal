@@ -1,3 +1,4 @@
+const { quoteWriteRoute } = require('../services/quoteFreeze');
 const express = require('express');
 const db = require('../db');
 const { requireAuth, quoteAccess } = require('../middleware/auth');
@@ -130,7 +131,7 @@ router.get('/', async (req, res) => {
   });
 });
 
-router.put('/:id/confirmation', async (req, res) => {
+router.put('/:id/confirmation', quoteWriteRoute(db, req => Number(req.params.id), async (req, res) => {
   if (req.user.dept !== 'sales' && !isAdmin(req.user)) {
     return res.status(403).json({ error: '只有业务或超级管理员可确认客价和分派车间' });
   }
@@ -139,7 +140,7 @@ router.put('/:id/confirmation', async (req, res) => {
   if (access.status !== 200) return res.status(access.status).json({ error: access.status === 404 ? '报价单不存在' : '无权操作该报价单' });
   const body = req.body || {};
   const existing = await db.prepare('SELECT * FROM quote_customer_confirmations WHERE quote_id = ?').get(id);
-  if (existing?.status === 'confirmed') {
+  if (existing?.status === 'confirmed' || await db.prepare('SELECT 1 FROM quote_verifications WHERE quote_id=?').get(id)) {
     return res.status(409).json({ error: '客价已经确认并锁定，不能再次修改；后续价格请在核价中心填写' });
   }
   const status = Object.prototype.hasOwnProperty.call(body, 'status')
@@ -195,7 +196,7 @@ router.put('/:id/confirmation', async (req, res) => {
   await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail) VALUES (?, 'sales', ?, 'customer_confirmation', ?)`)
     .run(id, req.user.name, JSON.stringify({ status, workshops, confirmed_price: confirmedPrice, confirmed_qty: confirmedQty }));
   res.json({ ok: true });
-});
+}));
 
 router.get('/export/xlsx', async (req, res) => {
   let rows = await loadRows(req.user);

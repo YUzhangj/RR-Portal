@@ -1,3 +1,4 @@
+const { quoteWriteRoute } = require('../services/quoteFreeze');
 const express = require('express');
 const db = require('../db');
 const { requireAuth, quoteAccess, hasMenuPermission } = require('../middleware/auth');
@@ -6,7 +7,7 @@ const router = express.Router();
 router.use(requireAuth);
 
 // POST /api/reviews/:section_id   { action: 'approve'|'reject', comment? }
-router.post('/:section_id', async (req, res) => {
+router.post('/:section_id', quoteWriteRoute(db, async req => (await db.prepare('SELECT quote_id FROM quote_sections WHERE id=?').get(Number(req.params.section_id)))?.quote_id, async (req, res) => {
   if (!['supervisor', 'admin'].includes(req.user.role)) return res.status(403).json({ error: '仅主管可审核' });
   const id = Number(req.params.section_id);
   const { action, comment } = req.body || {};
@@ -55,11 +56,11 @@ router.post('/:section_id', async (req, res) => {
     .run(sec.quote_id, sec.dept, actor, action, comment || null);
 
   res.json({ ok: true, all_approved: approvedAll });
-});
+}));
 
 // POST /api/reviews/:section_id/reopen  { reason? }
 // 主管把已审 section 退回到"已填"以便修改；同时若报价单已 fully_approved 则回退到 drafting
-router.post('/:section_id/reopen', async (req, res) => {
+router.post('/:section_id/reopen', quoteWriteRoute(db, async req => (await db.prepare('SELECT quote_id FROM quote_sections WHERE id=?').get(Number(req.params.section_id)))?.quote_id, async (req, res) => {
   const id = Number(req.params.section_id);
   const reason = (req.body && req.body.reason) || null;
 
@@ -89,6 +90,6 @@ router.post('/:section_id/reopen', async (req, res) => {
     .run(sec.quote_id, sec.dept, reopenActor, reason || null);
 
   res.json({ ok: true });
-});
+}));
 
 module.exports = router;

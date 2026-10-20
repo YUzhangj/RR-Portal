@@ -168,10 +168,54 @@ function upgradeLegacySectionsForCalculation(sections, rawBasis) {
   return prepared;
 }
 
+// Itemized historical versions are live calculations. Never use current_hkd
+// as the authoritative amount once a row carries editable formula parameters.
+// The source snapshot and balancing offsets remain unchanged for comparison.
+function calculateLegacyFormulaCosts(quote, payloads) {
+  const sales = payloads.sales || {};
+  const legacy = sales.legacy_import || {};
+  if (legacy.formula_mode !== 'itemized_v1' || legacy.excel_model) return null;
+  const components = Object.fromEntries(COMPONENTS.map(key => [key, number(legacy.formula_offsets?.[key])]));
+  const add = (key, value) => {
+    if (Object.hasOwn(components, key)) components[key] += number(value);
+  };
+  const molding = payloads.molding || {};
+  const loss = 1 + number(molding.injection_loss_pct ?? 3) / 100;
+  for (const row of molding.injection || []) {
+    const material = text(row.material);
+    const materialCost = number(row.weight_g) * loss * number(row.material_unit_price);
+    add(/^(PVC|TPR|TPE)\b/i.test(material) ? 'dom_mat' : 'imp_mat', materialCost);
+    add('injection_labor', number(row.shot_price));
+    if (/^ABS\b/i.test(material)) add('abs_cost', materialCost);
+  }
+  const fx = number(sales.header?.fx_rmb_hkd) || 0.87;
+  for (const [dept, payload] of Object.entries(payloads)) {
+    for (const item of payload.legacy_items || []) {
+      if (!item.include_in_summary) continue;
+      let amount;
+      if (item.formula_kind === 'rmb_divided_by_fx') amount = number(item.formula_rmb_value) / fx;
+      else if (item.formula_kind === 'assembly_base_per_output') {
+        const base = number(payload.assembly_base_rate ??
+          (quote.factory_code === 'heyuan' ? 260 : 310));
+        amount = base * number(item.people) * (number(item.team) || 1) / Math.max(number(item.output), 1);
+      } else if (item.formula_kind === 'quantity_x_unit') {
+        amount = number(item.formula_quantity) * number(item.formula_unit_hkd);
+      } else amount = number(item.current_hkd);
+      add(item.cost_category || (dept === 'assembly' ? 'assembly_labor' : 'other_buy'), amount);
+    }
+  }
+  const total = COMPONENTS.filter(key => key !== 'abs_cost').reduce((sum, key) => sum + components[key], 0);
+  const quotedPrice = total * (number(legacy.formula_markup_x) || 1);
+  components.abs_material = components.abs_cost;
+  return { components, quotedPrice, rawQuotedPrice: quotedPrice, hasSourceData: true,
+    sewing_taxable: require('../../frontend/sewing-tax').taxableAmounts(payloads.sewing || {}, components) };
+}
+
 module.exports = {
   COMPONENTS,
   sourceComponents,
   legacyCategory,
   assemblyParameters,
   upgradeLegacySectionsForCalculation,
+  calculateLegacyFormulaCosts,
 };

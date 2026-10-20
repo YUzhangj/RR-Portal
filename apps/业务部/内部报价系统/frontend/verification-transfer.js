@@ -24,6 +24,7 @@
   preview.onclick = async () => {
     file = input.files[0];
     if (!file) { result.textContent = '请选择导入包'; return; }
+    if (file.size > 49 * 1024 * 1024) { result.textContent = '导入文件最大支持 49 MiB；请压缩为 .gz 后重试'; return; }
     preview.disabled = true;
     try {
       plan = await send(false);

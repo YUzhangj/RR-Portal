@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { requireAuth } = require('../middleware/auth');
+const { VERIFICATION_UPLOAD_BYTES, handleVerificationUpload } = require('../services/verificationUpload');
 
 const router = express.Router();
 
@@ -72,7 +73,7 @@ const legacyWorkbookUpload = multer({
     destination: (_req, _file, cb) => cb(null, os.tmpdir()),
     filename: (_req, _file, cb) => cb(null, `sky-castle-verification-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.xlsx`),
   }),
-  limits: { fileSize: 160 * 1024 * 1024 },
+  limits: { fileSize: VERIFICATION_UPLOAD_BYTES, fieldSize: 1024, fields: 4, files: 1, parts: 6 },
   fileFilter: (_req, file, cb) => {
     const ok = /\.xlsx$/i.test(file.originalname);
     const error = ok ? null : new Error('Sky Castle 核价基准同步只支持 .xlsx 文件');
@@ -95,7 +96,7 @@ const requireLegacySyncAccess = (req, res, next) => {
   next();
 };
 router.post('/legacy-sky-castle-verification', requireAuth, requireLegacySyncAccess,
-  legacyWorkbookUpload.single('file'), async (req, res) => {
+  handleVerificationUpload(legacyWorkbookUpload.single('file')), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: '请选择更新后的 Sky Castle 核价总表' });
   const sourceDate = String(req.body?.source_date || '').trim();
   if (sourceDate && !/^\d{4}-\d{2}-\d{2}$/.test(sourceDate)) {

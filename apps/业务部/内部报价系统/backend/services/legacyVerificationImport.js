@@ -757,13 +757,13 @@ function parseLegacyVerificationWorkbook(workbookPath, options = {}) {
   };
 }
 
-function baselineFor(quote, departments, salesPayload, importedAt, departmentPayloads = {}) {
+function baselineFor(quote, departments, salesPayload, importedAt, departmentPayloads = {}, sectionStatus = 'approved') {
   return {
     quote,
     sections: departments.map(department => ({
       dept: department.code,
       dept_name: department.name_cn,
-      status: 'approved',
+      status: sectionStatus,
       payload: department.code === 'sales' ? salesPayload : (departmentPayloads[department.code] || {}),
     })),
     frozen_at: importedAt,
@@ -833,6 +833,11 @@ async function importLegacyVerificationItems(db, parsed, options = {}) {
   const importedAt = options.importedAt || `${parsed.sourceDate}T00:00:00+08:00`;
   const migrationKey = options.migrationKey || `legacy_verification_sky_castle_${parsed.sourceDate.replaceAll('-', '')}`;
   const existingMigration = await db.prepare('SELECT key FROM app_migrations WHERE key=?').get(migrationKey);
+  for (const item of parsed.items) {
+    if (item.verificationStatus != null && !['drafting', 'completed'].includes(item.verificationStatus)) {
+      throw new Error(`货号 ${item.quoteNo} 的导入核价状态无效`);
+    }
+  }
   if (existingMigration) {
     if (!apply) return { status: 'already_applied', migrationKey, itemCount: parsed.items.length };
     return backfillLegacyVerificationDetails(db, parsed, { ...options, migrationKey, importedAt });
@@ -860,12 +865,17 @@ async function importLegacyVerificationItems(db, parsed, options = {}) {
   if (!departments.length) throw new Error('系统没有部门配置，不能创建核价版本');
   const tx = db.transaction(async () => {
     for (const item of parsed.items) {
+      const completed = item.verificationStatus !== 'drafting';
+      const sectionStatus = completed ? 'approved' : 'filled';
+      const reviewActor = completed ? actor : null;
+      const reviewedAt = completed ? importedAt : null;
       const departmentPayloads = item.departmentPayloads || {};
       const salesPayloadJson = JSON.stringify(item.salesPayload);
       const info = await db.prepare(`INSERT INTO quotes
         (quote_no, product_name, customer, qty, created_by_dept, created_by_name, created_at, status, version, factory_code)
-        VALUES (?, ?, ?, ?, 'sales', ?, ?, 'fully_approved', '历史V1', ?)`)
-        .run(item.quoteNo, item.productName, customer, item.qty, actor, importedAt, factoryCode);
+        VALUES (?, ?, ?, ?, 'sales', ?, ?, ?, '历史V1', ?)`)
+        .run(item.quoteNo, item.productName, customer, item.qty, actor, importedAt,
+          completed ? 'fully_approved' : 'drafting', factoryCode);
       const quoteId = Number(info.lastInsertRowid);
       const quote = await db.prepare('SELECT * FROM quotes WHERE id=?').get(quoteId);
 
@@ -874,8 +884,9 @@ async function importLegacyVerificationItems(db, parsed, options = {}) {
           ? salesPayloadJson : JSON.stringify(departmentPayloads[department.code] || {});
         await db.prepare(`INSERT INTO quote_sections
           (quote_id, dept, payload_json, status, filled_by, filled_at, reviewed_by, reviewed_at, review_comment)
-          VALUES (?, ?, ?, 'approved', ?, ?, ?, ?, ?)`)
-          .run(quoteId, department.code, payloadJson, actor, importedAt, actor, importedAt, '历史核价汇总导入');
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(quoteId, department.code, payloadJson, sectionStatus, actor, importedAt, reviewActor, reviewedAt,
+            completed ? '历史核价汇总导入' : '历史核价导入，待复核');
       }
 
       const confirmationNote = item.qty == null
@@ -887,23 +898,26 @@ async function importLegacyVerificationItems(db, parsed, options = {}) {
         .run(quoteId, JSON.stringify([workshop]), item.confirmedPrice, item.qty, confirmationNote, actor, importedAt, importedAt);
 
       const baselineQuote = { ...quote, confirmed_price: item.confirmedPrice, confirmed_qty: item.qty };
-      const baseline = baselineFor(baselineQuote, departments, item.salesPayload, importedAt, departmentPayloads);
+      const baseline = baselineFor(baselineQuote, departments, item.salesPayload, importedAt, departmentPayloads, sectionStatus);
       await db.prepare(`INSERT INTO quote_verifications
         (quote_id, baseline_json, verified_values_json, verified_sections_json, status, note, created_by, created_at, updated_by, updated_at)
-        VALUES (?, ?, '{}', '{}', 'completed', ?, ?, ?, ?, ?)`)
-        .run(quoteId, JSON.stringify(baseline), `${customer} 历史核价汇总导入`, actor, importedAt, actor, importedAt);
+        VALUES (?, ?, '{}', '{}', ?, ?, ?, ?, ?, ?)`)
+        .run(quoteId, JSON.stringify(baseline), completed ? 'completed' : 'in_progress',
+          `${customer} 历史核价汇总导入`, actor, importedAt, actor, importedAt);
       const versionInfo = await db.prepare(`INSERT INTO quote_verification_versions
         (quote_id, version_no, label, source_type, status, note, created_by, created_at, completed_by, completed_at, updated_at)
-        VALUES (?, 1, 'V1', 'quote', 'completed', ?, ?, ?, ?, ?, ?)`)
-        .run(quoteId, '历史核价汇总导入', actor, importedAt, actor, importedAt, importedAt);
+        VALUES (?, 1, 'V1', 'quote', ?, ?, ?, ?, ?, ?, ?) RETURNING id`)
+        .get(quoteId, completed ? 'completed' : 'drafting', '历史核价汇总导入', actor, importedAt,
+          reviewActor, reviewedAt, importedAt);
       const versionId = Number(versionInfo.id);
       for (const department of departments) {
         const payloadJson = department.code === 'sales'
           ? salesPayloadJson : JSON.stringify(departmentPayloads[department.code] || {});
         await db.prepare(`INSERT INTO quote_verification_sections
           (version_id, dept, payload_json, status, filled_by, filled_at, reviewed_by, reviewed_at, review_comment)
-          VALUES (?, ?, ?, 'approved', ?, ?, ?, ?, ?)`)
-          .run(versionId, department.code, payloadJson, actor, importedAt, actor, importedAt, '历史核价汇总导入');
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(versionId, department.code, payloadJson, sectionStatus, actor, importedAt, reviewActor, reviewedAt,
+            completed ? '历史核价汇总导入' : '历史核价导入，待复核');
       }
       await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail, at)
         VALUES (?, 'sales', ?, 'legacy_verification_import', ?, ?)`)
@@ -982,6 +996,21 @@ async function createLegacyVerificationBatchVersion(db, parsed, options = {}) {
 
   const tx = db.transaction(async () => {
     const versions = [];
+    // Share the quote-first lock order with the other lifecycle writers. The
+    // parse/preflight happens before BEGIN, so recheck it after taking locks.
+    for (const { quote } of [...prepared].sort((a, b) => Number(a.quote.id) - Number(b.quote.id))) {
+      const locked = await db.prepare(`SELECT id, deleted_at FROM quotes WHERE id=?${db.pool ? ' FOR UPDATE' : ''}`).get(quote.id);
+      if (!locked || locked.deleted_at) {
+        throw Object.assign(new Error(`货号 ${quote.quote_no} 已更新，请刷新后重新同步`), { code: 'LEGACY_BATCH_CONFLICT' });
+      }
+    }
+    for (const { quote, latest } of prepared) {
+      const current = await db.prepare(`SELECT id, status FROM quote_verification_versions
+        WHERE quote_id=? ORDER BY version_no DESC LIMIT 1${db.pool ? ' FOR UPDATE' : ''}`).get(quote.id);
+      if (!current || Number(current.id) !== Number(latest.id) || current.status !== 'completed') {
+        throw Object.assign(new Error(`货号 ${quote.quote_no} 的核价版本已更新，请刷新后重新同步`), { code: 'LEGACY_BATCH_CONFLICT' });
+      }
+    }
     for (const { item, quote, latest, payloads } of prepared) {
       const versionNo = Number(latest.version_no) + 1;
       const label = `V${versionNo}`;

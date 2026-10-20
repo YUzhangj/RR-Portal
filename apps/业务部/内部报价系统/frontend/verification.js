@@ -240,7 +240,7 @@ function costingBasisTable(key, editable) {
   const columns = COSTING_BASIS_COLUMNS[key];
   const rows = costingBasisState?.[key] || [];
   return `<div data-basis-table="${key}"><table class="wb-table verification-basis-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join('')}${editable ? '<th></th>' : ''}</tr></thead>
-    <tbody>${rows.map((row, index) => `<tr data-basis-row="${index}">${columns.map(([field,, type]) => `<td><input data-basis-field="${field}" type="${type || 'text'}" step="any" value="${esc(row[field])}" ${editable ? '' : 'disabled'}></td>`).join('')}${editable ? '<td><button type="button" class="mini danger" data-basis-delete>×</button></td>' : ''}</tr>`).join('')}</tbody></table>
+    <tbody>${rows.map((row, index) => `<tr data-basis-row="${index}">${columns.map(([field, label, type]) => `<td><input data-basis-field="${field}" aria-label="第 ${index + 1} 行 ${esc(label)}" type="${type || 'text'}" step="any" value="${esc(row[field])}" ${editable ? '' : 'disabled'}></td>`).join('')}${editable ? `<td><button type="button" class="mini danger" data-basis-delete aria-label="删除第 ${index + 1} 行">×</button></td>` : ''}</tr>`).join('')}</tbody></table>
     ${editable ? `<button type="button" class="mini" data-basis-add="${key}">＋ 增加</button>` : ''}</div>`;
 }
 
@@ -259,7 +259,7 @@ function renderCostingBasis() {
   const updated = costingBasisMeta.updated_at ? formatDate(costingBasisMeta.updated_at) : '系统预设';
   host.innerHTML = `<details class="card verification-basis-card" ${costingBasisExpanded ? 'open' : ''}>
     <summary>
-      <div><span class="eyebrow">所有客户统一使用</span><h2>核价基准 · ${esc(basis.version)}</h2>
+      <div><h2>核价基准 · ${esc(basis.version)}</h2>
         <p>${esc(basis.title)} · 更新 ${esc(updated)}</p></div>
       <div class="verification-basis-kpis"><span>RMB→HKD <b>${basis.exchange.rmb_hkd}</b></span><span>HKD→USD <b>${basis.exchange.hkd_usd}</b></span><span>ABS 750SW <b>${basis.materials.find(row => row.model === '750SW')?.price ?? '—'}</b></span></div>
     </summary>
@@ -271,14 +271,15 @@ function renderCostingBasis() {
         ${basisInput('vb-rmb-hkd', '人民币折港币', basis.exchange.rmb_hkd, editable)}
         ${basisInput('vb-hkd-usd', '美元兑换港币', basis.exchange.hkd_usd, editable)}
         ${basisInput('vb-assembly-base', '装工基数 HKD/人', basis.assembly.base_rate_hkd, editable)}
-        ${basisInput('vb-hunan-freight', '湖南产品运费 %', basis.assembly.hunan_freight_pct, editable)}
-        ${basisInput('vb-wage-factor', '装工系数 1', basis.assembly.wage_factor, editable)}
-        ${basisInput('vb-social-factor', '装工系数 2', basis.assembly.social_factor, editable)}
-        ${basisInput('vb-overhead-factor', '装工系数 3', basis.assembly.overhead_factor, editable)}
-        ${basisInput('vb-sewing-tax', '车缝不含税起点 %', basis.tax.sewing_exclusion_pct, editable)}
-        ${basisInput('vb-electronic-tax', '电子不含税起点 %', basis.tax.electronic_exclusion_pct, editable)}
+        ${basisInput('vb-hunan-freight', '湖南产品运费 %（参考）', basis.assembly.hunan_freight_pct, false)}
+        ${basisInput('vb-wage-factor', '装工系数 1（参考）', basis.assembly.wage_factor, false)}
+        ${basisInput('vb-social-factor', '装工系数 2（参考）', basis.assembly.social_factor, false)}
+        ${basisInput('vb-overhead-factor', '装工系数 3（参考）', basis.assembly.overhead_factor, false)}
+        ${basisInput('vb-sewing-tax', '车缝不含税起点 %（参考）', basis.tax.sewing_exclusion_pct, false)}
+        ${basisInput('vb-electronic-tax', '电子不含税起点 %（参考）', basis.tax.electronic_exclusion_pct, false)}
         <label>默认纸箱类别<select id="vb-default-carton" ${editable ? '' : 'disabled'}>${basis.cartons.map(row => `<option value="${esc(row.label)}" ${row.label === basis.default_carton_label ? 'selected' : ''}>${esc(row.label)}</option>`).join('')}</select></label>
       </div>
+      <p class="muted">标注“参考”的参数仅供查阅，不参与本次基准同步；工价按装工基数计算，减税按现有分类规则计算。</p>
       <h3>喷油标准（HK$/次）</h3>
       <div class="wb-grid2 verification-basis-fields">
         ${basisInput('vb-paint-pad', '移印', basis.painting.pad, editable)}
@@ -338,15 +339,15 @@ function collectCostingBasis() {
     cartons: collectBasisRows('cartons'),
     default_carton_label: $('vb-default-carton').value,
     exchange: { rmb_hkd: n('vb-rmb-hkd'), hkd_usd: n('vb-hkd-usd') },
-    assembly: { base_rate_hkd: n('vb-assembly-base'), hunan_freight_pct: n('vb-hunan-freight'), wage_factor: n('vb-wage-factor'), social_factor: n('vb-social-factor'), overhead_factor: n('vb-overhead-factor') },
+    assembly: { ...costingBasisState.assembly, base_rate_hkd: n('vb-assembly-base') },
     painting: { pad: n('vb-paint-pad'), edge: n('vb-paint-edge'), clamp: n('vb-paint-clamp') },
-    tax: { sewing_exclusion_pct: n('vb-sewing-tax'), electronic_exclusion_pct: n('vb-electronic-tax') },
+    tax: { ...costingBasisState.tax },
   };
   return costingBasisState;
 }
 
 async function saveCostingBasis() {
-  if (!confirm('确认保存统一核价基准？未完成核价会同步更新，已完成历史版本保持不变。')) return;
+  if (!confirm('确认保存统一核价基准？未冻结报价和未完成核价会同步更新并退回重审，已冻结报价、已完成版本和原表公式版本保持不变。')) return;
   const button = $('verification-basis-save');
   const message = $('verification-basis-msg');
   button.disabled = true;
@@ -441,11 +442,14 @@ function renderList() {
 }
 
 async function loadList({refreshSelection=true}={}) {
-  try{const basis=await api('/refs/costing_basis');costingBasisState=basis.data;costingBasisMeta=basis;window.__costingBasis=basis.data;renderCostingBasis();}catch{}
   const sequence=++listRequestSequence;
-  const [user, result] = await Promise.all([api('/auth/me'), api('/verifications')]);
+  const [user, result, basis] = await Promise.all([api('/auth/me'), api('/verifications'), api('/refs/costing_basis').catch(() => null)]);
   if(sequence!==listRequestSequence)return;
   me = user; listState = result.rows;
+  costingBasisState = basis?.data || null;
+  costingBasisMeta = basis || {};
+  window.__costingBasis = costingBasisState;
+  renderCostingBasis();
   canAssignWorkshop = Boolean(result.can_assign_workshop);
   $('workshop-assignment').hidden = !canAssignWorkshop;
   $('who-chip').textContent = `${me.dept_name} · ${me.display_name || me.username}`;

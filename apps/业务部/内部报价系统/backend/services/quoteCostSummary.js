@@ -61,6 +61,8 @@ function sewingLaborToAdd(group) {
 
 function calculateSingleQuoteCosts(quote, sections, options = {}) {
   const payloads = parseSections(sections);
+  const legacy = require('./legacyFormula').calculateLegacyFormulaCosts(quote, payloads);
+  if (legacy) return legacy;
   const eng = payloads.engineering || {};
   const mold = payloads.molding || {};
   const painting = payloads.painting || {};
