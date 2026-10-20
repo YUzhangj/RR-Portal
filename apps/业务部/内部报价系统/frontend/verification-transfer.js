@@ -6,7 +6,7 @@
     if (!response.ok || !me.perms?.['账号管理']?.can_admin) return;
   } catch { return; }
   host.hidden = false;
-  host.innerHTML = '<h3>导入客户核价资料</h3><input type="file" accept=".json,.jsonl,.gz" aria-label="选择客户核价导入包"><button data-preview>预览导入</button><div data-result role="status"></div>';
+  host.innerHTML = '<details class="verification-transfer-panel"><summary>导入客户核价资料</summary><div class="verification-transfer-body"><div class="verification-transfer-controls"><input type="file" accept=".json,.jsonl,.gz" aria-label="选择客户核价导入包"><button data-preview>预览导入</button></div><div data-result role="status"></div></div></details>';
   const result = host.querySelector('[data-result]');
   const preview = host.querySelector('[data-preview]');
   const input = host.querySelector('input');

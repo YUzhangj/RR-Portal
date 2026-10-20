@@ -4,11 +4,11 @@ const {importParts,reconcileProductSelections}=require('../backend/services/mixe
 const product=(id,code,source_number='1')=>({id,code,source_number,name:code,ratio:1});
 const cfg=products=>({enabled:true,mode:'equal',units_per_pack:1,products});
 const products=[product('a','BEAUTYM-S3-037','36'),product('b','BEAUTYM-S3-038','37')];
-test('SKU导入补齐已合法选用A的共用B，原用量和啤机价格不变且再次导入幂等',()=>{
+test('补齐B正式货号时关联已选用A的共用零件，保留原用量价格并幂等',()=>{
  const config=cfg(products),part={id:'cap',name:'共用盖',source_product_code:'BEAUTYM-S3-037/BEAUTYM-S3-038',shot_price:.5,material_unit_price:.02};
  const engineering={mixed_imported_parts:[part],mixed_part_selections:{a:[{part_id:'cap',usage:2}]}};
  const molding={parts_catalog:{parts:[part],selections:engineering.mixed_part_selections}};
- const result=reconcileProductSelections(config,engineering,molding);
+ const result=reconcileProductSelections(config,engineering,molding,{updatedProductIds:['b']});
  assert.deepEqual(result.engineering.mixed_part_selections,{a:[{part_id:'cap',usage:2}],b:[{part_id:'cap',usage:2}]});
  assert.deepEqual(result.molding.parts_catalog.parts,molding.parts_catalog.parts);assert.equal(result.changes.length,1);
  assert.equal(reconcileProductSelections(config,result.engineering,result.molding).changes.length,0);assert.equal(engineering.mixed_part_selections.b,undefined);

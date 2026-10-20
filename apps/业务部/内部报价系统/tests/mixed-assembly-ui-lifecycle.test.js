@@ -12,6 +12,7 @@ class Element {
     this.html = value; this.nodes = {};
     const node = key => (this.nodes[key] = new Element());
     if (value.includes('mixed-switch')) { node('select'); node('.mixed-help'); node('.mixed-detail'); }
+    if (value.includes('data-return-assembly-summary')) node('button');
     if (value.includes('data-assembly-preview')) { node('input'); node('[data-assembly-preview]'); }
     if (value.includes('data-assembly-apply')) {
       node('[data-assembly-apply]'); node('[data-assembly-cancel]'); node('[data-fill-qty]'); node('[data-bulk-qty]');

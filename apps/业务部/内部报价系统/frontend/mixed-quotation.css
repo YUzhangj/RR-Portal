@@ -29,6 +29,7 @@
 table[aria-label="统一零件编辑"] th.mixed-machine-column { background: #fff0bf; color: #87541d; }
 table[aria-label="统一零件编辑"] td.mixed-machine-column { background: #fffaeb; }
 table[aria-label="统一零件编辑"] td.mixed-machine-column input { border-color: #e5d5a8; }
+table[aria-label="统一零件编辑"] td[data-mold-shared] { vertical-align: middle; border-bottom: 2px solid #d5dfeb; }
 
 /* Keep the NA average, common costs and their sum visually distinct. */
 .mixed-cost-matrix .mixed-na-average-row > th,.mixed-cost-matrix .mixed-na-average-row > td{background:#e8f2ff;color:#1e4975}
@@ -72,8 +73,46 @@ button.mixed-import-replace{background:#b45309;border-color:#b45309}
 /* Keep hidden product selectors hidden despite the flex layout. */
 .mixed-switch[hidden] { display: none !important; }
 
+.wb-table button.mixed-product-link{display:inline;padding:0;border:0;border-radius:2px;background:transparent;color:#2563eb;font:inherit;font-weight:600;text-align:left;box-shadow:none;cursor:pointer}
+.wb-table button.mixed-product-link:hover{text-decoration:underline;color:#1d4ed8}
+.wb-table button.mixed-product-link:focus-visible{outline:2px solid #2563eb;outline-offset:4px}
+
+.mixed-engineering-overview{height:min(60vh,580px);max-width:100%;overflow:auto;scrollbar-gutter:stable;border:1px solid #dbe3ed;border-radius:8px;margin-top:12px}
+.mixed-engineering-overview table{margin:0;width:max-content;min-width:100%}
+.mixed-engineering-overview thead th{position:sticky;top:0;z-index:2;background:#e8eef7;white-space:nowrap}
+.mixed-engineering-overview td{padding:8px 10px;white-space:nowrap}
+.mixed-engineering-overview td:first-child{position:sticky;left:0;z-index:1;background:#fff;box-shadow:1px 0 0 #dbe3ed}
+.mixed-engineering-overview thead th:first-child{left:0;z-index:3}
+.mixed-engineering-overview .hi td:first-child{background:#eff6ff}
+.mixed-engineering-overview .mixed-overview-name{min-width:200px;max-width:260px;white-space:normal}
+.mixed-overview-name span{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.45}
+@media print{.mixed-engineering-overview{height:auto;overflow:visible}.mixed-engineering-overview thead th,.mixed-engineering-overview td:first-child{position:static}}
+
 [data-painting-all] .painting-product-cell{width:240px;min-width:240px;max-width:240px;overflow:hidden;text-overflow:ellipsis;box-sizing:border-box}
 [data-painting-all] .painting-product-cell select{display:block;width:220px;min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;box-sizing:border-box}
 
 [data-painting-all] .painting-name-cell{width:220px;min-width:220px;max-width:220px;white-space:normal;overflow-wrap:anywhere;line-height:1.5;box-sizing:border-box}
 [data-painting-all] .painting-name-cell textarea{display:block;width:200px;min-width:0;max-width:200px;box-sizing:border-box;white-space:pre-wrap;overflow-wrap:anywhere;resize:vertical;font:inherit;line-height:1.5}
+
+.mixed-supplier-batch>summary{cursor:pointer;font-weight:600;color:#243b53;padding:4px 0}
+
+/* Full engineering details share one bounded scroll area. */
+.mixed-engineering-totals{display:flex;gap:10px 20px;flex-wrap:wrap;background:#eef6ff;border:1px solid #dbe7f7;border-radius:8px;padding:12px;margin:12px 0;color:#243b53}
+.mixed-engineering-nav{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.mixed-engineering-detail-book{height:min(68vh,680px);overflow:auto;position:relative;border:1px solid #dbe3ed;border-radius:8px;scrollbar-gutter:stable}
+.mixed-engineering-detail-book section{min-width:100%;width:max-content;margin-bottom:20px}
+.mixed-engineering-detail-book h4{position:sticky;top:0;left:0;z-index:4;margin:0;padding:10px 14px;background:#e8eef7;color:#243b53;font-size:15px;line-height:22px}
+.mixed-engineering-detail-book table{margin:0;width:max-content;min-width:100%;overflow:visible}
+.mixed-engineering-detail-book th{white-space:nowrap}
+.mixed-engineering-detail-book thead th{position:sticky;top:42px;z-index:2;background:#f1f5fa}
+.mixed-engineering-detail-book td{padding:8px 12px;white-space:pre-wrap;overflow-wrap:anywhere;min-width:70px;max-width:320px;vertical-align:top}
+.mixed-engineering-detail-book td:last-child{min-width:190px;max-width:260px}
+.mixed-engineering-detail-book td:first-child{position:sticky;left:0;z-index:1;min-width:170px;background:#fff;box-shadow:1px 0 0 #dbe3ed;white-space:nowrap}
+.mixed-engineering-detail-book thead th:first-child{left:0;z-index:3}
+.mixed-engineering-detail-book .mixed-detail-subtotal td,.mixed-engineering-detail-book tfoot th{background:#eef6ff;font-weight:600;color:#294766}
+.mixed-engineering-detail-book [data-engineering-images]{display:block;min-width:100px;max-width:220px}
+.mixed-engineering-product-totals{margin-top:14px}
+.mixed-engineering-product-totals>summary{cursor:pointer;color:#294766;font-weight:600;padding:10px 0}
+@media print{.mixed-engineering-detail-book{height:auto;overflow:visible}.mixed-engineering-detail-book h4,.mixed-engineering-detail-book th,.mixed-engineering-detail-book td:first-child{position:static}.mixed-engineering-nav{display:none}}
+
+.mixed-engineering-detail-book tfoot th{text-align:left}

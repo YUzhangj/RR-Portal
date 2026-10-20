@@ -1953,8 +1953,7 @@ function renderHwExtra(host, payload, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
 }
 
 // ==================== 部门工作台 ====================
-function renderMoldCosts(host, mc, onChange, canEdit) {
-  function paint() {
+function engineeringMoldCostTotals(mc) {
     const sumRmb = sum(mc.items, r => num(r.price_rmb));
     const fx = num(mc.fx_rmb_usd) || 7.75;
     const sumUsd = sumRmb / 0.85 / fx;
@@ -1971,6 +1970,13 @@ function renderMoldCosts(host, mc, onChange, canEdit) {
     const testingPerPcsUsd = testingFeeUsd / testingQty;
     const prototypePerPcsRmb = prototypePerPcsUsd * fx * 0.85;
     const testingPerPcsRmb = testingPerPcsUsd * fx * 0.85;
+    return {sumRmb,fx,sumUsd,customerUsd,netUsd,qty,prototypeFeeUsd,testingFeeUsd,prototypeQty,testingQty,
+      perPcsRmb,perPcsUsd,prototypePerPcsUsd,testingPerPcsUsd,prototypePerPcsRmb,testingPerPcsRmb};
+}
+function renderMoldCosts(host, mc, onChange, canEdit) {
+  function paint() {
+    const {sumRmb,fx,sumUsd,customerUsd,qty,prototypeFeeUsd,testingFeeUsd,prototypeQty,testingQty,
+      perPcsRmb,prototypePerPcsUsd,testingPerPcsUsd,prototypePerPcsRmb,testingPerPcsRmb} = engineeringMoldCostTotals(mc);
 
     host.innerHTML = `
       <table class="wb-table" style="max-width:680px">
@@ -3103,6 +3109,33 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
   render();
 }
 
+function cartonBoxPrice(box, rate) {
+  return (num(box.cl) + num(box.cw) + 2) * (num(box.cw) + num(box.ch) + 1) * 2 * rate / 1000;
+}
+function cartonFlatPrice(card, box) {
+  return ((num(card.l) || num(box?.cl)) + 1) * ((num(card.w) || num(box?.cw)) + 1) * 2 / 1000 * (card.qty == null || card.qty === '' ? 1 : num(card.qty));
+}
+function engineeringSummaryTotals(payload, fxRmbHkd, fxHkdUsd) {
+  const materials = key => sum(payload[key] || [], row => freeAmountHkd(row, fxRmbHkd, fxHkdUsd));
+  const hardware = materials('hardware'), auxiliary = materials('aux_materials'), packaging = materials('packaging_materials');
+  const carton = sum(engineeringCartonDetails(payload.carton_calc || {}), row => row.amount);
+  const indo = (hardware + auxiliary + packaging) * num(payload.indo_pct) / 100;
+  return {hardware,auxiliary,packaging,carton,indo,total:hardware + auxiliary + packaging + carton + indo,
+    mold_rmb:sum(payload.mold_costs?.items || [], item => num(item.price_rmb))};
+}
+function engineeringCartonDetails(c) {
+  const boxes = c.cartons?.length ? c.cartons : (c.cl ? [{cl:c.cl,cw:c.cw,ch:c.ch,qty:c.qty,flat_cards:c.flat_card ? [{l:c.cl,w:c.cw,qty:1}] : []}] : []);
+  // Read-only totals use the stored quote's fallback, as the server does.
+  // Current factory defaults apply only when the editor initializes new data.
+  const rate = c.paper_rate == null || c.paper_rate === '' ? 2.75 : num(c.paper_rate);
+  return boxes.filter(box => num(box.cl) || num(box.cw) || num(box.ch)).flatMap((box,index) => [
+    {type:'纸箱',name:box.name || `纸箱 ${index + 1}`,l:box.cl,w:box.cw,h:box.ch,qty:box.qty,rate,
+      ka_label:box.ka_label || c.ka_label,unit:cartonBoxPrice(box,rate),amount:cartonBoxPrice(box,rate)/Math.max(num(box.qty),1)},
+    ...(box.flat_cards || []).map((card,i) => ({type:'平卡',name:card.name || `平卡 ${i + 1}`,parent:box.name || `纸箱 ${index + 1}`,
+      l:num(card.l)||num(box.cl),w:num(card.w)||num(box.cw),h:'',qty:card.qty ?? 1,rate:'',ka_label:'',
+      unit:cartonFlatPrice({...card,qty:1},box),amount:cartonFlatPrice(card,box)}))
+  ]);
+}
 function renderCartonCalc(host, c, canEdit, onChange) {
   // 迁移：旧单纸箱 -> cartons[0]，每个纸箱内嵌 flat_cards[]
   if (!c.cartons) {
@@ -3130,9 +3163,9 @@ function renderCartonCalc(host, c, canEdit, onChange) {
   const productMmInput = key => c[`${key}_mm`] || (c[`${key}_cm`] ? num(c[`${key}_cm`]) * 10 : '');
   const productInchInput = key => c[key] == null || c[key] === '' ? '' : num(c[key]).toFixed(3);
   const cuftOf = (b) => num(b.cl) * num(b.cw) * num(b.ch) / 1728;
-  const boxPriceOf = (b) => (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * rate() / 1000;
+  const boxPriceOf = b => cartonBoxPrice(b, rate());
   // 平卡 L/W 留空时对应所在纸箱的长/宽
-  const flatPriceOf = (f, b) => ((num(f.l) || num((b||{}).cl)) + 1) * ((num(f.w) || num((b||{}).cw)) + 1) * 2 / 1000 * (f.qty == null || f.qty === '' ? 1 : num(f.qty));
+  const flatPriceOf = cartonFlatPrice;
 
   function render() {
     // 同步首个纸箱回旧字段（运费计算/出口表使用）
@@ -3475,6 +3508,7 @@ function attachSupplierMaterialImportUI(host, payload, canEdit, onChange, fxRmbH
   }
 
 function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quoteQty = 0, quoteCustomer = '') {
+  const showMoldCosts = window.MixedQuotation?.showsEngineeringMoldCosts?.(payload) !== false;
   payload.molds = payload.molds || [];
   payload.electronics = payload.electronics || [];
   payload.hardware = payload.hardware || [];
@@ -3489,6 +3523,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
   payload.electronics_loss_pct = payload.electronics_loss_pct ?? 1;
   payload.hardware_loss_pct = payload.hardware_loss_pct ?? 1;
   payload.aux_loss_pct = payload.aux_loss_pct ?? 1;
+  if (showMoldCosts) {
   payload.mold_costs = payload.mold_costs || {
     items: [
       { name: '模具费用', price_rmb: 0 },
@@ -3511,6 +3546,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
   if (payload.mold_costs.testing_fee_usd == null) payload.mold_costs.testing_fee_usd = num(payload.mold_costs.testing_fee_rmb);
   if (payload.mold_costs.prototype_amortization_qty == null) payload.mold_costs.prototype_amortization_qty = 50000;
   if (payload.mold_costs.testing_amortization_qty == null) payload.mold_costs.testing_amortization_qty = 2000;
+  }
   payload.electronics_extra = payload.electronics_extra || { test_repair: 0, packing_shipping: 0, profit_pct: 10, tax_diff: 0, tax_payable: 0 };
   ['profit_pct', 'tax_diff', 'tax_payable'].forEach(k => { if (payload.electronics_extra[k] == null) payload.electronics_extra[k] = k === 'profit_pct' ? 10 : 0; });
 
@@ -3525,8 +3561,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
     <div id="wb-molds"></div>
     <div id="wb-molds-shared"></div>
 
-    <h3>生产模具费用</h3>
-    <div id="wb-mold-costs"></div>
+    ${showMoldCosts ? '<h3>生产模具费用</h3><div id="wb-mold-costs"></div>' : ''}
 
     <h3>四、五金
       ${canEdit ? `<small><label class="upload-mold-sheet" style="display:inline-block;margin-left:12px">
@@ -3561,7 +3596,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
 
   renderMolds(host.querySelector('#wb-molds'), payload.molds, onChange, canEdit, fxRmbHkd, fxHkdUsd);
   window.MixedQuotation?.renderEngineeringSharedMolds(host.querySelector('#wb-molds-shared'), payload);
-  renderMoldCosts(host.querySelector('#wb-mold-costs'), payload.mold_costs, onChange, canEdit);
+  if (showMoldCosts) renderMoldCosts(host.querySelector('#wb-mold-costs'), payload.mold_costs, onChange, canEdit);
 
   // 上传模具报价单 → 解析 → 预览 → 应用
   const fileInp = host.querySelector('#mold-sheet-input');

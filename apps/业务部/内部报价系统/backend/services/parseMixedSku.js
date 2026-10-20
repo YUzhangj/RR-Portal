@@ -30,7 +30,7 @@ async function parseWorkbook(buffer){
    const name=text(row.getCell(columns.name).value);if(!name)throw Error(`第${row.number}行产品名称为空`);
    records.push({source_number:serial(number),code,name,brand:columns.brand?text(row.getCell(columns.brand).value):'',...(columns.capsule?{na_ratio:capsuleRatio(row.getCell(columns.capsule),row.number)}:{})});
   });
-  if(columns){if(!records.length)throw Error('没有产品资料');if(records.length>200)throw Error('产品不能超过200个');if(new Set(records.map(r=>r.source_number)).size!==records.length||new Set(records.map(r=>r.code)).size!==records.length)throw Error('序号或货号重复');return {records,sheet_used:ws.name};}
+  if(columns){if(!records.length)throw Error('没有产品资料');if(records.length>200)throw Error('产品不能超过200个');if(new Set(records.map(r=>r.source_number)).size!==records.length||new Set(records.map(r=>r.code)).size!==records.length)throw Error('序号或货号重复');records.sort((a,b)=>Number(a.source_number)-Number(b.source_number));return {records,sheet_used:ws.name};}
  }
  throw Error('未找到 NO.、Mini_item no、Discription 表头');
 }

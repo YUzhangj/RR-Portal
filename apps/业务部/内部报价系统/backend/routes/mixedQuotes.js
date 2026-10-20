@@ -45,9 +45,13 @@ router.put('/:id/mixed', async (req, res) => {
         config = { ...previous, enabled: false };
       }
       let importedLinks;
-      if (req.body.product_import === true && !disabling) {
+      const previousProducts = new Map((previous?.products || []).map(product => [product.id, product]));
+      const normalizeCode = value => String(value || '').normalize('NFKC').replace(/\s+/g, '').toUpperCase();
+      const updatedProductIds = config.products.filter(product =>
+        !previousProducts.has(product.id) || normalizeCode(previousProducts.get(product.id).code) !== normalizeCode(product.code)).map(product => product.id);
+      if (!disabling && (req.body.product_import === true || updatedProductIds.length)) {
         const payloadFor = dept => JSON.parse(sections.find(s => s.dept === dept)?.payload_json || '{}');
-        importedLinks = require('../services/mixedPartImport').reconcileProductSelections(config, payloadFor('engineering'), payloadFor('molding'));
+        importedLinks = require('../services/mixedPartImport').reconcileProductSelections(config, payloadFor('engineering'), payloadFor('molding'), {updatedProductIds});
         if (importedLinks.changes.length) {
           await db.prepare("INSERT INTO audit_log (quote_id, dept, actor, action, detail) VALUES (?, ?, ?, 'mixed_sku_import_links', ?)")
             .run(id, req.user.dept, req.user.name, JSON.stringify({changes:importedLinks.changes, sections:sections.filter(s => ['engineering','molding'].includes(s.dept))}));
