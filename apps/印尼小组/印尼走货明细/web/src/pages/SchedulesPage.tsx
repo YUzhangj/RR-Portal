@@ -5,6 +5,8 @@ import {
 import dayjs from 'dayjs'
 import { api } from '../api/client'
 import { scheduleSheetToRawGrid } from '../utils/scheduleImport'
+import { scheduleLineKey, scheduleManualPlaced, toggleScheduleManual, scheduleAutoPlaced,
+  scheduleActualProduction, scheduleProductionOverride } from '../utils/scheduleLineStatus'
 
 interface ScheduleSummary {
   id: number
@@ -224,7 +226,7 @@ export default function SchedulesPage() {
           </Button>
         }
       >
-        {detail && <DetailView detail={detail} />}
+        {detail && <DetailView key={detail.id} detail={detail} />}
       </Drawer>
 
       <Modal
@@ -364,9 +366,9 @@ function DetailView({ detail }: { detail: ScheduleDetail }) {
   async function toggleManual(r: SchedRow) {
     if (!r.orderNo || !r.code) { message.warning('该行缺少 TOMY PO 或 货号，无法标记'); return }
     const k = placedKeyOf(r)
-    const next = new Set(manualKeys)
-    const removing = next.has(k)
-    if (removing) next.delete(k); else next.add(k)
+    if (!k) { message.warning('请刷新排期后再标记'); return }
+    const removing = scheduleManualPlaced(r, manualKeys)
+    const next = toggleScheduleManual(r, manualKeys)
     // 分开取消采购时，保留取消前的生产状态，之后可单独取消生产。
     const productionNext = new Map(productionManual)
     if (removing && isProductionPlaced(r) && !isActualProductionPlaced(r)) productionNext.set(k, true)
@@ -386,23 +388,24 @@ function DetailView({ detail }: { detail: ScheduleDetail }) {
   }
 
   // 已下单：自动(采购单命中) 或 手动标记
-  const isAutoPlaced = useCallback((r: SchedRow) => !!(r.orderNo && r.code && placedKeys.has(placedKeyOf(r))), [placedKeys])
-  const isManualPlaced = useCallback((r: SchedRow) => manualKeys.has(placedKeyOf(r)), [manualKeys])
+  const isAutoPlaced = useCallback((r: SchedRow) => scheduleAutoPlaced(r, placedKeys), [placedKeys])
+  const isManualPlaced = useCallback((r: SchedRow) => scheduleManualPlaced(r, manualKeys), [manualKeys])
   const isPlaced = useCallback((r: SchedRow) => isAutoPlaced(r) || isManualPlaced(r), [isAutoPlaced, isManualPlaced])
-  const isActualProductionPlaced = useCallback((r: SchedRow) => !!(r.orderNo && productionPlacedPos.has(r.orderNo.trim())), [productionPlacedPos])
+  const isActualProductionPlaced = useCallback((r: SchedRow) => scheduleActualProduction(r, productionPlacedPos), [productionPlacedPos])
   // 手动覆盖优先；未单独设置时生产状态跟随采购，真实生产单始终为已下。
   const isProductionPlaced = useCallback((r: SchedRow) => {
     if (isActualProductionPlaced(r)) return true
-    const override = productionManual.get(placedKeyOf(r))
+    const override = scheduleProductionOverride(r, productionManual)
     return override ?? isPlaced(r)
   }, [isActualProductionPlaced, isPlaced, productionManual])
   async function toggleProductionManual(r: SchedRow) {
     if (!r.orderNo || !r.code) { message.warning('该行缺少 TOMY PO 或货号，无法标记'); return }
     if (isActualProductionPlaced(r)) { message.warning('该 TOMY PO 已生成真实生产单，不能手动取消'); return }
     const k = placedKeyOf(r)
+    if (!k) { message.warning('请刷新排期后再标记'); return }
     const nextValue = !isProductionPlaced(r)
     const next = new Map(productionManual)
-    if (nextValue === isPlaced(r)) next.delete(k); else next.set(k, nextValue)
+    next.set(k, nextValue)
     setProductionManual(next)
     try {
       await api.put('/schedules/production-placed-manual', Object.fromEntries(next))
@@ -619,13 +622,13 @@ const FX_PER_USD: Record<string, number> = {
   '€': 0.92, 'EUR': 0.92,
 }
 
-// 模块级排期主键（客户|货号|orderNo），与后端 ComputeDiff 一致
+// 后端逐条跨期配对的明细身份；同一个 MA + 货号可以有多条独立订单。
 function schedKeyOf(r: SchedRow): string {
-  return `${r.customer ?? ''}|${r.code ?? ''}|${r.orderNo ?? ''}`
+  return scheduleLineKey(r)
 }
 
 function placedKeyOf(r: SchedRow): string {
-  return `${r.orderNo ?? ''}|${r.code ?? ''}`
+  return scheduleLineKey(r)
 }
 // 关键字段实际变动的 原值/新值（数量/走货期/品名/单价），与后端 IsModified 同口径
 function significantChangedDiff(from: SchedRow, to: SchedRow): Record<string, { from: any; to: any }> {
