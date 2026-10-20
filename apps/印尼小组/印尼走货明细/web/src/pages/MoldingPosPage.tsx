@@ -5,6 +5,7 @@ import {
 } from 'antd'
 import dayjs from 'dayjs'
 import { api } from '../api/client'
+import { scheduleActualProduction, type ScheduleStatusRow } from '../utils/scheduleLineStatus'
 
 interface MpoItem {
   code?: string           // 货号
@@ -32,7 +33,7 @@ interface MpoItem {
   notes?: string
 }
 
-interface SchedRow {
+interface SchedRow extends ScheduleStatusRow {
   source?: string
   customer?: string
   country?: string
@@ -647,7 +648,7 @@ function SchedPickerModal(props: {
   const filtered = props.schedRows
     .map((r, i) => ({ ...r, _i: i }))
     .filter(r => {
-      if (props.hidePlaced && r.orderNo && props.placedOrderNos.has(r.orderNo.trim())) return false
+      if (props.hidePlaced && scheduleActualProduction(r, props.placedOrderNos)) return false
       if (!props.filter) return true
       const s = props.filter.toLowerCase()
       return ((r.code || '') + (r.productName || '') + (r.orderNo || '') + (r.endCustomer || ''))
