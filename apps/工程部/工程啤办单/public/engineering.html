@@ -78,7 +78,7 @@
     <div class="d-flex flex-wrap align-items-center gap-2">
       <div class="status-filter d-flex flex-wrap gap-1">
         <button class="btn btn-sm btn-outline-secondary active" onclick="filterStatus('',this)">全部</button>
-        <button class="btn btn-sm" style="background:#0f766e;color:#fff;border-color:#0f766e" onclick="filterStatus('待报价',this)">待报价</button>
+        <button class="btn btn-sm" style="background:#0f766e;color:#fff;border-color:#0f766e" onclick="filterStatus('未报价',this)">未报价</button>
         <button class="btn btn-sm" style="background:#fd7e14;color:#fff;border-color:#fd7e14" onclick="filterStatus('待审核',this)">待审核</button>
         <button class="btn btn-sm" style="background:#7c3aed;color:#fff;border-color:#7c3aed" onclick="filterStatus('待经理审核',this)">待经理审核</button>
         <button class="btn btn-sm btn-warning"  onclick="filterStatus('待生产',this)">待生产</button>
@@ -342,7 +342,7 @@
       </div>
       <div class="modal-body">
         <input type="hidden" id="asm-id">
-        <input type="hidden" id="asm-status" value="待审核">
+        <input type="hidden" id="asm-status" value="未报价">
         <div class="row g-3 mb-3">
           <div class="col-md-3"><label class="form-label fw-bold">产品编号</label><input class="form-control" id="asm-order_number" placeholder="如 157149（选填）"></div>
           <div class="col-md-3"><label class="form-label fw-bold" for="asm-product_name">产品名称 <span class="text-danger">*</span></label><input class="form-control" id="asm-product_name" placeholder="产品名称" required></div>
@@ -359,7 +359,13 @@
             </select>
           </div>
           <div class="col-md-3"><label class="form-label fw-bold">跟进工程师</label><input class="form-control" id="asm-engineer" placeholder="请输入姓名"></div>
-          <div class="col-md-6"><label class="form-label fw-bold">原因/备注</label><input class="form-control" id="asm-reason" placeholder="备注信息"></div>
+          <div class="col-md-3"><label class="form-label fw-bold">车间 <span class="text-muted fw-normal small">（选填）</span></label>
+            <select class="form-select" id="asm-workshop">
+              <option value="">请选择车间</option>
+              <option>A车间</option><option>B车间</option><option>兴信车间</option><option>华登车间</option>
+            </select>
+          </div>
+          <div class="col-md-3"><label class="form-label fw-bold">原因/备注</label><input class="form-control" id="asm-reason" placeholder="备注信息"></div>
         </div>
         <div class="d-flex justify-content-between align-items-center mb-2">
           <strong>夹具明细</strong>
@@ -370,7 +376,7 @@
         </div>
         <div class="items-table-wrap">
           <table class="table table-bordered table-sm items-table">
-            <thead><tr><th style="width:50px">序号</th><th>名称</th><th style="width:120px">图片</th><th style="width:80px">数量</th><th>要求完成日期</th><th>价格</th><th>完成时间</th><th style="width:40px"></th></tr></thead>
+            <thead><tr><th style="width:50px">序号</th><th>名称</th><th style="width:120px">图片</th><th style="width:80px">数量</th><th>要求完成日期</th><th style="width:40px"></th></tr></thead>
             <tbody id="asmItemsBody"></tbody>
           </table>
         </div>
@@ -590,7 +596,7 @@ function loadOrders() {
     if (currentWorkshop) orders = orders.filter(o => o.workshop === currentWorkshop);
     if (currentClient)   orders = orders.filter(o => o.client_name === currentClient || (o.items && o.items.some(it => it.client_name === currentClient)));
     // 按主管分组，每组内待审核排最前，其次按 ID 降序
-    const _sOrd = { '待审核':0, '待报价':1, '待经理审核':2, '待生产':3, '生产中':4, '已完成':5, '已驳回':6, '已取消':7 };
+    const _sOrd = { '未报价':0, '待审核':1, '待经理审核':2, '待生产':3, '生产中':4, '已完成':5, '已驳回':6, '已取消':7 };
     orders.sort((a, b) => {
       const sa = (a.supervisor || ''), sb = (b.supervisor || '');
       if (sa !== sb) return sa.localeCompare(sb, 'zh');
@@ -603,22 +609,22 @@ function loadOrders() {
 }
 
 // 主管审核后的状态，普通用户不可编辑/删除；主管/经理可以
-const lockedStatuses = ['待报价', '待经理审核', '待生产', '生产中', '已完成'];
+const lockedStatuses = [ '待经理审核', '待生产', '生产中', '已完成'];
 let _supervisors = [], _managers = [];
 apiFetch('/api/roles').then(r => r.json()).then(d => { _supervisors = d.supervisors || []; _managers = d.managers || []; }).catch(() => {});
 function isPrivileged() { return _supervisors.includes(currentUser) || _managers.includes(currentUser); }
 function isManager() { return _managers.includes(currentUser); }
 // 修改规则：未审核（待审核/已驳回等非锁定状态）的单据所有人可新建/编辑/删除；
 // 审核后（待经理审核/待生产/生产中/已完成）仅经理可修改
-function canModifyOrder(status) { return !lockedStatuses.includes(status) || isManager(); }
+function canModifyOrder(status) { return currentTab === 'assembly' ? ['未报价', '已驳回'].includes(status) : !lockedStatuses.includes(status) || isManager(); }
 function applyNavPermissions() {
   const btn = document.getElementById('newOrderBtn');
   if (btn) btn.style.display = '';
 }
-const isLocked = s => lockedStatuses.includes(s) && !isPrivileged();
+const isLocked = s => currentTab === 'assembly' ? !['未报价', '已驳回'].includes(s) : lockedStatuses.includes(s) && !isPrivileged();
 
 const statusBadge = s => ({
-  '待报价': '<span class="badge" style="background:#0f766e">待报价</span>',
+  '未报价': '<span class="badge" style="background:#0f766e">未报价</span>',
   '待审核': '<span class="badge" style="background:#fd7e14">待审核</span>',
   '待经理审核': '<span class="badge" style="background:#7c3aed">待经理审核</span>',
   '待生产': '<span class="badge badge-pending">待生产</span>',
@@ -1295,7 +1301,7 @@ function editAsmOrder(id) {
     .then(r => r.json())
     .then(order => {
       if (order.error) { showToast(order.error, 'danger'); return; }
-      if (!canModifyOrder(order.status)) { showToast('审核后的单据仅经理可修改', 'danger'); return; }
+      if (!canModifyOrder(order.status)) { showToast('已报价单据请先审核驳回，再修改并重新报价', 'danger'); return; }
       document.getElementById('asmModalTitle').textContent = `编辑夹具申请单 #${id}`;
       document.getElementById('asm-id').value = order.id;
       document.getElementById('asm-order_number').value = order.order_number || '';
@@ -1305,7 +1311,10 @@ function editAsmOrder(id) {
       document.getElementById('asm-supervisor').value = order.supervisor || '';
       document.getElementById('asm-engineer').value = order.eng_name || '';
       document.getElementById('asm-reason').value = order.reason || '';
-      document.getElementById('asm-status').value = (order.status === '已驳回') ? '待审核' : order.status;
+      const workshop = document.getElementById('asm-workshop');
+      if (order.workshop && !Array.from(workshop.options).some(option => option.value === order.workshop)) workshop.add(new Option(order.workshop, order.workshop));
+      workshop.value = order.workshop || '';
+      document.getElementById('asm-status').value = (order.status === '已驳回') ? '未报价' : order.status;
       const tbody = document.getElementById('asmItemsBody');
       tbody.innerHTML = '';
       _asmRowSeq = 0;
@@ -1317,7 +1326,7 @@ function editAsmOrder(id) {
     .catch(() => showToast('加载失败', 'danger'));
 }
 
-const asmItemFields = ['product_name','quantity','required_date','price','completion_time'];
+const asmItemFields = ['product_name','quantity','required_date'];
 let _asmSaving = false;
 document.getElementById('asmModal').addEventListener('hide.bs.modal', event => {
   if (_asmSaving) event.preventDefault();
@@ -1364,6 +1373,7 @@ function saveAsmOrder() {
     supervisor: document.getElementById('asm-supervisor').value || null,
     eng_name: document.getElementById('asm-engineer').value || null,
     reason: document.getElementById('asm-reason').value || null,
+    workshop: document.getElementById('asm-workshop').value || null,
     status: document.getElementById('asm-status').value,
     items: items,
   };
@@ -1605,8 +1615,8 @@ function renderReviewDetails(order, type) {
     thead = '<tr><th>序号</th><th>产品编号</th><th>工模编号</th><th>工模名称</th><th>原料</th><th>颜色/编号</th><th>色粉编号</th><th>每啤毛重(g)</th><th>数量</th><th>要求完成日期</th><th>回模时间</th><th>备注</th></tr>';
     rows = items.map(it => `<tr><td>${esc(it.seq_no||'-')}</td><td>${esc(it.product_id||'-')}</td><td>${esc(it.mold_id||'-')}</td><td>${esc(it.mold_name||'-')}</td><td>${esc(it.material||'-')}</td><td>${esc(it.color_code||'-')}</td><td>${esc(it.pigment_no||'-')}</td><td>${esc(it.unit_weight||'-')}</td><td>${esc(it.quantity||'-')}</td><td>${esc(it.required_date||'-')}</td><td>${esc(it.return_time||'-')}</td><td>${esc(it.notes||'-')}</td></tr>`).join('');
   } else if (type === 'assembly') {
-    thead = '<tr><th>序号</th><th>名称</th><th>图片</th><th>数量</th><th>要求完成日期</th><th>价格</th><th>完成时间</th></tr>';
-    rows = items.map((it, i) => `<tr><td>${i+1}</td><td>${esc(it.product_name||'-')}</td><td>${it.image ? `<a href="${esc(asmImgUrl(order.id, it.image))}" target="_blank" rel="noopener"><img src="${esc(asmImgUrl(order.id, it.image))}" alt="${esc(it.product_name || '夹具')}图片" style="max-width:96px;max-height:60px"></a>` : '-'}</td><td>${esc(it.quantity||'-')}</td><td>${esc(it.required_date||'-')}</td><td>${esc(String(it.price ?? '-'))}</td><td>${esc(it.completion_time||'-')}</td></tr>`).join('');
+    thead = '<tr><th>序号</th><th>名称</th><th>图片</th><th>数量</th><th>要求完成日期</th><th>价格</th><th>单位</th><th>类别</th><th>完成时间</th></tr>';
+    rows = items.map((it, i) => `<tr><td>${i+1}</td><td>${esc(it.product_name||'-')}</td><td>${it.image ? `<a href="${esc(asmImgUrl(order.id, it.image))}" target="_blank" rel="noopener"><img src="${esc(asmImgUrl(order.id, it.image))}" alt="${esc(it.product_name || '夹具')}图片" style="max-width:96px;max-height:60px"></a>` : '-'}</td><td>${esc(it.quantity||'-')}</td><td>${esc(it.required_date||'-')}</td><td>${esc(String(it.price ?? '-'))}</td><td>${esc(it.unit||'-')}</td><td>${esc(it.category||'-')}</td><td>${esc(it.completion_time||'-')}</td></tr>`).join('');
   } else {
     thead = '<tr><th>客名</th><th>名称</th><th>样板数量</th><th>提供胶件时间</th><th>收到胶件时间</th><th>工程需求完成时间</th><th>喷油交货时间</th><th>工程师/PMC</th><th>备注</th></tr>';
     rows = items.map(it => `<tr><td>${esc(it.client_name||'-')}</td><td>${esc(it.product_name||'-')}</td><td>${esc(it.sample_qty||'-')}</td><td>${esc(it.provide_time||'-')}</td><td>${esc(it.receive_time||'-')}</td><td>${esc(it.eng_complete_time||'-')}</td><td>${esc(it.delivery_time||'-')}</td><td>${esc(it.engineer||'-')}</td><td>${esc(it.notes||'-')}</td></tr>`).join('');
@@ -1682,12 +1692,12 @@ async function submitReview(action) {
     return;
   }
   if (type === 'assembly' && (isManager ? reviewingOrderStatus !== '待经理审核' : reviewingOrderStatus !== '待审核')) {
-    showToast(isManager ? '夹具单需先经主管审核并完成报价，再由经理审核' : '主管只能审核待审核的夹具单', 'warning');
+    showToast(isManager ? '夹具单需先由夹具部报价并经主管审核，再由经理审核' : '主管只能审核待审核的夹具单', 'warning');
     return;
   }
 
   let newStatus, toastMsg;
-  // 啤办单需经理二级审核；夹具单主管通过后先转夹具部报价（待报价），报价完成后才由经理审核；搪胶/喷油主管通过即可
+  // 夹具单先由夹具部报价（未报价→待审核），再经主管→经理两级审核；啤办单同样需经理二级审核；搪胶/喷油主管通过即可
   const needManagerReview = type === 'injection' || type === 'assembly';
   if (action === 'reject') {
     newStatus = '已驳回';
@@ -1695,9 +1705,6 @@ async function submitReview(action) {
   } else if (isManager) {
     newStatus = '待生产';
     toastMsg = '经理审核通过！单据已进入待生产';
-  } else if (type === 'assembly') {
-    newStatus = '待报价';
-    toastMsg = '主管审核通过！已转夹具部报价';
   } else if (!needManagerReview) {
     newStatus = '待生产';
     toastMsg = '主管审核通过！单据已进入待生产';
@@ -2412,7 +2419,8 @@ function openNewAsmModal() {
   document.getElementById('asm-supervisor').value = '';
   document.getElementById('asm-engineer').value = '';
   document.getElementById('asm-reason').value = '';
-  document.getElementById('asm-status').value = '待审核';
+  document.getElementById('asm-workshop').value = '';
+  document.getElementById('asm-status').value = '未报价';
   document.getElementById('asmItemsBody').innerHTML = '';
   _asmRowSeq = 0;
   addAsmRow();
@@ -2424,6 +2432,8 @@ function addAsmRow(it={}) {
   _asmRowSeq++;
   const tr = document.createElement('tr');
   tr._img = it.image ? { name: it.image, dataUrl: null } : {};
+  // 价格/完成时间由夹具部报价填写；编辑时保留已有值，保存时原样带回，避免被清空
+  tr._quote = { price: it.price ?? null, completion_time: it.completion_time ?? null };
   tr.innerHTML = `
     <td class="text-center asm-seq">${_asmRowSeq}</td>
     <td>${inp('text','product_name',it.product_name||'','placeholder="夹具名称"')}</td>
@@ -2438,8 +2448,6 @@ function addAsmRow(it={}) {
     </td>
     <td>${inp('number','quantity',it.quantity||'','style="width:80px" min="1"')}</td>
     <td>${inp('date','required_date',it.required_date||'')}</td>
-    <td>${inp('number','price',String(it.price ?? ''),'placeholder="价格" step="0.01" min="0"')}</td>
-    <td>${inp('text','completion_time',it.completion_time||'','placeholder="完成时间"')}</td>
     <td><button type="button" class="btn btn-sm btn-danger" onclick="removeAsmRow(this)"><i class="bi bi-x-lg"></i></button></td>`;
   document.getElementById('asmItemsBody').appendChild(tr);
   renderAsmRowImage(tr);

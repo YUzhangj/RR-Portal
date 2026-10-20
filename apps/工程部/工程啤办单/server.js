@@ -3,6 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
+const { buildMonthlyWorkbook, monthlyFilename, contentDisposition } = require('./monthly');
+const { migrateUnquoted } = require('./scripts/migrate-unquoted');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -11,6 +13,12 @@ const DATA_FILE = path.join(DATA_DIR, 'data.json');
 
 // ─── JSON 文件存储 ───────────────────────────────────────────────────────────
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+// 在首次读取缓存之前迁移历史状态；失败时停止启动，不以空库覆盖原资料。
+try { migrateUnquoted(DATA_FILE); } catch {
+  console.error('夹具状态迁移失败；原数据和已有备份已保留，请停机检查后再启动。');
+  process.exit(1);
+}
 
 // 默认原料价格从文件读取（200条完整数据）
 const DEFAULT_PRICES_FILE = path.join(DATA_DIR, 'default-material-prices.json');
@@ -442,7 +450,7 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-// 夹具流程：主管审核 → 报价 → 经理审核 → 生产。X-User 沿用既有部门标记，审核仍必须验证 PIN。
+// 夹具流程：报价 → 主管审核 → 经理审核 → 生产。X-User 沿用既有部门标记，审核仍必须验证 PIN。
 function validateAssemblyOrder(header, items) {
   if (typeof header.product_name !== 'string' || !header.product_name.trim()) return '请填写产品名称';
   if (typeof header.client_name !== 'string' || !header.client_name.trim()) return '请选择客户';
@@ -456,7 +464,7 @@ function updateAssemblyStatus(req, res) {
   const order = data.assembly_orders.find(o => o.id === +req.params.id);
   if (!order) return res.status(404).json({ error: '未找到' });
   const { status, pin, reviewer_name, reviewer_role, reason } = req.body;
-  const review = ['待报价', '待生产', '已驳回'].includes(status);
+  const review = ['待经理审核', '待生产', '已驳回'].includes(status);
   if (review) {
     const role = reviewer_role || 'supervisor';
     const manager = role === 'manager';
@@ -471,15 +479,13 @@ function updateAssemblyStatus(req, res) {
     clearPinFailures(key);
     const valid = manager
       ? order.status === '待经理审核' && ['待生产', '已驳回'].includes(status)
-      : order.status === '待审核' && ['待报价', '已驳回'].includes(status);
+      : order.status === '待审核' && ['待经理审核', '已驳回'].includes(status);
     if (!valid) return res.status(409).json({ error: '单据状态已变更，请刷新后按当前流程操作' });
-  } else if (status === '待经理审核') {
-    return res.status(403).json({ error: '请由夹具部填写报价后提交经理审核' });
   } else {
     const user = decodeURIComponent(req.headers['x-user'] || '');
     if (!user.trim()) return res.status(401).json({ error: '未授权：请登录后操作' });
     const production = (status === '生产中' && order.status === '待生产') || (status === '已完成' && order.status === '生产中');
-    const cancel = status === '已取消' && ['待审核', '已驳回'].includes(order.status);
+    const cancel = status === '已取消' && ['未报价', '待审核', '已驳回'].includes(order.status);
     if (production && user !== '夹具部') return res.status(403).json({ error: '请在夹具部登记生产状态' });
     if (!production && !cancel) return res.status(409).json({ error: '单据状态已变更，请刷新后按当前流程操作' });
   }
@@ -494,14 +500,52 @@ function updateAssemblyStatus(req, res) {
   res.json({ success: true });
 }
 
-// 报价仅更新现有明细的价格/完成日期，与进入经理审核同次保存，禁止全量 PUT 覆盖工程资料。
+// 报价仅更新现有明细的价格/完成日期，与进入主管审核同次保存，禁止全量 PUT 覆盖工程资料。
+// ── 夹具月结表导出（只读）────────────────────────────────────────────────────
+// 口径：已报价且未驳回/未取消（待审核/待经理审核/待生产/生产中/已完成）的夹具单明细，
+// 按明细 completion_time 所在月份归集（空则用订单 date 兜底），按 workshop 分 sheet。
+app.get('/api/assembly-monthly', async (req, res) => {
+  const month = String(req.query.month || '');
+  if (!/^(?!0000)\d{4}-(?:0[1-9]|1[0-2])$/.test(month)) return res.status(400).json({ error: '请传入 month=YYYY-MM' });
+  const data = loadData();
+  const STATUSES = ['待审核', '待经理审核', '待生产', '生产中', '已完成'];
+  const workshop = String(req.query.workshop || '');
+  const rows = [];
+  for (const o of data.assembly_orders) {
+    if (!STATUSES.includes(o.status) || (workshop && o.workshop !== workshop)) continue;
+    for (const it of data.assembly_items.filter(i => i.order_id === o.id)) {
+      const when = (it.completion_time && String(it.completion_time).trim()) || o.date || '';
+      if (!monthMatches(when, month)) continue;
+      if (it.price == null || String(it.price).trim() === '' || !Number.isFinite(Number(it.price))) continue;
+      rows.push({
+        order_number: o.order_number, product_name: o.product_name, workshop: o.workshop,
+        date: o.date, reason: o.reason,
+        item_name: it.product_name, quantity: it.quantity, unit: it.unit,
+        price: it.price, category: it.category, completion_time: it.completion_time,
+      });
+    }
+  }
+  rows.sort((a, b) => String(a.completion_time || a.date || '').localeCompare(String(b.completion_time || b.date || '')));
+  if (!rows.length) return res.status(404).json({ error: `${month} 没有可导出的夹具单明细` });
+  try {
+    const rate = Number.isFinite(+data.exchange_rate_rmb_to_hkd) && +data.exchange_rate_rmb_to_hkd > 0 ? +data.exchange_rate_rmb_to_hkd : 1.08;
+    const wb = await buildMonthlyWorkbook(rows, month, rate);
+    const bytes = await wb.xlsx.writeBuffer();
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', contentDisposition(monthlyFilename(month)));
+    res.send(Buffer.from(bytes));
+  } catch (e) {
+    res.status(500).json({ error: '导出失败，请稍后重试' });
+  }
+});
+
 app.post('/api/assembly/:id/quote', (req, res) => {
   if (decodeURIComponent(req.headers['x-user'] || '') !== '夹具部') return res.status(403).json({ error: '请在夹具部提交报价' });
   const data = loadData();
   const order = data.assembly_orders.find(o => o.id === +req.params.id);
   if (!order) return res.status(404).json({ error: '未找到' });
   const { items, expected_updated_at } = req.body;
-  if (order.status !== '待报价' || !expected_updated_at || expected_updated_at !== order.updated_at) return res.status(409).json({ error: '单据已变更，请重新打开报价' });
+  if (order.status !== '未报价' || !expected_updated_at || expected_updated_at !== order.updated_at) return res.status(409).json({ error: '单据已变更，请重新打开报价' });
   const existing = data.assembly_items.filter(it => it.order_id === order.id);
   if (!Array.isArray(items) || !items.length || items.length !== existing.length) return res.status(400).json({ error: '请填写每一项夹具报价' });
   const ids = new Set(existing.map(it => it.id));
@@ -511,16 +555,21 @@ app.post('/api/assembly/:id/quote', (req, res) => {
     if (!it || !ids.has(it.id) || seen.has(it.id)) return res.status(409).json({ error: '明细已变更，请重新打开报价' });
     seen.add(it.id);
     const price = typeof it.price === 'string' ? it.price.trim() : it.price;
-    if ((typeof price !== 'string' && typeof price !== 'number') || price === '' || !Number.isFinite(Number(price)) || Number(price) < 0) return res.status(400).json({ error: '请填写有效且不小于 0 的价格' });
+    if ((typeof price !== 'string' && typeof price !== 'number') || String(price).trim() === '' || !Number.isFinite(Number(price)) || Number(price) < 0) return res.status(400).json({ error: '请填写有效且不小于 0 的价格' });
     const date = it.completion_time;
     if (typeof date !== 'string' || !/^(?!0000)\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) return res.status(400).json({ error: '请填写每项有效的完成日期' });
-    updates.push({ id: it.id, price: Number(price), completion_time: date });
+    const unit = typeof it.unit === 'string' ? it.unit.trim() : '';
+    if (!unit) return res.status(400).json({ error: `第 ${updates.length + 1} 项请填写单位` });
+    if (unit.length > 10) return res.status(400).json({ error: `第 ${updates.length + 1} 项单位过长（最多 10 字）` });
+    const category = typeof it.category === 'string' ? it.category.trim() : '';
+    if (!['设备', '原材料', '工具'].includes(category)) return res.status(400).json({ error: `第 ${updates.length + 1} 项类别必须是「设备/原材料/工具」之一` });
+    updates.push({ id: it.id, price: Number(price), completion_time: date, unit, category });
   }
   const next = structuredClone(data);
   const byId = new Map(updates.map(it => [it.id, it]));
   next.assembly_items.forEach(it => { if (it.order_id === order.id) Object.assign(it, byId.get(it.id)); });
   const updated = next.assembly_orders.find(o => o.id === order.id);
-  updated.status = '待经理审核';
+  updated.status = '待审核';
   updated.updated_at = nextUpdatedAt(order.updated_at);
   try { saveData(next); } catch (e) { return res.status(500).json({ error: '保存失败，请重试' }); }
   res.json(getOrderById('assembly', order.id));
@@ -541,8 +590,10 @@ app.post('/api/assembly/:id/quote', (req, res) => {
       if (type === 'assembly') {
         const error = validateAssemblyOrder(header, items);
         if (error) return res.status(400).json({ error });
-        if (header.status && header.status !== '待审核') return res.status(400).json({ error: '新夹具单必须先提交主管审核' });
-        header.status = '待审核';
+        if (header.status && header.status !== '未报价') return res.status(400).json({ error: '新夹具单必须先由夹具部报价' });
+        header.status = '未报价';
+        delete header.id; delete header.created_at; delete header.updated_at;
+        items.forEach(it => { for (const key of ['id', 'order_id', 'sort_order', 'price', 'completion_time', 'unit', 'category']) delete it[key]; });
       }
       // 夹具申请单图片：new_images 为 base64 dataURL 数组，落盘为文件，订单只存文件名
       const newImages = type === 'assembly' ? header.new_images : undefined;
@@ -564,8 +615,8 @@ app.post('/api/assembly/:id/quote', (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // 主管审核后锁定，仅主管/经理可修改删除
-  const LOCKED_STATUSES = ['待报价', '待经理审核', '待生产', '生产中', '已完成'];
+  // 进入审核流程后锁定，仅主管/经理可修改删除
+  const LOCKED_STATUSES = ['待经理审核', '待生产', '生产中', '已完成'];
 
   function checkLock(req, res, order, action) {
     if (!order || !LOCKED_STATUSES.includes(order.status)) return false;
@@ -579,16 +630,18 @@ app.post('/api/assembly/:id/quote', (req, res) => {
     try {
       const data = loadData();
       const order = data[`${type}_orders`].find(o => o.id === +req.params.id);
-      if (checkLock(req, res, order, '修改')) return;
+      if (type !== 'assembly' && checkLock(req, res, order, '修改')) return;
       const { items, ...header } = req.body;
       if (type === 'assembly' && order) {
+        if (!['未报价', '已驳回'].includes(order.status)) return res.status(403).json({ error: '已报价单据请先审核驳回，再修改并重新报价' });
         const error = validateAssemblyOrder({ ...order, ...header }, items === undefined ? getOrderById(type, order.id).items : items);
         if (error) return res.status(400).json({ error });
-        if (header.status && header.status !== order.status && !(order.status === '已驳回' && header.status === '待审核')) {
+        if (Object.prototype.hasOwnProperty.call(header, 'status') && header.status !== order.status && !(order.status === '已驳回' && header.status === '未报价')) {
           return res.status(403).json({ error: '请通过审核或报价操作变更夹具单状态' });
         }
         // 不接受从客户端回传的系统字段，明细图片仍走现有保存通道。
         delete header.id; delete header.created_at; delete header.updated_at;
+        if (Array.isArray(items)) items.forEach(it => { for (const key of ['id', 'order_id', 'sort_order', 'price', 'completion_time', 'unit', 'category']) delete it[key]; });
       }
       // 喷油收到胶件时间（delivery_time）仅喷油部可填：工程部编辑整单时 items 全量重建，
       // 这里按行位置把已有值补回，避免被清空

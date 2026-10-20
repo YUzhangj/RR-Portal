@@ -15,6 +15,22 @@
     .items-table td { overflow: visible; }
     #orderList { overflow-x: auto; }
     #orderList table { min-width: 720px; }
+    /* 打印总表：只保留标题和总表内容 */
+    @media print {
+      nav.navbar, .modal, .toast, .no-print { display: none !important; }
+      body { background: #fff !important; }
+      .card, .card-body, .container-fluid, #orderList { display: block !important; }
+      .card { border: none !important; box-shadow: none !important; }
+      .card-body { padding: 0 !important; }
+      #orderList .table-responsive { overflow: visible !important; }
+      #orderList { padding: 0; overflow: visible; }
+      #orderList .mb-4 { margin-bottom: 8px !important; }
+      #orderList table { font-size: 9pt !important; page-break-inside: auto !important; min-width: 0; }
+      #orderList table th, #orderList table td { border: 1px solid #333 !important; }
+      #orderList h6 { border-radius: 0 !important; background: #e8e8e8 !important; color: #000 !important; }
+      @page { size: A4 landscape; margin: 8mm; }
+      #orderList thead { display: table-header-group; }
+    }
   </style>
 </head>
 <body class="bg-light">
@@ -23,19 +39,30 @@
 <nav class="navbar navbar-dark" style="background:#2980b9">
   <div class="container-fluid">
     <span class="navbar-brand"><i class="bi bi-wrench-adjustable-circle me-2"></i>夹具部 — 夹具申请单</span>
-    <div class="d-flex gap-2 align-items-center">
-      <a href="index.html" class="nav-dept-link"><i class="bi bi-house me-1"></i>主页</a>
+    <div class="d-flex flex-wrap gap-2 align-items-center">
+      <a href="index.html"       class="nav-dept-link"><i class="bi bi-house me-1"></i>主页</a>
+      <a href="engineering.html" class="nav-dept-link">工程部</a>
+      <a href="injection.html"   class="nav-dept-link">啤机部</a>
+      <a href="slush.html"       class="nav-dept-link">搪胶部</a>
+      <a href="spray.html"       class="nav-dept-link">喷油部</a>
     </div>
   </div>
 </nav>
 
 <div class="container-fluid mt-3">
   <!-- 操作栏 -->
-  <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+  <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3 no-print">
     <div class="d-flex flex-wrap align-items-center gap-2">
+      <select id="workshopFilter" class="form-select form-select-sm" style="width:auto" onchange="applyFilters()">
+        <option value="">全部车间</option>
+        <option value="华登车间">华登车间</option>
+        <option value="A车间">A车间</option>
+        <option value="B车间">B车间</option>
+        <option value="兴信车间">兴信车间</option>
+      </select>
       <div class="status-filter d-flex flex-wrap gap-1">
         <button class="btn btn-sm btn-outline-secondary active" onclick="filterStatus('',this)">全部</button>
-        <button class="btn btn-sm" style="background:#0f766e;color:#fff;border-color:#0f766e" onclick="filterStatus('待报价',this)">待报价</button>
+        <button class="btn btn-sm" style="background:#0f766e;color:#fff;border-color:#0f766e" onclick="filterStatus('未报价',this)">未报价</button>
         <button class="btn btn-sm" style="background:#fd7e14;color:#fff;border-color:#fd7e14" onclick="filterStatus('待审核',this)">待审核</button>
         <button class="btn btn-sm" style="background:#7c3aed;color:#fff;border-color:#7c3aed" onclick="filterStatus('待经理审核',this)">待经理审核</button>
         <button class="btn btn-sm btn-warning"  onclick="filterStatus('待生产',this)">待生产</button>
@@ -44,9 +71,30 @@
         <button class="btn btn-sm btn-danger"   onclick="filterStatus('已驳回',this)">已驳回</button>
       </div>
     </div>
-    <div class="d-flex gap-2">
-      <button class="btn btn-outline-secondary" onclick="loadOrders()"><i class="bi bi-arrow-clockwise me-1"></i>刷新</button>
+    <div class="d-flex flex-wrap gap-2 align-items-center">
+      <div class="btn-group btn-group-sm">
+        <button class="btn btn-outline-primary active" id="viewListBtn" onclick="switchView('list')"><i class="bi bi-list-ul me-1"></i>列表</button>
+        <button class="btn btn-outline-primary" id="viewSummaryBtn" onclick="switchView('summary')"><i class="bi bi-table me-1"></i>总表</button>
+      </div>
+      <button class="btn btn-sm btn-outline-secondary no-print" onclick="printSummary()"><i class="bi bi-printer me-1"></i>打印总表</button>
+      <button class="btn btn-sm btn-outline-success no-print" onclick="exportMonthly()"><i class="bi bi-file-earmark-excel me-1"></i>导出月结表</button>
+      <div class="form-check form-switch mb-0">
+        <input class="form-check-input" type="checkbox" id="autoRefresh" checked>
+        <label class="form-check-label small text-muted" for="autoRefresh" title="每30秒自动刷新">自动刷新</label>
+      </div>
     </div>
+  </div>
+
+  <!-- 筛选行（列表/总表/打印共用） -->
+  <div class="d-flex flex-wrap gap-2 align-items-center mb-3 no-print">
+    <input type="month" id="monthFilter" class="form-control form-control-sm" style="width:auto" onchange="applyFilters()">
+    <button class="btn btn-sm btn-warning" onclick="clearMonthFilter()">全部</button>
+    <input id="orderNoFilter" class="form-control form-control-sm" style="width:150px" placeholder="搜索产品编号..." oninput="applyFilters()">
+    <input id="docNoFilter" class="form-control form-control-sm" style="width:150px" placeholder="搜索订单编号..." oninput="applyFilters()">
+    <select id="clientFilter" class="form-select form-select-sm" style="width:auto" onchange="applyFilters()">
+      <option value="">全部客户</option>
+    </select>
+    <button class="btn btn-sm btn-outline-secondary" onclick="loadOrders()"><i class="bi bi-arrow-clockwise me-1"></i>刷新数据</button>
   </div>
 
   <!-- 订单列表 -->
@@ -67,7 +115,7 @@
       </div>
       <div class="modal-body">
         <input type="hidden" id="asm-id">
-        <input type="hidden" id="asm-status" value="待审核">
+        <input type="hidden" id="asm-status" value="未报价">
         <div class="row g-3 mb-3">
           <div class="col-md-3"><label class="form-label fw-bold">申请人 <span class="text-danger">*</span></label><input class="form-control" id="asm-applicant" placeholder="您的姓名"></div>
           <div class="col-md-3"><label class="form-label fw-bold">货号</label><input class="form-control" id="asm-order_number" placeholder="选填"></div>
@@ -86,7 +134,7 @@
           <div class="col-md-3"><label class="form-label fw-bold">车间</label>
             <select class="form-select" id="asm-workshop">
               <option value="">请选择车间</option>
-              <option>华登车间</option><option>A车间</option><option>B车间</option>
+              <option>华登车间</option><option>A车间</option><option>B车间</option><option>兴信车间</option>
             </select>
           </div>
           <div class="col-md-3"><label class="form-label fw-bold">备注</label><input class="form-control" id="asm-reason" placeholder="备注信息"></div>
@@ -99,10 +147,15 @@
           </div>
         </div>
         <div class="items-table-wrap">
+          <datalist id="asmUnitList">
+            <option value="套"></option><option value="个"></option><option value="条"></option>
+            <option value="台"></option><option value="支"></option><option value="卷"></option>
+            <option value="把"></option><option value="米"></option><option value="天"></option>
+          </datalist>
           <table class="table table-bordered table-sm items-table" id="asmItemsTable">
             <thead>
               <tr>
-                <th style="width:50px">序号</th><th>名称</th><th style="width:80px">数量</th><th>要求完成日期</th><th>价格</th><th>完成时间</th><th style="width:96px">图片</th><th style="width:40px"></th>
+                <th style="width:50px">序号</th><th>名称</th><th style="width:80px">数量</th><th>要求完成日期</th><th style="width:96px">图片</th><th style="width:40px"></th>
               </tr>
             </thead>
             <tbody id="asmItemsBody"></tbody>
@@ -150,7 +203,7 @@
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭报价"></button>
       </div>
       <div class="modal-body">
-        <p class="text-muted small mb-2"><i class="bi bi-info-circle me-1"></i>请为每项夹具填写价格和完成时间，提交后单据进入「待经理审核」，由工程经理审核。</p>
+        <p class="text-muted small mb-2"><i class="bi bi-info-circle me-1"></i>请为每项夹具填写价格和完成时间，提交后单据进入「待审核」，由主管审核。</p>
         <div id="quoteError" class="alert alert-danger" role="alert" hidden></div>
         <div id="quoteBody"></div>
       </div>
@@ -176,14 +229,66 @@
 <script src="utils.js"></script>
 <script>
 // ─── 状态管理 ────────────────────────────────────────────────────────────────
+let allOrders = [];
 let currentFilter = '';
+let currentView = 'list'; // 'list' or 'summary'
 
 // ─── 状态筛选 ────────────────────────────────────────────────────────────────
 function filterStatus(status, el) {
   currentFilter = status;
   document.querySelectorAll('.status-filter .btn').forEach(b => b.classList.remove('active'));
   el.classList.add('active');
-  loadOrders();
+  applyFilters();
+}
+
+function switchView(view) {
+  currentView = view;
+  document.getElementById('viewListBtn').classList.toggle('active', view === 'list');
+  document.getElementById('viewSummaryBtn').classList.toggle('active', view === 'summary');
+  applyFilters();
+}
+
+// 打印总表：先切到总表视图（沿用当前筛选），渲染完成后调起打印
+function printSummary() {
+  if (currentView !== 'summary') switchView('summary');
+  setTimeout(() => window.print(), 50);
+}
+
+// 导出夹模具月结表（按筛选行的月份，未选月份时提示）
+function exportMonthly() {
+  const month = document.getElementById('monthFilter')?.value || '';
+  if (!month) { alert('请先在筛选行选择要导出的月份（「全部」状态下无法导出月结表）'); return; }
+  const workshop = document.getElementById('workshopFilter').value;
+  window.location.href = `${API_BASE}/api/assembly-monthly?month=${encodeURIComponent(month)}&workshop=${encodeURIComponent(workshop)}`;
+}
+
+function clearMonthFilter() {
+  document.getElementById('monthFilter').value = '';
+  applyFilters();
+}
+
+function applyFilters() {
+  let filtered = allOrders;
+  const ws = document.getElementById('workshopFilter')?.value || '';
+  if (ws) filtered = filtered.filter(o => o.workshop === ws);
+  if (currentFilter) filtered = filtered.filter(o => o.status === currentFilter);
+  const month = document.getElementById('monthFilter')?.value || '';
+  if (month) filtered = filtered.filter(o => String(o.date || '').startsWith(month));
+  const noKw = (document.getElementById('orderNoFilter')?.value || '').trim().toLowerCase();
+  if (noKw) filtered = filtered.filter(o => String(o.order_number || '').toLowerCase().includes(noKw));
+  const docKw = (document.getElementById('docNoFilter')?.value || '').trim().toLowerCase();
+  if (docKw) filtered = filtered.filter(o => String(o.doc_number || '').toLowerCase().includes(docKw));
+  const client = document.getElementById('clientFilter')?.value || '';
+  if (client) filtered = filtered.filter(o => o.client_name === client);
+  // 排序：状态分组，组内 ID 降序
+  const _sOrd = { '未报价':0, '待审核':1, '待经理审核':2, '待生产':3, '生产中':4, '已完成':5, '已驳回':6, '已取消':7 };
+  filtered = [...filtered].sort((a, b) => {
+    const oa = _sOrd[a.status] ?? 9, ob = _sOrd[b.status] ?? 9;
+    if (oa !== ob) return oa - ob;
+    return b.id - a.id;
+  });
+  if (currentView === 'summary') renderSummary(filtered);
+  else renderOrderList(filtered);
 }
 
 // ─── 加载/渲染订单列表 ────────────────────────────────────────────────────────
@@ -192,20 +297,25 @@ function loadOrders() {
   apiFetch('/api/assembly')
     .then(r => r.json())
     .then(orders => {
-      if (currentFilter) orders = orders.filter(o => o.status === currentFilter);
-      const _sOrd = { '待审核':0, '待报价':1, '待经理审核':2, '待生产':3, '生产中':4, '已完成':5, '已驳回':6, '已取消':7 };
-      orders.sort((a, b) => {
-        const oa = _sOrd[a.status] ?? 9, ob = _sOrd[b.status] ?? 9;
-        if (oa !== ob) return oa - ob;
-        return b.id - a.id;
-      });
-      renderOrderList(orders);
+      allOrders = orders;
+      // 客户下拉：从订单收集去重
+      const clientSel = document.getElementById('clientFilter');
+      if (clientSel) {
+        const clients = [...new Set(orders.map(o => o.client_name).filter(Boolean))].sort();
+        const cur = clientSel.value;
+        clientSel.innerHTML = '<option value="">全部客户</option>'
+          + clients.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+        clientSel.value = clients.includes(cur) ? cur : '';
+      }
+      applyFilters();
     })
-    .catch(() => showToast('加载失败', 'danger'));
+    .catch(() => {
+      document.getElementById('orderList').innerHTML = '<div class="text-center p-4 text-danger">加载失败，请刷新页面</div>';
+    });
 }
 
 const statusBadge = s => ({
-  '待报价': '<span class="badge" style="background:#0f766e">待报价</span>',
+  '未报价': '<span class="badge" style="background:#0f766e">未报价</span>',
   '待审核': '<span class="badge" style="background:#fd7e14">待审核</span>',
   '待经理审核': '<span class="badge" style="background:#7c3aed">待经理审核</span>',
   '待生产': '<span class="badge badge-pending">待生产</span>',
@@ -221,9 +331,9 @@ function renderOrderList(orders) {
     return;
   }
   const rows = orders.map(o => {
-    const canEdit = o.status === '待审核' || o.status === '已驳回';
+    const canEdit = o.status === '未报价' || o.status === '已驳回';
     const canDelete = canEdit;
-    const canQuote = o.status === '待报价';
+    const canQuote = o.status === '未报价';
     const canStart = o.status === '待生产';
     const canFinish = o.status === '生产中';
     const itemCount = (o.items || []).length;
@@ -232,6 +342,7 @@ function renderOrderList(orders) {
       <td>${esc(o.order_number || '-')}</td>
       <td>${esc(o.product_name || '-')}</td>
       <td>${esc(o.client_name || '-')}</td>
+      <td>${esc(o.workshop || '-')}</td>
       <td class="text-center">${itemCount}</td>
       <td>${esc(o.created_by || '-')}</td>
       <td>${fmtDateTime(o.created_at)}</td>
@@ -253,11 +364,64 @@ function renderOrderList(orders) {
     <table class="table table-hover table-sm mb-0" style="font-size:.82rem">
       <thead class="table-dark">
         <tr>
-          <th>货号</th><th>货名</th><th>客名</th><th>夹具数</th><th>申请人</th><th>申请时间</th><th>状态</th><th>操作</th>
+          <th>货号</th><th>货名</th><th>客名</th><th>车间</th><th>夹具数</th><th>申请人</th><th>申请时间</th><th>状态</th><th>操作</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>`;
+}
+
+// ─── 总表视图 ───────────────────────────────────────────────────────────────────
+function renderSummary(orders) {
+  if (!orders.length) {
+    document.getElementById('orderList').innerHTML = `<div class="empty-state"><i class="bi bi-inbox"></i><p class="mt-2">暂无单据</p></div>`;
+    return;
+  }
+  // 按车间分组
+  const byWorkshop = Object.create(null);
+  orders.forEach(o => {
+    const ws = o.workshop || '未分配';
+    if (!byWorkshop[ws]) byWorkshop[ws] = [];
+    byWorkshop[ws].push(o);
+  });
+
+  let html = '';
+  for (const ws of Object.keys(byWorkshop).sort()) {
+    let rows = '';
+    for (const o of byWorkshop[ws]) {
+      const items = (o.items && o.items.length) ? o.items : [null];
+      items.forEach((it, idx) => {
+        rows += `<tr>
+          <td>${idx === 0 ? `<strong>${esc(o.order_number || '-')}</strong>` : ''}</td>
+          <td>${idx === 0 ? esc(o.product_name || '-') : ''}</td>
+          <td>${idx === 0 ? esc(o.client_name || '-') : ''}</td>
+          <td>${it ? esc(it.product_name || '-') : '-'}</td>
+          <td class="text-center">${it ? esc(it.quantity || '-') : '-'}</td>
+          <td>${it ? esc(it.required_date || '-') : '-'}</td>
+          <td class="text-end">${it ? esc(String(it.price ?? '-')) : '-'}</td>
+          <td>${it ? esc(it.unit || '-') : '-'}</td>
+          <td>${it ? esc(it.category || '-') : '-'}</td>
+          <td>${it ? esc(it.completion_time || '-') : '-'}</td>
+          <td>${idx === 0 ? statusBadge(o.status) : ''}</td>
+        </tr>`;
+      });
+    }
+    html += `<div class="mb-4">
+      <h6 class="fw-bold px-3 py-2 mb-0" style="background:#2980b9;color:#fff;border-radius:6px 6px 0 0">
+        <i class="bi bi-building me-1"></i>${esc(ws)}夹具申请总表
+      </h6>
+      <div class="table-responsive">
+      <table class="table table-bordered table-sm mb-0" style="font-size:.8rem">
+        <thead style="background:#f8f9fa">
+          <tr>
+            <th>货号</th><th>货名</th><th>客名</th><th>夹具名称</th>
+            <th style="width:70px">数量</th><th>要求完成日期</th><th style="width:90px">价格</th><th style="width:60px">单位</th><th style="width:80px">类别</th><th>完成时间</th><th>状态</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table></div></div>`;
+  }
+  document.getElementById('orderList').innerHTML = html;
 }
 
 function fmtDateTime(s) {
@@ -281,7 +445,7 @@ function openNewModal() {
   document.getElementById('asm-supervisor').value = '';
   document.getElementById('asm-workshop').value = '';
   document.getElementById('asm-reason').value = '';
-  document.getElementById('asm-status').value = '待审核';
+  document.getElementById('asm-status').value = '未报价';
   document.getElementById('asmItemsBody').innerHTML = '';
   _rowSeq = 0;
   asmImages = [];
@@ -294,7 +458,7 @@ function editOrder(id) {
   apiFetch(`/api/assembly/${id}`)
     .then(r => r.json())
     .then(order => {
-      if (order.status !== '待审核' && order.status !== '已驳回') {
+      if (order.status !== '未报价' && order.status !== '已驳回') {
         showToast('当前状态不允许编辑', 'danger');
         return;
       }
@@ -306,9 +470,11 @@ function editOrder(id) {
       document.getElementById('asm-product_name').value = order.product_name || '';
       document.getElementById('asm-client_name').value = order.client_name || '';
       document.getElementById('asm-supervisor').value = order.supervisor || '';
-      document.getElementById('asm-workshop').value = order.workshop || '';
+      const workshop = document.getElementById('asm-workshop');
+      if (order.workshop && !Array.from(workshop.options).some(option => option.value === order.workshop)) workshop.add(new Option(order.workshop, order.workshop));
+      workshop.value = order.workshop || '';
       document.getElementById('asm-reason').value = order.reason || '';
-      document.getElementById('asm-status').value = (order.status === '已驳回') ? '待审核' : order.status;
+      document.getElementById('asm-status').value = (order.status === '已驳回') ? '未报价' : order.status;
 
       const tbody = document.getElementById('asmItemsBody');
       tbody.innerHTML = '';
@@ -406,8 +572,6 @@ function addAsmRow(it={}) {
     <td>${inp('text','product_name',it.product_name,'placeholder="夹具名称"')}</td>
     <td>${inp('number','quantity',it.quantity,'style="width:80px" min="1"')}</td>
     <td>${inp('text','required_date',it.required_date,'placeholder="YYYY-MM-DD" class="w-date"')}</td>
-    <td>${inp('number','price',it.price||'','placeholder="价格" step="0.01"')}</td>
-    <td>${inp('text','completion_time',it.completion_time,'placeholder="完成时间" class="w-date"')}</td>
     <td class="text-center asm-img-cell p-1">
       <input type="file" accept="image/*" hidden onchange="onAsmRowImage(this)">
       <button type="button" class="btn btn-sm btn-outline-primary py-0 px-1" title="上传图片" onclick="this.previousElementSibling.click()"><i class="bi bi-image"></i></button>
@@ -458,7 +622,7 @@ function removeRow(btn) {
 }
 
 // ─── 保存订单 ─────────────────────────────────────────────────────────────────
-const asmFields = ['product_name','quantity','required_date','price','completion_time'];
+const asmFields = ['product_name','quantity','required_date'];
 
 function collectRows(tbodyId, fields) {
   return Array.from(document.getElementById(tbodyId).querySelectorAll('tr')).map(tr => {
@@ -477,7 +641,7 @@ function saveOrder() {
   const orderNumber = document.getElementById('asm-order_number').value.trim();
   if (!document.getElementById('asm-product_name').value.trim()) { alert('请填写货名'); return; }
   if (!document.getElementById('asm-client_name').value) { alert('请选择客户'); return; }
-  if (!document.getElementById('asm-supervisor').value) { alert('请选择主管，单据需先交主管审核'); return; }
+  if (!document.getElementById('asm-supervisor').value) { alert('请选择主管，报价后将交该主管审核'); return; }
 
   const items = collectRows('asmItemsBody', asmFields);
   if (!items.length || items.every(it => !it.product_name)) {
@@ -518,7 +682,7 @@ function saveOrder() {
     .catch(() => showToast('保存失败', 'danger'));
 }
 
-// ─── 报价（待报价 → 一次保存全部报价并转待经理审核）─────────────────────────
+// ─── 报价（未报价 → 一次保存全部报价并转待审核）─────────────────────────
 let _quoteOrderId = null;
 let _quoteItems = [];
 let _quoteVersion = null;
@@ -564,7 +728,7 @@ async function openQuoteModal(id) {
   try {
     const order = await quoteResponse(await apiFetch(`/api/assembly/${id}`));
     if (request !== _quoteRequestSeq) return;
-    if (order.status !== '待报价') throw new Error('该单据当前不在「待报价」状态，请关闭后刷新列表');
+    if (order.status !== '未报价') throw new Error('该单据当前不在「未报价」状态，请关闭后刷新列表');
     if (!Array.isArray(order.items) || !order.items.length || !order.updated_at) {
       throw new Error('该单据缺少报价明细或版本信息，请关闭后刷新列表');
     }
@@ -579,14 +743,25 @@ async function openQuoteModal(id) {
           <td>${esc(it.required_date || '-')}</td>
           <td><input type="number" class="form-control" name="quote_price" data-idx="${i}" aria-label="第${i + 1}项价格"
               value="${it.price === null || it.price === undefined ? '' : esc(String(it.price))}" step="0.01" min="0" placeholder="0.00" required></td>
+          <td><input class="form-control" name="quote_unit" data-idx="${i}" list="quoteUnitList" aria-label="第${i + 1}项单位"
+              value="${esc(it.unit || '')}" maxlength="10" placeholder="单位" required></td>
+          <td><select class="form-select" name="quote_category" data-idx="${i}" aria-label="第${i + 1}项类别" required>
+              <option value="">请选择</option>
+              ${['设备','原材料','工具'].map(c => `<option${it.category === c ? ' selected' : ''}>${c}</option>`).join('')}
+            </select></td>
           <td><input type="date" class="form-control" name="quote_completion" data-idx="${i}" aria-label="第${i + 1}项完成日期"
               value="${esc(it.completion_time || '')}" min="0001-01-01" max="9999-12-31" required></td>
         </tr>`).join('');
     document.getElementById('quoteBody').innerHTML = `
+      <datalist id="quoteUnitList">
+        <option value="套"></option><option value="个"></option><option value="条"></option>
+        <option value="台"></option><option value="支"></option><option value="卷"></option>
+        <option value="把"></option><option value="米"></option><option value="天"></option>
+      </datalist>
       <div class="table-responsive">
-        <table class="table table-bordered table-sm mb-0" style="min-width:650px">
+        <table class="table table-bordered table-sm mb-0" style="min-width:800px">
           <thead class="table-dark">
-            <tr><th style="width:50px">序号</th><th>名称</th><th style="width:70px">数量</th><th>要求完成日期</th><th style="width:130px">价格</th><th style="width:150px">完成时间</th></tr>
+            <tr><th style="width:50px">序号</th><th>名称</th><th style="width:70px">数量</th><th>要求完成日期</th><th style="width:120px">价格</th><th style="width:90px">单位 <span class="text-danger">*</span></th><th style="width:110px">类别 <span class="text-danger">*</span></th><th style="width:150px">完成时间</th></tr>
           </thead>
           <tbody>${rows}</tbody>
         </table>
@@ -602,20 +777,26 @@ async function submitQuote() {
   if (!_quoteOrderId || _quoteSubmitting) return;
   quoteError();
   const items = [];
+  const CATS = ['设备', '原材料', '工具'];
   for (let i = 0; i < _quoteItems.length; i++) {
     const price = document.querySelector(`#quoteBody [name="quote_price"][data-idx="${i}"]`);
     const completion = document.querySelector(`#quoteBody [name="quote_completion"][data-idx="${i}"]`);
-    if (!price || !completion) { quoteError('报价明细不完整，请关闭后重新打开'); return; }
-    if (!price.reportValidity() || !completion.reportValidity()) return;
+    const unit = document.querySelector(`#quoteBody [name="quote_unit"][data-idx="${i}"]`);
+    const category = document.querySelector(`#quoteBody [name="quote_category"][data-idx="${i}"]`);
+    if (!price || !completion || !unit || !category) { quoteError('报价明细不完整，请关闭后重新打开'); return; }
+    if (!price.reportValidity() || !completion.reportValidity() || !unit.reportValidity() || !category.reportValidity()) return;
     if (!price.value.trim() || !Number.isFinite(Number(price.value)) || Number(price.value) < 0) {
       quoteError(`第 ${i + 1} 项请填写有效的非负价格`); price.focus(); return;
     }
+    if (!unit.value.trim()) { quoteError(`第 ${i + 1} 项请填写单位`); unit.focus(); return; }
+    if (unit.value.trim().length > 10) { quoteError(`第 ${i + 1} 项单位过长（最多 10 字）`); unit.focus(); return; }
+    if (!CATS.includes(category.value)) { quoteError(`第 ${i + 1} 项请选择类别（设备/原材料/工具）`); category.focus(); return; }
     const date = completion.value;
     const parsed = new Date(date + 'T00:00:00Z');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || +date.slice(0, 4) < 1 || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
       quoteError(`第 ${i + 1} 项请填写有效的完成日期`); completion.focus(); return;
     }
-    items.push({ id: _quoteItems[i].id, price: price.value.trim(), completion_time: date });
+    items.push({ id: _quoteItems[i].id, price: price.value.trim(), completion_time: date, unit: unit.value.trim(), category: category.value });
   }
   setQuoteBusy(true);
   try {
@@ -626,7 +807,7 @@ async function submitQuote() {
     }));
     setQuoteBusy(false);
     bootstrap.Modal.getInstance(document.getElementById('quoteModal'))?.hide();
-    showToast('报价已提交，单据进入「待经理审核」', 'success');
+    showToast('报价已提交，单据进入「待审核」', 'success');
     loadOrders();
   } catch (error) {
     quoteError(error.message || '提交失败，请稍后重试；已填写内容已保留');
@@ -694,7 +875,7 @@ function viewOrderDetail(id, orderNum) {
   apiFetch(`/api/assembly/${id}`)
     .then(r => r.json())
     .then(order => {
-      const canEdit = order.status === '待审核' || order.status === '已驳回';
+      const canEdit = order.status === '未报价' || order.status === '已驳回';
       document.getElementById('detailEditBtn').style.display = canEdit ? '' : 'none';
       document.getElementById('orderDetailBody').innerHTML = renderOrderDetails(order);
     })
@@ -728,8 +909,8 @@ function renderOrderDetails(order) {
   const items = order.items || [];
   if (!items.length) return headerHtml + '<div class="text-muted small">（无明细行）</div>';
 
-  const thead = '<tr><th>序号</th><th>名称</th><th>数量</th><th>要求完成日期</th><th>价格</th><th>完成时间</th><th>图片</th></tr>';
-  const rows = items.map((it, i) => `<tr><td>${i+1}</td><td>${esc(it.product_name||'-')}</td><td>${esc(it.quantity||'-')}</td><td>${esc(it.required_date||'-')}</td><td>${esc(it.price||'-')}</td><td>${esc(it.completion_time||'-')}</td><td>${it.image ? `<img src="${asmImgUrl(order.id, it.image)}" style="max-height:48px;max-width:72px;border-radius:4px;border:1px solid #ddd">` : '-'}</td></tr>`).join('');
+  const thead = '<tr><th>序号</th><th>名称</th><th>数量</th><th>要求完成日期</th><th>价格</th><th>单位</th><th>类别</th><th>完成时间</th><th>图片</th></tr>';
+  const rows = items.map((it, i) => `<tr><td>${i+1}</td><td>${esc(it.product_name||'-')}</td><td>${esc(it.quantity||'-')}</td><td>${esc(it.required_date||'-')}</td><td>${esc(String(it.price??'-'))}</td><td>${esc(it.unit||'-')}</td><td>${esc(it.category||'-')}</td><td>${esc(it.completion_time||'-')}</td><td>${it.image ? `<img src="${asmImgUrl(order.id, it.image)}" style="max-height:48px;max-width:72px;border-radius:4px;border:1px solid #ddd">` : '-'}</td></tr>`).join('');
 
   return headerHtml + `<div class="table-responsive"><table class="table table-bordered table-sm"><thead class="table-light">${thead}</thead><tbody>${rows}</tbody></table></div>`;
 }
@@ -860,8 +1041,14 @@ function onAsmExcelSelected() {
 // ─── 初始化 ──────────────────────────────────────────────────────────────────
 loadOrders();
 
-// Auto-refresh every 30s
-setInterval(loadOrders, 30000);
+// ─── 自动刷新（30 秒），由右上角开关控制 ──────────────────────────────────────
+let autoTimer = null;
+function setAutoRefresh(on) {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  if (on) autoTimer = setInterval(loadOrders, 30000);
+}
+document.getElementById('autoRefresh').addEventListener('change', e => setAutoRefresh(e.target.checked));
+setAutoRefresh(document.getElementById('autoRefresh').checked);
 </script>
 
 </body>
