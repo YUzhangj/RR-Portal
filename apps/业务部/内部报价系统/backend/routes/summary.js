@@ -139,6 +139,9 @@ router.put('/:id/confirmation', async (req, res) => {
   if (access.status !== 200) return res.status(access.status).json({ error: access.status === 404 ? '报价单不存在' : '无权操作该报价单' });
   const body = req.body || {};
   const existing = await db.prepare('SELECT * FROM quote_customer_confirmations WHERE quote_id = ?').get(id);
+  if (existing?.status === 'confirmed') {
+    return res.status(409).json({ error: '客价已经确认并锁定，不能再次修改；后续价格请在核价中心填写' });
+  }
   const status = Object.prototype.hasOwnProperty.call(body, 'status')
     ? (body.status === 'confirmed' ? 'confirmed' : 'pending')
     : (existing?.status === 'confirmed' ? 'confirmed' : 'pending');
@@ -172,6 +175,23 @@ router.put('/:id/confirmation', async (req, res) => {
       confirmed_at = CASE WHEN excluded.status = 'confirmed' THEN CURRENT_TIMESTAMP ELSE NULL END,
       updated_at = CURRENT_TIMESTAMP
   `).run(id, status, JSON.stringify(workshops), confirmedPrice, confirmedQty, note, req.user.name, status);
+  if (status === 'confirmed') {
+    const quote = await db.prepare('SELECT * FROM quotes WHERE id = ?').get(id);
+    const sections = await db.prepare(`SELECT s.dept, d.name_cn AS dept_name, s.status, s.payload_json
+      FROM quote_sections s JOIN departments d ON d.code=s.dept WHERE s.quote_id=? ORDER BY d.sort_order`).all(id);
+    const baseline = {
+      quote: { ...quote, confirmed_price: confirmedPrice, confirmed_qty: confirmedQty },
+      sections: sections.map(section => ({
+        dept: section.dept, dept_name: section.dept_name, status: section.status,
+        payload: parseJson(section.payload_json, {}),
+      })),
+      frozen_at: new Date().toISOString(),
+    };
+    await db.prepare(`INSERT INTO quote_verifications
+      (quote_id, baseline_json, verified_values_json, status, created_by, updated_by)
+      VALUES (?, ?, '{}', 'not_started', ?, ?) ON CONFLICT (quote_id) DO NOTHING`)
+      .run(id, JSON.stringify(baseline), req.user.name, req.user.name);
+  }
   await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail) VALUES (?, 'sales', ?, 'customer_confirmation', ?)`)
     .run(id, req.user.name, JSON.stringify({ status, workshops, confirmed_price: confirmedPrice, confirmed_qty: confirmedQty }));
   res.json({ ok: true });

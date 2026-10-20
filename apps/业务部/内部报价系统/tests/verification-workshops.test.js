@@ -28,10 +28,10 @@ test('one detail row per quote; subtotals and ratios reflect underlying amounts'
 test('export links customer subtotals and includes pending groups without duplicates',async()=>{
   const rs=[row(1,'A','兴信A',10,20,200),row(2,'A',null,1,100,100)];
   const wb=buildWorkbook(rs,columns),summary=wb.getWorksheet('总表不分车间');
-  assert.match(summary.getCell('DI4').formula,/'A'!DI/);assert.equal(summary.getCell('DI4').result,300);
+  assert.match(summary.getCell('DG4').formula,/'A'!DI/);assert.equal(summary.getCell('DG4').result,.03);
   const detail=wb.getWorksheet('不分车间核价明细');assert.equal(detail.getCell('DI5').formula,`IF(ISNUMBER('A'!DI5),'A'!DI5,"")`);
   const customer=wb.getWorksheet('A');assert.ok(customer.getColumn(1).values.some(v=>typeof v==='string'&&v.includes(G.pending)));
-  const sums=wb.getWorksheet('总表分车间');assert.equal(sums.getCell(`DI${sums.rowCount}`).result,300);
+  const sums=wb.getWorksheet('总表分车间');assert.equal(sums.getCell(`DG${sums.rowCount}`).result,.03);
   assert.ok((await wb.xlsx.writeBuffer()).length>1000);
 });
 test('customer export calculations use local rows and local detail subtotals',async()=>{

@@ -134,7 +134,7 @@ test('无效比例、汇率、穴数及未知小产品不能被悄悄按0计算'
 test('普通单品计算不受混装功能影响', () => {
   const sections = projectSections(fixture(), 'a');
   assert.deepEqual(calculateQuoteCosts({}, sections), calculateSingleQuoteCosts({}, sections));
-  assert.equal(calculateQuoteCosts({}, sections).quotedPrice, 10);
+  assert.equal(calculateQuoteCosts({}, sections).quotedPrice, 10.04);
 });
 test('空纸箱占位不产生费用，也不能替代缺失的小产品明细', () => {
   const sections = fixture();

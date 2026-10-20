@@ -59,7 +59,7 @@ function sewingLaborToAdd(group) {
   return laborInItems > 0 ? 0 : num(group && group.labor_amount);
 }
 
-function calculateSingleQuoteCosts(quote, sections) {
+function calculateSingleQuoteCosts(quote, sections, options = {}) {
   const payloads = parseSections(sections);
   const eng = payloads.engineering || {};
   const mold = payloads.molding || {};
@@ -107,6 +107,10 @@ function calculateSingleQuoteCosts(quote, sections) {
   const sewingGroupAmount = group => sum(group.items, item => num(item.usage) * num(item.mat_price) * (num(item.markup) || 1)) + sewingLaborToAdd(group);
   const sewingTotalRmb = sum(sewing.sewing_groups, group => sewingGroupAmount(group) * groupQty(group)) / sewingQty;
   const sewingHairRmb = sum((sewing.sewing_groups || []).filter(group => group.category === '车发'), group => sewingGroupAmount(group) * groupQty(group)) / sewingQty;
+  // 与报价详情页一致：车缝印尼运费只以物料为基数，排除明细人工及单列人工。
+  const sewingMaterialRmb = sum(sewing.sewing_groups, group =>
+    sum(group.items, item => /人工/.test(String(item.fabric || item.part || item.name || ''))
+      ? 0 : num(item.usage) * num(item.mat_price) * (num(item.markup) || 1)) * groupQty(group)) / sewingQty;
   const sewingHair = sewingHairRmb / fxRH;
   const sewingCloth = (sewingTotalRmb - sewingHairRmb) / fxRH;
 
@@ -155,16 +159,30 @@ function calculateSingleQuoteCosts(quote, sections) {
     + sum(electronicRows, row => /^IC$/i.test(String(row.name || '').trim()) ? 0 : amount(row)) * num(electronic.indo_pct) / 100
     + (domesticMaterial + importedMaterial + injectionLabor + blow) * num(mold.indo_pct) / 100
     + slushTotal * num(slush.indo_pct) / 100
-    + sewingTotalRmb / fxRH * num(sewing.indo_pct) / 100
+    + (options.mixed ? sewingTotalRmb : sewingMaterialRmb) / fxRH * num(sewing.indo_pct) / 100
     + paintingTotal * 0.3 * num(painting.indo_pct) / 100;
-  const surtax = num(sales.pricing_summary && sales.pricing_summary.surtax);
-  const scenario = (sales.shipping && sales.shipping.scenarios || []).find(item => !item.is_factory && /盐田.*40/i.test(item.name || ''))
-    || (sales.shipping && sales.shipping.scenarios || []).find(item => !item.is_factory);
-  const freightRate = num(scenario && scenario._freight_rate);
-  const freightPct = sales.shipping?.freight_pct == null ? 48 : sales.shipping.freight_pct;
-  const liftingPct = sales.shipping?.lifting_pct == null ? 52 : sales.shipping.lifting_pct;
-  const freight = freightRate * num(freightPct) / 100;
-  const cabinet = freightRate * num(liftingPct) / 100;
+  // 使用当前明细重新计算出货场景、摊费及附加税；忽略旧手填附加税快照。
+  const mainBase = domesticMaterial + importedMaterial + injectionLabor + blow + paintingTotal
+    + hardwareTotal + packagingTotal + auxiliaryTotal + assemblyLabor + indoFreight + slushTotal + cartonHkd;
+  let detailPricing = require('./quoteDetailPricing').calculateDetailPricing({
+    quote, sales, engineering: eng, mainBase, sewingHkd: sewingHair + sewingCloth, electronicHkd: electronicTotal,
+  });
+  // 混装按每款先算码点后成本，再由混装引擎统一除找数、加共有费；
+  // 此处不能提前套用单品出货价，否则会重复加入摊费和附加税。
+  if (options.mixed) {
+    const shipping = sales.shipping || {};
+    const scenario = (shipping.scenarios || []).find(item => !item.is_factory && /盐田.*40/i.test(item.name || ''))
+      || (shipping.scenarios || []).find(item => !item.is_factory);
+    const rate = num(scenario?._freight_rate);
+    const freight = rate * num(shipping.freight_pct ?? 48) / 100;
+    const cabinet = rate * num(shipping.lifting_pct ?? 52) / 100;
+    const markup = hasValue(shipping, 'markup_x') ? num(shipping.markup_x) : 1.2;
+    detailPricing = { freight, cabinet, surtaxHkd: 0,
+      quotedPrice: (mainBase + num(sales.pricing_summary?.surtax) + freight + cabinet) * markup
+        + (sewingHair + sewingCloth) * (hasValue(shipping, 'sew_markup_x') ? num(shipping.sew_markup_x) : markup)
+        + electronicTotal * (hasValue(shipping, 'elec_markup_x') ? num(shipping.elec_markup_x) : markup) };
+  }
+  const { freight, cabinet } = detailPricing;
 
   const components = {
     injection_labor: injectionLabor, assembly_labor: assemblyLabor,
@@ -175,7 +193,7 @@ function calculateSingleQuoteCosts(quote, sections) {
     glue_bag: categoryTotal('胶袋'), color_box: categoryTotal('彩盒/内咭'),
     battery: categoryTotal('电池'), libao: categoryTotal('产品利宝') + categoryTotal('彩盒利宝'),
     plating: categoryTotal('电镀'), flocking: categoryTotal('植绒'), other_buy: categoryTotal('其他外购'),
-    carton: cartonHkd, freight, cabinet, misc: indoFreight, abs_material: absMaterial,
+    carton: cartonHkd, freight, cabinet, misc: (options.mixed ? indoFreight : +indoFreight.toFixed(4)) + detailPricing.surtaxHkd, abs_material: absMaterial,
   };
   // 用明细行是否存在判断，而不是用金额是否非零；这样一张明确填写为 0 的新报价
   // 也会清掉旧快照，不会错误回退到历史 pricing_summary。
@@ -185,14 +203,9 @@ function calculateSingleQuoteCosts(quote, sections) {
     assembly.assembly_labor, assembly.packaging_labor,
     assembly.assembly_step_groups, assembly.packaging_step_groups, cartons,
   ].some(rows => Array.isArray(rows) && rows.length > 0);
-  const mainBase = domesticMaterial + importedMaterial + injectionLabor + blow + paintingTotal
-    + hardwareTotal + packagingTotal + auxiliaryTotal + assemblyLabor + indoFreight + slushTotal + cartonHkd + surtax;
-  const markup = hasValue(sales.shipping, 'markup_x') ? num(sales.shipping.markup_x) : 1.2;
-  const sewingMarkup = hasValue(sales.shipping, 'sew_markup_x') ? num(sales.shipping.sew_markup_x) : markup;
-  const electronicMarkup = hasValue(sales.shipping, 'elec_markup_x') ? num(sales.shipping.elec_markup_x) : markup;
-  const quotedPrice = (mainBase + freight + cabinet) * markup + (sewingHair + sewingCloth) * sewingMarkup + electronicTotal * electronicMarkup;
-  return { components, sewing_taxable: require('../../frontend/sewing-tax').taxableAmounts(sewing, components), quotedPrice: hasSourceData ? +quotedPrice.toFixed(4) : 0, hasSourceData,
-    rawQuotedPrice: hasSourceData ? quotedPrice : 0 };
+  return { components, sewing_taxable: require('../../frontend/sewing-tax').taxableAmounts(sewing, components), quotedPrice: hasSourceData ? (options.mixed ? +detailPricing.quotedPrice.toFixed(4) : detailPricing.quotedPrice) : 0, hasSourceData,
+    rawQuotedPrice: hasSourceData ? detailPricing.quotedPrice : 0, indoFreight, detailPricing };
+
 }
 
 function calculateQuoteCosts(quote, sections) {

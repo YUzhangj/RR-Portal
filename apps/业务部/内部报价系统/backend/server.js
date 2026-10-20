@@ -46,6 +46,7 @@ app.use('/api/uploads', require('./routes/uploads'));
 app.use('/api/refs', require('./routes/refs'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/verification-summary', require('./routes/verificationSummary'));
+app.use('/api/verification-transfer', require('./routes/verificationTransfer'));
 app.use('/api/verifications', require('./routes/verifications'));
 
 // nosniff：即使有人上传内容为 HTML/SVG 但扩展名被强制成图片，浏览器也不会嗅探成可执行类型

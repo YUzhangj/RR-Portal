@@ -216,6 +216,8 @@ async function initialize() {
     SELECT q.id, d.code FROM quotes q CROSS JOIN departments d
     ON CONFLICT (quote_id, dept) DO NOTHING`).run();
 
+  const {DEFAULT_COSTING_BASIS}=require('../services/costingBasis');
+  for(const factory of factories) await prepare(`INSERT INTO factory_ref_tables(factory_code,key,data_json,updated_by) VALUES (?,'costing_basis',?,'[factory-seed]') ON CONFLICT(factory_code,key) DO NOTHING`).run(factory.code,JSON.stringify(DEFAULT_COSTING_BASIS));
   const refs = { material_prices: materialPrices, machine_prices: machinePrices };
   for (const [key, data] of Object.entries(refs)) {
     await prepare(`INSERT INTO ref_tables (key, data_json, updated_by) VALUES (?, ?, '[seed]')

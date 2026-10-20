@@ -17,6 +17,7 @@ router.post('/:section_id', async (req, res) => {
   if (!hasMenuPermission(req.user, require('../permissions/menu_catalog').DEPT_TO_MENU[sec.dept], 'review')) return res.status(403).json({ error: '没有该部门的审核权限' });
   const acc = await quoteAccess(req.user, sec.quote_id);
   if (acc.status !== 200) return res.status(acc.status).json({ error: acc.status === 404 ? '不存在' : '无权审核该客户的报价单' });
+  if (await require('../services/quoteFreeze').quoteFrozen(db, sec.quote_id)) return res.status(409).json({error:'客价已确认，原报价已锁定；请到核价中心操作'});
   if (sec.dept !== req.user.dept && !['sales', 'engineering'].includes(req.user.dept)) {
     return res.status(403).json({ error: '只能审核本部门' });
   }
@@ -67,6 +68,7 @@ router.post('/:section_id/reopen', async (req, res) => {
   if (!hasMenuPermission(req.user, require('../permissions/menu_catalog').DEPT_TO_MENU[sec.dept], 'review')) return res.status(403).json({ error: '没有该部门的审核权限' });
   const acc = await quoteAccess(req.user, sec.quote_id);
   if (acc.status !== 200) return res.status(acc.status).json({ error: acc.status === 404 ? '不存在' : '无权操作该客户的报价单' });
+  if (await require('../services/quoteFreeze').quoteFrozen(db, sec.quote_id)) return res.status(409).json({error:'客价已确认，原报价已锁定；请到核价中心操作'});
   if (sec.dept !== req.user.dept && !['sales', 'engineering'].includes(req.user.dept)) {
     return res.status(403).json({ error: '只能操作本部门' });
   }

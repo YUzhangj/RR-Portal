@@ -68,7 +68,8 @@ test('报价汇总直接统计各部门明细，不依赖业务部历史快照',
   const sections = [
     { dept: 'sales', payload_json: JSON.stringify({
       header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.8 },
-      shipping: { markup_x: 1.2, freight_pct: 48, lifting_pct: 52, scenarios: [{ name: '盐田40柜', _freight_rate: 10 }] },
+      freight_calc: {cap_40: 100,yt40: 1000},
+      shipping: { markup_x: 1.2, divisor:1, surtax_markup_x:0, freight_pct: 48, lifting_pct: 52, scenarios: [{ name: '盐田40柜', _freight_rate: 999 }] },
     }) },
     { dept: 'molding', payload_json: JSON.stringify({
       injection: [{ material: 'PVC', weight_g: 2, material_unit_price: 1, shot_price: 3 }],
@@ -86,7 +87,7 @@ test('报价汇总直接统计各部门明细，不依赖业务部历史快照',
   assert.equal(result.abs_material_cost, 0);
   assert.equal(result.components.freight, 4.40352);
   assert.equal(result.components.cabinet, 5.2);
-  assert.equal(result.quoted_price, 21.6);
+  assert.ok(Math.abs(result.quoted_price - 21.6) < 1e-10);
 });
 
 test('ABS料价成本从注塑材料单独识别且不重复计入原料', () => {

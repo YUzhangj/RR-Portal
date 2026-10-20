@@ -10,7 +10,7 @@ test('植绒独立计入分类与总成本，不重复进入其他外购',()=>{
  const breakdown=dynamicCostBreakdown(result.components,eng);
  assert.equal(breakdown.columns.flocking,11);
  assert.equal(breakdown.labels.flocking,'植绒');
- assert.equal(breakdown.total,15);
+ assert.equal(breakdown.total,15+result.components.freight+result.components.cabinet+result.detailPricing.surtaxHkd);
 });
 test('混装导出保留植绒列、金额与公式',async()=>{
  const {buildMixedWorkbook}=require('../backend/services/exportMixedQuotation');

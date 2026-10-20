@@ -52,8 +52,9 @@ test('滚印烫印单价不被印尼运费覆盖，喷油明细和主表引用�
   const costs = calculateQuoteCosts(args.quote, args.sections);
   near(costs.components.painting_labor, 0.231);
   near(costs.components.paint_material, 0.099);
-  near(costs.components.misc, 0.0099);
-  near(costs.quotedPrice, 0.4079);
+  near(costs.indoFreight, 0.0099);
+  near(costs.components.misc, 0.0099 + costs.detailPricing.surtaxHkd);
+  near(costs.quotedPrice, costs.detailPricing.quotedPrice);
 });
 
 test('多产品喷油保留滚印烫印输入及配比，主表使用加权报价而非工序数量', async () => {
@@ -84,7 +85,8 @@ test('多产品喷油保留滚印烫印输入及配比，主表使用加权报�
   near(main.getCell(summaryRow, 11).result, 0.42);
   const costs = calculateQuoteCosts(args.quote, args.sections);
   near(costs.components.painting_labor + costs.components.paint_material, 0.42);
-  near(costs.components.misc, 0.0063);
+  near(costs.indoFreight, 0.0063);
+  near(costs.components.misc, 0.0063 + costs.detailPricing.surtaxHkd);
 });
 
 test('旧十一工序输入继续按原单价计入导出，新增空工序不覆盖金额', async () => {

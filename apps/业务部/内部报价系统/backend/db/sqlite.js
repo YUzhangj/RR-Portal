@@ -493,6 +493,8 @@ db.transaction = function (fn) {
 };
 
 const { seedConfiguredAccounts } = require('./accountSeed');
+const {DEFAULT_COSTING_BASIS}=require('../services/costingBasis');
+for(const f of factorySeeds) db.prepare(`INSERT OR IGNORE INTO factory_ref_tables(factory_code,key,data_json,updated_by) VALUES (?,'costing_basis',?,'[factory-seed]')`).run(f.code,JSON.stringify(DEFAULT_COSTING_BASIS));
 db.ready = seedConfiguredAccounts(db);
 
 module.exports = db;

@@ -14,6 +14,9 @@ router.put('/:id', async (req, res) => {
   // 客户可见范围校验（防跨客户越权写）
   const acc = await quoteAccess(req.user, sec.quote_id);
   if (acc.status !== 200) return res.status(acc.status).json({ error: acc.status === 404 ? '不存在' : '无权操作该客户的报价单' });
+  const locked = await db.prepare(`SELECT 1 FROM quote_customer_confirmations WHERE quote_id = ? AND status = 'confirmed'
+    UNION SELECT 1 FROM quote_verifications WHERE quote_id = ? LIMIT 1`).get(sec.quote_id, sec.quote_id);
+  if (locked) return res.status(409).json({ error: '客价已确认，原报价已锁定；请到核价中心填写核价' });
   // 业务 / 工程 可操作所有 section；其他部门只能操作自己
   if (sec.dept !== req.user.dept && !['sales', 'engineering'].includes(req.user.dept)) {
     return res.status(403).json({ error: '只能填写本部门部分' });

@@ -1,6 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { requireAuth } = require('../middleware/auth');
 
@@ -65,6 +66,78 @@ const memUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 },
 });
+
+const legacyWorkbookUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, os.tmpdir()),
+    filename: (_req, _file, cb) => cb(null, `sky-castle-verification-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.xlsx`),
+  }),
+  limits: { fileSize: 160 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok = /\.xlsx$/i.test(file.originalname);
+    const error = ok ? null : new Error('Sky Castle 核价基准同步只支持 .xlsx 文件');
+    if (error) error.code = 'LEGACY_WORKBOOK_TYPE';
+    cb(error, ok);
+  },
+});
+const {
+  parseLegacyVerificationWorkbook,
+  createLegacyVerificationBatchVersion,
+} = require('../services/legacyVerificationImport');
+
+// POST /api/uploads/legacy-sky-castle-verification
+// 上传更新后的核价总表，为表中所有 Sky Castle 货号原子化创建并锁定下一核价版本。
+const requireLegacySyncAccess = (req, res, next) => {
+  const canAdmin = Boolean(req.user.perms?.['账号管理']?.can_admin);
+  if (!canAdmin) {
+    return res.status(403).json({ error: '只有系统管理员可以同步 Sky Castle 核价基准' });
+  }
+  next();
+};
+router.post('/legacy-sky-castle-verification', requireAuth, requireLegacySyncAccess,
+  legacyWorkbookUpload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: '请选择更新后的 Sky Castle 核价总表' });
+  const sourceDate = String(req.body?.source_date || '').trim();
+  if (sourceDate && !/^\d{4}-\d{2}-\d{2}$/.test(sourceDate)) {
+    try { fs.unlinkSync(req.file.path); } catch {}
+    return res.status(400).json({ error: '核价基准日期格式应为 YYYY-MM-DD' });
+  }
+  try {
+    const head = fs.readFileSync(req.file.path).subarray(0, 4);
+    if (head[0] !== 0x50 || head[1] !== 0x4B) {
+      return res.status(400).json({ error: '文件不是有效的 .xlsx 工作簿' });
+    }
+    let parsed;
+    try {
+      parsed = parseLegacyVerificationWorkbook(req.file.path, {
+        sourceDate: sourceDate || new Date().toISOString().slice(0, 10),
+        sourceFile: path.basename(req.file.originalname),
+      });
+    } catch (error) {
+      const message = String(error.message || error);
+      const encrypted = /encrypt|password|CFB|Unsupported ZIP/i.test(message);
+      return res.status(422).json({
+        error: encrypted
+          ? '该工作簿仍有打开密码，请先在 WPS/Excel 另存为不加密的 .xlsx，再上传同步'
+          : `核价总表解析失败：${message}`,
+      });
+    }
+    const actor = req.user.display_name || req.user.username;
+    const result = await createLegacyVerificationBatchVersion(require('../db'), parsed, {
+      factoryCode: req.user.active_factory_code,
+      actor,
+    });
+    res.json(result);
+  } catch (error) {
+    if (error.code === 'LEGACY_BATCH_CONFLICT') return res.status(409).json({ error: error.message });
+    if (error.code === '23505' || String(error.message).includes('UNIQUE')) {
+      return res.status(409).json({ error: '核价版本已被其他人更新，请刷新后重新同步' });
+    }
+    throw error;
+  } finally {
+    try { fs.unlinkSync(req.file.path); } catch {}
+  }
+  });
 const { parseWorkbook } = require('../services/parseMoldSheet');
 const { extractImagesByRow } = require('../services/extractXlsxImages');
 router.post('/mold-sheet', requireAuth, memUpload.single('file'), async (req, res) => {

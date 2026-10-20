@@ -840,7 +840,7 @@ test('export tax-summary base price uses the live page formula result instead of
   });
   const basePriceCell = worksheet.getCell(titleRow + 2, 1).value;
 
-  assert.equal(Number(basePriceCell.result.toFixed(4)), 4.2206);
+  assert.equal(Number(basePriceCell.result.toFixed(4)), Number(((2.5 + 7200 / 1980) * 1.2 * (1 + .004 * 1.2 / .98)).toFixed(4)));
   assert.doesNotMatch(basePriceCell.formula, /SUM/);
 });
 
