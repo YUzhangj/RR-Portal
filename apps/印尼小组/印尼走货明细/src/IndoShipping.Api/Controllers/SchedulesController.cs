@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Dapper;
 using IndoShipping.Api.Features.Bootstrap;
+using IndoShipping.Api.Features.Schedules;
 using IndoShipping.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Mvc;
 
@@ -36,7 +37,7 @@ public class SchedulesController(ISqlConnectionFactory factory) : ControllerBase
         return Ok(output);
     }
 
-    // 手动标记"已下单"的键集合（key = "orderNo|code"），与自动匹配合并使用。
+    // 新标记按逐条跨期配对的 line ID 保存；兼容旧 orderNo|code 标记仅归属历史明细。
     [HttpGet("placed-manual")]
     public async Task<IActionResult> GetPlacedManual()
     {
@@ -50,7 +51,7 @@ public class SchedulesController(ISqlConnectionFactory factory) : ControllerBase
     [HttpPut("placed-manual")]
     public async Task<IActionResult> PutPlacedManual([FromBody] JsonElement body)
     {
-        // body: 字符串数组 ["orderNo|code", ...]；去重后整体覆盖保存。
+        // body: 字符串数组 ["line:...", ...]（兼容旧键）；去重后整体覆盖保存。
         var keys = body.ValueKind == JsonValueKind.Array
             ? body.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String)
                   .Select(e => e.GetString() ?? "").Where(s => s.Length > 0).Distinct().ToArray()
@@ -64,7 +65,7 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;",
         return Ok(new { ok = true, count = keys.Length });
     }
 
-    // 生产下单状态的手动覆盖（key = "orderNo|code", value = true/false）。
+    // 生产下单状态的明细级手动覆盖（兼容旧 orderNo|code）。
     // 未设置的行默认跟随采购状态；已有真实生产单的行由前端始终判定为已下。
     [HttpGet("production-placed-manual")]
     public async Task<IActionResult> GetProductionPlacedManual()
@@ -99,9 +100,18 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;",
     public async Task<IActionResult> Get(int id)
     {
         using var c = factory.Create();
-        var row = await c.QueryFirstOrDefaultAsync("SELECT * FROM schedules WHERE id=@id", new { id });
+        c.Open();
+        using var tx = c.BeginTransaction(System.Data.IsolationLevel.RepeatableRead);
+        var row = await c.QueryFirstOrDefaultAsync("SELECT * FROM schedules WHERE id=@id", new { id }, tx);
         if (row == null) return NotFound(new { error = "not found" });
-        return Ok(row);
+        // Rebuild old stored diffs too: legacy GroupBy(...).Last() discarded duplicate lines.
+        var history = await LoadHistory(c, tx);
+        var view = history.Single(x => x.Snapshot.Id == id);
+        var result = (IDictionary<string, object>)row;
+        result["raw_rows"] = JsonSerializer.Serialize(view.Rows);
+        result["diff_from_prev"] = JsonSerializer.Serialize(view.Diff);
+        tx.Commit();
+        return Ok(result);
     }
 
     public class CreateBody
@@ -118,17 +128,13 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;",
         c.Open();
         using var tx = c.BeginTransaction();
         await MaterialTrackingHistory.CaptureAsync(c, tx);
-        // Diff baseline: 按周次标签排序紧邻的"前一周"（week_label 严格小于本次的最大者），
-        // 而非按上传时间——这样补传历史周次也不会比错对象。
-        var prevRaw = await c.ExecuteScalarAsync<string?>(@"
-            SELECT raw_rows FROM schedules
-            WHERE week_label IS NOT NULL AND week_label < @wl
-            ORDER BY week_label DESC LIMIT 1", new { wl = body.week_label }, tx);
-        var rawRowsStr = body.raw_rows?.GetRawText() ?? "[]";
-        var prevRows = ParseArray(prevRaw);
-        var currRows = ParseArray(rawRowsStr);
-        var diff = ComputeDiff(prevRows, currRows);
-        var diffStr = JsonSerializer.Serialize(diff);
+        // Freeze the current read-only identities before a backfill can change history order.
+        // Store metadata separately so existing material-completion hashes remain valid.
+        var oldSnapshots = await LoadSnapshots(c, tx);
+        var oldLedger = await LoadLedger(c, tx);
+        var oldHistory = ScheduleLineHistory.Build(oldSnapshots, oldLedger);
+        var ledger = ScheduleLineHistory.Freeze(oldHistory, oldLedger);
+        var rawRowsStr = JsonSerializer.Serialize(ScheduleLineHistory.Parse(body.raw_rows?.GetRawText()));
         // Upsert by week_label (overwrite on re-upload of same week)
         var id = await c.ExecuteScalarAsync<int>(@"
 INSERT INTO schedules(week_label, upload_date, raw_rows, diff_from_prev)
@@ -138,7 +144,20 @@ ON CONFLICT (week_label) DO UPDATE SET
     raw_rows = EXCLUDED.raw_rows,
     diff_from_prev = EXCLUDED.diff_from_prev
 RETURNING id;",
-            new { wl = body.week_label, ud = body.upload_date, rr = rawRowsStr, df = diffStr }, tx);
+            new { wl = body.week_label, ud = body.upload_date, rr = rawRowsStr, df = "{}" }, tx);
+        var snapshots = await LoadSnapshots(c, tx);
+        var current = snapshots.Single(x => x.Id == id);
+        var oldPeriod = oldHistory.FirstOrDefault(x => x.Snapshot.Id == id);
+        if (oldPeriod is not null)
+            ledger.Snapshots[id] = ScheduleLineHistory.Replacement(current, oldPeriod.Rows);
+        var history = ScheduleLineHistory.Build(snapshots, ledger);
+        var diff = history.Single(x => x.Snapshot.Id == id).Diff;
+        await c.ExecuteAsync("UPDATE schedules SET diff_from_prev=CAST(@df AS jsonb) WHERE id=@id",
+            new { id, df = JsonSerializer.Serialize(diff) }, tx);
+        await c.ExecuteAsync(@"
+INSERT INTO settings(key,value) VALUES ('schedule_line_identities',@value)
+ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value;",
+            new { value = JsonSerializer.Serialize(ScheduleLineHistory.Freeze(history, ledger)) }, tx);
         await MaterialTrackingHistory.CaptureAsync(c, tx);
         tx.Commit();
         return Ok(new { ok = true, id, diff });
@@ -151,54 +170,20 @@ RETURNING id;",
         catch { return 0; }
     }
 
-    private static List<JsonElement> ParseArray(string? raw)
+    private static async Task<List<ScheduleLineHistory.View>> LoadHistory(System.Data.IDbConnection c, System.Data.IDbTransaction? tx = null)
     {
-        if (string.IsNullOrWhiteSpace(raw)) return new();
-        try
-        {
-            using var d = JsonDocument.Parse(raw);
-            if (d.RootElement.ValueKind != JsonValueKind.Array) return new();
-            return d.RootElement.EnumerateArray().Select(e => e.Clone()).ToList();
-        }
-        catch { return new(); }
+        var snapshots = await LoadSnapshots(c, tx);
+        return ScheduleLineHistory.Build(snapshots, await LoadLedger(c, tx));
     }
 
-    private static object ComputeDiff(List<JsonElement> prev, List<JsonElement> curr)
+    private static async Task<ScheduleLineHistory.Ledger> LoadLedger(System.Data.IDbConnection c, System.Data.IDbTransaction? tx = null) =>
+        ScheduleLineHistory.ReadLedger(await c.ExecuteScalarAsync<string?>(
+            "SELECT value FROM settings WHERE key='schedule_line_identities'", transaction: tx));
+
+    private static async Task<List<ScheduleLineHistory.Snapshot>> LoadSnapshots(System.Data.IDbConnection c, System.Data.IDbTransaction? tx = null)
     {
-        string KeyOf(JsonElement r)
-        {
-            string Get(string k) => r.ValueKind == JsonValueKind.Object && r.TryGetProperty(k, out var v) && v.ValueKind != JsonValueKind.Null
-                ? (v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : v.ToString())
-                : "";
-            // 以 orderNo(TOMY PO) 为基准：每条 PO 行单独跨周配对，避免同货号多行被折叠
-            // key = 客户|货号|orderNo（与前端 keyOf 一致）
-            return (Get("customer")) + "|" + (Get("code") != "" ? Get("code") : Get("itemNo")) + "|" + Get("orderNo");
-        }
-        string Field(JsonElement r, string k) => r.ValueKind == JsonValueKind.Object && r.TryGetProperty(k, out var v) && v.ValueKind != JsonValueKind.Null
-            ? (v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : v.ToString())
-            : "";
-        double Num(JsonElement r, string k) => double.TryParse(Field(r, k), out var d) ? d : 0;
-        // 与旧系统一致：仅当 数量 / 走货期(eta) / 品名 / 单价 变化才算"改动"，
-        // 箱数、验货期、CUST PO、接单期、国家等变动不标黄。
-        bool IsModified(JsonElement p, JsonElement r)
-        {
-            if (Math.Abs(Num(p, "qty") - Num(r, "qty")) > 1e-9) return true;
-            if (Field(p, "eta") != Field(r, "eta")) return true;
-            if (Field(p, "productName") != Field(r, "productName")) return true;
-            if (Math.Abs(Num(p, "unitPrice") - Num(r, "unitPrice")) > 1e-9) return true;
-            return false;
-        }
-        var prevMap = prev.GroupBy(KeyOf).ToDictionary(g => g.Key, g => g.Last());
-        var currMap = curr.GroupBy(KeyOf).ToDictionary(g => g.Key, g => g.Last());
-        var added   = new List<JsonElement>();
-        var removed = new List<JsonElement>();
-        var changed = new List<object>();
-        foreach (var (k, r) in currMap)
-        {
-            if (!prevMap.TryGetValue(k, out var p)) added.Add(r);
-            else if (IsModified(p, r)) changed.Add(new { from = p, to = r });
-        }
-        foreach (var (k, r) in prevMap) if (!currMap.ContainsKey(k)) removed.Add(r);
-        return new { added, removed, changed };
+        var rows = await c.QueryAsync<(int id, string? week_label, DateTime? upload_date, string? raw_rows)>(
+            "SELECT id, week_label, upload_date, raw_rows FROM schedules", transaction: tx);
+        return rows.Select(r => new ScheduleLineHistory.Snapshot(r.id, r.week_label, r.upload_date, r.raw_rows)).ToList();
     }
 }
