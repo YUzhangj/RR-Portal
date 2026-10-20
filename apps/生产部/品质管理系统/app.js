@@ -3529,6 +3529,7 @@ function openEditModal(id) {
   setVal('f_qc',          r.qc || '');
   setVal('f_remark',      r.remark || '');
   bindNameWhitelistCheck();
+  _measRows = [];  /* 先清理上一次编辑的测量，避免其 FAIL 影响本条判定 */
   _loadDefectRows(r.defects || []);   /* 加载已有不良明细 */
   _loadMeasRows(r.measurements || []); /* 加载已有测量数据 */
   renderSupplierDatalist();
@@ -3715,10 +3716,15 @@ function onDefectDescSelect(rowIdx, inputEl) {
     _defectRows[rowIdx].desc     = item.name;
     _defectRows[rowIdx].level    = item.defaultLevel || _defectRows[rowIdx].level;
     _defectRows[rowIdx].category = item.category     || _defectRows[rowIdx].category;
-    _renderDefectRows();
+    /* change 在焦点移到数量框时触发；原地更新下拉，避免重建 DOM 丢失焦点/首次数量输入。 */
+    inputEl.value = item.name;
+    const selects = inputEl.parentElement?.querySelectorAll('select');
+    if (selects?.[0]) selects[0].value = _defectRows[rowIdx].level;
+    if (selects?.[1]) selects[1].value = _defectRows[rowIdx].category;
   } else {
     _defectRows[rowIdx].desc = val;
   }
+  _updateDefectSummary();
 }
 
 /* saveRecord 前检查未知描述 */
@@ -3952,12 +3958,7 @@ function updateMeasAvgAndJudge(rowIdx) {
     const cur=resSel.value;
     if (!cur||cur==='PASS'||cur==='FAIL'){resSel.value=judge;row.result=judge;}
   }
-  /* 如果任何测量行 FAIL，主判定下拉强制为 REJ */
-  const mainResEl = document.getElementById('f_result');
-  if (mainResEl) {
-    const anyMeasFail = _measRows.some(m => String(m.result||'').toUpperCase()==='FAIL');
-    if (anyMeasFail) mainResEl.value = 'REJ';
-  }
+  _syncFormResult();
 }
 
 /* ── 安全更新单格（不重建 DOM）── */
@@ -3981,6 +3982,7 @@ function _onMeasTypeChange(idx, val) {
   _measRows[idx].measureType = val || 'single';
   _normalizeMeasRow(_measRows[idx]);
   _renderMeasRows();
+  updateMeasAvgAndJudge(idx);
 }
 
 /* ── 计算当前行的平均值文字（兼容三种 measureType）── */
@@ -4098,7 +4100,7 @@ function _renderMeasRows() {
           <option value="PF"     ${mt==='PF'?'selected':''}>结果判定</option>
         </select>
         <select id="meas-result-${i}" style="${inBase};font-size:10.5px;font-weight:600;color:${resColor}"
-                onchange="_measRows[${i}].result=this.value">
+                onchange="_measRows[${i}].result=this.value;_syncFormResult()">
           <option value="" ${!row.result?'selected':''}>判定</option>
           <option value="PASS" ${row.result==='PASS'?'selected':''}>✓ PASS</option>
           <option value="FAIL" ${row.result==='FAIL'?'selected':''}>✗ FAIL</option>
@@ -4209,6 +4211,7 @@ function addMeasRow() {
 function removeMeasRow(i) {
   _measRows.splice(i, 1);
   _renderMeasRows();
+  _syncFormResult();
 }
 
 function _loadMeasRows(measurements) {
@@ -4237,6 +4240,7 @@ function _loadMeasRows(measurements) {
     : [];
   _measRows.forEach(_normalizeMeasRow);
   _renderMeasRows();
+  _syncFormResult();
 }
 
 
@@ -4549,16 +4553,7 @@ function _updateDefectSummary() {
     dsAqlR.style.color = 'var(--red)';
   }
 
-  /* 自动同步判定结果（仅 PASS/REJ，不覆盖 COND/AOD/HOLD）*/
-  if (judgment) {
-    const resultEl = document.getElementById('f_result');
-    if (resultEl) {
-      const cur = resultEl.value;
-      if (cur !== 'COND' && cur !== 'HOLD') {
-        resultEl.value = judgment.result;
-      }
-    }
-  }
+  _syncFormResult();
 }
 
 /* 从 record.defects 数组加载 */
@@ -4767,8 +4762,13 @@ function hasMeasurementFail(measurements) {
     measurements.some(m => String(m.result || '').toUpperCase() === 'FAIL');
 }
 
-/* 最终判定：measurements FAIL 优先，其次 defects 超 AQL，最后用原始 result */
+/* 最终判定：用户显式选择的 COND（有条件接收/AOD）/ HOLD 优先，
+   其次 measurements FAIL → REJ，再其次 defects 超 AQL → REJ，最后用原始 result */
 function getFinalRecordResult(baseResult, defects, measurements, lotQty) {
+  /* 0. 有条件接收/待定是人工特批判定，不被自动规则覆盖（否则报告/列表会错显示成 REJ） */
+  const b = String(baseResult || '').trim().toUpperCase();
+  if (b === 'COND' || b === 'HOLD') return b;
+
   /* 1. 测量 FAIL → 强制 REJ */
   if (hasMeasurementFail(measurements)) return 'REJ';
 
@@ -4779,7 +4779,15 @@ function getFinalRecordResult(baseResult, defects, measurements, lotQty) {
   }
 
   /* 3. 使用用户选择的原始结果 */
-  return baseResult || 'PASS';
+  return b || 'PASS';
+}
+
+/* 表单中使用与保存/报告相同的自动规则，保留人工 COND/HOLD。 */
+function _syncFormResult() {
+  const resultEl = document.getElementById('f_result');
+  if (!resultEl || resultEl.value === 'COND' || resultEl.value === 'HOLD') return;
+  const lotQty = Number(document.getElementById('f_qty')?.value) || 0;
+  resultEl.value = getFinalRecordResult('PASS', _defectRows, _measRows, lotQty);
 }
 
 function saveRecord(options = {}) {
@@ -4834,7 +4842,7 @@ function saveRecord(options = {}) {
     fail = failFromDefs;
     if (sample != null && fail > sample) {
       /* 退货/全检场景：一个问题就可能占 100%，多个问题合计会超过抽查数，改为可确认的警告 */
-      if (!confirm(`不良数量合计 ${fail} 已超过抽查数量 ${sample}（不良率超 100%）。退货/全检场景属正常，确认继续保存？`)) return;
+      if (!confirm(`不良数量合计 ${fail} 已超过抽查数量 ${sample}（不良率超 100%）。同一抽查件有多个不良时合计可能超出，请核对数量，确认继续保存？`)) return;
     }
     pass = sample != null ? Math.max(0, sample - fail) : 0;
 
@@ -4842,7 +4850,7 @@ function saveRecord(options = {}) {
     const resultSel = getVal('f_result');
     const judgment  = autoJudgeByAql(qty, validDefects);
     if (judgment && judgment.result === 'REJ' && resultSel === 'PASS') {
-      const msg = `当前不良数量已超过 AQL 允收（${judgment.reasons.join('；')}），建议判定为 REJ，是否继续保存为 PASS？`;
+      const msg = `当前不良数量已超过 AQL 允收（${judgment.reasons.join('；')}），保存时将自动判定为 REJ，是否继续保存？`;
       if (!confirm(msg)) return;
     }
   } else {
@@ -4907,8 +4915,8 @@ function saveRecord(options = {}) {
     ), defect,
     qc: getVal('f_qc'), remark: getVal('f_remark'),
     updatedAt: nowIso(),
-    ...(defectsArr ? { defects: defectsArr } : {}),
-    ...(measArr   ? { measurements: measArr } : {}),
+    defects: defectsArr || [],
+    measurements: measArr || [],
   };
 
   if (editingId !== null) {
