@@ -1,0 +1,51 @@
+/* Compact task-list tools; expanded forms retain their full contents. */
+.verification-ledger-page:has(#verification-list:not(.hidden)){padding:12px 14px;gap:0}
+.verification-tools{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;margin-bottom:8px;flex:0 0 auto;min-width:0}
+.verification-tools>.card,.verification-tools .card{margin:0;min-width:0}
+.verification-tools #verification-transfer[hidden]{display:none!important}
+.verification-tools details>summary{display:flex;flex-direction:row;justify-content:flex-start;align-items:center;gap:10px;box-sizing:border-box;min-height:42px;padding:9px 12px;list-style:none;cursor:pointer}
+.verification-tools details>summary::-webkit-details-marker{display:none}
+.verification-tools details>summary::before{content:'▸';flex:none;color:#64748b;font-size:13px}
+.verification-tools details[open]>summary::before{transform:rotate(90deg)}
+.verification-tools details>summary:focus-visible{outline:2px solid #2563eb;outline-offset:-2px}
+.verification-tools .verification-basis-card h2{font-size:14px;margin:0;white-space:nowrap}
+.verification-tools .verification-basis-card:not([open]) summary p,
+.verification-tools .verification-basis-card:not([open]) summary .eyebrow{display:none}
+.verification-tools .verification-basis-card summary p{margin:4px 0 0;font-size:12px}
+.verification-tools .verification-basis-kpis{display:flex;gap:8px 18px;flex-wrap:wrap;margin:0 0 0 auto;font-size:12px;white-space:nowrap}
+.verification-transfer-panel>summary{font-size:14px;font-weight:600;color:#334155}
+.verification-transfer-body{padding:2px 12px 12px}
+.verification-transfer-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.verification-transfer-controls input{box-sizing:border-box;width:min(100%,480px);min-width:0;max-width:100%}
+.verification-transfer-body [data-result]:not(:empty){margin-top:10px;line-height:1.6;overflow-wrap:anywhere}
+.verification-transfer-body [data-result] button{margin-left:8px}
+#verification-list .verification-center-head{padding:10px 14px;gap:10px}
+#verification-list .verification-center-title{gap:9px}
+#verification-list .verification-center-icon{width:32px;height:32px;flex-basis:32px;font-size:16px;border-radius:9px}
+#verification-list .verification-center-title h1{font-size:18px;margin:0}
+#verification-list .verification-center-title p{font-size:12px;margin:2px 0 0}
+#verification-list .verification-center-actions{gap:6px;align-items:center}
+#verification-list .verification-center-actions>button,
+#verification-list .verification-center-actions>a{min-height:32px;padding:5px 10px;font-size:13px;line-height:20px;white-space:nowrap}
+#verification-list .verification-toolbar{padding:8px 12px;gap:8px}
+#verification-list .verification-toolbar input,#verification-list .verification-toolbar select{min-height:34px;padding:6px 9px}
+#verification-list #workshop-assignment{padding:8px 12px!important;gap:8px!important}
+@media(min-width:1000px){
+ .verification-tools:has(#verification-transfer:not([hidden])){grid-template-columns:auto minmax(0,1fr)}
+ .verification-tools:has(details[open]){grid-template-columns:minmax(0,1fr)}
+}
+@media(min-width:761px){
+ body:has(#verification-list:not(.hidden)):has(.verification-tools details[open]){overflow:auto}
+ .verification-ledger-page:has(#verification-list:not(.hidden)):has(.verification-tools details[open]){height:auto;min-height:calc(100vh - 55px);padding-bottom:0;overflow:visible}
+ .verification-tools:has(details[open])+#verification-list:not(.hidden){position:sticky;top:0;flex:0 0 100vh;height:100vh;min-height:0;margin-bottom:0}
+}
+@media(max-width:760px){
+ .verification-tools details>summary{flex-wrap:wrap;gap:6px 10px}
+ .verification-tools .verification-basis-kpis{margin-left:20px;gap:6px 12px}
+ #verification-list .verification-center-head{align-items:flex-start;gap:8px}
+ #verification-list .verification-center-actions{width:auto;justify-content:flex-start}
+ #verification-list .verification-toolbar{grid-template-columns:repeat(2,minmax(0,1fr))}
+ #verification-list .verification-toolbar input[type=search]{grid-column:1/-1}
+}
+
+.verification-tools .verification-basis-kpis span{padding:0;border:0;border-radius:0;background:transparent}

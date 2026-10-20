@@ -115,6 +115,53 @@ test('正式货号导入：两种顺序、旧关联自动同步、重复导入�
   const ambiguousEng=ambiguousData.sections.find(s=>s.dept==='engineering'),ambiguousBefore=ambiguousData.sections.map(s=>[s.id,s.payload_json,s.filled_at]);
   const ambiguousFailure=await api('/quotes/'+ambiguousQuote.id+'/mixed/import-molds','POST',{expected_config:ambiguousData.mixed_quote,base_filled_at:ambiguousEng.filled_at,engineering:JSON.parse(ambiguousEng.payload_json||'{}'),molds:[{mold_no:'M',parts:[{name:'共用盖',source_product_code:'BEAUTYM-S3-037/OTHER-S3-037'}]}]},409);
   assert.match(ambiguousFailure.error,/占位.*多个/);assert.deepEqual((await read(ambiguousQuote.id)).sections.map(s=>[s.id,s.payload_json,s.filled_at]),ambiguousBefore);
+  // Reordering the updated product sheet cannot move department data by row.
+  // Summary weights must use the newly imported ratios, including explicit 0.
+  const updateQuote=await api('/quotes','POST',{quote_no:'SKU-UPDATE-RATIOS',product_name:'更新同步',customer:'TEST',quote_type:'mixed'});
+  let updateData=await read(updateQuote.id);
+  await saveConfig(updateQuote.id,updateData,{...updateData.mixed_quote,na_direct:true,products:[
+    {id:'a',code:'SKU-001',source_number:'01',name:'旧一',ratio:1,na_ratio:.1},
+    {id:'b',code:'SKU-002',source_number:'02',name:'旧二',ratio:1,na_ratio:.2},
+  ]});
+  updateData=await read(updateQuote.id);
+  for(const section of updateData.sections) {
+    const payload=section.dept==='sales'
+      ? {mixed_quote:updateData.mixed_quote,header:{fx_hkd_usd:1,fx_rmb_hkd:1},shipping:{markup_x:1,divisor:1},mixed_pricing:{surtax_pct:0}}
+      : {mixed_products:{a:{note:section.dept+' 一'},b:{note:section.dept+' 二'}},mixed_shared:{note:'共用保留'}};
+    if(section.dept==='engineering') {
+      payload.mixed_products.a.hardware=[{qty:1,unit_price:10}];
+      payload.mixed_products.b.hardware=[{qty:1,unit_price:20}];
+      payload.mixed_shared.hardware=[{qty:1,unit_price:2}];
+    }
+    await api('/sections/'+section.id,'PUT',{payload,submit:false,base_filled_at:section.filled_at});
+  }
+  updateData=await read(updateQuote.id);
+  const departmentPayloads=updateData.sections.filter(s=>s.dept!=='sales').map(s=>[s.dept,s.payload_json]);
+  const importUpdated=apply(updateData.mixed_quote,[
+    {source_number:'01',code:'SKU-002',name:'更新二',na_ratio:.4},
+    {source_number:'02',code:'SKU-001',name:'更新一',na_ratio:0},
+  ]).config;
+  await saveConfig(updateQuote.id,updateData,importUpdated);
+  updateData=await read(updateQuote.id);
+  assert.deepEqual(updateData.sections.filter(s=>s.dept!=='sales').map(s=>[s.dept,s.payload_json]),departmentPayloads);
+  assert.deepEqual(updateData.mixed_quote.products.map(p=>[p.id,p.code,p.name,p.na_ratio]),[
+    ['b','SKU-002','更新二',.4],['a','SKU-001','更新一',0],
+  ]);
+  const updatedSummary=await api('/quotes/'+updateQuote.id+'/mixed');
+  assert.equal(updatedSummary.valid,true);
+  assert.equal(updatedSummary.final_usd,10); // 10*0 + 20*.4 + shared 2
+  assert.deepEqual(updatedSummary.products.map(p=>[p.id,p.weight]),[['b',.4],['a',0]]);
+  // Completing a formal code through the ordinary configuration save also
+  // fills its existing unassigned part, without a separate repair action.
+  const updateEng=updateData.sections.find(s=>s.dept==='engineering');
+  const updatePayload=JSON.parse(updateEng.payload_json);
+  updatePayload.mixed_imported_parts=[{id:'waiting',name:'新瓶身',source_product_code:'SKU-003'}];
+  await api('/sections/'+updateEng.id,'PUT',{payload:updatePayload,submit:false,base_filled_at:updateEng.filled_at});
+  updateData=await read(updateQuote.id);
+  const withNew={...updateData.mixed_quote,products:[...updateData.mixed_quote.products,{id:'new',code:'SKU-003',name:'新增',ratio:1,na_ratio:0}]};
+  await api('/quotes/'+updateQuote.id+'/mixed','PUT',{config:withNew,expected_config:updateData.mixed_quote});
+  updateData=await read(updateQuote.id);
+  assert.deepEqual(selections(updateData).new,[{part_id:'waiting',usage:1}]);
   const {DatabaseSync}=require('node:sqlite');
   const database=new DatabaseSync(path.join(temporary,'test.db'));
   const audit=database.prepare("SELECT detail FROM audit_log WHERE quote_id=? AND action='mixed_sku_import_links'").all(id);

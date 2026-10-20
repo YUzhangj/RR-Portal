@@ -48,11 +48,33 @@ function unusedPlaceholders(config, payloads) {
 }
 // Product-sheet imports and mold imports resolve the same numbered references.
 // Keep this inside the normal import transaction, rather than a separate repair UI.
-function reconcileProductSelections(config, engineering, molding) {
+function reconcileProductSelections(config, engineering, molding, { updatedProductIds = [] } = {}) {
   const catalog = engineeringCatalog(molding, engineering).parts_catalog;
   if (!catalog) return {engineering, molding, changes:[]};
   const plan = repairNumberedSelections(config, catalog.selections, catalog.parts);
   if (plan.unresolved.length) throw new Error(plan.unresolved.join('；'));
+  // A newly added or completed official SKU may now resolve a previously
+  // unassigned part. Only fill links for those products: a ratio-only update
+  // must not restore a part that someone deliberately deselected.
+  const updated = new Set(updatedProductIds);
+  for (const part of catalog.parts) {
+    const targets = new Map();
+    for (const code of partCodes(part)) {
+      const matches = matchesGroup(config, code);
+      if (matches.length > 1) throw new Error(`${part.name}对应多个小产品，请核对正式货号`);
+      if (matches.length === 1 && updated.has(matches[0].id)) targets.set(matches[0].id, matches[0]);
+    }
+    const missing = [...targets.values()].filter(product =>
+      !(plan.selections[product.id] || []).some(ref => ref.part_id === part.id));
+    if (!missing.length) continue;
+    const sources = Object.values(plan.selections).flat().filter(ref => ref.part_id === part.id);
+    if (new Set(sources.map(ref => Number(ref.usage))).size > 1)
+      throw new Error(`${part.name}的现有用量不同，无法确定新增共用关系的用量`);
+    for (const product of missing) {
+      (plan.selections[product.id] ||= []).push(sources.length ? {...sources[0]} : {part_id:part.id, usage:1});
+      plan.changes.push({part_id:part.id, name:part.name, from:'', to:product.code});
+    }
+  }
   if (!plan.changes.length) return {engineering, molding, changes:[]};
   const nextEngineering = structuredClone(engineering), nextMolding = structuredClone(molding);
   nextEngineering.mixed_part_selections = plan.selections;

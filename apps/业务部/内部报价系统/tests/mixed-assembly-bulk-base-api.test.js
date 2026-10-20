@@ -95,6 +95,20 @@ test('统一装工基数经真实草稿保存、重新读取、混装汇总及�
     assert.ok(sheet, '真实部门下载必须使用混装成本');
     for (let row = 2; row <= 4; row++) near(sheet.getCell(row, 3).value, amounts[row - 2]);
   }
+  // The same draft save and export flow must consume the unified target.
+  window.MixedQuotation.applyAssemblyBaseRate(root,cfg,'320');
+  window.MixedQuotation.applyAssemblyTarget(root,cfg,'6000');
+  detail=await api('/quotes/'+created.id);
+  const targetSection=detail.sections.find(s=>s.dept==='assembly');
+  await api('/sections/'+targetSection.id,'PUT',{payload:root,submit:false,base_filled_at:targetSection.filled_at});
+  const targetSaved=JSON.parse((await api('/quotes/'+created.id)).sections.find(s=>s.dept==='assembly').payload_json);
+  assert.deepEqual(targetSaved,root);
+  const targetAmounts=[320*(28+4)/6000+.1,320*13/6000,320*27/6000];
+  const targetSummary=await api(`/quotes/${created.id}/mixed`);
+  near(targetSummary.components.assembly_labor,targetAmounts[0]*.4+targetAmounts[1]*.6+targetAmounts[2]);
+  const targetWorkbook=new ExcelJS.Workbook();
+  await targetWorkbook.xlsx.load(await api(`/quotes/${created.id}/export-department/assembly`));
+  for(let row=2;row<=4;row++)near(targetWorkbook.getWorksheet('部门成本汇总').getCell(row,3).value,targetAmounts[row-2]);
   const final = (await api('/quotes/' + created.id)).sections.find(s => s.dept === 'assembly');
   const { DatabaseSync } = require('node:sqlite');
   const local = new DatabaseSync(database);

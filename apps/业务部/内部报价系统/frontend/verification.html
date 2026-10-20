@@ -18,6 +18,7 @@
     @media(min-width:761px){#verification-list:not(.hidden):has(#workshop-assignment:not([hidden])){grid-template-rows:auto auto auto minmax(0,1fr)}}
   </style>
   <link rel="stylesheet" href="./excel-grid.css?v=20261020-delivery">
+  <link rel="stylesheet" href="./verification-compact.css?v=20261020-compact-v2">
 </head>
 <body>
   <div class="topbar module-topbar">
@@ -29,7 +30,7 @@
     <div id="user-chip"><span id="who-chip"></span></div>
   </div>
 
-  <main class="verification-page verification-ledger-page"><section id="verification-transfer" class="card" hidden></section><section id="verification-costing-basis"></section>
+  <main class="verification-page verification-ledger-page"><div class="verification-tools"><section id="verification-transfer" class="card" hidden></section><section id="verification-costing-basis"></section></div>
     <section id="verification-list" class="card verification-center-card">
       <header class="verification-center-head">
         <div class="verification-center-title">
@@ -85,7 +86,7 @@
   <script src="./excel-formulas.js?v=20261020-delivery"></script>
   <script src="./excel-valuation.js?v=20261020-delivery"></script>
   <script src="./excel-grid.js?v=20261020-delivery"></script>
-  <script src="./verification-transfer.js?v=20261020-stream"></script>
+  <script src="./verification-transfer.js?v=20261020-compact-v1"></script>
   <script type="module" src="./verification.js?v=20261020-delivery"></script>
 </body>
 </html>

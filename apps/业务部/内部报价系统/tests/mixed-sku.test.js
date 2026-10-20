@@ -2,6 +2,25 @@ const test=require('node:test'),assert=require('node:assert/strict'),ExcelJS=req
 const {parseWorkbook}=require('../backend/services/parseMixedSku');
 const {apply,productSerial}=require('../frontend/mixed-sku');
 const {importParts}=require('../backend/services/mixedPartImport');
+test('配比表按NO数字顺序预览及应用，新增款插回表内位置，保留正式货号标识和已有比例',async()=>{
+ const wb=new ExcelJS.Workbook(),ws=wb.addWorksheet('配比');
+ ws.addRow(['NO.','Mini_item no','Description']);
+ ws.addRow([10,'SKU-010','十号']);ws.addRow([2,'SKU-002','二号']);ws.addRow([1,'SKU-001','一号']);
+ const {records}=await parseWorkbook(await wb.xlsx.writeBuffer());
+ assert.deepEqual(records.map(record=>record.source_number),['01','02','10']);
+ const config={enabled:true,mode:'equal',units_per_pack:1,na_direct:true,products:[
+  {id:'ten',code:'SKU-010',name:'旧十号',source_number:'01',ratio:1,na_ratio:.2},
+  {id:'extra',code:'OTHER',name:'原有保留',ratio:1,na_ratio:.3},
+  {id:'one',code:'SKU-001',name:'旧一号',source_number:'02',ratio:1,na_ratio:.5},
+ ]};
+ const before=JSON.stringify(config),result=apply(config,[...records].reverse());
+ assert.equal(result.matched,2);assert.equal(result.added,1);assert.deepEqual(result.unmatched,['OTHER']);
+ assert.deepEqual(result.config.products.map(product=>[product.id,product.code,product.na_ratio]),[
+  ['one','SKU-001',.5],['sku_02','SKU-002',0],['ten','SKU-010',.2],['extra','OTHER',.3],
+ ]);
+ assert.deepEqual(apply(result.config,records).config,result.config,'重复导入不改变标识和顺序');
+ assert.equal(JSON.stringify(config),before);
+});
 test('SKU资料按序号更新，保留产品标识、比例和模具关联',async()=>{
  const wb=new ExcelJS.Workbook(),ws=wb.addWorksheet('SKU LIST');ws.addRow(['NO.','Mini_item no','Brand','Discription']);
  ws.addRow([3,'BEAUTYM-S3-003','Brand','产品三']);ws.addRow([60,'BEAUTYM-S3-048-excl','Brand','独家款']);

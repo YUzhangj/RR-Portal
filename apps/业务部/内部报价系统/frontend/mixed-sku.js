@@ -104,6 +104,11 @@
       if(!next.products.map(p=>molds.ratioValue(p.na_ratio ?? p.ratio)).some(value=>value>0)) throw Error('NA比例合计必须大于零');
     }
     if(new Set(next.products.map(p=>normalizedCode(p.code))).size!==next.products.length)throw Error('导入后货号重复');
+    // NO. controls presentation order only. Product IDs (and department data)
+    // still follow the official SKU even when the sheet order changes.
+    const imported = next.products.filter(product=>updatedIds.has(product.id))
+      .sort((a,b)=>Number(a.source_number)-Number(b.source_number));
+    next.products = [...imported, ...next.products.filter(product=>!updatedIds.has(product.id))];
     return {config:next,matched,added,unmatched:next.products.filter(p=>!updatedIds.has(p.id)).map(p=>p.code)};
   }
   function planPainting(config,items){

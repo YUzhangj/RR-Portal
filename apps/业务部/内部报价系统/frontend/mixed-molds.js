@@ -193,12 +193,30 @@ function lookupMaterialPrice(material, grade, prices) {
       p.product_id === ref.product_id && p.name === ref.name)?.demand ?? '';
   }
   function catalogMachineReference(root, part) {
-    const model = parseFloat(part.machine_model);
+    const model = parseFloat(catalogMoldField(root, part, 'machine_model').value);
     const match = (root.machine_prices?.length ? root.machine_prices : DEFAULT_MACHINE_PRICES).find(r => {
       const range = String(r.model).match(/^([\d.]+)A?-([\d.]+)A?$/i);
       return range ? model >= +range[1] && model <= +range[2] : model === parseFloat(r.model);
     });
     return match;
+  }
+  function catalogMoldParts(root, part) {
+    const mold = String(part.mold_no || '').trim();
+    const peers = mold ? (root.parts_catalog?.parts || []).filter(p => String(p.mold_no || '').trim() === mold) : [];
+    return peers.length ? peers : [part];
+  }
+  function catalogMoldField(root, part, key) {
+    const values = [...new Set(catalogMoldParts(root, part).map(p => p[key])
+      .filter(value => value != null && String(value).trim() !== '').map(value =>
+        key === 'machine_model' ? String(value).replace(/\s+/g,'').toUpperCase() : Number.isFinite(Number(value)) ? String(Number(value)) : String(value)))];
+    return {value:values.length === 1 ? values[0] : '', conflict:values.length > 1};
+  }
+  function updateCatalogMoldField(root, part, key, value) {
+    if (!['machine_model','target'].includes(key)) throw new Error('不支持的共用模具参数');
+    for (const peer of catalogMoldParts(root, part)) {
+      peer[key] = value;
+      if (key === 'machine_model') peer.machine = catalogMachineReference(root, peer)?.normal || '';
+    }
   }
   function catalogMachinePrice(root, part) {
     if (part.machine_price != null && part.machine_price !== '') return Number(part.machine_price);
@@ -216,15 +234,18 @@ function lookupMaterialPrice(material, grade, prices) {
     for (const [key, parts] of groups) {
       const source = (root.mixed_molds || []).find(m => m.mold_no === key);
       const rates = root.machine_prices?.length ? root.machine_prices : DEFAULT_MACHINE_PRICES;
+      const sharedModel = catalogMoldField(root, parts[0], 'machine_model');
+      const sharedTarget = catalogMoldField(root, parts[0], 'target');
+      if (sharedModel.conflict || sharedTarget.conflict) throw new Error(key + ' 同模具的机型和日产啤次必须一致，请统一填写');
       const jobs = parts.map(part => {
-        const model = String(part.machine_model || '').replace(/\s+/g, '').toUpperCase();
+        const model = String(sharedModel.value).replace(/\s+/g, '').toUpperCase();
         const matched = rates.find(r => {
           const text = String(r.model).toUpperCase();
           const range = text.match(/^([\d.]+)A?-([\d.]+)A?$/);
           return range ? parseFloat(model) >= +range[1] && parseFloat(model) <= +range[2] : parseFloat(model) === parseFloat(text);
         });
         const price = number((part.machine_price === '' ? null : part.machine_price) ?? matched?.price ?? source?.machine_price, part.name + ' 机台日费用（待补参数）', true);
-        const target = number(part.target ?? source?.target, part.name + ' 日产啤次（待补参数）', true);
+        const target = number(sharedTarget.value || source?.target, part.name + ' 日产啤次（待补参数）', true);
         const cavity = number(part.cavity, part.name + ' 出模数（待补参数）', true);
         if (!Number.isInteger(cavity)) throw new Error(part.name + ' 出模数必须为整数');
         const specified = productionDemand(root, part);
@@ -436,5 +457,5 @@ function lookupMaterialPrice(material, grade, prices) {
     if (Math.abs(columns.other) < 1e-10) columns.other = 0;
     return { columns, labels, total: base.total };
   }
-  return { prepareMoldImport, isNonMoldPart, updateEngineeringFields, pricingWeights, ratioValue, catalogMachineReference, DEFAULT_MACHINE_PRICES, catalogMachinePrice, inheritMoldFields, engineeringCatalogRows, DEFAULT_MATERIAL_PRICES, lookupMaterialPrice, materialPricePerGram, catalogMaterialPrice, productionDemand, automaticCatalogLabor, validateConfig, weights, calculate, number, enableCatalog, catalogRows, applyCatalog, engineeringCatalog, costBreakdown, dynamicCostBreakdown };
+  return { catalogMoldParts, catalogMoldField, updateCatalogMoldField, prepareMoldImport, isNonMoldPart, updateEngineeringFields, pricingWeights, ratioValue, catalogMachineReference, DEFAULT_MACHINE_PRICES, catalogMachinePrice, inheritMoldFields, engineeringCatalogRows, DEFAULT_MATERIAL_PRICES, lookupMaterialPrice, materialPricePerGram, catalogMaterialPrice, productionDemand, automaticCatalogLabor, validateConfig, weights, calculate, number, enableCatalog, catalogRows, applyCatalog, engineeringCatalog, costBreakdown, dynamicCostBreakdown };
 });

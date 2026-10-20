@@ -11,7 +11,7 @@ test('用量只乘零件成本，不改变手填需求；共有选用和订单�
  r.parts_catalog.selections.__shared__=[{part_id:'a',usage:1}];
  assert.equal(M.catalogRows(r,cfg,16000).resolved.get('a').labor_demand,4000);
 });
-test('缺少参数禁止沿用历史啤价',()=>{const r=root();delete r.parts_catalog.parts[0].target;assert.throws(()=>M.catalogRows(r,cfg,8000),/待补参数/);});
+test('整模缺少参数禁止沿用历史啤价，同模只需一处已有有效啤次',()=>{const r=root();delete r.parts_catalog.parts[0].target;assert.equal(M.catalogRows(r,cfg,8000).resolved.get('a').shot_price,.12);delete r.parts_catalog.parts[1].target;assert.throws(()=>M.catalogRows(r,cfg,8000),/待补参数/);});
 test('原表生产需求独立于混装比例，水瓶封穴啤工可重算',()=>{
  const r=root();const [a,b]=r.parts_catalog.parts;
  Object.assign(a,{cavity:6,machine_price:1160,target:3400,shared_source:{mold_no:'M',product_id:'a',name:'A'}});
