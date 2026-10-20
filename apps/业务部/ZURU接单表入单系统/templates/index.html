@@ -7,7 +7,7 @@
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { font-family:'Microsoft YaHei',sans-serif; background:#f0f2f5; color:#333; }
-.header { background:linear-gradient(135deg,#1a73e8,#0d47a1); color:#fff; padding:20px 30px; }
+.header { background:#0d47a1; background:linear-gradient(135deg,#1a73e8,#0d47a1); color:#fff; padding:20px 30px; }
 .header h1 { font-size:22px; }
 .header p { font-size:13px; opacity:.8; margin-top:4px; }
 .container { max-width:960px; margin:20px auto; padding:0 20px; }
@@ -148,6 +148,17 @@ body { font-family:'Microsoft YaHei',sans-serif; background:#f0f2f5; color:#333;
     <span class="config-status" id="configStatus"></span>
   </div>
 
+  <!-- 货号数据更新 -->
+  <div class="config-bar">
+    <label>货号数据：</label>
+    <span id="itemInfo" style="font-size:13px;color:#555;">读取中...</span>
+    <button class="btn-sm" style="background:#7b1fa2;color:#fff" onclick="document.getElementById('itemFileInput').click()">选择接单表更新货号</button>
+    <button class="btn-sm" style="background:#7b1fa2;color:#fff" onclick="updateItemsFromPath()">从当前接单表更新</button>
+    <input type="file" id="itemFileInput" accept=".xlsx,.xlsm" style="display:none">
+    <span class="config-status" id="itemStatus"></span>
+  </div>
+  <div class="result-panel" id="itemResultPanel"></div>
+
   <!-- 上传区 -->
   <div class="upload-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
     <p>点击选择或拖拽PO文件到此处</p>
@@ -203,6 +214,12 @@ body { font-family:'Microsoft YaHei',sans-serif; background:#f0f2f5; color:#333;
 </div>
 
 <script>
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, character => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[character]));
+}
+
 const fileInput = document.getElementById('fileInput');
 const dropZone = document.getElementById('dropZone');
 const fileList = document.getElementById('fileList');
@@ -235,7 +252,7 @@ function closeBrowser() {
 
 async function browseTo(path) {
   try {
-    const res = await fetch('api/browse', {
+    const res = await fetch('/api/browse', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({path})
@@ -249,7 +266,7 @@ async function browseTo(path) {
     // 盘符列表
     const driveList = document.getElementById('driveList');
     driveList.innerHTML = data.drives.map(d =>
-      `<button class="drive-btn" onclick="browseTo('${d.replace(/\\/g,'\\\\')}')">${d}</button>`
+      `<button class="drive-btn" onclick="browseTo(${escapeHtml(JSON.stringify(d))})">${escapeHtml(d)}</button>`
     ).join('');
 
     // 目录内容
@@ -259,22 +276,22 @@ async function browseTo(path) {
       return;
     }
     body.innerHTML = data.items.map(item => {
-      const escaped = (data.current + '\\' + item.name).replace(/\\/g, '\\\\');
+      const escaped = escapeHtml(JSON.stringify(data.current + '\\' + item.name));
       if (item.type === 'dir') {
-        return `<div class="browse-item is-dir" ondblclick="browseTo('${escaped}')">
+        return `<div class="browse-item is-dir" ondblclick="browseTo(${escaped})">
           <span class="icon">&#128193;</span>
-          <span class="item-name">${item.name}</span>
+          <span class="item-name">${escapeHtml(item.name)}</span>
         </div>`;
       } else {
-        return `<div class="browse-item is-file" onclick="selectFile('${escaped}')">
+        return `<div class="browse-item is-file" onclick="selectFile(${escaped})">
           <span class="icon">&#128196;</span>
-          <span class="item-name">${item.name}</span>
+          <span class="item-name">${escapeHtml(item.name)}</span>
         </div>`;
       }
     }).join('');
   } catch(e) {
     document.getElementById('browserBody').innerHTML =
-      `<div class="browse-empty">加载失败: ${e.message}</div>`;
+      `<div class="browse-empty">加载失败: ${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -304,7 +321,7 @@ document.getElementById('tableFileInput').addEventListener('change', async funct
   const fd = new FormData();
   fd.append('file', file);
   try {
-    const res = await fetch('api/upload_table', { method: 'POST', body: fd });
+    const res = await fetch('/api/upload_table', { method: 'POST', body: fd });
     const d = await res.json();
     if (d.ok) {
       configStatus.textContent = `已上传「${d.filename}」（${d.count}个PO）`;
@@ -336,12 +353,13 @@ if (isLocal) {
 // 页面加载时读取已保存的路径
 (async function init() {
   try {
-    const res = await fetch('api/config');
+    const res = await fetch('/api/config');
     const cfg = await res.json();
+    if (cfg.items) renderItemInfo(cfg.items);
     if (cfg.order_table_path) {
       tablePath.value = cfg.order_table_path;
       // 自动验证
-      const r2 = await fetch('api/check_path', {
+      const r2 = await fetch('/api/check_path', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({path: cfg.order_table_path})
@@ -374,7 +392,7 @@ async function savePath() {
 
   try {
     // 先验证路径
-    const r1 = await fetch('api/check_path', {
+    const r1 = await fetch('/api/check_path', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({path})
@@ -387,7 +405,7 @@ async function savePath() {
       return;
     }
     // 保存
-    await fetch('api/config', {
+    await fetch('/api/config', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({order_table_path: path})
@@ -403,6 +421,74 @@ async function savePath() {
     configStatus.className = 'config-status err';
     tableConnected = false;
   }
+}
+
+// === 货号数据更新 ===
+const itemInfo = document.getElementById('itemInfo');
+const itemStatus = document.getElementById('itemStatus');
+const itemResultPanel = document.getElementById('itemResultPanel');
+
+function renderItemInfo(it) {
+  itemInfo.textContent = `共 ${it.count} 条` +
+    (it.builtin ? '（内置数据）' : `（上次更新 ${it.updated}）`);
+}
+
+function showItemUpdateResult(d) {
+  let html = '<h3>货号更新结果</h3>';
+  html += `<div class="result-section result-success" style="font-size:14px;font-weight:600;">
+    更新完成 — 新增 ${d.added.length} 条 | 变更 ${d.changed.length} 条 | 货号总数 ${d.total} 条</div>`;
+  if (d.added.length) {
+    html += `<div class="result-section result-success"><b>新增货号:</b>
+      <ul>${d.added.map(k => '<li>'+escapeHtml(k)+'</li>').join('')}</ul></div>`;
+  }
+  if (d.changed.length) {
+    html += `<div class="result-section result-info"><b>资料有变更（已按接单表更新）:</b>
+      <ul>${d.changed.map(k => '<li>'+escapeHtml(k)+'</li>').join('')}</ul></div>`;
+  }
+  if (d.dupes && d.dupes.length) {
+    html += `<div class="result-section result-warning"><b>⚠ 接单表里有重复货号（已取第一行，与接单表VLOOKUP一致），建议回接单表核对:</b>
+      <ul>${d.dupes.map(k => '<li>'+escapeHtml(k)+'</li>').join('')}</ul></div>`;
+  }
+  if (!d.added.length && !d.changed.length) {
+    html += '<div class="result-section result-info">货号数据已是最新，没有变化</div>';
+  }
+  itemResultPanel.innerHTML = html;
+  itemResultPanel.style.display = 'block';
+}
+
+async function postUpdateItems(fd) {
+  itemStatus.textContent = '更新中（大文件需几秒）...';
+  itemStatus.className = 'config-status';
+  itemResultPanel.style.display = 'none';
+  try {
+    const res = await fetch('/api/update_items', { method: 'POST', body: fd });
+    const d = await res.json();
+    if (d.ok) {
+      itemStatus.textContent = '更新成功';
+      itemStatus.className = 'config-status ok';
+      renderItemInfo({count: d.total, builtin: d.builtin, updated: d.updated});
+      showItemUpdateResult(d);
+    } else {
+      itemStatus.textContent = d.error || '更新失败';
+      itemStatus.className = 'config-status err';
+    }
+  } catch(e) {
+    itemStatus.textContent = '更新失败: ' + e.message;
+    itemStatus.className = 'config-status err';
+  }
+}
+
+document.getElementById('itemFileInput').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  this.value = '';
+  if (!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  postUpdateItems(fd);
+});
+
+function updateItemsFromPath() {
+  postUpdateItems(new FormData());
 }
 
 // 文件名兜底判断
@@ -433,13 +519,14 @@ async function classifyFiles() {
   const fd = new FormData();
   selectedFiles.forEach(f => fd.append('files', f));
   try {
-    const res = await fetch('api/classify', { method: 'POST', body: fd });
+    const res = await fetch('/api/classify', { method: 'POST', body: fd });
     const data = await res.json();
     if (data.ok) {
       fileClassification = {};
       data.results.forEach(r => {
         fileClassification[r.filename] = {
           po: r.po, is_revision: r.is_revision,
+          cancelled: r.cancelled || false,
           missing_items: r.missing_items || []
         };
       });
@@ -472,18 +559,21 @@ function removeFile(idx) {
 function getFileType(fname) {
   // 优先用接单表比对结果
   if (fileClassification[fname]) {
+    if (fileClassification[fname].cancelled) return 'cancel';
     return fileClassification[fname].is_revision ? 'rev' : 'new';
   }
   // 回退到文件名判断
+  if (/取消|cancel/i.test(fname)) return 'cancel';
   return isRevisionByName(fname) ? 'rev' : 'unknown';
 }
 
 function renderFileList() {
-  let newCnt = 0, revCnt = 0, unkCnt = 0;
+  let newCnt = 0, revCnt = 0, unkCnt = 0, cancelCnt = 0;
   selectedFiles.forEach(f => {
     const t = getFileType(f.name);
     if (t === 'new') newCnt++;
     else if (t === 'rev') revCnt++;
+    else if (t === 'cancel') cancelCnt++;
     else unkCnt++;
   });
 
@@ -498,6 +588,7 @@ function renderFileList() {
     let html = `共 ${selectedFiles.length} 个文件 &nbsp;|&nbsp; `;
     if (newCnt) html += `<span class="cnt-new">新单 ${newCnt} 个</span> &nbsp;|&nbsp; `;
     if (revCnt) html += `<span class="cnt-rev">修改单 ${revCnt} 个（将跳过）</span> &nbsp;|&nbsp; `;
+    if (cancelCnt) html += `<span style="color:#c62828;font-weight:700">取消单 ${cancelCnt} 个（将跳过）</span> &nbsp;|&nbsp; `;
     if (unkCnt) html += `<span class="cnt-unk">识别中 ${unkCnt} 个</span> &nbsp;|&nbsp; `;
     const dupGroupCnt = Object.keys(duplicatePos).length;
     if (dupGroupCnt) html += `<span style="color:#d32f2f;font-weight:700">⚠ 重复PO ${dupGroupCnt} 组</span> &nbsp;|&nbsp; `;
@@ -514,10 +605,11 @@ function renderFileList() {
   selectedFiles.forEach((f, i) => {
     const type = getFileType(f.name);
     const cls = fileClassification[f.name];
-    const poLabel = cls && cls.po ? `<span class="po-num">PO: ${cls.po}</span>` : '';
+    const poLabel = cls && cls.po ? `<span class="po-num">PO: ${escapeHtml(cls.po)}</span>` : '';
     let tagClass, tagText;
     if (type === 'new') { tagClass = 'tag-new'; tagText = '新单'; }
     else if (type === 'rev') { tagClass = 'tag-rev'; tagText = '修改单'; }
+    else if (type === 'cancel') { tagClass = 'tag-dup'; tagText = '取消单'; }
     else { tagClass = 'tag-unknown'; tagText = '待确认'; }
 
     // 重复PO检测
@@ -527,7 +619,7 @@ function renderFileList() {
       const others = duplicatePos[filePo].filter(n => n !== f.name);
       if (others.length > 0) {
         dupHtml = `<div style="font-size:11px;color:#d32f2f;margin-top:4px;font-weight:600;">
-          ⚠ 重复PO！同PO文件: ${others.join(', ')}</div>`;
+          ⚠ 重复PO！同PO文件: ${others.map(escapeHtml).join(', ')}</div>`;
       }
     }
 
@@ -535,7 +627,7 @@ function renderFileList() {
     let missingHtml = '';
     if (cls && cls.missing_items && cls.missing_items.length > 0 && type === 'new') {
       missingHtml = `<div style="font-size:11px;color:#c62828;margin-top:4px;">
-        匹配不到: ${cls.missing_items.join(', ')}（将跳过）</div>`;
+        匹配不到: ${cls.missing_items.map(escapeHtml).join(', ')}（将跳过）</div>`;
     }
 
     // 重复PO标签
@@ -545,7 +637,7 @@ function renderFileList() {
     }
 
     fileList.innerHTML += `<div class="file-item" style="flex-wrap:wrap">
-      <span class="name">${f.name}${poLabel}</span>
+      <span class="name">${escapeHtml(f.name)}${poLabel}</span>
       <span>
         ${dupTag}<span class="tag ${tagClass}">${tagText}</span>
         <span class="remove" onclick="removeFile(${i})">&times;</span>
@@ -581,7 +673,7 @@ async function startProcess() {
   const odVal = document.getElementById('orderDate').value;
   if (odVal) fd.append('order_date', odVal);
   try {
-    const res = await fetch('api/process', { method: 'POST', body: fd });
+    const res = await fetch('/api/process', { method: 'POST', body: fd });
     clearInterval(fakeTimer);
     progressBar.style.width = '100%';
     progressPct.textContent = '100%';
@@ -611,7 +703,7 @@ async function startProcess() {
 }
 
 function dlFile(fn) {
-  fetch('api/download/' + encodeURIComponent(fn))
+  fetch('/api/download/' + encodeURIComponent(fn))
     .then(r => r.blob())
     .then(blob => {
       const a = document.createElement('a');
@@ -645,7 +737,7 @@ function showResult(data) {
   // 下载按钮
   if (data.filename) {
     html += `<div class="download-area">
-      <button class="btn btn-download" style="font-size:16px;padding:14px 40px;" onclick="dlFile('${data.filename.replace(/'/g,"\\'")}')">下载接单表Excel</button>
+      <button class="btn btn-download" style="font-size:16px;padding:14px 40px;" onclick="dlFile(${escapeHtml(JSON.stringify(data.filename))})">下载接单表Excel</button>
     </div>`;
   } else if (data.written === 0 && !revCnt) {
     html += '<div class="result-section result-error">没有可处理的新单数据</div>';
@@ -654,25 +746,25 @@ function showResult(data) {
   // 新单明细
   if (data.details && data.details.length) {
     html += `<div class="result-section result-success"><b>新单明细:</b>
-      <ul>${data.details.map(d => '<li>'+d+'</li>').join('')}</ul></div>`;
+      <ul>${data.details.map(d => '<li>'+escapeHtml(d)+'</li>').join('')}</ul></div>`;
   }
 
   // 修改单
   if (data.revisions && data.revisions.length) {
     html += `<div class="result-section result-warning"><b>修改单（接单表已有，已跳过）:</b>
-      <ul>${data.revisions.map(r => '<li>'+r+'</li>').join('')}</ul></div>`;
+      <ul>${data.revisions.map(r => '<li>'+escapeHtml(r)+'</li>').join('')}</ul></div>`;
   }
 
   // 警告（含匹配不到的货号）
   if (data.warnings && data.warnings.length) {
     html += `<div class="result-section result-error"><b>匹配不到 / 警告:</b>
-      <ul>${data.warnings.map(w => '<li>'+w+'</li>').join('')}</ul></div>`;
+      <ul>${data.warnings.map(w => '<li>'+escapeHtml(w)+'</li>').join('')}</ul></div>`;
   }
 
   // 解析错误
   if (data.parse_errors && data.parse_errors.length) {
     html += `<div class="result-section result-error"><b>解析失败:</b>
-      <ul>${data.parse_errors.map(e => '<li>'+e+'</li>').join('')}</ul></div>`;
+      <ul>${data.parse_errors.map(e => '<li>'+escapeHtml(e)+'</li>').join('')}</ul></div>`;
   }
 
   resultPanel.innerHTML = html;
