@@ -1118,7 +1118,7 @@
     }
     draw();
   }
-  function salesPanel(host, payload, quote, edit, sections, changed) {
+  function salesPanel(host, payload, quote, edit, sections, changed, saveSection) {
     const saved = payload.mixed_quote || null;
     const cfg = JSON.parse(JSON.stringify(saved || { enabled: true, version: 1, mode: 'equal', units_per_pack: 1,
       products: [] }));
@@ -1180,6 +1180,7 @@
       });
       panel.querySelector('.mixed-save-config')?.addEventListener('click', async event => {
         const button = event.target, message = panel.querySelector('.mixed-message');
+        if (button.disabled) return;
         try {
           window.MixedMolds.validateConfig(cfg);
           if (productImport && [...document.querySelectorAll('.dept-tab[title="有未保存修改"]')].some(tab => tab.dataset.dept !== 'sales')) throw new Error('请先保存其他部门的修改，再导入产品资料');
@@ -1188,7 +1189,11 @@
           if (removed.length && !window.confirm(`确认删除 ${removed.map(p => p.code).join('、')}？\n将删除这些小产品的全部部门明细和零件选用关系。共用零件及其他小产品会保留。`)) return;
           button.disabled = true;
           const section = sections.find(s => s.dept === 'sales');
-          await request('/sections/' + section.id, { method: 'PUT', body: JSON.stringify({ payload, submit: false, base_filled_at: section.filled_at }) });
+          // Use the same queue/version object as draft and shortcut saves. A successful
+          // draft must advance its version even when the config request later fails.
+          if (typeof saveSection !== 'function') throw new Error('保存组件未同步，请保留输入后重新打开报价单');
+          await saveSection(section, payload, false);
+          section.payload_json = JSON.stringify(payload);
           await request(`/quotes/${quote.id}/mixed`, { method: 'PUT', body: JSON.stringify({ config: cfg, expected_config: saved, product_import: productImport, confirmed_removed_ids: removed.map(p => p.id), expected_sections: Object.fromEntries(sections.filter(s => s.dept !== 'sales').map(s => [s.id, s.filled_at || ''])) }) });
           location.reload();
         } catch (error) { message.textContent = error.message; message.className = 'mixed-message mixed-error'; button.disabled = false; }

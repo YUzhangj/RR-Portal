@@ -7094,7 +7094,7 @@ if (window.MixedQuotation && !window.__WORKBENCH_EMBED__) {
   const originalSales = renderSales;
   renderSales = function (host, payload, quote, headerEdit, pricingEdit, sections, onChange, onHeaderChange) {
     originalSales(host, payload, quote, headerEdit, pricingEdit, sections, onChange, onHeaderChange);
-    window.MixedQuotation.salesPanel(host, payload, quote, pricingEdit, sections, onChange);
+    window.MixedQuotation.salesPanel(host, payload, quote, pricingEdit, sections, onChange, putSection);
   };
 }
 window.VerificationWorkbench = {
