@@ -3,7 +3,7 @@ import {
   AutoComplete, Button, Card, Col, Drawer, Form, Input, InputNumber, Popconfirm,
   Row, Select, Space, Switch, Table, Tabs, Tag, Typography, App,
 } from 'antd'
-import { api, type Dictionaries, type Material, type Molding, type MoldingPart, type Product, type ProductDetail } from '../api/client'
+import { api, type Dictionaries, type Material, type Molding, type MoldingPart, type Product, type ProductDetail, type SupplierDict } from '../api/client'
 import { MATERIAL_CATEGORIES, inferMaterialCategory } from '../utils/engineeringImport'
 import { resolveMaterialTranslation } from '../utils/materialTranslate'
 import { mergeImportedMaterials, recommendMaterialChoices, resolveMaterialImport, type ImportChoice } from '../utils/materialImportMerge'
@@ -11,7 +11,7 @@ import { mergeImportedMoldings } from '../utils/moldingImportMerge'
 import { MaterialImportReview } from '../components/MaterialImportReview'
 import SupplierProfileEditor from '../components/SupplierProfileEditor'
 import {
-  HUASHENGYI_FULL_NAME, linkedCustomsCompany,
+  HUASHENGYI_FULL_NAME, materialCustomsCompany,
   supplierCustomsCompany, supplierProfileForName,
   supplierAutocompleteOptions, filterSupplierOption, supplierDisplayName,
 } from '../utils/supplierProfiles'
@@ -26,10 +26,6 @@ const WORKSHOPS = ['兴信A车间', '兴信B车间', '华登']
 
 function translatedMaterialName(nameZh: string, dicts: Dictionaries): string {
   return resolveMaterialTranslation(nameZh, dicts.translations || [])
-}
-
-function materialCustomsCompany(material: Material, dicts: Dictionaries): string {
-  return material.customs_company ?? linkedCustomsCompany(material.supplier || '', dicts.suppliers)
 }
 
 export default function ProductsPage() {
@@ -47,6 +43,7 @@ export default function ProductsPage() {
   const [savingDetail, setSavingDetail] = useState(false)
   const [activeTab, setActiveTab] = useState<'mold' | 'mat'>('mold')
   const [dicts, setDicts] = useState<Dictionaries>({ hs: [], suppliers: [], translations: [] })
+  const dictionaryRequestRef = useRef(0)
   const [drawerFull, setDrawerFull] = useState(false)
   const [showInactive, setShowInactive] = useState(false)
   const currentProductCode = Form.useWatch('code', form)
@@ -62,7 +59,12 @@ export default function ProductsPage() {
     try { const { data } = await api.get<string[]>('/customers'); setCustomers(data || []) } catch {}
   }
   async function loadDicts() {
-    try { const { data } = await api.get<Dictionaries>('/dictionaries'); setDicts({ hs: data.hs || [], suppliers: data.suppliers || [], translations: data.translations || [] }) } catch {}
+    const request = ++dictionaryRequestRef.current
+    try {
+      const { data } = await api.get<Dictionaries>('/dictionaries')
+      if (request !== dictionaryRequestRef.current) return
+      setDicts({ hs: data.hs || [], suppliers: data.suppliers || [], translations: data.translations || [] })
+    } catch {}
   }
   useEffect(() => { loadCustomers(); loadDicts() }, [])
   useEffect(() => { loadList() }, [loadList])
@@ -114,7 +116,7 @@ export default function ProductsPage() {
           hsCN: m.hs_cn ?? '',
           hsID: m.hs_id ?? '',
           supplier: m.supplier || '',
-          customsCompany: m.customs_company || '',
+          customsCompany: materialCustomsCompany(m, dicts.suppliers),
           unitKg: m.unit_kg ?? 'KGM',
           grossPerPc: m.gross_per_pc ?? 0,
           netPerPc: m.net_per_pc ?? 0,
@@ -139,8 +141,8 @@ export default function ProductsPage() {
           return {
             supplier: String(m.supplier || '').trim(),
             previousSupplier: String(previous?.supplier || '').trim(),
-            customs: materialCustomsCompany(m, dicts),
-            previousCustoms: previous ? materialCustomsCompany(previous, dicts) : '',
+            customs: materialCustomsCompany(m, dicts.suppliers),
+            previousCustoms: previous ? materialCustomsCompany(previous, dicts.suppliers) : '',
           }
         })
       let supplierAdded = 0
@@ -427,7 +429,23 @@ export default function ProductsPage() {
                 rows={materials}
                 onChange={setMaterials}
                 dicts={dicts}
-                onSuppliersChanged={loadDicts}
+                onSuppliersChanged={(profile) => {
+                  // 档案保存已成功，先失效旧请求，再同步当前显示与立即保存使用的资料。
+                  dictionaryRequestRef.current++
+                  setDicts(current => {
+                    const matches = (entry: SupplierDict) => profile.id != null
+                      ? entry.id === profile.id
+                      : entry.keyword.trim().toLocaleLowerCase() === profile.keyword.trim().toLocaleLowerCase()
+                    const found = current.suppliers.some(matches)
+                    return {
+                      ...current,
+                      suppliers: found
+                        ? current.suppliers.map(entry => matches(entry) ? { ...entry, ...profile } : entry)
+                        : [...current.suppliers, profile],
+                    }
+                  })
+                  loadDicts()
+                }}
                 productCode={currentProductCode?.trim() || editing?.code}
               />,
             },
@@ -590,7 +608,7 @@ function MaterialsEditor({ rows, onChange, dicts, productCode, onSuppliersChange
   onChange: (rows: Material[]) => void
   dicts: Dictionaries
   productCode?: string
-  onSuppliersChanged: () => void
+  onSuppliersChanged: (profile: SupplierDict) => void
 }) {
   const { message } = App.useApp()
   const fileRef = useRef<HTMLInputElement>(null)
@@ -736,7 +754,7 @@ function MaterialsEditor({ rows, onChange, dicts, productCode, onSuppliersChange
         .map(material => ({
           ...material,
           supplier: material.supplier,
-          customs_company: material.customs_company || (material.supplier ? materialCustomsCompany(material, dicts) : ''),
+          customs_company: materialCustomsCompany(material, dicts.suppliers),
         }))
       if (!imported.length) { message.warning('没识别到有效行 (需含 中文名 / 料号 列)'); return }
       const result = mergeImportedMaterials(rows, imported)
@@ -802,13 +820,13 @@ function MaterialsEditor({ rows, onChange, dicts, productCode, onSuppliersChange
             <SupplierProfileEditor name={r.supplier || ''} onSaved={(profile) => {
               onChange(rows.map((row, index) => index === i
                 ? { ...row, supplier: profile.keyword?.trim() || profile.full, customs_company: supplierCustomsCompany(profile) } : row))
-              onSuppliersChanged()
+              onSuppliersChanged(profile)
             }} />
           </> },
           { title: '报关公司', width: 200, render: (_v, r) => {
             const profile = supplierProfileForName(r.supplier || '', dicts.suppliers)
             const selfCompany = profile?.full?.trim() || r.supplier?.trim() || ''
-            const linked = materialCustomsCompany(r, dicts)
+            const linked = materialCustomsCompany(r, dicts.suppliers)
             const options = [
               ...(selfCompany ? [{ value: selfCompany, label: selfCompany }] : []),
               { value: HUASHENGYI_FULL_NAME, label: HUASHENGYI_FULL_NAME },
