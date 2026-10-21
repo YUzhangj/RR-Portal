@@ -137,8 +137,11 @@ function parseDeliveryNote(text) {
   }
 
   /* 送货单号：送货单号/发货单号/单号/NO. */
-  m = joined.match(/(?:送\s*[货貨]\s*[单單]\s*[号號]|发\s*[货貨]\s*[单單]\s*[号號]|[单單]\s*[号號]|NO\.?)\s*[：:]\s*([A-Za-z0-9][A-Za-z0-9\-\/]{3,})/i);
-  if (m) fields.deliveryNo = m[1];
+  const deliveryLabels = /(?:送\s*[货貨]\s*[单單]\s*[号號]|[发發]\s*[货貨]\s*[单單]\s*[号號]|[单單]\s*[号號]|NO\.?)\s*[：:]\s*([A-Za-z0-9][A-Za-z0-9.\-\/]{3,})/ig;
+  for (const candidate of joined.matchAll(deliveryLabels)) {
+    if (/[订訂]\s*$/.test(joined.slice(0, candidate.index))) continue;   /* 订单号/訂單號不属于送货单号 */
+    fields.deliveryNo = candidate[1]; break;
+  }
   /* 无标签单号兜底：开头独立成行的 4-8 位流水号（排除年份，进表格即停） */
   if (!fields.deliveryNo) {
     for (const ln of lines.slice(0, 12)) {
@@ -159,7 +162,7 @@ function parseDeliveryNote(text) {
   if (!fields.supplier) {
     for (const ln of lines.slice(0, 6)) {
       const t = ln.replace(/^#+\s*/, '').trim();
-      if (!t || t === '送货单' || t === '送貨單' || t.startsWith('|')) continue;
+      if (!t || t === '送货单' || t === '送貨單' || t === fields.deliveryNo || t.startsWith('|')) continue;
       if (/客户|客戶|收货|收貨|日期|单号|單號|NO\.?|地址|电话|電話| Tel|DATE|DELIVERY|MESSRS|^\d/i.test(t)) continue;
       if (t.length <= 20) { fields.supplier = t; break; }
     }
@@ -178,7 +181,7 @@ function parseDeliveryNote(text) {
       const cNo    = find(/编号|編號|货号|貨號|Item/i, /订单|訂單|合同/);
       let   cName  = find(/品名|名称|名稱|货名|貨名|规格|規格|Desc/i, /编号|編號/);
       let splitNameHdr = false;
-      if (cName === -1) { cName = head.findIndex(h => h === '貨' || h === '货' || h === '名'); splitNameHdr = cName !== -1; }   /* 「貨|名」分两列的表头（华登） */
+      if (cName === -1) { cName = head.findIndex((h, i) => /^(貨|货)$/.test(h) && head[i + 1] === '名'); splitNameHdr = cName !== -1; }   /* 「貨|名」分两列的表头（华登） */
       let   cQty   = head.findIndex(h => /^(数|數)\s*量$/.test(h));
       if (cQty === -1) cQty = find(/送货数量|送貨數量|实送数量|實送數量/);
       if (cQty === -1) cQty = find(/送货|送貨|实送|實送/, /欠|总|總/);
@@ -188,7 +191,12 @@ function parseDeliveryNote(text) {
       let lastNo = '';
       for (const row of tbl.slice(hi + 1)) {
         const cells = splitRow(row);
-        const get = i => (i >= 0 && i < cells.length ? cells[i] : '');
+        const raw = i => (i >= 0 && i < cells.length ? cells[i] : '');
+        const numeric = v => /^\d[\d,.]*(?:\s*\/.*)?$/.test(v);
+        /* 合并品名格会令后续所有列左移；短一格时即便下一列金额也是数字，也应按行宽校正。 */
+        const shifted = splitNameHdr && cQty > cName && numeric(raw(cQty - 1)) &&
+          (cells.length === head.length - 1 || !numeric(raw(cQty)));
+        const get = i => raw(shifted && i > cName ? i - 1 : i);
         let no = get(cNo), name = get(cName);
         if (!no && !name) continue;
         if (/^序$|^NO\.?$/i.test(no)) continue;
@@ -202,14 +210,13 @@ function parseDeliveryNote(text) {
         }
         if (!no) no = lastNo;   /* 合并单元格：货号向下继承 */
         if (no) lastNo = no;
-        /* 分列表头（貨|名）下数据行可能整体左移一列：映射格不是纯数字且左格是，则取左格 */
-        let   qtyCell = get(cQty);
-        if (splitNameHdr && cQty > cName && !/^[\d,.]+$/.test(qtyCell) && /^[\d,.]+$/.test(get(cQty - 1))) qtyCell = get(cQty - 1);
+        const qtyCell = get(cQty);
         const qty  = qtyCell.split('/')[0].replace(/[^\d.]/g, '');
         if (!qty && !name) continue;   /* 无数量又无品名，不是明细行 */
         let   unit = get(cUnit);
         /* 表头合并了「送货数量单位」时，单位在数量右边一格 */
-        if (!unit && cQty >= 0 && cells[cQty + 1] && !/\d/.test(cells[cQty + 1]) && cells[cQty + 1].length <= 4) unit = cells[cQty + 1];
+        const nextCell = get(cQty + 1);
+        if (!unit && cQty >= 0 && nextCell && !/\d/.test(nextCell) && nextCell.length <= 4) unit = nextCell;
         if (!fields.orderNo) { const o = get(cOrder).replace(/\s+/g, ''); if (o && o !== no && o.length >= 6) fields.orderNo = o; }
         fields.items.push({ productNo: no, productName: name, qty, unit });
       }
@@ -252,7 +259,7 @@ function parseDeliveryNote(text) {
 
   /* 表格外订单号兜底 */
   if (!fields.orderNo) {
-    m = joined.match(/(?:订\s*单\s*(?:号|编号)|PO\s*号?)\s*[：:]\s*([A-Za-z0-9][A-Za-z0-9\-]{3,})/i);
+    m = joined.match(/(?:[订訂]\s*[单單]\s*(?:[号號]|[编編]\s*[号號])|PO\s*[号號]?)\s*[：:]\s*([A-Za-z0-9][A-Za-z0-9\-]{3,})/i);
     if (m) fields.orderNo = m[1];
   }
 
