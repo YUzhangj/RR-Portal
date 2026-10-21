@@ -263,7 +263,7 @@ app.post("/api/ai/translate", handle(async (request, reply) => {
         complaintMessageZhMachine: result.translation,
         complaintMessageZhFinal: null,
         translationStatus: "translated",
-        translationProvider: "moonshot",
+        translationProvider: ai.providerName(),
         translationModel: ai.modelName(),
       });
       translated += 1;
