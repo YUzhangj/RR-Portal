@@ -1936,16 +1936,21 @@ const EXCEL_COL_MAP = {
     '产品图片':'product_image'
   },
   spray: {
-    '客名':'client_name','客户':'client_name',
+    '客名':'client_name','客户':'client_name','客户名称':'client_name',
     '名称':'product_name','产品名称':'product_name',
+    '零件名称':'part_name','工序':'process',
     '样板数量':'sample_qty',
     '工程师':'engineer','工程师/pmc':'engineer',
     '备注':'notes'
   }
 };
 
-// 表头识别关键词（出现≥2个则认为是表头行）
-const HEADER_KEYWORDS = ['工模编号','工模名称','模具编号','模具名称','原料','颜色','备注','序号','产品编号','色粉'];
+// 表头识别关键词（至少2列命中，单列的同义词不重复计数）
+const HEADER_KEYWORDS = {
+  injection: ['工模编号','工模名称','模具编号','模具名称','原料','颜色','备注','序号','产品编号','色粉'],
+  slush:     ['工模编号','工模名称','模具编号','模具名称','原料','颜色','备注','序号','产品编号','色粉'],
+  spray:     ['客名','客户','客户名称','名称','产品名称','零件名称','工序','样板数量','工程师','工程师/pmc','备注']
+};
 
 let _excelImportType = 'injection';
 const _excelInput = (() => {
@@ -1968,7 +1973,7 @@ function loadXLSX() {
   if (window.XLSX) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const s = document.createElement('script');
-    s.src = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
+    s.src = './vendor/xlsx.full.min.js';
     s.onload = resolve;
     s.onerror = () => reject(new Error('Failed to load XLSX library'));
     document.head.appendChild(s);
@@ -1989,15 +1994,21 @@ function onExcelFileSelected() {
       const allRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
       if (!allRows.length) { showToast('Excel 文件没有数据', 'warning'); return; }
 
-      // 扫描找表头行：第一个包含≥2个关键词的行
+      // 喷油表头按列名匹配，避免将“客户名称：xxx”等订单信息当作表头。
+      const headerKeywords = HEADER_KEYWORDS[_excelImportType] || HEADER_KEYWORDS.injection;
       let headerRowIdx = -1;
       for (let i = 0; i < allRows.length; i++) {
         const cells = allRows[i].map(c => normCol(c));
-        const hits = HEADER_KEYWORDS.filter(k => cells.some(c => c.includes(normCol(k))));
+        const hits = cells.filter(c => headerKeywords.some(k => {
+          const keyword = normCol(k);
+          return _excelImportType === 'spray'
+            ? c === keyword || c.startsWith(keyword + '(') || c.startsWith(keyword + '[')
+            : c.includes(keyword);
+        }));
         if (hits.length >= 2) { headerRowIdx = i; break; }
       }
       if (headerRowIdx === -1) {
-        showToast('未找到表头行，请确保Excel含有"工模编号""工模名称"等列名', 'warning');
+        showToast('未找到表头行，请确保Excel含有对应的列名（如喷油单：客名、名称、样板数量）', 'warning');
         return;
       }
 
@@ -2133,7 +2144,7 @@ function onExcelFileSelected() {
         // 啤办单：有原料或颜色的行也算有效（同模不同原料的子件行）
         const hasKey = moldId || moldName || productId
           || (_excelImportType === 'injection' && (material || color))
-          || (_excelImportType === 'spray' && obj.client_name);
+          || (_excelImportType === 'spray' && (obj.product_name || obj.part_name));
         if (!hasKey) return false;
         // 跳过注释行（工模编号/名称以注释关键词开头）
         if (SKIP_RE.test(moldId) || SKIP_RE.test(moldName)) return false;
