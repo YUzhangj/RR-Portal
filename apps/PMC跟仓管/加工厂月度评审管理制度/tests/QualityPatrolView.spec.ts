@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import QualityPatrolView from '../src/views/QualityPatrolView.vue'
 import { patrolSummary } from '../src/utils/qualityPatrol'
-const mocks = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), token: vi.fn(), url: vi.fn(), auth: { role: 'admin', userId: 'admin941' } }))
-vi.mock('../src/pb', () => ({ pb: { collection: () => ({ getFullList: mocks.list, create: mocks.create, update: mocks.update, delete: mocks.remove }), files: { getURL: mocks.url, getToken: mocks.token } } }))
+const mocks = vi.hoisted(() => ({ orders: vi.fn(), list: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn(), token: vi.fn(), url: vi.fn(), auth: { role: 'admin', userId: 'admin941' } }))
+vi.mock('../src/pb', () => ({ pb: { authStore: { onChange: () => () => {} }, collection: () => ({ getFullList: mocks.list, create: mocks.create, update: mocks.update, delete: mocks.remove }), files: { getURL: mocks.url, getToken: mocks.token } } }))
+vi.mock('../src/stores/orders', () => ({ useOrdersStore: () => ({ fetchAll: mocks.orders }) }))
 vi.mock('../src/stores/auth', async () => { const { reactive } = await import('vue'); return { useAuthStore: () => reactive(mocks.auth) } })
 vi.mock('../src/stores/factories', () => ({ useFactoriesStore: () => ({ fetchAll: vi.fn(), items: [{ id: 'hn', name: '湖南工厂', region: 'hunan', craft: 'sewing', staff_count: 40, workshop_area: 123.5 }, { id: 'dg', name: '东莞工厂', region: 'dongguan', craft: 'sewing' }] }) }))
 vi.mock('vue-router', () => ({ useRoute: () => ({ query: { region: 'hunan' } }), RouterLink: { template: '<a><slot /></a>' } }))
@@ -15,6 +16,7 @@ function image(name: string, size: number, type = 'image/png') { const file = ne
 afterEach(() => { for (const w of wrappers.splice(0)) if (w.exists()) w.unmount(); document.body.innerHTML = ''; vi.useRealTimers() })
 beforeEach(() => {
   vi.clearAllMocks()
+  mocks.orders.mockResolvedValue([])
   mocks.auth.role = 'admin'
   mocks.auth.userId = 'admin941'
   mocks.token.mockImplementation(async () => fileToken())
@@ -26,11 +28,51 @@ beforeEach(() => {
   ])
 })
 describe('巡查现场', () => {
+  it('loads live output with an inclusive inspection cutoff and refreshes changed amounts', async () => {
+    mocks.orders.mockResolvedValue([
+      {factory:'hn',order_date:'2026-01-01',amount:100},
+      {factory:'hn',order_date:'2026-10-16 23:59:59Z',amount:25.5},
+      {factory:'hn',order_date:'2026-10-17',amount:900},
+      {factory:'hn',order_date:'2025-12-31',amount:800},
+      {factory:'dg',order_date:'2026-10-01',amount:700},
+    ])
+    const w=mountView();await flushPromises()
+    expect(w.find('td.actual-output').text()).toBe('125.50')
+    await w.findAll('.filters select')[1]!.setValue('2026-09-18')
+    expect(w.find('td.actual-output').text()).toBe('100.00')
+    mocks.orders.mockResolvedValue([{factory:'hn',order_date:'2026-01-01',amount:200}])
+    await w.find('.filters button').trigger('click');await flushPromises()
+    expect(w.find('td.actual-output').text()).toBe('200.00')
+  })
+  it('does not fetch output for accounts without output permission', async () => {
+    mocks.auth.role='sc_clerk'
+    const w=mountView();await flushPromises()
+    expect(mocks.orders).not.toHaveBeenCalled()
+    expect(w.find('td.actual-output').text()).toBe('无产值查看权限')
+  })
+  it('refreshes output every minute and cancels polling on unmount', async () => {
+    vi.useFakeTimers()
+    const w=mountView();await flushPromises()
+    expect(mocks.orders).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(60000)
+    expect(mocks.orders).toHaveBeenCalledTimes(2)
+    w.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('does not present a failed output load as zero and supports retry', async () => {
+    mocks.orders.mockRejectedValueOnce(new Error('offline'))
+    const w=mountView();await flushPromises()
+    expect(w.find('td.actual-output').text()).toBe('产值加载失败')
+    const retry=w.findAll('button').find(b=>b.text()==='重试产值')!
+    await retry.trigger('click');await flushPromises()
+    expect(w.find('td.actual-output').text()).toBe('0.00')
+  })
+
   it('uses template 02 column order, period labels and completion prose while preserving legacy fields on edit', async () => {
     mocks.list.mockResolvedValue([{ id:'1', factory:'hn', check_date:'2026-10-16', responsibility_scope:'责任人甲', responsible_supervisor:'主管乙', processing_fee_period:'1月-9月份', processing_fee:12.75, completion_details:'1:10/21完成\n2:10/26完成', planned_date:'2026-10-25' }])
     const w = mountView(); await flushPromises()
     const headers = w.findAll('.patrol-table thead th').map(h => h.text())
-    expect(headers.slice(2, 9)).toEqual(['员工人数','拉线','场地面积（平方）','责任范围','责任主管','1月-9月份\n加工费（万）','本次评级'])
+    expect(headers.slice(2, 10)).toEqual(['员工人数','拉线','场地面积（平方）','责任范围','责任主管','1月-9月份\n加工费（万）','实际总产值（元）当年1月1日至检查当日','本次评级'])
     expect(headers).not.toContain('计划完成时间')
     expect(w.find('.sheet-heading').text()).toContain('2026-10-16')
     expect(w.find('td.field-completed_date').text()).toBe('1:10/21完成\n2:10/26完成')
@@ -238,12 +280,13 @@ describe('巡查现场', () => {
     expect(w.find('.patrol-table tbody').text()).toContain('湖南工厂')
     await vi.advanceTimersByTimeAsync(10000)
     expect(w.find('[role=alert]').text()).toContain('照片授权获取失败')
-    expect(vi.getTimerCount()).toBe(0)
+    expect(vi.getTimerCount()).toBe(1) // Only the output refresh interval remains.
     await w.find('[role=alert] button').trigger('click'); await flushPromises()
     expect(w.find('.photo-cell img').exists()).toBe(true)
     const { useAuthStore } = await import('../src/stores/auth')
     useAuthStore().userId = 'other941'; await flushPromises()
     expect(w.find('.photo-cell img').exists()).toBe(false)
-    expect(vi.getTimerCount()).toBe(0)
+    expect(w.find('td.actual-output').text()).toBe('请刷新产值')
+    expect(vi.getTimerCount()).toBe(1)
   })
 })

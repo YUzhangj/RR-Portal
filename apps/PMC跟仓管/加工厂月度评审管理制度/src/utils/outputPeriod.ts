@@ -16,14 +16,22 @@ export function outputPeriod(mode: OutputPeriodMode, month: string, year: string
   if (![1, 2, 3, 4].includes(quarter)) throw new Error('请选择有效季度。')
   return { start: `${year}-${String(quarter * 3 - 2).padStart(2, '0')}`, end: `${year}-${String(quarter * 3).padStart(2, '0')}` }
 }
-export function outputAmounts(orders: { factory: string; order_date?: string; amount?: number }[], range: OutputPeriod) {
+export function outputAmounts(orders: { factory: string; order_date?: string; amount?: number }[], range: OutputPeriod, throughDay?: string) {
   // Order amounts can include fractional cents; preserve the stored amount until display.
   const amounts: Record<string, number> = {}
   for (const order of orders) {
     const month = order.order_date?.slice(0, 7) || ''
     if (!/^[1-9]\d{3}-(0[1-9]|1[0-2])$/.test(month) || month < range.start || month > range.end) continue
+    if (throughDay && (order.order_date!.slice(0, 10) > throughDay || order.order_date!.slice(0, 10).length !== 10)) continue
     const amount = Number(order.amount)
     if (Number.isFinite(amount)) amounts[order.factory] = (amounts[order.factory] || 0) + amount
   }
   return amounts
+}
+
+// Each patrol uses its own inspection year and inclusive cutoff day.
+export function patrolOutputAmounts(orders: Parameters<typeof outputAmounts>[0], checkDate: string) {
+  const day = checkDate.slice(0, 10)
+  if (!/^[1-9]\d{3}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(Date.parse(day)) || new Date(day).toISOString().slice(0, 10) !== day) return null
+  return outputAmounts(orders, { start: day.slice(0, 4) + '-01', end: day.slice(0, 7) }, day)
 }
