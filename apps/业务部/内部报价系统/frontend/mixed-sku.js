@@ -6,8 +6,10 @@
   function productPartNumber(product) {
     const code = normalizedCode(product.code);
     if (/^\d+$/.test(code)) return serial(code);
-    const official = /-(\d+)$/.exec(code);
-    return official ? serial(official[1]) : productSerial(product);
+    // EXCL qualifies the official SKU; it does not replace its numeric part.
+    // Never fall back to spreadsheet NO. when a nonempty official code exists.
+    const official = /-(\d+)(?:-EXCL)?$/.exec(code);
+    return official ? serial(official[1]) : code || productSerial(product);
   }
   function partProductCodes(part) {
     const raw=String(part?.source_product_code ?? '').normalize('NFKC').trim();
