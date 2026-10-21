@@ -264,17 +264,16 @@
       var origSave = window.saveRecord;
       window.saveRecord = function () {
         var q = window.__qcQueue;
-        var overlay = document.getElementById('modalOverlay');
         var ret = origSave.apply(this, arguments);
-        if (q && overlay && !overlay.classList.contains('show')) {
-          q.idx++;
-          if (q.idx < q.items.length) {
-            window.__qcQueue = q;
-            loadQueueItem(q);
-          } else {
-            window.__qcQueue = null;
-            toast(q.items.length + ' 条货品已全部录入完成', 'success');
-          }
+        /* 两种保存按钮共用明确的保存结果；校验取消或本地写入失败时保留当前项。 */
+        if (!q || ret !== true) return ret;
+        q.idx++;
+        if (q.idx < q.items.length) {
+          window.__qcQueue = q;
+          loadQueueItem(q);
+        } else {
+          window.__qcQueue = null;
+          toast(q.items.length + ' 条货品已全部录入完成', 'success');
         }
         return ret;
       };
