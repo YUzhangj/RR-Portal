@@ -113,6 +113,11 @@ button:disabled { background: #d1d5db; cursor: not-allowed; box-shadow: none; }
 button.mini { padding: 5px 12px; font-size: 12px; background: #6b7280; }
 button.mini:hover { background: #4b5563; }
 
+/* Keep the shipping save action distinct from the adjacent gray tools. */
+button.mini[data-save-shipping-summary]:not(:disabled) { background: var(--primary); color: #fff; }
+button.mini[data-save-shipping-summary]:not(:disabled):hover { background: var(--primary-hover); }
+button.mini[data-save-shipping-summary]:disabled { background: #d1d5db; }
+
 button.danger { background: var(--danger); }
 button.danger:hover { background: var(--danger-hover); }
 

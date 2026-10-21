@@ -44,6 +44,7 @@ function page(sections) {
     renderLegacyPricingTail: () => {},
   });
   for (const [start, end] of [
+    ['const sectionDraftPayloads =', 'const shippingSummarySavers ='],
     ['function legacyFormulaAmount(', 'function renderLegacyItems('],
     ['function legacyFormulaComponents(', '// ============== 汇总面板'],
     ['function renderSummaryPane(', '// ============== 汇总 · 减税明细 4 表'],

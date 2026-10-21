@@ -49,7 +49,7 @@ test('PostgreSQL 和 SQLite 使用兼容的空时间版本比较', () => {
 });
 
 test('报价和核价入口加载最新的保存队列脚本', () => {
-  for (const [page, version] of [['quote.html', '20261021-config-save-v1'], ['verification.html', '20261020-delivery']]) {
+  for (const [page, version] of [['quote.html', '20261021-shipping-save-v1'], ['verification.html', '20261021-shipping-save-v1']]) {
     const html = fs.readFileSync(path.join(root, 'frontend', page), 'utf8');
     assert.ok(html.includes('workbench.js?v=' + version));
   }

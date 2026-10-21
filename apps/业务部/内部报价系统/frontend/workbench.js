@@ -149,6 +149,80 @@ function putSection(sec, payload, submit) {
   return current;
 }
 
+// Business and summary views edit one draft, so returning to the business tab
+// cannot later save an older copy of shipping settings over an acknowledged save.
+const sectionDraftPayloads = new WeakMap();
+function sectionDraft(section) {
+  if (!section) return {};
+  if (!sectionDraftPayloads.has(section)) sectionDraftPayloads.set(section, JSON.parse(section.payload_json || '{}'));
+  return sectionDraftPayloads.get(section);
+}
+const shippingSummarySavers = new WeakMap();
+function shippingSummaryEditState(section, me, locked) {
+  const permitted = canEditDepartment(me, 'sales') && hasPerm(me, '汇总分析', 'edit');
+  const reason = locked ? '原报价已锁定，请到核价中心修改。'
+    : section?.status === 'approved' ? '业务部已审核，请先解除业务部审核后再修改算价参数。' : '';
+  return { editable: !!section && permitted && !reason, reason: permitted ? reason : '' };
+}
+function shippingSummarySaver(section, payload, onStatus) {
+  let state = shippingSummarySavers.get(section);
+  if (!state) {
+    state = { dirty: false, pending: null, sequence: 0, text: '修改后自动保存到业务草稿', error: false };
+    const paint = () => state.onStatus?.({ text: state.text, error: state.error, pending: !!state.pending, dirty: state.dirty });
+    state.save = () => {
+      const sequence = ++state.sequence;
+      // Freeze exactly what this request acknowledges. Later typing must remain dirty.
+      const snapshot = JSON.stringify(payload);
+      state.dirty = true; state.error = false; state.text = '正在保存算价参数…';
+      const pending = putSection(section, JSON.parse(snapshot), false).then(() => {
+        section.payload_json = snapshot;
+        if (sequence === state.sequence) {
+          state.dirty = false; state.error = false; state.text = '✓ 算价参数已保存到业务草稿';
+        }
+        return true;
+      }, error => {
+        if (sequence === state.sequence) {
+          state.error = true; state.text = '保存失败：' + error.message + ' 当前输入已保留。';
+        }
+        return false;
+      }).finally(() => {
+        if (state.pending === pending) state.pending = null;
+        paint();
+      });
+      state.pending = pending; paint();
+      return pending;
+    };
+    state.flush = async () => {
+      if (!state.pending && state.dirty) state.save();
+      while (state.pending) await state.pending;
+      if (state.dirty) throw new Error(state.text);
+    };
+    state.paint = paint;
+    shippingSummarySavers.set(section, state);
+  }
+  state.onStatus = onStatus; state.paint();
+  return state;
+}
+function mountShippingSummarySave(host, section, payload, editState) {
+  const bar = host.querySelector('#shipping-summary-save');
+  if (!editState.editable) {
+    bar.textContent = editState.reason;
+    host.saveShippingSummary = null;
+    return () => Promise.resolve(false);
+  }
+  bar.innerHTML = '<button type="button" class="mini" data-save-shipping-summary>保存算价参数</button> <span role="status" aria-live="polite" data-shipping-save-status></span>';
+  const button = bar.querySelector('[data-save-shipping-summary]');
+  const status = bar.querySelector('[data-shipping-save-status]');
+  const saver = shippingSummarySaver(section, payload, state => {
+    status.textContent = state.text; status.style.color = state.error ? '#b91c1c' : state.dirty ? '#475569' : '#166534';
+    button.disabled = state.pending; button.textContent = state.error ? '重试保存算价参数' : '保存算价参数';
+    host.onShippingSummaryDirty?.(state.dirty);
+  });
+  button.onclick = () => saver.save();
+  host.saveShippingSummary = () => saver.flush();
+  return () => saver.save();
+}
+
 // ==================== 通用可编辑表格 ====================
 // columns: [{key, label, type?: 'text'|'number'|'textarea'|'formula', readonly?: bool|fn,
 //   calc?: row => number, onValue?: (row,value,raw) => void,
@@ -2074,7 +2148,7 @@ function renderSummaryPane(host, sections, quote, me) {
   const mold = get('molding');
   const pnt = get('painting');
   const asm = get('assembly');
-  const sales = get('sales');
+  const sales = sectionDraft(nativeSales);
   const slush = get('slush');
   const sewing = get('sewing');
   const electronic = get('electronic');
@@ -2319,6 +2393,7 @@ function renderSummaryPane(host, sections, quote, me) {
     </div>
     <h2 style="margin-top:24px">🚚 出货价算价</h2>
     <div id="wb-shipping-sum"></div>
+    <div id="shipping-summary-save" style="margin-top:12px"></div>
     <div id="tax-deduction-block" style="margin-top:24px"></div>`;
   // 出货价算价（来自业务 section）
   const salesSec = sections.find(x => x.dept === 'sales');
@@ -2344,15 +2419,11 @@ function renderSummaryPane(host, sections, quote, me) {
   if (window.JazwaresFreight?.matches(quote.customer)) {
     freightMapSum.externalRegions = window.JazwaresFreight.calculate(freightCalcSum.jazwares || {}, eCartonSum, salesHeader).regions;
   }
-  const canEditShip = canEditDepartment(me, 'sales') && hasPerm(me, '汇总分析', 'edit');
+  const shippingEdit = shippingSummaryEditState(salesSec, me, window.__data?.quote_locked);
+  const canEditShip = shippingEdit.editable;
   // 模具分摊传美金（与「生产模具费用」表同口径），出货价算价直接在 USD 层加
-  // 统一保存业务 section（同步本地缓存，避免重渲染按旧 payload 还原）
-  const saveSales = () => {
-    if (canEditShip && salesSec) {
-      salesSec.payload_json = JSON.stringify(sales);
-      putSection(salesSec, sales, false).catch(() => {});
-    }
-  };
+  // Cache only acknowledged saves; display failures and keep the draft for retry.
+  const saveSales = mountShippingSummarySave(host, salesSec, sales, shippingEdit);
   // 第 7 个参数（历史手填附加税 HKD）传 null：附加税已改为 0.4% 模型，不再传入
   const shippingCalc = renderShipping(host.querySelector('#wb-shipping-sum'), sales, salesHeader, canEditShip, saveSales,
     freightMapSum, factoryHkdSum, null, {
@@ -2364,7 +2435,7 @@ function renderSummaryPane(host, sections, quote, me) {
   const markupInp = host.querySelector('#tot-markup');
   if (markupInp && canEditShip) {
     markupInp.oninput = () => { sales.shipping = sales.shipping || {}; sales.shipping.markup_x = markupInp.value === '' ? null : Number(markupInp.value); };  // 允许 0；空才回退默认
-    markupInp.onchange = () => { saveSales(); renderSummaryPane(host, sections, quote, me); };  // 失焦持久化+刷新(避免每键重渲染丢焦/录错)
+    markupInp.onchange = async () => { if (await saveSales()) renderSummaryPane(host, sections, quote, me); };  // 失焦持久化+刷新(避免每键重渲染丢焦/录错)
   } else if (markupInp) {
     markupInp.disabled = true;
   }
@@ -6221,9 +6292,9 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
           baseInp.style.background = '#ecfdf5';
           baseInp.title = '已按场景名自动套用运费（' + x._freight_matched + '）';
         } else {
-          baseInp.disabled = !canEdit;
+          baseInp.disabled = true;
           baseInp.style.background = '';
-          baseInp.title = '';
+          baseInp.title = '自动取各部门已保存的成本合计；请修改对应部门明细后重新汇总';
         }
       }
     });
@@ -6278,7 +6349,7 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
           ${canEdit ? '<th style="width:30px"></th>' : ''}
         </tr></thead>
         <tbody>
-          <tr><td>小计 HK$</td>${sc.map((x, i) => `<td><input class="sc-base" data-i="${i}" type="number" step="any" value="${x.base_rmb ?? 0}" ${canEdit && !x._freight_matched ? '' : 'disabled'} style="${x._freight_matched ? 'background:#ecfdf5' : ''}"></td>`).join('')}${canEdit ? '<td></td>' : ''}</tr>
+          <tr><td>小计 HK$</td>${sc.map((x, i) => `<td><input class="sc-base" data-i="${i}" type="number" step="any" value="${x.base_rmb ?? 0}" disabled title="自动取各部门已保存的成本合计；请修改对应部门明细后重新汇总" style="${x._freight_matched ? 'background:#ecfdf5' : ''}"></td>`).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr><td>运费 (${canEdit ? `<input id="sh-freight" type="number" step="any" value="${s.freight_pct}" style="width:60px">` : s.freight_pct}%)</td>${rows.map((r, i) => cellTd(i, 'freight', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr><td>吊柜费 (${canEdit ? `<input id="sh-lifting" type="number" step="any" value="${s.lifting_pct}" style="width:60px">` : s.lifting_pct}%)</td>${rows.map((r, i) => cellTd(i, 'lifting', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr class="hi"><td>含运 HK$</td>${rows.map((r, i) => cellTd(i, 'afterShip', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
@@ -6328,7 +6399,6 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
       s.scenarios[i].name = inp.value;
       onChange(); refresh(); // 名字变了重新匹配运费
     });
-    bindNum('.sc-base', 'base_rmb');
     bindNum('.sc-mold', 'mold_share_rmb');
     const globalMap = { freight: 'freight_pct', lifting: 'lifting_pct', markup: 'markup_x', divisor: 'divisor', target: 'target_usd',
       'surtax-markup': 'surtax_markup_x', 'sew-markup': 'sew_markup_x', 'elec-markup': 'elec_markup_x' };
@@ -6595,7 +6665,7 @@ async function renderQuotePage() {
     try { authorizedCustomers = (await api('/quotes/customers')).customers || []; }
     catch { authorizedCustomers = []; }
   }
-  window.__data = { quote, sections, me, mixed_quote: data.mixed_quote, mixed_engineering_molds: data.mixed_engineering_molds };
+  window.__data = { quote, sections, me, quote_locked: quoteLocked, mixed_quote: data.mixed_quote, mixed_engineering_molds: data.mixed_engineering_molds };
   // 从业务 section 读税率，给所有 loss-summary 用
   const salesSecForTax = sections.find(s => s.dept === 'sales');
   if (salesSecForTax && salesSecForTax.payload_json) {
@@ -6611,7 +6681,7 @@ async function renderQuotePage() {
   // 工作台容器
   const mySec = sections.find(s => s.dept === me.dept);
   if (!mySec) { $('sections').innerHTML = '<i>未找到本部门 section</i>'; return; }
-  const payload = mySec.payload_json ? JSON.parse(mySec.payload_json) : {};
+  const payload = sectionDraft(mySec);
   const canEdit = mySec.status !== 'approved' && me.dept !== 'sales' ? true : false;
   // 业务部门 section 永远可编辑（除非已审）
   const canEditMine = !quoteLocked && mySec.status !== 'approved' && canEditDepartment(me, mySec.dept);
@@ -6687,7 +6757,7 @@ async function renderQuotePage() {
       }
       if (dirtyByDept.get(activeDept)) {
         const activeSection = sections.find(section => section.dept === activeDept);
-        const action = await requestUnsavedAction(activeSection?.dept_name || DEPT_MENU[activeDept] || activeDept);
+        const action = await requestUnsavedAction(activeDept === '__summary__' ? '出货价算价' : activeSection?.dept_name || DEPT_MENU[activeDept] || activeDept);
         if (action === 'cancel') return;
         if (action === 'save') {
           const save = saveHandlers.get(activeDept);
@@ -6723,6 +6793,8 @@ async function renderQuotePage() {
     if (canSeeSummary) {
       summaryPane = document.createElement('div'); summaryPane.className = 'card section-pane';
       summaryPane.dataset.dept = '__summary__';
+      summaryPane.onShippingSummaryDirty = dirty => dirty ? markDirty('__summary__') : clearDirty('__summary__');
+      saveHandlers.set('__summary__', async () => { await summaryPane.saveShippingSummary?.(); });
       summaryPane.style.display = 'none';
       renderSummaryPane(summaryPane, sections, quote, me);
       host.appendChild(summaryPane);
@@ -6791,7 +6863,7 @@ async function renderQuotePage() {
     const fxRateUsd = num(salesHdrOther.fx_hkd_usd) || 7.8;
 
     others.forEach(s => {
-      const sectionPayload = s.payload_json ? JSON.parse(s.payload_json) : {};
+      const sectionPayload = sectionDraft(s);
       // 默认只读，避免业务/工程不小心点保存覆盖其他部门数据；点"✏️ 进入编辑"切换为可写。
       // 例外：工程/业务部门由业务查看时直接可编辑（两者同属，免点按钮）；其他部门仍只读。
       // 工程/业务直接可编辑：仅在「未提交审核」(status=empty) 时自动进入编辑；
