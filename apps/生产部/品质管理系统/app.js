@@ -3554,7 +3554,7 @@ function clearForm() {
   if (_meQc) setVal('f_qc', _meQc.name || _meQc.username || '');
   setVal('f_type',   '成品');
   setVal('f_result', 'PASS');
-  setVal('f_aqlLevel', 'MAJ 0.65');   /* AQL档位默认 MAJ 0.65（无不良时报告也高亮表头） */
+  setVal('f_aqlLevel', 'MAJ 1.0,MIN 2.5');   /* AQL档位默认 MAJ 1.0 + MIN 2.5（无不良时报告也高亮表头） */
   syncAqlLevelPills();
   _loadDefectRows([]);   /* 清空不良明细 */
   _loadMeasRows([]);     /* 清空测量数据 */
@@ -4734,7 +4734,7 @@ function resetSingleEntryFormForNext() {
   setVal('f_supplier', _keep.supplier);
   setVal('f_client',   _keep.client);
   setVal('f_type',     _keep.type);
-  setVal('f_aqlLevel', _keep.aqlLevel || 'MAJ 0.65');
+  setVal('f_aqlLevel', _keep.aqlLevel || 'MAJ 1.0,MIN 2.5');
   syncAqlLevelPills();
   const dateEl     = document.getElementById('f_date');
   const inspDateEl = document.getElementById('f_inspDate');

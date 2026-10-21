@@ -265,16 +265,22 @@
       window.saveRecord = function () {
         var q = window.__qcQueue;
         var overlay = document.getElementById('modalOverlay');
+        /* 「保存并继续录入」不关弹窗，用记录数变化判断保存是否成功 */
+        var beforeCount = -1;
+        try { beforeCount = (JSON.parse(localStorage.getItem(window.__QC_STORAGE_PREFIX + 'records') || '{}').records || []).length; } catch (e) {}
         var ret = origSave.apply(this, arguments);
-        if (q && overlay && !overlay.classList.contains('show')) {
-          q.idx++;
-          if (q.idx < q.items.length) {
-            window.__qcQueue = q;
-            loadQueueItem(q);
-          } else {
-            window.__qcQueue = null;
-            toast(q.items.length + ' 条货品已全部录入完成', 'success');
-          }
+        if (!q) return ret;
+        var closed = overlay && !overlay.classList.contains('show');
+        var savedNew = false;
+        try { savedNew = (JSON.parse(localStorage.getItem(window.__QC_STORAGE_PREFIX + 'records') || '{}').records || []).length > beforeCount; } catch (e) {}
+        if (!closed && !savedNew) return ret;   /* 校验失败等未保存场景：不推进队列 */
+        q.idx++;
+        if (q.idx < q.items.length) {
+          window.__qcQueue = q;
+          loadQueueItem(q);
+        } else {
+          window.__qcQueue = null;
+          toast(q.items.length + ' 条货品已全部录入完成', 'success');
         }
         return ret;
       };
