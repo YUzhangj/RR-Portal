@@ -5,8 +5,11 @@ import { getTokenPayload, type RecordModel } from 'pocketbase'
 import AppLayout from '../components/AppLayout.vue'
 import { pb } from '../pb'
 import { useAuthStore } from '../stores/auth'
+import { useOrdersStore } from '../stores/orders'
+import { patrolOutputAmounts } from '../utils/outputPeriod'
+import type { Order } from '../types/order'
 import { useFactoriesStore } from '../stores/factories'
-import { allowedRegions, canEditQuality, canViewCraft } from '../utils/permissions'
+import { allowedRegions, canEditQuality, canViewCraft, canViewOutput } from '../utils/permissions'
 import { REGION_LABELS, regionOf, type Region } from '../constants/roles'
 import { PATROL_FIELDS, PATROL_TABLE_FIELDS, PATROL_GRADES, PATROL_GUIDANCE, patrolSummary, patrolDisplayValue } from '../utils/qualityPatrol'
 
@@ -15,7 +18,7 @@ const QualityPatrolCompare = defineAsyncComponent(() => import('../components/Qu
 const importOpen = ref(false)
 const compareOpen = ref(false)
 const tableFields = PATROL_TABLE_FIELDS
-const columnCount = computed(() => tableFields.length + 4 + (editable.value ? 1 : 0))
+const columnCount = computed(() => tableFields.length + 5 + (editable.value ? 1 : 0))
 const auth = useAuthStore()
 const factories = useFactoriesStore()
 const route = useRoute()
@@ -25,6 +28,49 @@ const editable = computed(() => !!auth.role && canEditQuality(auth.role))
 const authorizedFactories = computed(() => factories.items.filter(f => regions.value.includes(regionOf(f)) && canViewCraft(f.craft)))
 const availableFactories = computed(() => authorizedFactories.value.filter(f => !region.value || regionOf(f) === region.value))
 const records = ref<RecordModel[]>([])
+const orders = useOrdersStore()
+const outputOrders = ref<Order[]>([])
+const outputState = ref('加载中…')
+let outputRequest = 0
+let outputTimer: ReturnType<typeof setInterval> | undefined
+const outputAuthRevision = ref(0)
+const outputAllowed = computed(() => { void outputAuthRevision.value; return !!auth.userId && !!auth.role && canViewOutput(auth.role) })
+const actualAmounts = computed(() => {
+  const result: Record<string, Record<string, number> | null> = {}
+  for (const row of rows.value) {
+    const day = String(row.check_date).slice(0, 10)
+    if (!(day in result)) result[day] = patrolOutputAmounts(outputOrders.value, day)
+  }
+  return result
+})
+function actualOutput(row: RecordModel) {
+  if (!outputAllowed.value) return '无产值查看权限'
+  if (outputState.value) return outputState.value
+  const amounts = actualAmounts.value[String(row.check_date).slice(0, 10)]
+  if (!amounts) return '检查日期无效'
+  return (amounts[row.factory] || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+async function refreshOutput() {
+  const current = ++outputRequest
+  outputOrders.value = []
+  outputState.value = '加载中…'
+  if (!outputAllowed.value) { outputState.value = '无产值查看权限'; return }
+  try {
+    const result = await orders.fetchAll(undefined, { force: true })
+    if (disposed || current !== outputRequest) return
+    outputOrders.value = result
+    outputState.value = ''
+  } catch { if (!disposed && current === outputRequest) outputState.value = '产值加载失败' }
+}
+function clearOutputAccess() {
+  outputAuthRevision.value++
+  ++outputRequest
+  outputOrders.value = []
+  outputState.value = '请刷新产值'
+}
+const stopOutputAuth = pb.authStore.onChange(clearOutputAccess)
+watch(() => auth.userId, clearOutputAccess)
+
 const date = ref('')
 const search = ref('')
 const grade = ref('')
@@ -110,7 +156,7 @@ function photoFailed() {
 }
 watch(() => auth.userId, () => { stopPhotoAccess(); photoError.value = '' })
 watch(region, () => { date.value = dates.value[0] || '' })
-onBeforeUnmount(() => { disposed = true; stopPhotoAccess() })
+onBeforeUnmount(() => { disposed = true; ++outputRequest; clearInterval(outputTimer); stopOutputAuth(); stopPhotoAccess() })
 
 async function onImported(checkDate: string, importedRegion: Region) {
   region.value = importedRegion
@@ -120,6 +166,7 @@ async function onImported(checkDate: string, importedRegion: Region) {
 }
 async function load() {
   loading.value = true
+  void refreshOutput()
   error.value = ''
   try {
     await factories.fetchAll()
@@ -130,7 +177,7 @@ async function load() {
   } catch { error.value = '巡查记录加载失败，请确认服务已更新并重试。' }
   finally { loading.value = false }
 }
-onMounted(load)
+onMounted(() => { void load(); outputTimer = setInterval(() => { if (document.visibilityState === 'visible' && !editing.value && !importOpen.value) void refreshOutput() }, 60000) })
 function openForm(record?: RecordModel) {
   returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
   formError.value = ''
@@ -231,14 +278,15 @@ async function remove(r: RecordModel) {
       <div v-if="photoError" role="alert" class="error">{{ photoError }} <button @click="refreshPhotoAccess">刷新照片</button></div>
       <p v-if="loading" role="status">正在加载巡查记录…</p>
       <template v-else-if="!error">
+        <p class="guidance">实际总产值按产值管理口径，汇总下单日期从检查当年1月1日至检查当日（含当天）的订单金额；页面每分钟自动更新，也可点击刷新。<button v-if="outputState === '产值加载失败'" @click="refreshOutput">重试产值</button></p>
         <div class="sheet-heading">{{ date || '各期' }} {{ region ? REGION_LABELS[region] : '' }}加工厂检查总结</div>
         <div class="sheet-scroll">
           <table class="patrol-table">
-            <thead><tr><th scope="col">序号</th><th scope="col">厂名</th><th v-for="f in tableFields" :key="f.key" scope="col" :class="['field-' + f.key, { narrative: f.type === 'text' }]">{{ headerLabel(f) }}</th><th scope="col">现场照片</th><th scope="col">备注</th><th v-if="editable" scope="col">操作</th></tr></thead>
+            <thead><tr><th scope="col">序号</th><th scope="col">厂名</th><template v-for="f in tableFields" :key="f.key"><th scope="col" :class="['field-' + f.key, { narrative: f.type === 'text' }]">{{ headerLabel(f) }}</th><th v-if="f.key === 'processing_fee'" scope="col" class="actual-output">实际总产值（元）<small>当年1月1日至检查当日</small></th></template><th scope="col">现场照片</th><th scope="col">备注</th><th v-if="editable" scope="col">操作</th></tr></thead>
             <tbody>
               <tr v-for="(r, i) in rows" :key="r.id">
                 <td>{{ i + 1 }}</td><td class="factory-cell" :class="{ visitor: r.visitor_ready }"><strong>{{ factoryName(r.factory) }}</strong><small>{{ r.check_date.slice(0, 10) }}</small></td>
-                <td v-for="f in tableFields" :key="f.key" :class="['field-' + f.key, { narrative: f.type === 'text', 'grade-cell': f.type === 'grade', warning: f.key === 'staff' && r.below_standard }]">{{ display(r, f) }}<small v-if="f.key === 'processing_fee' && feePeriods.length !== 1 && r.processing_fee_period">{{ r.processing_fee_period }}</small></td>
+                <template v-for="f in tableFields" :key="f.key"><td :class="['field-' + f.key, { narrative: f.type === 'text', 'grade-cell': f.type === 'grade', warning: f.key === 'staff' && r.below_standard }]">{{ display(r, f) }}<small v-if="f.key === 'processing_fee' && feePeriods.length !== 1 && r.processing_fee_period">{{ r.processing_fee_period }}</small></td><td v-if="f.key === 'processing_fee'" class="actual-output">{{ actualOutput(r) }}</td></template>
                 <td class="photo-cell"><template v-if="fileToken"><a v-for="name in r.photos || []" :key="name" :href="photoUrl(r, name)" target="_blank" rel="noopener noreferrer"><img :src="photoUrl(r, name)" alt="现场照片" loading="lazy" referrerpolicy="no-referrer" @error="photoFailed" /></a></template><span v-if="r.photos?.length && !fileToken">照片暂不可用</span><span v-if="!r.photos?.length">—</span></td><td class="narrative">{{ r.notes || '—' }}</td>
                 <td v-if="editable"><div class="actions"><button :disabled="saving" @click="openForm(r)">编辑</button><button :disabled="saving" @click="remove(r)">删除</button></div></td>
               </tr>
@@ -287,6 +335,8 @@ th { background: #f2f2f2; color: #202635; }
 .narrative { min-width: 230px; max-width: 340px; text-align: left; line-height: 1.65; overflow-wrap: anywhere; }
 .factory-cell { min-width: 170px; max-width: 220px; overflow-wrap: anywhere; } small { display: block; margin-top: 8px; color: #45515e; }
 .field-responsibility_scope, .field-responsible_supervisor { min-width: 90px; max-width: 150px; overflow-wrap: anywhere; }
+.actual-output { min-width: 180px; }
+.actual-output small { display: block; font-weight: normal; margin-top: 6px; }
 .field-processing_fee { min-width: 130px; }
 .field-completed_date { min-width: 165px; max-width: 230px; line-height: 1.65; overflow-wrap: anywhere; }
 .field-help { color: #596275; margin: 0; line-height: 1.6; }
