@@ -1,16 +1,31 @@
 import type { AppConfig, DirEntry, DocTypeItem, Overview, ProjectInfo, TrashItem, WalkItem } from "@/types";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
+  const method = (init?.method || "GET").toUpperCase();
+  const headers = new Headers(init?.headers);
+  if (method !== "GET" && method !== "HEAD") headers.set("X-EPMS-Request", "1");
+  if (method !== "GET" && method !== "HEAD" && !url.startsWith("api/epms/")) requireEdit();
+  const res = await fetch(url, { ...init, headers, credentials: "same-origin" });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data as { error?: string }).error || `请求失败 (${res.status})`);
+  if (!res.ok) {
+    const error = new Error((data as { error?: string }).error || "请求失败 (" + res.status + ")");
+    Object.assign(error, { status: res.status });
+    throw error;
+  }
   return data as T;
 }
 
 const enc = encodeURIComponent;
+let verifiedSession: EpmsSession | null = null;
+export function setApiSession(value: EpmsSession | null) { verifiedSession = value; }
+function requireEdit() {
+  if (!verifiedSession?.canEdit) throw new Error("当前账号只读；请使用具有资料编辑权限的核心账号登录");
+}
 
 export const api = {
   config: () => req<AppConfig>("api/config"),
+
+  editorAccess: (path: string) => req<{ readOnly: boolean; reason?: string }>(`api/editor-access?path=${enc(path)}`),
 
   list: (path: string) => req<{ path: string; entries: DirEntry[] }>(`api/list?path=${enc(path)}`),
 
@@ -96,12 +111,14 @@ export const api = {
     onProgress?: (pct: number) => void,
     opts?: { overwrite?: boolean; baseMtime?: number },
   ): Promise<{ ok: true; name: string }> {
+    try { requireEdit(); } catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       const params = [`path=${enc(dirPath)}`, `name=${enc(file.name)}`];
       if (opts?.overwrite) params.push("overwrite=1");
       if (opts?.baseMtime) params.push(`baseMtime=${opts.baseMtime}`);
       xhr.open("POST", `api/upload?${params.join("&")}`);
+      xhr.setRequestHeader("X-EPMS-Request", "1");
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
       };
@@ -118,4 +135,19 @@ export const api = {
       xhr.send(file);
     });
   },
+
+  /* ---------- Server-verified personal account ---------- */
+  epmsSession: () => req<EpmsSession>("api/epms/session"),
+  epmsLogin: (username: string, password: string) =>
+    req<EpmsSession>("api/epms/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) }),
+  epmsLogout: () => req<{ ok: true }>("api/epms/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }),
+
 };
+
+export interface EpmsSession {
+  id: string;
+  name: string;
+  canRead: boolean;
+  canEdit: boolean;
+  canReview: boolean;
+}

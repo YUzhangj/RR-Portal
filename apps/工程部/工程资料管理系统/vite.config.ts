@@ -15,6 +15,7 @@ export default defineConfig({
   preview: {
     port: 3100,
     host: true, // 生产模式同样对局域网开放
+    allowedHosts: true, // 保留现有 .local / 自定义主机名访问能力
   },
   resolve: {
     alias: {

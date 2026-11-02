@@ -12,24 +12,29 @@ const page = fs.readFileSync(path.join(app, 'src/sections/DocEditor.tsx'), 'utf8
 const tree = ts.createSourceFile('DocEditor.tsx', page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 let effect;
 function visit(node) {
-  if (ts.isCallExpression(node) && node.expression.getText(tree) === 'useEffect' && node.arguments[1]?.getText(tree) === '[path]') effect = node.arguments[0];
+  if (ts.isCallExpression(node) && node.expression.getText(tree) === 'useEffect' && node.arguments[1]?.getText(tree) === '[path, session?.id, session?.canEdit]') effect = node.arguments[0];
   ts.forEachChild(node, visit);
 }
 visit(tree); assert.ok(effect);
 const effectJs = ts.transpileModule('(' + effect.getText(tree) + ')', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 
-async function open(file, exists) {
+async function open(file, exists, replayEffect = false, access = { readOnly: false }, canEdit = true) {
   const calls = [], values = {};
   const context = vm.createContext({ path: file, fileName: path.basename(file), dirtyRef: { current: false }, destroyedRef: { current: false }, CONTAINER_ID: 'test-editor',
-    api: { stat: async p => { calls.push(['stat', p]); if (!exists.includes(p)) throw Error('404'); return { mtime: 100, size: 1 }; }, fileUrl: p => p },
+    session: { id: 'synthetic-user', canEdit },
+    api: { stat: async p => { calls.push(['stat', p]); if (!exists.includes(p)) throw Error('404'); return { mtime: 100, size: 1 }; }, fileUrl: p => p,
+      editorAccess: async p => { calls.push(['access', p]); if (access instanceof Error) throw access; return access; } },
     fetch: async p => { calls.push(['fetch', p]); return { ok: true, arrayBuffer: async () => new ArrayBuffer(1) }; },
     ensureLuckysheet: async () => calls.push(['engine']),
-    window: { LuckyExcel: { transformExcelToLucky: (_buf, cb) => cb({ sheets: [{}] }) }, luckysheet: { create: () => calls.push(['create']), destroy() {} } },
+    window: { LuckyExcel: { transformExcelToLucky: (_buf, cb) => cb({ sheets: [{}] }) }, luckysheet: { create: options => calls.push(['create', options]), destroy() {} } },
     setResolvedPath: p => { values.resolvedPath = p; }, setBaseMtime: n => { values.baseMtime = n; },
-    setError: e => { values.error = e; }, setPhase: p => { values.phase = p; },
-    document: { getElementById: () => ({ addEventListener() {} }) }, markDirty() {},
+    setError: e => { values.error = e; }, setPhase: p => { values.phase = p; }, setAccess: value => { values.access = value; }, setDirty() {}, onDirtyChange() {},
+    document: { getElementById: () => ({ addEventListener() {}, removeEventListener() {} }) }, markDirty() {},
   });
-  vm.runInContext(effectJs, context)();
+  const setup = vm.runInContext(effectJs, context);
+  const cleanup = setup();
+  // React StrictMode replays setup after cleanup on the same mounted refs.
+  if (replayEffect) { cleanup(); setup(); }
   for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r));
   return { calls, values };
 }
@@ -53,6 +58,31 @@ test('other document types never enter the Excel resolver or workbook parser', a
     const result = await open(file, [file]); assert.equal(result.values.phase, 'error');
     assert.deepEqual(result.calls, []);
   }
+});
+
+test('editor still initializes after StrictMode cleanup replays its effect', async () => {
+  const result = await open('客户/排模表.xlsx', ['客户/排模表.xlsx'], true);
+  assert.equal(result.values.phase, 'ready');
+  assert.equal(result.calls.filter(c => c[0] === 'create').length, 1);
+});
+
+test('editor is read-only for readers, controlled documents, or failed access checks', async () => {
+  for (const [access, canEdit] of [[{ readOnly: false }, false], [{ readOnly: true, reason: '历史受控资料只读' }, true], [new Error('offline'), true]]) {
+    const result = await open('客户/排模表.xlsx', ['客户/排模表.xlsx'], false, access, canEdit);
+    assert.equal(result.values.phase, 'ready');
+    const options = result.calls.find(c => c[0] === 'create')[1];
+    assert.equal(options.allowEdit, false);
+    assert.equal(options.enableAddRow, false);
+    assert.equal(options.showtoolbar, false);
+    if (access instanceof Error) assert.equal(result.values.access.readOnly, true);
+  }
+});
+
+test('historical protection uses a read-only explanation without hiding corrupt-record errors', async () => {
+  const historical = await open('客户/排模表.xlsx', ['客户/排模表.xlsx'], false, { readOnly: true, reason: '编辑锁已失效或属于其他窗口，请重新读取并获取锁' });
+  assert.equal(historical.values.access.reason, '历史受控资料已保留，当前界面仅供查看');
+  const damaged = await open('客户/排模表.xlsx', ['客户/排模表.xlsx'], false, { readOnly: true, reason: '单据记录损坏，原资料已保留' });
+  assert.equal(damaged.values.access.reason, '单据记录损坏，原资料已保留');
 });
 
 // Extract actual read-only route dependencies and handler, rather than reimplement selection.

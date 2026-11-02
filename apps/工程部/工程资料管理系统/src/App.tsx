@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { api } from "@/lib/api";
+import { CoreAccountControl, EpmsAccountProvider } from "@/components/EpmsAccount";
+import { useEpmsAccess } from "@/lib/epms-access";
 import type { AppConfig, View } from "@/types";
 import ClientsView from "@/sections/ClientsView";
 import ClientView from "@/sections/ClientView";
@@ -23,14 +25,18 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Clock3, FolderPlus, HardDriveDownload, LayoutGrid, Search, Trash2 } from "lucide-react";
 
-export default function App() {
+function EngineeringApp() {
+  const { session, revision } = useEpmsAccess();
+  const canEdit = Boolean(session?.canEdit);
+  const [editorDirty, setEditorDirty] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configError, setConfigError] = useState("");
   const [view, setView] = useState<View>({ type: "clients" });
   const [dialog, setDialog] = useState<DialogState>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [refreshCount, setRefreshCount] = useState(0);
+  const refreshKey = refreshCount + revision;
 
-  const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const refresh = useCallback(() => setRefreshCount((k) => k + 1), []);
 
   useEffect(() => {
     api
@@ -39,19 +45,20 @@ export default function App() {
       .catch((e) => setConfigError(e.message));
   }, []);
 
-  const navigate = useCallback((v: View) => setView(v), []);
-  const goPath = useCallback((path: string) => setView({ type: "explorer", path }), []);
+  const allowLeaveEditor = useCallback(() => view.type !== "editor" || !editorDirty
+    || window.confirm("资料有未保存的修改，确定不保存就离开吗？"), [view.type, editorDirty]);
+  const navigate = useCallback((v: View) => { if (allowLeaveEditor()) setView(v); }, [allowLeaveEditor]);
+  const goPath = useCallback((path: string) => { if (allowLeaveEditor()) setView({ type: "explorer", path }); }, [allowLeaveEditor]);
 
   // 进入编辑器前的视图，用于「返回」
   const editorBackRef = useRef<View>({ type: "clients" });
   const openEditor = useCallback(
     (path: string, name: string) => {
-      setView((cur) => {
-        if (cur.type !== "editor") editorBackRef.current = cur;
-        return { type: "editor", path, name };
-      });
+      if (!allowLeaveEditor()) return;
+      if (view.type !== "editor") editorBackRef.current = view;
+      setView({ type: "editor", path, name });
     },
-    [],
+    [allowLeaveEditor, view],
   );
 
   if (configError) {
@@ -87,14 +94,14 @@ export default function App() {
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-slate-100 text-slate-900">
       {/* 顶部导航栏 */}
-      <header className="flex shrink-0 items-center gap-3 border-b bg-white px-4 py-2.5">
+      <header className="flex shrink-0 flex-wrap items-center gap-3 border-b bg-white px-4 py-2.5">
         <div className="flex items-baseline gap-2">
           <h1 className="text-base font-bold tracking-tight">工程资料管理系统</h1>
           <span className="hidden max-w-72 truncate text-xs text-slate-400 lg:inline" title={config?.root}>
             {config?.root}
           </span>
         </div>
-        <nav className="ml-4 flex items-center gap-1">
+        <nav className="flex flex-wrap items-center gap-1 sm:ml-4">
           {navBtn(<LayoutGrid className="h-4 w-4" />, "客户", view.type === "clients" || view.type === "client", () =>
             navigate({ type: "clients" }),
           )}
@@ -108,8 +115,12 @@ export default function App() {
             navigate({ type: "trash" }),
           )}
         </nav>
-        <div className="ml-auto">
-          <Button size="sm" onClick={() => setDialog({ type: "newProject" })}>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <CoreAccountControl beforeLogout={async () => {
+            if (editorDirty && !window.confirm("资料有未保存的修改。请先保存或下载备用；确定退出并放弃这些修改吗？"))
+              throw new Error("已取消退出，未保存的资料仍保留在当前页面");
+          }} />
+          <Button disabled={!canEdit} size="sm" onClick={() => setDialog({ type: "newProject" })}>
             <FolderPlus className="mr-1.5 h-4 w-4" /> 新建项目
           </Button>
         </div>
@@ -128,6 +139,7 @@ export default function App() {
             name={view.name}
             onClose={() => setView(editorBackRef.current)}
             onSaved={refresh}
+            onDirtyChange={setEditorDirty}
           />
         ) : (
           <div className="h-full overflow-y-auto">
@@ -223,4 +235,8 @@ export default function App() {
       <Toaster richColors position="top-center" />
     </div>
   );
+}
+
+export default function App() {
+  return <EpmsAccountProvider><EngineeringApp /></EpmsAccountProvider>;
 }
