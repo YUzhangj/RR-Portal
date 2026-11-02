@@ -227,3 +227,21 @@ test('ordinary documents still support real create, copy, upload, download, rena
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(x.root, '.回收站/manifest.json'), 'utf8')), []);
   } finally { x.cleanup(); }
 });
+test('both existing purchase-list names remain discoverable with case-insensitive xlsx preference and xls fallback', async () => {
+  const x = fixture(); try {
+    for (const [index, name] of ['外购清单', '外购件清单'].entries()) {
+      const project = 'Client/2026/Alias' + index, directory = path.join(x.root, project, '工程放产资料');
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(path.join(directory, name + '.xls'), 'synthetic legacy file');
+      fs.writeFileSync(path.join(directory, name + '.XLSX'), 'synthetic modern file');
+      const before = snapshot(x.root);
+      const response = await x.call('/api/doctypes?project=' + encodeURIComponent(project));
+      assert.equal(response.status, 200);
+      assert.equal(response.body.items.find(item => item.name === '外购件清单').existing, '工程放产资料/' + name + '.XLSX');
+      assert.deepEqual(snapshot(x.root), before);
+      fs.unlinkSync(path.join(directory, name + '.XLSX'));
+      const fallback = await x.call('/api/doctypes?project=' + encodeURIComponent(project));
+      assert.equal(fallback.body.items.find(item => item.name === '外购件清单').existing, '工程放产资料/' + name + '.xls');
+    }
+  } finally { x.cleanup(); }
+});

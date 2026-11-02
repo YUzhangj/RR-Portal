@@ -369,9 +369,11 @@ const routes: Record<string, { method: string; handler: Handler }> = {
       }
       const items = docTypes.map((dt) => {
         // 同名资料同时存在 .xls 与 .xlsx 时优先 .xlsx（可在网页编辑器打开）
+        const names = dt.name === "外购件清单" ? ["外购件清单", "外购清单"] : [dt.name];
+        const matches = (file: WalkItem) => names.some((name) => file.name.includes(name));
         const hit =
-          projectFiles.find((f) => f.name.includes(dt.name) && f.ext === ".xlsx") ??
-          projectFiles.find((f) => f.name.includes(dt.name));
+          projectFiles.find((file) => matches(file) && file.ext === ".xlsx") ??
+          projectFiles.find(matches);
         return {
           name: dt.name,
           dir: dt.dir,
