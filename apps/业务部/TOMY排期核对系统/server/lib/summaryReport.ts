@@ -1,13 +1,21 @@
-import type { ReconciliationResult } from '../types/index.js'
+import type { CustomerScheduleReconciliationResult, ReconciliationResult } from '../types/index.js'
 
 const DG_LABEL = 'RR01/东莞'
 const ID_LABEL = 'RR02/印尼RRI'
 const RRM_LABEL = 'RR03/印尼RRM'
+const CUSTOMER_LABEL = '客户排期'
 
 const EMPTY_RESULT: ReconciliationResult = {
   matched: [],
   unmatchedPOItems: [],
   ambiguousPOItems: [],
+  errors: [],
+}
+
+const EMPTY_CUSTOMER_RESULT: CustomerScheduleReconciliationResult = {
+  matched: [],
+  unmatchedRows: [],
+  ambiguousRows: [],
   errors: [],
 }
 
@@ -23,10 +31,12 @@ export function buildSummaryReport(
   dgResult: ReconciliationResult | null | undefined,
   idResult: ReconciliationResult | null | undefined,
   rrmResult?: ReconciliationResult | null | undefined,
+  customerResult?: CustomerScheduleReconciliationResult | null | undefined,
 ): string {
   const dg = dgResult ?? EMPTY_RESULT
   const id = idResult ?? EMPTY_RESULT
   const rrm = rrmResult ?? EMPTY_RESULT
+  const customer = customerResult ?? EMPTY_CUSTOMER_RESULT
 
   const lines: string[] = []
 
@@ -41,7 +51,8 @@ export function buildSummaryReport(
   const dgMismatched = dg.matched.filter(r => r.mismatches.length > 0)
   const idMismatched = id.matched.filter(r => r.mismatches.length > 0)
   const rrmMismatched = rrm.matched.filter(r => r.mismatches.length > 0)
-  const totalMismatched = dgMismatched.length + idMismatched.length + rrmMismatched.length
+  const customerMismatched = customer.matched.filter(r => r.mismatches.length > 0)
+  const totalMismatched = dgMismatched.length + idMismatched.length + rrmMismatched.length + customerMismatched.length
 
   lines.push(`【字段不一致】共 ${totalMismatched} 条`)
   lines.push('----------------------------------------')
@@ -73,10 +84,19 @@ export function buildSummaryReport(
     }
   }
 
+  for (const row of customerMismatched) {
+    lines.push(`PO: ${row.tomyPO}  货号: ${row.货号}  来源: ${row.sourceSchedule}`)
+    for (const m of row.mismatches) {
+      lines.push(`  字段: ${m.field}`)
+      lines.push(`    客户排期值: ${m.scheduleValue}`)
+      lines.push(`    工厂排期/规则值: ${m.poValue}`)
+    }
+  }
+
   lines.push('')
 
   // Section 2: Unmatched PO items
-  const totalUnmatched = dg.unmatchedPOItems.length + id.unmatchedPOItems.length + rrm.unmatchedPOItems.length
+  const totalUnmatched = dg.unmatchedPOItems.length + id.unmatchedPOItems.length + rrm.unmatchedPOItems.length + customer.unmatchedRows.length
 
   lines.push(`【PO未匹配】共 ${totalUnmatched} 条`)
   lines.push('----------------------------------------')
@@ -93,10 +113,15 @@ export function buildSummaryReport(
     lines.push(`PO: ${item.tomyPO}  货号: ${item.货号}  工厂: ${RRM_LABEL}  来源: ${item.sourceFile}`)
   }
 
+
+  for (const item of customer.unmatchedRows) {
+    lines.push(`PO: ${item.tomyPO}  货号: ${item.货号}  来源: ${CUSTOMER_LABEL}`)
+  }
+
   lines.push('')
 
   // Section 3: Summary counts
-  const totalErrors = dg.errors.length + id.errors.length + rrm.errors.length
+  const totalErrors = dg.errors.length + id.errors.length + rrm.errors.length + customer.errors.length
   lines.push('========================================')
   lines.push('汇总统计')
   lines.push('========================================')

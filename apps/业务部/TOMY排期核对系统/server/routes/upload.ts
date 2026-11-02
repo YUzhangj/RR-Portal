@@ -7,7 +7,19 @@ import { reconcile } from '../lib/reconciler.js'
 import { writeAnnotatedSchedule } from '../lib/excelWriter.js'
 import { buildZipBuffer } from '../lib/zipBuilder.js'
 import { buildSummaryReport } from '../lib/summaryReport.js'
-import type { FileResult, ProcessResponse, POData, ReconciliationResult, ReconciliationSummary } from '../types/index.js'
+import {
+  parseCustomerScheduleExcel,
+  reconcileCustomerSchedule,
+  writeAnnotatedCustomerSchedule,
+} from '../lib/customerSchedule.js'
+import type {
+  CustomerScheduleReconciliationResult,
+  FileResult,
+  ProcessResponse,
+  POData,
+  ReconciliationResult,
+  ReconciliationSummary,
+} from '../types/index.js'
 
 // Fix multer's Latin-1 decoded filename back to correct UTF-8.
 // Multer decodes multipart filenames as Latin-1 (binary), but browsers send UTF-8.
@@ -29,17 +41,26 @@ const upload = multer({
   limits: { fileSize: 25 * 1024 * 1024 },
 })
 
-// Session-scoped output buffer store: sessionId → { buffer, timer }
-const outputStore = new Map<string, { buffer: Buffer; timer: ReturnType<typeof setTimeout> }>()
+// Session-scoped output buffer store. Entries remain downloadable until the TTL expires.
+const outputStore = new Map<string, {
+  buffer: Buffer
+  timer: ReturnType<typeof setTimeout>
+  contentType: string
+  filename: string
+}>()
 
 const SESSION_TTL_MS = 30 * 60 * 1000 // 30 minutes
 
-function storeOutput(buffer: Buffer): string {
+function storeOutput(
+  buffer: Buffer,
+  contentType = 'application/zip',
+  filename = 'TOMY_reconciliation.zip',
+): string {
   const sessionId = crypto.randomUUID()
   const timer = setTimeout(() => {
     outputStore.delete(sessionId)
   }, SESSION_TTL_MS)
-  outputStore.set(sessionId, { buffer, timer })
+  outputStore.set(sessionId, { buffer, timer, contentType, filename })
   return sessionId
 }
 
@@ -70,6 +91,35 @@ function buildReconciliationSummary(result: ReconciliationResult): Reconciliatio
   }
 }
 
+function buildCustomerReconciliationSummary(
+  result: CustomerScheduleReconciliationResult,
+): ReconciliationSummary {
+  return {
+    matchedCount: result.matched.length,
+    unmatchedCount: result.unmatchedRows.length,
+    ambiguousCount: result.ambiguousRows.length,
+    mismatchedFieldCount: result.matched.reduce((sum, match) => sum + match.mismatches.length, 0),
+    errors: result.errors,
+    details: {
+      matched: result.matched.map((match) => ({
+        tomyPO: match.tomyPO,
+        货号: match.货号,
+        sourceFile: match.sourceSchedule,
+        mismatches: match.mismatches.map((mismatch) => ({
+          field: mismatch.field,
+          scheduleValue: mismatch.scheduleValue,
+          poValue: mismatch.poValue,
+        })),
+      })),
+      unmatched: result.unmatchedRows.map((row) => ({
+        tomyPO: row.tomyPO,
+        货号: row.货号,
+        sourceFile: '客户排期',
+      })),
+    },
+  }
+}
+
 // Empty result fallback for optional single-factory submissions
 const emptyResult: ReconciliationResult = {
   matched: [],
@@ -85,12 +135,14 @@ router.post(
     { name: 'pos', maxCount: 100 },
     { name: 'scheduleDg', maxCount: 1 },
     { name: 'scheduleId', maxCount: 1 },
+    { name: 'scheduleCustomer', maxCount: 1 },
   ]),
   async (req, res) => {
     const files = req.files as { [fieldname: string]: Express.Multer.File[] }
     const poFiles = files?.pos || []
     const scheduleDgFiles = files?.scheduleDg || []
     const scheduleIdFiles = files?.scheduleId || []
+    const scheduleCustomerFiles = files?.scheduleCustomer || []
 
     // Use clean filenames sent from frontend (avoids multer encoding issues)
     let poNames: string[] = []
@@ -99,6 +151,7 @@ router.post(
     } catch { /* use multer names as fallback */ }
     const scheduleDgName = (req.body?.scheduleDgName as string) || ''
     const scheduleIdName = (req.body?.scheduleIdName as string) || ''
+    const scheduleCustomerName = (req.body?.scheduleCustomerName as string) || ''
 
     // Process each PO PDF — keep original buffers for ZIP inclusion
     const results: FileResult[] = []
@@ -174,14 +227,38 @@ router.post(
       }
     }
 
+    // Process customer schedule Excel (red headers are the primary check fields).
+    let scheduleCustomerResult: ProcessResponse['scheduleCustomer'] = null
+    let customerBuffer: Buffer | null = null
+    let customerScheduleRows = null
+
+    if (scheduleCustomerFiles.length > 0) {
+      const file = scheduleCustomerFiles[0]
+      const displayName = scheduleCustomerName || fixFilename(file.originalname)
+      try {
+        const rows = await parseCustomerScheduleExcel(file.buffer)
+        scheduleCustomerResult = { filename: displayName, status: 'done', rowCount: rows.length }
+        customerBuffer = file.buffer
+        customerScheduleRows = rows
+      } catch (err) {
+        scheduleCustomerResult = {
+          filename: displayName,
+          status: 'error',
+          rowCount: 0,
+          error: err instanceof Error ? err.message : 'Unknown error',
+        }
+      }
+    }
+
     const response: ProcessResponse = {
       files: results,
       scheduleDg: scheduleDgResult,
       scheduleId: scheduleIdResult,
+      scheduleCustomer: scheduleCustomerResult,
     }
 
-    // Run dual reconciliation if any schedule is available
-    if (dgBuffer !== null || idBuffer !== null) {
+    // Run reconciliation if any schedule is available
+    if (dgBuffer !== null || idBuffer !== null || customerBuffer !== null) {
       const poDataList: POData[] = results
         .filter((r) => r.status === 'done' && r.data !== null)
         .map((r) => r.data!)
@@ -200,17 +277,19 @@ router.post(
         let dgResult: ReconciliationResult | null = null
         let idResult: ReconciliationResult | null = null
         let rrmResult: ReconciliationResult | null = null
+        let customerResult: CustomerScheduleReconciliationResult | null = null
         let dgExcel: Buffer | null = null
         let idExcel: Buffer | null = null
         let rrmExcel: Buffer | null = null
+        let customerExcel: Buffer | null = null
 
-        if (dgBuffer !== null && dgScheduleRows !== null) {
+        if (dgBuffer !== null && dgScheduleRows !== null && (poFiles.length > 0 || customerBuffer === null)) {
           dgResult = reconcile(dgPOs, dgScheduleRows)
           dgExcel = await writeAnnotatedSchedule(dgBuffer, dgResult, dgScheduleRows)
           response.reconciliationDg = buildReconciliationSummary(dgResult)
         }
 
-        if (idBuffer !== null && idScheduleRows !== null) {
+        if (idBuffer !== null && idScheduleRows !== null && (poFiles.length > 0 || customerBuffer === null)) {
           // RR02 (RRI) → KIK总排期 sheet
           idResult = reconcile(idPOs, idScheduleRows)
           idExcel = await writeAnnotatedSchedule(idBuffer, idResult, idScheduleRows, 'KIK总排期')
@@ -224,17 +303,35 @@ router.post(
           }
         }
 
+
+        if (customerBuffer !== null && customerScheduleRows !== null) {
+          customerResult = reconcileCustomerSchedule(customerScheduleRows, {
+            dg: dgScheduleRows,
+            id: idScheduleRows,
+            rrm: rrmScheduleRows,
+          })
+          customerExcel = await writeAnnotatedCustomerSchedule(customerBuffer, customerResult)
+          response.reconciliationCustomer = buildCustomerReconciliationSummary(customerResult)
+          response.customerSessionId = storeOutput(
+            customerExcel,
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            '客户排期核对结果.xlsx',
+          )
+        }
+
         // Build summary report and ZIP
         const summaryText = buildSummaryReport(
           dgResult ?? emptyResult,
           idResult ?? emptyResult,
           rrmResult ?? emptyResult,
+          customerResult,
         )
 
         const zipEntries: Array<{ name: string; buffer: Buffer }> = []
         if (dgExcel) zipEntries.push({ name: 'DG/东莞排期核对结果.xlsx', buffer: dgExcel })
         if (idExcel) zipEntries.push({ name: 'ID/印尼排期核对结果.xlsx', buffer: idExcel })
         if (rrmExcel) zipEntries.push({ name: 'RRM/印尼排期核对结果.xlsx', buffer: rrmExcel })
+        if (customerExcel) zipEntries.push({ name: '客户排期/客户排期核对结果.xlsx', buffer: customerExcel })
 
         // Add original PO PDFs to their factory folders
         for (const po of poBuffers) {
@@ -264,6 +361,7 @@ router.post(
         if (dgBuffer !== null) response.reconciliationDg = { ...emptyErrorSummary }
         if (idBuffer !== null) response.reconciliationId = { ...emptyErrorSummary }
         if (idBuffer !== null) response.reconciliationRrm = { ...emptyErrorSummary }
+        if (customerBuffer !== null) response.reconciliationCustomer = { ...emptyErrorSummary }
         response.outputReady = false
       }
     }
@@ -282,12 +380,11 @@ router.get('/download/:sessionId', (req, res) => {
     return
   }
 
-  // Clear the auto-cleanup timer and remove from store (one-time download)
-  clearTimeout(entry.timer)
-  outputStore.delete(sessionId)
-
-  res.setHeader('Content-Type', 'application/zip')
-  res.setHeader('Content-Disposition', 'attachment; filename="TOMY_reconciliation.zip"')
+  res.setHeader('Content-Type', entry.contentType)
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename*=UTF-8''${encodeURIComponent(entry.filename)}`,
+  )
   res.send(entry.buffer)
 })
 

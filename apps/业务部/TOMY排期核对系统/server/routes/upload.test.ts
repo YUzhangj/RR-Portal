@@ -6,6 +6,8 @@ import { dirname } from 'path'
 import app from '../index.js'
 import type { Server } from 'http'
 import type { ProcessResponse, FileResult } from '../types/index.js'
+import ExcelJS from 'exceljs'
+import { CUSTOMER_CHECK_HEADERS } from '../lib/customerSchedule.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = resolve(__dirname, '../../')
@@ -172,5 +174,72 @@ describe('POST /api/process', () => {
     expect(result.data).toHaveProperty('customerPO')
     expect(result.data).toHaveProperty('items')
     expect(Array.isArray(result.data?.items)).toBe(true)
+  }, 60000)
+
+  it('processes a customer schedule and returns its reconciliation result', async () => {
+    const customerWorkbook = new ExcelJS.Workbook()
+    const sheet = customerWorkbook.addWorksheet('Open Order')
+    sheet.addRow(CUSTOMER_CHECK_HEADERS)
+    const values: Record<string, unknown> = {
+      'Ship To Cust Name': 'TOMY AUSTRALIA PTY, LTD.',
+      'Customer PO #': '20218996',
+      'Ship To Country': 'AUSTRALIA',
+      'Part Number': '47023A1',
+      'PO Num': '10123190',
+      'Order Qty': 600,
+      'Unit Cost': 4.419,
+      'Purchase Amount': 2651.4,
+      'PO Due Date': new Date(2026, 8, 9),
+      'QC Result': 'Pass',
+      'QC Inspection Date': new Date(2026, 8, 8),
+      'Purchase Point Name': 'DONGGUAN HANSON PLASTIC PRODUCT LTD',
+    }
+    sheet.addRow(CUSTOMER_CHECK_HEADERS.map((header) => values[header]))
+    const customerBuffer = Buffer.from(await customerWorkbook.xlsx.writeBuffer())
+
+    const dgWorkbook = new ExcelJS.Workbook()
+    const dgSheet = dgWorkbook.addWorksheet('总排期')
+    dgSheet.addRow(['国家', '客名', 'Tomy PO', 'Cust. PO NO.', '货号', '数量', 'PO走货期', '单价USD', '金额USD', '验货期', '实际验货期'])
+    dgSheet.addRow([
+      '澳大利亚', 'TOMY AUSTRALIA PTY, LTD.', '10123190', '20218996',
+      '47023A1', 600, new Date(2026, 8, 9), 4.419, 2651.4,
+      new Date(2026, 8, 7), new Date(2026, 8, 8),
+    ])
+    dgSheet.getCell('K2').font = { color: { argb: 'FF0000FF' } }
+    const dgBuffer = Buffer.from(await dgWorkbook.xlsx.writeBuffer())
+
+    const formData = new FormData()
+    formData.append(
+      'scheduleDg',
+      new Blob([dgBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+      'dongguan.xlsx',
+    )
+    formData.append(
+      'scheduleCustomer',
+      new Blob([customerBuffer], { type: 'application/octet-stream' }),
+      'customer.dat',
+    )
+
+    const response = await fetch(`${baseUrl}/api/process`, { method: 'POST', body: formData })
+    expect(response.status).toBe(200)
+    const data = (await response.json()) as ProcessResponse
+    expect(data.scheduleCustomer).toMatchObject({ status: 'done', rowCount: 1 })
+    expect(data.reconciliationCustomer?.matchedCount).toBe(1)
+    expect(data.reconciliationCustomer?.mismatchedFieldCount).toBe(0)
+    expect(data.outputReady).toBe(true)
+    expect(data.sessionId).toBeTruthy()
+    expect(data.customerSessionId).toBeTruthy()
+
+    const customerDownload = await fetch(`${baseUrl}/api/download/${data.customerSessionId}`)
+    expect(customerDownload.status).toBe(200)
+    expect(customerDownload.headers.get('content-type')).toContain(
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+
+    const firstDownload = await fetch(`${baseUrl}/api/download/${data.sessionId}`)
+    const secondDownload = await fetch(`${baseUrl}/api/download/${data.sessionId}`)
+    expect(firstDownload.status).toBe(200)
+    expect(secondDownload.status).toBe(200)
+    expect(firstDownload.headers.get('content-type')).toContain('application/zip')
   }, 60000)
 })

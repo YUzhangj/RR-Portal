@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "outDir": "dist",
     "rootDir": "server",
     "strict": true,
@@ -10,5 +10,6 @@
     "resolveJsonModule": true,
     "skipLibCheck": true
   },
-  "include": ["server/**/*"]
+  "include": ["server/**/*"],
+  "exclude": ["server/**/*.test.ts", "server/smoke-test.ts"]
 }

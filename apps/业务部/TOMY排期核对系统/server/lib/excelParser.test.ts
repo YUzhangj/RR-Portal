@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
 import { parseScheduleExcel } from './excelParser.js'
+import ExcelJS from 'exceljs'
 
 // Load real Excel fixtures from project root
 const PROJECT_ROOT = resolve(import.meta.dirname, '../../')
@@ -126,9 +127,10 @@ describe('parseScheduleExcel', { timeout: 30000 }, () => {
   describe('Cross-file alias compatibility', () => {
     it('both files produce rows with all required ScheduleRow fields', async () => {
       const required = [
-        'rowIndex', '接单期', '国家', '第三客户名称', '客跟单',
+        'rowIndex', '接单期', '国家', '客名', '第三客户名称', '客跟单',
         'tomyPO', 'customerPO', '货号', '数量', '外箱', '总箱数',
-        'PO走货期', '日期码', '箱唛资料'
+        'PO走货期', '验货期', '实际验货期', '实际验货通过', '验货状态', '验货状态日期',
+        '日期码', '箱唛资料', '单价USD', '金额USD'
       ]
       const [dg, id] = await Promise.all([
         parseScheduleExcel(dongguanBuffer),
@@ -138,6 +140,29 @@ describe('parseScheduleExcel', { timeout: 30000 }, () => {
         expect(dg[0]).toHaveProperty(field)
         expect(id[0]).toHaveProperty(field)
       }
+    })
+  })
+
+  it('recognizes a blue actual inspection date as QC passed', async () => {
+    const workbook = new ExcelJS.Workbook()
+    const sheet = workbook.addWorksheet('总排期')
+    sheet.addRow(['Tomy PO', '货号', '验货期', '实际验货期'])
+    sheet.addRow(['101', 'A1', new Date(2026, 8, 7), new Date(2026, 8, 8)])
+    sheet.addRow(['102', 'A2', new Date(2026, 11, 1), '11/2 Hold'])
+    sheet.getCell('D2').font = { color: { argb: 'FF0000FF' } }
+    const rows = await parseScheduleExcel(Buffer.from(await workbook.xlsx.writeBuffer()))
+    expect(rows[0]).toMatchObject({
+      验货期: new Date(2026, 8, 7),
+      实际验货期: new Date(2026, 8, 8),
+      实际验货通过: true,
+      验货状态: 'Pass',
+      验货状态日期: new Date(2026, 8, 8),
+    })
+    expect(rows[1]).toMatchObject({
+      实际验货期: null,
+      实际验货通过: false,
+      验货状态: 'On Hold',
+      验货状态日期: new Date(2026, 10, 2),
     })
   })
 })

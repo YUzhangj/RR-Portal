@@ -7,6 +7,7 @@ import type { ScheduleRow } from '../types/index.js'
 const COLUMN_ALIASES: Record<string, string[]> = {
   tomyPO: ['Tomy PO', 'TOMY PO'],
   customerPO: ['Cust. PO NO.', 'CUSTOMER PO'],
+  keMing: ['客名', '第三客户名称'],
   diSanKeHu: ['第三客户名称', '客名'],
   poZouHuoQi: ['PO走货期', '走货期'],
 }
@@ -59,6 +60,38 @@ function getCellValue(row: ExcelJS.Row, colIndex: number | undefined): unknown {
   return unwrapCellValue(cell.value)
 }
 
+function hasBlueFont(cell: ExcelJS.Cell): boolean {
+  const color = cell.font?.color
+  if (!color) return false
+  if (color.argb) {
+    const rgb = color.argb.slice(-6)
+    const red = Number.parseInt(rgb.slice(0, 2), 16)
+    const green = Number.parseInt(rgb.slice(2, 4), 16)
+    const blue = Number.parseInt(rgb.slice(4, 6), 16)
+    return Number.isFinite(red) && Number.isFinite(green) && Number.isFinite(blue)
+      && blue > red && blue > green
+  }
+  const indexed = (color as typeof color & { indexed?: number }).indexed
+  if (indexed !== undefined) return indexed === 5 || indexed === 12
+  if (color.theme !== undefined) return color.theme === 4 || color.theme === 10
+  return false
+}
+
+function parseHoldDate(value: unknown, referenceDate: Date | null): Date | null {
+  if (typeof value !== 'string') return null
+  const match = value.match(/\b(\d{1,2})[\/.\-](\d{1,2})\s*(?:ON\s*)?HOLD\b/i)
+  if (!match) return null
+  const month = Number(match[1])
+  const day = Number(match[2])
+  const year = referenceDate?.getFullYear() ?? new Date().getFullYear()
+  const parsed = new Date(year, month - 1, day)
+  return parsed.getFullYear() === year
+    && parsed.getMonth() === month - 1
+    && parsed.getDate() === day
+    ? parsed
+    : null
+}
+
 /**
  * Parse an Excel schedule file and return ScheduleRow[] for the 总排期 sheet.
  *
@@ -77,7 +110,7 @@ function getCellValue(row: ExcelJS.Row, colIndex: number | undefined): unknown {
  */
 export async function parseScheduleExcel(buffer: Buffer, sheetName?: string): Promise<ScheduleRow[]> {
   const workbook = new ExcelJS.Workbook()
-  await workbook.xlsx.load(await prepareScheduleWorkbook(buffer))
+  await workbook.xlsx.load(await prepareScheduleWorkbook(buffer) as unknown as Parameters<typeof workbook.xlsx.load>[0])
 
   let ws: ExcelJS.Worksheet | undefined
 
@@ -128,6 +161,7 @@ export async function parseScheduleExcel(buffer: Buffer, sheetName?: string): Pr
   // Direct lookup columns (identical names in both files)
   const jieDanQiCol = colMap.get('接单期')
   const guoJiaCol = colMap.get('国家')
+  const keMingCol = resolveColumn(colMap, COLUMN_ALIASES.keMing)
   const diSanKeHuCol = resolveColumn(colMap, COLUMN_ALIASES.diSanKeHu)
   const keGenDanCol = colMap.get('客跟单')
   const huoHaoCol = colMap.get('货号')
@@ -135,9 +169,13 @@ export async function parseScheduleExcel(buffer: Buffer, sheetName?: string): Pr
   const waiXiangCol = colMap.get('外箱')
   const zongXiangShuCol = colMap.get('总箱数')
   const poZouHuoQiCol = resolveColumn(colMap, COLUMN_ALIASES.poZouHuoQi)
+  const yanHuoQiCol = colMap.get('验货期')
+  const shiJiYanHuoQiCol = colMap.get('实际验货期')
   const riQiMaCol = colMap.get('日期码')
   const xiangMaiZiLiaoCol = colMap.get('箱唛资料')
   const keTieZhiCol = colMap.get('客贴纸')
+  const danJiaUsdCol = colMap.get('单价USD')
+  const jinEUsdCol = colMap.get('金额USD')
 
   const rows: ScheduleRow[] = []
 
@@ -162,7 +200,13 @@ export async function parseScheduleExcel(buffer: Buffer, sheetName?: string): Pr
       ? String(rawGuoJia).trim() || null
       : null
 
-    // Extract 第三客户名称
+    // Extract 客名. Indonesian schedules use 第三客户名称 for the same business field.
+    const rawKeMing = getCellValue(row, keMingCol)
+    const keMing = rawKeMing !== null && rawKeMing !== undefined
+      ? String(rawKeMing).trim() || null
+      : null
+
+    // Extract 第三客户名称 for the original PO-to-schedule reconciliation.
     const rawDiSanKeHu = getCellValue(row, diSanKeHuCol)
     const diSanKeHu = rawDiSanKeHu !== null && rawDiSanKeHu !== undefined
       ? String(rawDiSanKeHu).trim() || null
@@ -206,6 +250,34 @@ export async function parseScheduleExcel(buffer: Buffer, sheetName?: string): Pr
     const rawPoZouHuoQi = getCellValue(row, poZouHuoQiCol)
     const poZouHuoQi = rawPoZouHuoQi instanceof Date ? rawPoZouHuoQi : null
 
+    // QC state: a blue actual inspection date means inspection passed.
+    // A planned date without a blue actual date means booked but not passed yet.
+    const rawYanHuoQi = getCellValue(row, yanHuoQiCol)
+    const yanHuoQi = rawYanHuoQi instanceof Date ? rawYanHuoQi : null
+    const rawShiJiYanHuoQi = getCellValue(row, shiJiYanHuoQiCol)
+    const shiJiYanHuoQi = rawShiJiYanHuoQi instanceof Date ? rawShiJiYanHuoQi : null
+    const shiJiYanHuoCell = shiJiYanHuoQiCol === undefined ? null : row.getCell(shiJiYanHuoQiCol)
+    const shiJiYanHuoTongGuo = shiJiYanHuoQi !== null
+      && shiJiYanHuoCell !== null
+      && hasBlueFont(shiJiYanHuoCell)
+    const actualInspectionText = typeof rawShiJiYanHuoQi === 'string'
+      ? rawShiJiYanHuoQi.trim()
+      : ''
+    const holdDate = parseHoldDate(rawShiJiYanHuoQi, yanHuoQi ?? poZouHuoQi)
+    const isOnHold = /\b(?:ON\s*)?HOLD\b/i.test(actualInspectionText)
+    const yanHuoZhuangTai: ScheduleRow['验货状态'] = shiJiYanHuoTongGuo
+      ? 'Pass'
+      : isOnHold
+        ? 'On Hold'
+        : yanHuoQi
+          ? 'Pending'
+          : 'Unscheduled'
+    const yanHuoZhuangTaiRiQi = shiJiYanHuoTongGuo
+      ? shiJiYanHuoQi
+      : isOnHold
+        ? holdDate
+        : yanHuoQi
+
     // Extract 日期码
     const rawRiQiMa = getCellValue(row, riQiMaCol)
     const riQiMa = rawRiQiMa !== null && rawRiQiMa !== undefined
@@ -224,10 +296,24 @@ export async function parseScheduleExcel(buffer: Buffer, sheetName?: string): Pr
       ? String(rawKeTieZhi).trim() || null
       : null
 
+    // Extract USD unit price and amount used by customer schedule reconciliation.
+    const rawDanJiaUsd = getCellValue(row, danJiaUsdCol)
+    const parsedDanJiaUsd = rawDanJiaUsd === null || rawDanJiaUsd === undefined
+      ? Number.NaN
+      : Number(rawDanJiaUsd)
+    const danJiaUsd = Number.isFinite(parsedDanJiaUsd) ? parsedDanJiaUsd : null
+
+    const rawJinEUsd = getCellValue(row, jinEUsdCol)
+    const parsedJinEUsd = rawJinEUsd === null || rawJinEUsd === undefined
+      ? Number.NaN
+      : Number(rawJinEUsd)
+    const jinEUsd = Number.isFinite(parsedJinEUsd) ? parsedJinEUsd : null
+
     rows.push({
       rowIndex: rowIdx,
       接单期: jieDanQi,
       国家: guoJia,
+      客名: keMing,
       第三客户名称: diSanKeHu,
       客跟单: keGenDan,
       tomyPO: tomyPOStr,
@@ -237,9 +323,16 @@ export async function parseScheduleExcel(buffer: Buffer, sheetName?: string): Pr
       外箱: waiXiang,
       总箱数: zongXiangShu,
       PO走货期: poZouHuoQi,
+      验货期: yanHuoQi,
+      实际验货期: shiJiYanHuoQi,
+      实际验货通过: shiJiYanHuoTongGuo,
+      验货状态: yanHuoZhuangTai,
+      验货状态日期: yanHuoZhuangTaiRiQi,
       日期码: riQiMa,
       箱唛资料: xiangMaiZiLiao,
       客贴纸: keTieZhi,
+      单价USD: danJiaUsd,
+      金额USD: jinEUsd,
     })
   })
 

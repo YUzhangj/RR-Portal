@@ -75,11 +75,14 @@ interface ProcessResponse {
   files: FileResult[]
   scheduleDg: ScheduleResult | null
   scheduleId: ScheduleResult | null
+  scheduleCustomer: ScheduleResult | null
   reconciliationDg?: ReconciliationSummary
   reconciliationId?: ReconciliationSummary
   reconciliationRrm?: ReconciliationSummary
+  reconciliationCustomer?: ReconciliationSummary
   outputReady?: boolean
   sessionId?: string
+  customerSessionId?: string
 }
 
 // ─── Section container with eyebrow label ─────────────────────────────────
@@ -104,9 +107,11 @@ function Section({
 function ReconciliationCard({
   title,
   reconciliation,
+  customer = false,
 }: {
   title: string
   reconciliation: ReconciliationSummary
+  customer?: boolean
 }) {
   const { details } = reconciliation
 
@@ -172,11 +177,11 @@ function ReconciliationCard({
             {record.mismatches.map((mm, i) => (
               <Text key={i} style={{ fontSize: 12 }}>
                 <Text strong style={{ color: colors.ink2 }}>{mm.field}</Text>
-                ：排期
+                ：{customer ? '客户排期' : '排期'}
                 <Text code style={{ fontSize: 11, padding: '1px 5px' }}>
                   {String(mm.scheduleValue ?? '空')}
                 </Text>
-                　PO
+                　{customer ? '工厂排期/规则' : 'PO'}
                 <Text code style={{ fontSize: 11, padding: '1px 5px' }}>
                   {String(mm.poValue ?? '空')}
                 </Text>
@@ -347,14 +352,43 @@ function App() {
   const [poFiles, setPoFiles] = useState<UploadFile[]>([])
   const [scheduleDgFile, setScheduleDgFile] = useState<UploadFile[]>([])
   const [scheduleIdFile, setScheduleIdFile] = useState<UploadFile[]>([])
+  const [scheduleCustomerFile, setScheduleCustomerFile] = useState<UploadFile[]>([])
   const [loading, setLoading] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [result, setResult] = useState<ProcessResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  const downloadResult = async (
+    sessionId: string,
+    filename: string,
+    automatic = false,
+  ) => {
+    setDownloading(true)
+    try {
+      const response = await fetch(`./api/download/${sessionId}`)
+      if (!response.ok) {
+        throw new Error(`下载失败: ${response.status} ${response.statusText}`)
+      }
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      if (automatic) message.success('核对完成，结果文件已开始下载')
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '下载失败，请点击下载按钮重试')
+    } finally {
+      setDownloading(false)
+    }
+  }
+
   const handleSubmit = async () => {
-    if (poFiles.length === 0) {
-      message.warning('请选择 PO PDF 文件')
+    if (poFiles.length === 0 && scheduleCustomerFile.length === 0) {
+      message.warning('请选择 PO PDF 或客户排期表')
       return
     }
     if (scheduleDgFile.length === 0 && scheduleIdFile.length === 0) {
@@ -384,6 +418,10 @@ function App() {
       formData.append('scheduleId', scheduleIdFile[0].originFileObj)
       formData.append('scheduleIdName', scheduleIdFile[0].originFileObj.name)
     }
+    if (scheduleCustomerFile[0]?.originFileObj) {
+      formData.append('scheduleCustomer', scheduleCustomerFile[0].originFileObj)
+      formData.append('scheduleCustomerName', scheduleCustomerFile[0].originFileObj.name)
+    }
 
     try {
       const response = await fetch('./api/process', {
@@ -395,6 +433,11 @@ function App() {
       }
       const data = (await response.json()) as ProcessResponse
       setResult(data)
+      if (data.customerSessionId) {
+        await downloadResult(data.customerSessionId, '客户排期核对结果.xlsx', true)
+      } else if (data.outputReady && data.sessionId) {
+        await downloadResult(data.sessionId, 'TOMY_核对结果.zip', true)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
@@ -404,29 +447,18 @@ function App() {
 
   const handleDownload = async () => {
     if (!result?.sessionId) return
-    setDownloading(true)
-    try {
-      const response = await fetch(`./api/download/${result.sessionId}`)
-      if (!response.ok) {
-        throw new Error(`下载失败: ${response.status} ${response.statusText}`)
-      }
-      const blob = await response.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'TOMY_核对结果.zip'
-      a.click()
-      URL.revokeObjectURL(url)
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : '下载失败')
-    } finally {
-      setDownloading(false)
-    }
+    await downloadResult(result.sessionId, 'TOMY_核对结果.zip')
+  }
+
+  const handleCustomerDownload = async () => {
+    if (!result?.customerSessionId) return
+    await downloadResult(result.customerSessionId, '客户排期核对结果.xlsx')
   }
 
   const schedules: ScheduleResult[] = []
   if (result?.scheduleDg) schedules.push(result.scheduleDg)
   if (result?.scheduleId) schedules.push(result.scheduleId)
+  if (result?.scheduleCustomer) schedules.push(result.scheduleCustomer)
 
   return (
     <main className="page stack">
@@ -434,7 +466,7 @@ function App() {
         <div className="eyebrow">业务部 · TOMY</div>
         <h1>排期核对</h1>
         <p className="subtitle">
-          上传 TOMY PO PDF 与东莞／印尼排期 Excel，自动匹配出货记录、输出差异报告及日期码。
+          上传 TOMY PO PDF、客户排期与东莞／印尼排期，自动核对并下载标注结果。
         </p>
       </header>
 
@@ -489,6 +521,23 @@ function App() {
         </Card>
       </Section>
 
+      <Section label="客户排期表">
+        <Card size="small">
+          <Upload
+            accept=".xlsx,.xls,.dat"
+            maxCount={1}
+            beforeUpload={() => false}
+            fileList={scheduleCustomerFile}
+            onChange={({ fileList }) => setScheduleCustomerFile(fileList)}
+          >
+            <Button icon={<FileTextOutlined />}>选择客户排期表</Button>
+          </Upload>
+          <p className="meta">
+            可选 · 支持 Excel 及微信下载的 .dat 文件 · 重点核对红色字段、单价/金额与 QC 状态
+          </p>
+        </Card>
+      </Section>
+
       <Button
         type="primary"
         icon={<UploadOutlined />}
@@ -536,6 +585,28 @@ function App() {
                 title="印尼RRM (RR03) 核对结果"
                 reconciliation={result.reconciliationRrm}
               />
+            )}
+
+            {result.reconciliationCustomer && (
+              <ReconciliationCard
+                title="客户排期核对结果"
+                reconciliation={result.reconciliationCustomer}
+                customer
+              />
+            )}
+
+            {result.customerSessionId && (
+              <Button
+                type="primary"
+                icon={<DownloadOutlined />}
+                onClick={handleCustomerDownload}
+                loading={downloading}
+                size="large"
+                block
+                style={{ height: 44 }}
+              >
+                下载客户排期标注结果 Excel
+              </Button>
             )}
 
             {result.outputReady && (
