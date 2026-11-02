@@ -23,6 +23,7 @@ export interface ScheduleRow {
   rowIndex: number
   接单期: Date | null
   国家: string | null
+  客名: string | null
   第三客户名称: string | null
   客跟单: string | null
   tomyPO: string | null
@@ -32,9 +33,55 @@ export interface ScheduleRow {
   外箱: number | null
   总箱数: number | null
   PO走货期: Date | null
+  验货期: Date | null
+  实际验货期: Date | null
+  实际验货通过: boolean
+  验货状态: 'Pass' | 'Pending' | 'On Hold' | 'Unscheduled'
+  验货状态日期: Date | null
   日期码: string | null
   箱唛资料: string | null
   客贴纸: string | null
+  单价USD: number | null
+  金额USD: number | null
+}
+
+export interface CustomerScheduleRow {
+  rowIndex: number
+  shipToCustName: string | null
+  customerPO: string | null
+  shipToCountry: string | null
+  partNumber: string | null
+  poNum: string | null
+  orderQty: number | null
+  unitCost: number | null
+  purchaseAmount: number | null
+  poDueDate: Date | null
+  qcResult: string | null
+  qcInspectionDate: Date | null
+  purchasePointName: string | null
+}
+
+export interface CustomerScheduleMatchResult {
+  customerRowIndex: number
+  tomyPO: string
+  货号: string
+  sourceSchedule: string
+  mismatches: FieldMismatch[]
+}
+
+export interface CustomerScheduleUnmatchedRow {
+  customerRowIndex: number
+  tomyPO: string
+  货号: string
+  purchasePointName: string | null
+  reason?: string
+}
+
+export interface CustomerScheduleReconciliationResult {
+  matched: CustomerScheduleMatchResult[]
+  unmatchedRows: CustomerScheduleUnmatchedRow[]
+  ambiguousRows: Array<{ customerRowIndex: number; tomyPO: string; 货号: string; count: number }>
+  errors: string[]
 }
 
 export interface FileResult {
@@ -58,11 +105,19 @@ export interface ProcessResponse {
     rowCount: number
     error?: string
   } | null
+  scheduleCustomer: {
+    filename: string
+    status: 'done' | 'error'
+    rowCount: number
+    error?: string
+  } | null
   reconciliationDg?: ReconciliationSummary
   reconciliationId?: ReconciliationSummary
   reconciliationRrm?: ReconciliationSummary
+  reconciliationCustomer?: ReconciliationSummary
   outputReady?: boolean
   sessionId?: string
+  customerSessionId?: string
 }
 
 export interface MatchDetail {
@@ -87,6 +142,7 @@ export interface ReconciliationSummary {
   details: {
     matched: MatchDetail[]
     unmatched: UnmatchedDetail[]
+    ambiguous?: Array<{ tomyPO: string; 货号: string; sourceFile: string; count: number }>
   }
 }
 

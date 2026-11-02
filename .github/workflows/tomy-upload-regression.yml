@@ -22,12 +22,15 @@ jobs:
         with:
           node-version: 24
       - run: npm ci --no-audit --no-fund
+      - run: npm ci --prefix client --no-audit --no-fund
       - name: Regressions within a 384 MiB JavaScript heap
         env:
           NODE_OPTIONS: --max-old-space-size=384
         run: |
-          npx vitest run server/lib/prepareScheduleWorkbook.test.ts server/lib/excelWriter.test.ts server/lib/reconciler.test.ts server/lib/normalize.test.ts server/lib/dateCodeGenerator.test.ts server/lib/summaryReport.test.ts server/lib/zipBuilder.test.ts --maxWorkers=1
+          npx vitest run --maxWorkers=1
           npx tsc --noEmit --strict --module NodeNext --moduleResolution NodeNext --target ES2022 --esModuleInterop --skipLibCheck server/lib/prepareScheduleWorkbook.ts
+      - name: Build the typed backend
+        run: npm run build
       - name: Upload PDFs, reconcile both workbooks and download ZIP twice
         env:
           NODE_OPTIONS: --max-old-space-size=384
@@ -42,7 +45,7 @@ jobs:
             sleep 1
           done
           node server/upload-smoke.mjs
-      - name: Build the production frontend
+      - name: Lint and build the production frontend
         run: |
-          npm ci --prefix client --no-audit --no-fund
+          npm run lint --prefix client
           npm run build --prefix client

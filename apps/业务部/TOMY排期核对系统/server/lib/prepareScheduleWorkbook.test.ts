@@ -1,11 +1,41 @@
 import { describe, it, expect } from 'vitest'
 import ExcelJS from 'exceljs'
 import JSZip from 'jszip'
-import { prepareScheduleWorkbook, trimTrailingEmptyRows } from './prepareScheduleWorkbook.js'
+import { prepareScheduleWorkbook, trimTrailingEmptyRows, loadBoundedWorkbookArchive, WORKBOOK_XML_LIMIT } from './prepareScheduleWorkbook.js'
 import { parseScheduleExcel } from './excelParser.js'
 import { writeAnnotatedSchedule } from './excelWriter.js'
 
 describe('sparse schedule workbook preparation', () => {
+  it('rejects legacy XLS and oversized declared ZIP XML before expansion', async () => {
+    await expect(loadBoundedWorkbookArchive(Buffer.from('legacy BIFF data'))).rejects.toThrow(/\.xlsx/)
+    const zip = new JSZip(); zip.file('xl/worksheets/sheet1.xml', '<worksheet/>')
+    const buffer = await zip.generateAsync({ type: 'nodebuffer' })
+    for (let i = 0; i < buffer.length - 4; i++) if (buffer.readUInt32LE(i) === 0x02014b50 && buffer.readUInt32LE(i + 24) > 0) {
+      buffer.writeUInt32LE(WORKBOOK_XML_LIMIT + 1, i + 24)
+    }
+    await expect(loadBoundedWorkbookArchive(buffer)).rejects.toThrow(/解压内容过大/)
+  })
+
+  it('rejects unsafe archive paths and excessive actual structural rows', async () => {
+    const zip = new JSZip(); zip.file('../outside.xml', '<keep/>')
+    await expect(loadBoundedWorkbookArchive(await zip.generateAsync({ type: 'nodebuffer' }))).rejects.toThrow(/不安全/)
+    const book = new ExcelJS.Workbook(); book.addWorksheet('总排期').addRow(['Tomy PO', '货号'])
+    const archive = await JSZip.loadAsync(await book.xlsx.writeBuffer()), name = 'xl/worksheets/sheet1.xml'
+    archive.file(name, (await archive.file(name)!.async('string')).replace('</sheetData>', '<row r="2" hidden="1"/>'.repeat(100001) + '</sheetData>'))
+    await expect(prepareScheduleWorkbook(await archive.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }))).rejects.toThrow(/结构行过多/)
+  })
+
+  it('rejects dense cell and style records while counting, before ExcelJS allocation', async () => {
+    const book = new ExcelJS.Workbook(); book.addWorksheet('总排期').addRow(['Tomy PO', '货号'])
+    const base = Buffer.from(await book.xlsx.writeBuffer())
+    const cells = await JSZip.loadAsync(base), name = 'xl/worksheets/sheet1.xml'
+    cells.file(name, (await cells.file(name)!.async('string')).replace('</sheetData>', '<row r="2">' + '<c r="A2"/>'.repeat(150001) + '</row></sheetData>'))
+    await expect(prepareScheduleWorkbook(await cells.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }))).rejects.toThrow(/单元格或结构行过多/)
+    const styles = await JSZip.loadAsync(base)
+    styles.file('xl/styles.xml', (await styles.file('xl/styles.xml')!.async('string')).replace('</cellXfs>', '<xf/>'.repeat(20001) + '</cellXfs>'))
+    await expect(prepareScheduleWorkbook(await styles.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }))).rejects.toThrow(/样式或共享文本过多/)
+  })
+
   it('keeps cells, formulas, styled blanks, interior heights and structural rows unchanged', () => {
     const xml = '<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row>' +
       '<row r="2" ht="25"/><row r="3"><c r="A3"><f>A1+1</f><v>2</v></c><c r="B3" s="2"/></row>' +
