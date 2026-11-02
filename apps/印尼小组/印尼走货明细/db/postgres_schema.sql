@@ -266,20 +266,20 @@ CREATE TABLE IF NOT EXISTS shipment_items (
     kg                  DECIMAL(18,4) NULL,
     qty                 DECIMAL(18,4) NULL,
     cartons             INT          NULL,
-    qty_per_carton      VARCHAR(64)  NULL,
+    qty_per_carton      TEXT  NULL,
     weighing_qty        DECIMAL(18,4) NULL,
     purchase_unit       VARCHAR(32)  NOT NULL DEFAULT '个',
-    pallet              VARCHAR(64)  NULL,
+    pallet              TEXT  NULL,
     price               DECIMAL(22,8) NULL,
     currency            VARCHAR(8)   NOT NULL DEFAULT '¥',
-    po_no               VARCHAR(64)  NULL,
+    po_no               TEXT  NULL,
     po_date             DATE         NULL,
     supplier            VARCHAR(256) NULL,
     customs_company     VARCHAR(256) NULL,
     bl_head             VARCHAR(256) NULL,
-    contract_no         VARCHAR(64)  NULL,
+    contract_no         TEXT  NULL,
     contract_date       DATE         NULL,
-    invoice_no          VARCHAR(64)  NULL,
+    invoice_no          TEXT  NULL,
     invoice_date        DATE         NULL,
     invoice_price       DECIMAL(18,4) NULL,
     product_use         VARCHAR(256) NULL,
@@ -288,11 +288,113 @@ CREATE TABLE IF NOT EXISTS shipment_items (
     CONSTRAINT "FK_shipment_items_material" FOREIGN KEY (material_id) REFERENCES materials(id)
 );
 CREATE INDEX IF NOT EXISTS "IX_shipment_items_shipment" ON shipment_items(shipment_id);
-CREATE INDEX IF NOT EXISTS "IX_shipment_items_po_no"    ON shipment_items(po_no);
 ALTER TABLE shipment_items ADD COLUMN IF NOT EXISTS weighing_qty DECIMAL(18,4) NULL;
 ALTER TABLE shipment_items ADD COLUMN IF NOT EXISTS carton_group VARCHAR(64) NULL;
 ALTER TABLE shipment_items ADD COLUMN IF NOT EXISTS material_snapshot JSONB NULL;
 ALTER TABLE shipment_items ADD COLUMN IF NOT EXISTS carton_no VARCHAR(256) NULL;
+
+-- BEGIN shipment-detail-text-20261102
+-- Packing segments, pallet descriptions and document references are user text.
+-- Preserve complete values instead of relying on the old 64-character storage cap.
+-- PO references are queried by equality only; a hash index also accepts long,
+-- incompressible text that would exceed a PostgreSQL B-tree index tuple limit.
+DO $$
+DECLARE
+    column_name TEXT;
+    type_changes TEXT;
+    index_definition TEXT;
+    index_oid OID;
+    expected_btree TEXT := format('CREATE INDEX %I ON %I.shipment_items USING btree (po_no)',
+        'IX_shipment_items_po_no', current_schema());
+    expected_hash TEXT := format('CREATE INDEX %I ON %I.shipment_items USING hash (po_no)',
+        'IX_shipment_items_po_no', current_schema());
+BEGIN
+    index_oid := to_regclass(format('%I.%I', current_schema(), 'IX_shipment_items_po_no'));
+    SELECT pg_get_indexdef(index_oid) INTO index_definition;
+    IF EXISTS (
+        SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_am am ON am.oid = c.relam
+        WHERE i.indrelid = 'shipment_items'::regclass AND i.indexrelid IS DISTINCT FROM index_oid
+          AND EXISTS (
+              SELECT 1 FROM pg_depend d
+              WHERE d.classid = 'pg_class'::regclass AND d.objid = i.indexrelid
+                AND d.refclassid = 'pg_class'::regclass AND d.refobjid = i.indrelid
+                AND d.refobjsubid IN (SELECT attnum FROM pg_attribute
+                    WHERE attrelid = 'shipment_items'::regclass
+                      AND attname = ANY(ARRAY['qty_per_carton', 'pallet', 'po_no', 'contract_no', 'invoice_no']))
+          )
+          AND am.amname <> 'hash'
+    ) THEN
+        RAISE EXCEPTION 'Unexpected additional shipment text index; shipment text migration was not applied';
+    END IF;
+    IF index_definition = expected_hash AND EXISTS (
+        SELECT 1 FROM pg_index WHERE indexrelid = index_oid AND indisvalid AND indisready AND indislive
+    ) AND (
+        SELECT count(*) = 5 FROM pg_attribute
+        WHERE attrelid = 'shipment_items'::regclass AND NOT attisdropped
+          AND attname = ANY(ARRAY['qty_per_carton', 'pallet', 'po_no', 'contract_no', 'invoice_no'])
+          AND atttypid = 'text'::regtype AND atttypmod = -1
+    ) THEN
+        RETURN; -- Already applied: do not take a DDL lock on every startup.
+    END IF;
+
+    -- The caller can bound lock_timeout (production rollout uses a short timeout).
+    -- Hold this lock while rechecking catalog state so concurrent DDL cannot turn
+    -- a reviewed index into an unrelated index between validation and replacement.
+    LOCK TABLE shipment_items IN ACCESS EXCLUSIVE MODE;
+    index_oid := to_regclass(format('%I.%I', current_schema(), 'IX_shipment_items_po_no'));
+    SELECT pg_get_indexdef(index_oid) INTO index_definition;
+    IF index_oid IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM pg_index WHERE indexrelid = index_oid AND indisvalid AND indisready AND indislive
+    ) THEN
+        RAISE EXCEPTION 'Unusable IX_shipment_items_po_no; shipment text migration was not applied';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_am am ON am.oid = c.relam
+        WHERE i.indrelid = 'shipment_items'::regclass AND i.indexrelid IS DISTINCT FROM index_oid
+          AND EXISTS (
+              SELECT 1 FROM pg_depend d
+              WHERE d.classid = 'pg_class'::regclass AND d.objid = i.indexrelid
+                AND d.refclassid = 'pg_class'::regclass AND d.refobjid = i.indrelid
+                AND d.refobjsubid IN (SELECT attnum FROM pg_attribute
+                    WHERE attrelid = 'shipment_items'::regclass
+                      AND attname = ANY(ARRAY['qty_per_carton', 'pallet', 'po_no', 'contract_no', 'invoice_no']))
+          )
+          AND am.amname <> 'hash'
+    ) THEN
+        RAISE EXCEPTION 'Unexpected additional shipment text index; shipment text migration was not applied';
+    END IF;
+    IF index_definition IS NOT NULL AND index_definition <> expected_btree AND index_definition <> expected_hash THEN
+        RAISE EXCEPTION 'Unexpected IX_shipment_items_po_no definition; shipment text migration was not applied';
+    END IF;
+    FOREACH column_name IN ARRAY ARRAY['qty_per_carton', 'pallet', 'po_no', 'contract_no', 'invoice_no'] LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_attribute
+            WHERE attrelid = 'shipment_items'::regclass AND attname = column_name AND NOT attisdropped
+              AND ((atttypid = 'varchar'::regtype AND atttypmod = 68)
+                   OR (atttypid = 'text'::regtype AND atttypmod = -1))
+        ) THEN
+            RAISE EXCEPTION 'Unexpected shipment text column type: %; migration was not applied', column_name;
+        END IF;
+    END LOOP;
+    SELECT string_agg(format('ALTER COLUMN %I TYPE TEXT', attname), ', ' ORDER BY attnum)
+    INTO type_changes
+    FROM pg_attribute
+    WHERE attrelid = 'shipment_items'::regclass AND NOT attisdropped
+      AND attname = ANY(ARRAY['qty_per_carton', 'pallet', 'po_no', 'contract_no', 'invoice_no'])
+      AND atttypid = 'varchar'::regtype AND atttypmod = 68;
+    IF type_changes IS NOT NULL THEN
+        EXECUTE 'ALTER TABLE shipment_items ' || type_changes;
+    END IF;
+    IF index_definition = expected_btree THEN
+        DROP INDEX "IX_shipment_items_po_no";
+    END IF;
+    IF index_definition IS NULL OR index_definition = expected_btree THEN
+        CREATE INDEX "IX_shipment_items_po_no" ON shipment_items USING hash(po_no);
+    END IF;
+END $$;
+-- END shipment-detail-text-20261102
 
 -- ============ 设置 ============
 CREATE TABLE IF NOT EXISTS settings (

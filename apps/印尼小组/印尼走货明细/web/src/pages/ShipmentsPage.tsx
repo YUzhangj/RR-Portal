@@ -24,7 +24,8 @@ import { shipmentDateOnly, shipmentPurchaseDates } from '../utils/shipmentDates'
 import { formatShipmentPallet, shipmentOptionalNumber } from '../utils/shipmentDisplay'
 import { applyMergedShipmentEdits, mergedReadOnlyFields, type MergedEditorRow } from '../utils/shipmentMergedEditor'
 import { shipmentSheetFields, type SheetEdit } from '../utils/shipmentSheet'
-import { linkShipmentOutbound, remainingOutboundQuantity } from '../utils/shipmentOutboundLink'
+import { remainingOutboundQuantity } from '../utils/shipmentOutboundLink'
+import { linkShipmentOutboundBatches } from '../utils/shipmentOutboundBatchLink'
 import { outboundCandidates, planOutboundPull } from '../utils/shipmentOutboundRemaining'
 import type { ShipmentImportItem } from '../utils/shipmentImport'
 import { applyShipmentImport } from '../utils/shipmentImportApply'
@@ -231,7 +232,8 @@ export default function ShipmentsPage() {
   const [linkRowKey, setLinkRowKey] = useState<number | null>(null)
   const [linkRows, setLinkRows] = useState<OutByMat[]>([])
   const [linkFilter, setLinkFilter] = useState('')
-  const [linkSelected, setLinkSelected] = useState<number | null>(null)
+  const [linkSelected, setLinkSelected] = useState<number[]>([])
+  const [linkQuantities, setLinkQuantities] = useState<Record<number, number | null>>({})
   const [linkConfirmed, setLinkConfirmed] = useState(false)
   const [linkBusy, setLinkBusy] = useState(false)
   const linkRequest = useRef(0)
@@ -514,11 +516,11 @@ export default function ShipmentsPage() {
   }
   function closeOutboundLink() {
     linkRequest.current++
-    setLinkRowKey(null); setLinkRows([]); setLinkSelected(null); setLinkConfirmed(false); setLinkBusy(false)
+    setLinkRowKey(null); setLinkRows([]); setLinkSelected([]); setLinkQuantities({}); setLinkConfirmed(false); setLinkBusy(false)
   }
   async function openOutboundLink(row: ShipmentItem) {
     const request = ++linkRequest.current
-    setLinkRowKey(row._rowKey!); setLinkRows([]); setLinkSelected(null); setLinkConfirmed(false); setLinkBusy(true)
+    setLinkRowKey(row._rowKey!); setLinkRows([]); setLinkSelected([]); setLinkQuantities({}); setLinkConfirmed(false); setLinkBusy(true)
     const material = matMap.get(row.material_id!)
     setLinkFilter(row.material_snapshot && !row.material_snapshot.id ? material?.product_code || material?.name_zh || '' : '')
     try {
@@ -528,28 +530,37 @@ export default function ShipmentsPage() {
     finally { if (request === linkRequest.current) setLinkBusy(false) }
   }
   async function confirmOutboundLink() {
-    if (linkRowKey == null || !linkSelected || !linkConfirmed || linkBusy) return
+    if (linkRowKey == null || !linkSelected.length || !linkConfirmed || linkBusy) return
     const request = linkRequest.current
     const revision = { ...sheetRevision.current }
     setLinkBusy(true)
     try {
       // Re-read balance at confirmation; the server checks again under lock on Save.
       const { data } = await api.get<OutByMat[]>('/outbound/allocatable', { params: editing?.id ? { shipment_id: editing.id } : {} })
-      const source = data.find(r => r.outbound_id === linkSelected)
-      if (!source?.material_id) throw new Error('该出库已不可分配或缺少物料，请重新选择')
-      const { data: materials } = await api.get<Material[]>('/materials/by-ids', { params: { ids: String(source.material_id) } })
-      const material = materials.find(m => m.id === source.material_id)
+      const sources = linkSelected.map(id => {
+        const source = data.find(r => r.outbound_id === id)
+        if (!source?.material_id) throw new Error(`OUT-${id} 已不可分配或缺少物料，请重新选择`)
+        return source
+      })
+      if (new Set(sources.map(source => source.material_id)).size !== 1)
+        throw new Error('只能关联同一物料 ID 的多个出库批次')
+      const { data: materials } = await api.get<Material[]>('/materials/by-ids', { params: { ids: String(sources[0].material_id) } })
+      const material = materials.find(m => m.id === sources[0].material_id)
       if (!material) throw new Error('出库对应物料不存在，请刷新重试')
       if (request !== linkRequest.current) return
-      if (revision.rawItems !== sheetRevision.current.rawItems || revision.matMap !== sheetRevision.current.matMap)
+      if (revision.session !== sheetRevision.current.session || revision.rawItems !== sheetRevision.current.rawItems || revision.matMap !== sheetRevision.current.matMap)
         throw new Error('明细已变化，请重新核对后关联')
-      const previous = linkRows.find(r => r.outbound_id === linkSelected)
-      if (!previous || ['material_id', 'po_no', 'po_date', 'supplier', 'price', 'currency', 'purchase_unit', 'purchase_charge_ratio', 'customs_company', 'code', 'name_zh', 'spec'].some(key =>
-        previous[key as keyof OutByMat] !== source[key as keyof OutByMat])) {
+      if (sources.some(source => {
+        const previous = linkRows.find(r => r.outbound_id === source.outbound_id)
+        return !previous || ['material_id', 'po_no', 'po_date', 'supplier', 'price', 'currency', 'purchase_unit', 'purchase_charge_ratio', 'customs_company', 'code', 'name_zh', 'spec'].some(key =>
+          previous[key as keyof OutByMat] !== source[key as keyof OutByMat])
+      })) {
         setLinkRows(data); setLinkConfirmed(false)
         throw new Error('出库资料已更新，请核对后重新确认')
       }
-      const next = linkShipmentOutbound(revision.rawItems, linkRowKey, source, material, revision.matMap)
+      setLinkRows(data)
+      const next = linkShipmentOutboundBatches(revision.rawItems, linkRowKey,
+        sources.map(source => ({ source, qty: linkQuantities[source.outbound_id] ?? 0 })), material, revision.matMap, createCartonGroupId())
       const original = revision.rawItems.find(r => r._rowKey === linkRowKey)!
       setMatMap(current => {
         const map = new Map(current)
@@ -558,7 +569,7 @@ export default function ShipmentsPage() {
         return map
       })
       setItems(next); setEditorDirty(true); applyPartition(next); closeOutboundLink()
-      message.success(`已关联 OUT-${source.outbound_id}，装箱资料已保留，请保存走货单`)
+      message.success(`已关联 ${sources.length} 笔出库，装箱资料已保留，请保存走货单`)
     } catch (error: any) { if (request === linkRequest.current) message.error(error?.message || '关联失败，请重试') }
     finally { if (request === linkRequest.current) setLinkBusy(false) }
   }
@@ -887,16 +898,18 @@ export default function ShipmentsPage() {
         for (const m of (data || [])) if (m.id != null) matById.set(m.id, m)
       } catch {}
     }
+    const physicalBySource = new Map(consolidatedItems.flatMap(group => group.sources.map(source => [source._rowKey, group] as const)))
     items.forEach((it, i) => {
       const tag = `行${i + 1}（物料#${it.material_id ?? '-'} ${it.formula_name ?? ''}）：`
+      const physical = it.material_snapshot?.shipment_outbound_link_group ? physicalBySource.get(it._rowKey) || it : it
       if (!it.outbound_id) warn.push(tag + '未关联具体出库记录，不参与出库余额校验')
-      if (!(Number(it.kg) > 0)) hard.push(tag + '申报数量必须 > 0（按申报单位）')
+      if (!(Number(physical.kg) > 0)) hard.push(tag + '申报数量必须 > 0（按申报单位）')
       if (!(Number(it.qty) > 0)) hard.push(tag + '送货数量必须 > 0')
       if (!(Number(it.cartons) > 0)) hard.push(tag + '箱数必须 > 0')
       const packing = parseShipmentPacking(it.qty_per_carton)
       if (packing.mode === 'invalid') hard.push(tag + '每箱数量格式不合法（例如“3000”或“1-2/3000 3/4000”）')
-      if (packing.mode === 'ranges' && Number(it.qty) > 0 && Math.abs(packing.totalQty - Number(it.qty)) > 0.0001)
-        warn.push(tag + `每箱数量分段合计 ${packing.totalQty} 与送货数量 ${it.qty} 不一致`)
+      if (packing.mode === 'ranges' && Number(physical.qty) > 0 && Math.abs(packing.totalQty - Number(physical.qty)) > 0.0001)
+        warn.push(tag + `每箱数量分段合计 ${packing.totalQty} 与送货数量 ${physical.qty} 不一致`)
       if (!(Number(it.price) > 0)) hard.push(tag + '采购单价必须 > 0')
       if (decimals(it.kg) > 4) hard.push(tag + '申报数量小数超过 4 位')
       // Per-piece purchase prices may need more than four decimal places.
@@ -1235,9 +1248,15 @@ export default function ShipmentsPage() {
   // Totals (for footer of items table)
   const tot = useMemo(() => {
     let cbm = 0, gross = 0, net = 0
+    // A newly split outbound link keeps the original physical cartons on every
+    // source row. Count that packing once, while legacy rows retain their basis.
+    const repeatedPacking = new Set(consolidatedItems
+      .filter(group => !!group.material_snapshot?.shipment_outbound_link_group)
+      .flatMap(group => group.sources.slice(1).map(source => source._rowKey)))
     for (const it of items) {
       const m = it.material_id != null ? matMap.get(it.material_id) : null
-      cbm += (Number(m?.length) || 0) * (Number(m?.width) || 0) * (Number(m?.height) || 0) / 1e6 * (Number(it.cartons) || 0)
+      if (!repeatedPacking.has(it._rowKey))
+        cbm += (Number(m?.length) || 0) * (Number(m?.width) || 0) * (Number(m?.height) || 0) / 1e6 * (Number(it.cartons) || 0)
       const weightQty = shipmentWeightQuantity(m?.name_zh, it.qty)
       gross += shipmentGrossPerPc(m?.weight_per_carton, effectiveWeighingQty(it, m)) * weightQty
       net += (Number(m?.net_per_pc) || 0) * weightQty
@@ -1250,7 +1269,7 @@ export default function ShipmentsPage() {
       amount: items.reduce((s, it) => s + shipmentPurchaseAmount(it), 0),
       cbm, gross, net,
     }
-  }, [items, matMap])
+  }, [items, matMap, consolidatedItems, cartonRows])
 
   return (
     <div style={{ padding: 16 }}>
@@ -1615,25 +1634,46 @@ export default function ShipmentsPage() {
       </Modal>
 
       {/* 从出库拉物料 */}
-      <Modal open={linkRowKey != null} title="给当前明细关联出库（不新增行）" width="90vw"
+      <Modal open={linkRowKey != null} title="给当前明细关联出库（支持同物料多批次）" width="90vw"
         onCancel={closeOutboundLink} onOk={confirmOutboundLink}
-        okText="确认物料并关联" cancelText="取消" okButtonProps={{ loading: linkBusy, disabled: !linkSelected || !linkConfirmed || linkBusy }} destroyOnClose>
+        okText="确认物料并关联" cancelText="取消" okButtonProps={{ loading: linkBusy, disabled: !linkSelected.length || !linkConfirmed || linkBusy }} destroyOnClose>
         {(() => {
           const row = items.find(r => r._rowKey === linkRowKey)
           const m = row ? matMap.get(row.material_id!) : undefined
           const knownId = row?.material_snapshot?.id || (!row?.material_snapshot ? row?.material_id : undefined)
+          const selectedMaterialId = linkRows.find(source => source.outbound_id === linkSelected[0])?.material_id
+          const allocated = Number(linkSelected.reduce((sum, id) => sum + Number(linkQuantities[id] || 0), 0).toFixed(4))
           return <>
             <Typography.Paragraph>当前明细：{m?.product_code || '未填货号'} / {m?.name_zh || '未填物料'} / {m?.spec || '无规格'}；送货数量：{row?.qty ?? 0} {row?.purchase_unit || (isPaperRope(m?.name_zh) ? '米' : '个')}</Typography.Paragraph>
-            <Typography.Paragraph type="secondary">请核对对应物料与出库批次；关联按物料 ID，下方名称、规格为采购快照，可能与当前物料库不同。保留本行数量、重量、箱号、箱数、卡板和尺寸；PO、供应商、报关公司及采购价格按出库来源带入。关联不会重复扣库存，点击走货单“保存”后生效。</Typography.Paragraph>
+            <Typography.Paragraph type="secondary">可多选同一物料的出库批次，并填写各批次分配数量。已有数量和重量保持不变；数量为空时按分配合计带入。装箱资料保留，采购单号、单价和备品计费比例按各批次保留，保存后生效。</Typography.Paragraph>
             {row?.material_snapshot && <Typography.Paragraph type="warning">这是导入资料：请先确认下方所选物料与当前行一致。确认后绑定真实物料 ID，导入的装箱资料仍保留在本单，不写回物料库。</Typography.Paragraph>}
-            <Input.Search allowClear disabled={linkBusy} value={linkFilter} placeholder="搜索货号 / 名称 / 规格 / PO；可清空搜索查看候选" style={{ width: 480, maxWidth: '100%', marginBottom: 12 }} onChange={e => { setLinkFilter(e.target.value); setLinkSelected(null); setLinkConfirmed(false) }} />
+            <Input.Search allowClear disabled={linkBusy} value={linkFilter} placeholder="搜索货号 / 名称 / 规格 / PO；可清空搜索查看候选" style={{ width: 480, maxWidth: '100%', marginBottom: 12 }} onChange={e => setLinkFilter(e.target.value)} />
+            <Typography.Paragraph>已选 {linkSelected.length} 个批次，分配合计：{allocated}；{Number(row?.qty) > 0 ? `应分配：${row!.qty}` : '将按分配合计带入送货数量'}</Typography.Paragraph>
             <Table<OutByMat> size="small" loading={linkBusy} rowKey="outbound_id" scroll={{ x: 1250, y: 350 }} pagination={{ pageSize: 10 }}
               locale={{ emptyText: '暂无符合条件的可分配出库。请核对搜索条件，或先在出库页面完成对应物料的出库。' }}
               dataSource={linkRows.filter(r => (!knownId || knownId < 0 || r.material_id === knownId) &&
                 [r.code, r.name_zh, r.spec, r.po_no, String(r.outbound_id)].join(' ').toLowerCase().includes(linkFilter.trim().toLowerCase()))}
-              rowSelection={{ type: 'radio', selectedRowKeys: linkSelected ? [linkSelected] : [],
-                onChange: keys => { setLinkSelected(Number(keys[0]) || null); setLinkConfirmed(false) },
-                getCheckboxProps: r => ({ disabled: linkBusy || !r.material_id || remainingOutboundQuantity(items, linkRowKey!, r) < (row?.qty || 0) }) }}
+              rowSelection={{ type: 'checkbox', selectedRowKeys: linkSelected, preserveSelectedRowKeys: true, hideSelectAll: true,
+                onChange: keys => {
+                  const ids = keys.map(Number)
+                  const currentMaterialId = linkRows.find(source => source.outbound_id === ids[0])?.material_id
+                  if (ids.some(id => linkRows.find(source => source.outbound_id === id)?.material_id !== currentMaterialId)) {
+                    message.warning('只能选择同一物料的出库批次'); return
+                  }
+                  const quantities: Record<number, number | null> = {}
+                  let used = ids.filter(id => linkSelected.includes(id)).reduce((sum, id) => sum + Number(linkQuantities[id] || 0), 0)
+                  for (const id of ids) {
+                    const source = linkRows.find(source => source.outbound_id === id)!
+                    const remaining = remainingOutboundQuantity(items, linkRowKey!, source)
+                    const qty = linkSelected.includes(id) ? linkQuantities[id]
+                      : Number(row?.qty) > 0 ? Math.max(0, Math.min(remaining, Number(row!.qty) - used)) : remaining
+                    quantities[id] = qty ?? null
+                    if (!linkSelected.includes(id)) used += Number(qty || 0)
+                  }
+                  setLinkSelected(ids); setLinkQuantities(quantities); setLinkConfirmed(false)
+                },
+                getCheckboxProps: r => ({ disabled: linkBusy || !r.material_id || (selectedMaterialId != null && r.material_id !== selectedMaterialId)
+                  || remainingOutboundQuantity(items, linkRowKey!, r) <= 0 }) }}
               columns={[
                 { title: '出库记录', dataIndex: 'outbound_id', render: v => `OUT-${v}` },
                 { title: '物料 ID', dataIndex: 'material_id' }, { title: '货号', dataIndex: 'code' },
@@ -1641,11 +1681,16 @@ export default function ShipmentsPage() {
                 { title: 'PO', dataIndex: 'po_no' }, { title: '供应商', dataIndex: 'supplier' },
                 { title: '出库日期', dataIndex: 'out_date', render: v => v?.slice(0, 10) },
                 { title: '本行可分配', render: (_, r) => remainingOutboundQuantity(items, linkRowKey!, r) },
+                { title: '本次分配数量', width: 150, render: (_, r) => <InputNumber aria-label={`OUT-${r.outbound_id} 分配数量`}
+                  min={0} max={remainingOutboundQuantity(items, linkRowKey!, r)} precision={4} value={linkQuantities[r.outbound_id]}
+                  disabled={linkBusy || !linkSelected.includes(r.outbound_id)} onChange={value => {
+                    setLinkQuantities(current => ({ ...current, [r.outbound_id]: value })); setLinkConfirmed(false)
+                  }} /> },
                 { title: '数量单位', dataIndex: 'purchase_unit', render: (v, r) => v || (isPaperRope(r.name_zh) ? '米' : '个') },
                 { title: '采购单价', dataIndex: 'price' }, { title: '币种', dataIndex: 'currency' },
               ]} />
-            <Typography.Paragraph type="secondary">本行可分配量已扣除其他柜及当前柜其他明细的占用；不足时请先调整或拆分本行数量，不会自动截减。</Typography.Paragraph>
-            <Checkbox checked={linkConfirmed} disabled={!linkSelected || linkBusy} onChange={e => setLinkConfirmed(e.target.checked)}>已核对物料、规格、数量单位及 PO，确认是本行对应的出库</Checkbox>
+            <Typography.Paragraph type="secondary">可分配量已扣除其他柜及本柜其他明细的占用。各批次均须填写大于 0 的数量，合计须与已有送货数量一致；不同供应商、报关公司或币种请分别关联。</Typography.Paragraph>
+            <Checkbox checked={linkConfirmed} disabled={!linkSelected.length || linkBusy} onChange={e => setLinkConfirmed(e.target.checked)}>已核对所选批次的物料、规格、数量单位、分配数量及 PO</Checkbox>
           </>
         })()}
       </Modal>

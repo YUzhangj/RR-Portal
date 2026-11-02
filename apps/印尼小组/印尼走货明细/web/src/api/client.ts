@@ -98,6 +98,8 @@ export interface ShipmentImportSource {
 }
 
 export interface Material {
+  // Local shipment snapshot only; keeps explicitly linked batches in one packing row.
+  shipment_outbound_link_group?: string
   import_source?: ShipmentImportSource
   // A linked ordinary row converted to a local packing snapshot retains its
   // original product-HS fallback for absent codes; explicit empty codes do not.

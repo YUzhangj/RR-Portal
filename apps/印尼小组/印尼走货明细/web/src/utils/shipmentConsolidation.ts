@@ -4,6 +4,7 @@ import { effectiveCustomsCompany, sortShipmentItems } from './shipmentOrder'
 import { invoiceCustomsCompany } from './shipmentInvoice'
 import { shipmentChargeQuantity, shipmentPurchaseAmount } from './shipmentPurchase'
 import { isPaperRope, parseShipmentPacking, shipmentWeightQuantity } from './shipmentWeight'
+import { shipmentDecimalTicks } from './shipmentDecimal'
 
 type BatchItem = CustomsItem & { outbound_id?: number; carton_no?: string; material_snapshot?: unknown }
 
@@ -14,7 +15,18 @@ export function consolidateShipmentItems<T extends BatchItem>(
 ): Array<T & { sources: T[]; outbound_ids: number[]; purchase_charge_ratio?: number }> {
   const groups = new Map<string, T & { sources: T[]; outbound_ids: number[]; purchase_charge_ratio?: number }>()
   const text = (value: unknown) => String(value ?? '').trim()
-  const sum = (a: unknown, b: unknown) => Number(((Number(a) || 0) + (Number(b) || 0)).toPrecision(15))
+  const sum = (...values: unknown[]) => {
+    const numbers = values.map(value => Number(value) || 0)
+    const ticks = numbers.map(shipmentDecimalTicks)
+    // Stored qty/kg have four decimal places. Preserve them rather than cutting
+    // a valid large batch total down to fifteen significant digits.
+    if (ticks.every((value): value is number => value != null)) {
+      const total = ticks.reduce((result, value) => result + BigInt(value), 0n)
+      if (total >= -BigInt(Number.MAX_SAFE_INTEGER) && total <= BigInt(Number.MAX_SAFE_INTEGER))
+        return Number(total) / 10000
+    }
+    return Number(numbers.reduce((a, b) => a + b, 0).toPrecision(15))
+  }
   // Sort before choosing the surviving position: shared-carton ordering also
   // determines which contract owns a company's final-line surcharge.
   sortShipmentItems(items, materials, fallback).forEach((item, index) => {
@@ -24,15 +36,17 @@ export function consolidateShipmentItems<T extends BatchItem>(
     const confirmedSnapshot = !!snapshot && Number(snapshot.id) > 0 && snapshot.id === material?.id
       && !!text(snapshot.name_zh) && text(snapshot.name_zh) === text(material?.name_zh)
     const packing = parseShipmentPacking(item.qty_per_carton)
+    const linkedPacking = confirmedSnapshot && !!snapshot?.shipment_outbound_link_group
     // Unlinked/unconfirmed imports and per-box packing schedules cannot
     // safely be collapsed. Carton number labels, however, identify batches,
     // not different goods: retain all labels on the consolidated display row.
     const eligible = !!material && Number(identity) > 0 && Number(item.outbound_id) > 0
-      && Number.isFinite(Number(item.kg)) && Number(item.kg) > 0
+      && Number.isFinite(Number(item.kg)) && (Number(item.kg) > 0 || (linkedPacking && Number(item.kg) === 0))
       && Number.isFinite(Number(item.qty)) && Number(item.qty) > 0
-      && (!snapshot || confirmedSnapshot) && ['uniform', 'empty'].includes(packing.mode)
+      && (!snapshot || confirmedSnapshot) && (['uniform', 'empty'].includes(packing.mode) || (linkedPacking && packing.mode === 'ranges'))
     const key = eligible ? JSON.stringify([
       identity, text(item.supplier || material?.supplier),
+      linkedPacking ? [snapshot.shipment_outbound_link_group, text(item.qty_per_carton)] : null,
       // Confirmed local snapshots may use different negative editor keys. Merge
       // only when their actual declaration/packing attributes are identical.
       ...['name_zh', 'name_en', 'product_code', 'related_product_code', 'spec', 'category', 'hs_cn', 'hs_id',
@@ -58,8 +72,8 @@ export function consolidateShipmentItems<T extends BatchItem>(
     }
     group.sources.push(item)
     group.outbound_ids = [...new Set([...group.outbound_ids, item.outbound_id!])]
-    group.qty = sum(group.qty, item.qty)
-    group.kg = sum(group.kg, item.kg)
+    group.qty = sum(...group.sources.map(source => source.qty))
+    group.kg = sum(...group.sources.map(source => source.kg))
     // PO prices may differ. Preserve each batch's amount instead of applying
     // the first purchase order's price to the combined quantity.
     const chargeQty = group.sources.reduce((qty, source) => qty + shipmentChargeQuantity(source), 0)
