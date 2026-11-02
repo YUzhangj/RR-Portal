@@ -24,15 +24,17 @@ export function consolidateShipmentItems<T extends BatchItem>(
     const confirmedSnapshot = !!snapshot && Number(snapshot.id) > 0 && snapshot.id === material?.id
       && !!text(snapshot.name_zh) && text(snapshot.name_zh) === text(material?.name_zh)
     const packing = parseShipmentPacking(item.qty_per_carton)
+    const linkedPacking = confirmedSnapshot && !!snapshot?.shipment_outbound_link_group
     // Unlinked/unconfirmed imports and per-box packing schedules cannot
     // safely be collapsed. Carton number labels, however, identify batches,
     // not different goods: retain all labels on the consolidated display row.
     const eligible = !!material && Number(identity) > 0 && Number(item.outbound_id) > 0
-      && Number.isFinite(Number(item.kg)) && Number(item.kg) > 0
+      && Number.isFinite(Number(item.kg)) && (Number(item.kg) > 0 || (linkedPacking && Number(item.kg) === 0))
       && Number.isFinite(Number(item.qty)) && Number(item.qty) > 0
-      && (!snapshot || confirmedSnapshot) && ['uniform', 'empty'].includes(packing.mode)
+      && (!snapshot || confirmedSnapshot) && (['uniform', 'empty'].includes(packing.mode) || (linkedPacking && packing.mode === 'ranges'))
     const key = eligible ? JSON.stringify([
       identity, text(item.supplier || material?.supplier),
+      linkedPacking ? [snapshot.shipment_outbound_link_group, text(item.qty_per_carton)] : null,
       // Confirmed local snapshots may use different negative editor keys. Merge
       // only when their actual declaration/packing attributes are identical.
       ...['name_zh', 'name_en', 'product_code', 'related_product_code', 'spec', 'category', 'hs_cn', 'hs_id',
