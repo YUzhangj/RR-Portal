@@ -74,6 +74,7 @@ export interface CustomerScheduleUnmatchedRow {
   tomyPO: string
   货号: string
   purchasePointName: string | null
+  reason?: string
 }
 
 export interface CustomerScheduleReconciliationResult {
@@ -141,6 +142,7 @@ export interface ReconciliationSummary {
   details: {
     matched: MatchDetail[]
     unmatched: UnmatchedDetail[]
+    ambiguous?: Array<{ tomyPO: string; 货号: string; sourceFile: string; count: number }>
   }
 }
 

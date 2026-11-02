@@ -2,6 +2,7 @@ import ExcelJS from 'exceljs'
 import { parse } from 'date-fns'
 import { normalize } from './normalize.js'
 import { prepareScheduleWorkbook } from './prepareScheduleWorkbook.js'
+import { patchCustomerWorkbook, type CellAnnotation } from './customerWorkbookPatch.js'
 import type {
   CustomerScheduleReconciliationResult,
   CustomerScheduleRow,
@@ -34,18 +35,6 @@ const PURCHASE_POINT_NAMES: Record<string, string> = {
   RR03: 'PT ROYAL REGENT MANUFACTURING',
 }
 
-const GREEN_FILL: ExcelJS.FillPattern = {
-  type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC6EFCE' },
-}
-
-const RED_FILL: ExcelJS.FillPattern = {
-  type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFC7CE' },
-}
-
-const YELLOW_FILL: ExcelJS.FillPattern = {
-  type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFEB9C' },
-}
-
 function unwrapCellValue(raw: ExcelJS.CellValue): unknown {
   if (raw === null || raw === undefined) return null
   if (typeof raw === 'object' && 'result' in (raw as object)) {
@@ -54,26 +43,28 @@ function unwrapCellValue(raw: ExcelJS.CellValue): unknown {
   if (typeof raw === 'object' && 'text' in (raw as object)) {
     return (raw as { text: string }).text
   }
+  if (typeof raw === 'object' && 'richText' in raw) return raw.richText.map(part => part.text).join('')
   return raw
 }
 
 function asText(value: unknown): string | null {
   if (value === null || value === undefined) return null
+  if (typeof value === 'object') return null
   const text = String(value).trim()
   return text || null
 }
 
 function asNumber(value: unknown): number | null {
-  if (value === null || value === undefined || value === '') return null
+  if (value === null || value === undefined || typeof value === 'string' && !value.trim()) return null
   const parsed = Number(String(value).replace(/,/g, ''))
   return Number.isFinite(parsed) ? parsed : null
 }
 
-function asDate(value: unknown): Date | null {
+function asDate(value: unknown, date1904 = false): Date | null {
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value
   if (typeof value === 'number' && Number.isFinite(value)) {
-    const utc = new Date(Date.UTC(1899, 11, 30) + Math.round(value) * 86_400_000)
-    return new Date(utc.getUTCFullYear(), utc.getUTCMonth(), utc.getUTCDate())
+    const utc = new Date((date1904 ? Date.UTC(1904, 0, 1) : Date.UTC(1899, 11, 30)) + Math.floor(value) * 86_400_000)
+    return Number.isNaN(utc.getTime()) ? null : new Date(utc.getUTCFullYear(), utc.getUTCMonth(), utc.getUTCDate())
   }
   const text = asText(value)
   if (!text) return null
@@ -88,16 +79,19 @@ function buildColumnMap(row: ExcelJS.Row): Map<string, number> {
   const map = new Map<string, number>()
   row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
     const header = String(unwrapCellValue(cell.value) ?? '').trim()
+    if (header && CUSTOMER_CHECK_HEADERS.includes(header as typeof CUSTOMER_CHECK_HEADERS[number]) && map.has(header)) throw new Error(`客户排期表存在重复核对表头: ${header}`)
     if (header) map.set(header, colNumber)
   })
   return map
 }
 
 function findCustomerWorksheet(workbook: ExcelJS.Workbook): ExcelJS.Worksheet {
-  const worksheet = workbook.worksheets.find((sheet) => {
+  const candidates = workbook.worksheets.filter((sheet) => {
     const headers = buildColumnMap(sheet.getRow(1))
     return REQUIRED_HEADERS.every((header) => headers.has(header))
   })
+  if (candidates.length > 1) throw new Error('客户排期表包含多个候选工作表，请只保留要核对的一个工作表')
+  const worksheet = candidates[0]
   if (!worksheet) {
     throw new Error(`客户排期表缺少必需表头: ${REQUIRED_HEADERS.join(', ')}`)
   }
@@ -119,13 +113,18 @@ export async function parseCustomerScheduleExcel(buffer: Buffer): Promise<Custom
     const column = columns.get(header)
     return column === undefined ? null : unwrapCellValue(row.getCell(column).value)
   }
+  const typed = <T>(row: ExcelJS.Row, header: string, convert: (value: unknown) => T | null): T | null => {
+    const raw = get(row, header), value = convert(raw)
+    if (raw != null && String(raw).trim() && value === null) throw new Error(`客户排期第 ${row.number} 行 ${header} 格式无效，请检查数值或日期`)
+    return value
+  }
 
   const rows: CustomerScheduleRow[] = []
   worksheet.eachRow({ includeEmpty: false }, (row, rowIndex) => {
     if (rowIndex === 1) return
     const poNum = asText(get(row, CUSTOMER_HEADERS.poNum))
     const partNumber = asText(get(row, CUSTOMER_HEADERS.partNumber))
-    if (!poNum || !partNumber) return
+    if (CUSTOMER_CHECK_HEADERS.every(header => get(row, header) == null || get(row, header) === '')) return
 
     rows.push({
       rowIndex,
@@ -134,16 +133,17 @@ export async function parseCustomerScheduleExcel(buffer: Buffer): Promise<Custom
       shipToCountry: asText(get(row, CUSTOMER_HEADERS.shipToCountry)),
       partNumber,
       poNum,
-      orderQty: asNumber(get(row, CUSTOMER_HEADERS.orderQty)),
-      unitCost: asNumber(get(row, CUSTOMER_HEADERS.unitCost)),
-      purchaseAmount: asNumber(get(row, CUSTOMER_HEADERS.purchaseAmount)),
-      poDueDate: asDate(get(row, CUSTOMER_HEADERS.poDueDate)),
+      orderQty: typed(row, CUSTOMER_HEADERS.orderQty, asNumber),
+      unitCost: typed(row, CUSTOMER_HEADERS.unitCost, asNumber),
+      purchaseAmount: typed(row, CUSTOMER_HEADERS.purchaseAmount, asNumber),
+      poDueDate: typed(row, CUSTOMER_HEADERS.poDueDate, raw => asDate(raw, workbook.properties.date1904)),
       qcResult: asText(get(row, CUSTOMER_HEADERS.qcResult)),
-      qcInspectionDate: asDate(get(row, CUSTOMER_HEADERS.qcInspectionDate)),
+      qcInspectionDate: typed(row, CUSTOMER_HEADERS.qcInspectionDate, raw => asDate(raw, workbook.properties.date1904)),
       purchasePointName: asText(get(row, CUSTOMER_HEADERS.purchasePointName)),
     })
   })
 
+  if (!rows.length) throw new Error('客户排期表没有可核对的数据行')
   return rows
 }
 
@@ -169,19 +169,6 @@ function addTextMismatch(
   }
 }
 
-function addNumberMismatch(
-  mismatches: FieldMismatch[],
-  field: string,
-  actual: number | null,
-  expected: number | null | undefined,
-  tolerance = 0,
-): void {
-  if (expected == null) return
-  if (actual === null || Math.abs(actual - expected) > tolerance) {
-    mismatches.push({ field, scheduleValue: actual, poValue: expected })
-  }
-}
-
 function addRequiredNumberMismatch(
   mismatches: FieldMismatch[],
   field: string,
@@ -195,7 +182,7 @@ function addRequiredNumberMismatch(
 }
 
 function customerKey(poNum: string | null | undefined, partNumber: string | null | undefined): string {
-  return `${normalizedText(poNum)}:${normalizedText(partNumber)}`
+  return JSON.stringify([normalizedText(poNum), normalizedText(partNumber)])
 }
 
 const COUNTRY_MAP: Record<string, string> = {
@@ -205,21 +192,6 @@ const COUNTRY_MAP: Record<string, string> = {
   FRANCE: '法国', GERMANY: '德国', JAPAN: '日本', KOREA: '韩国', 'SOUTH KOREA': '韩国',
   CANADA: '加拿大', NETHERLANDS: '荷兰', SPAIN: '西班牙', ITALY: '意大利',
 }
-
-const CHECKED_HEADERS = [
-  CUSTOMER_HEADERS.shipToCustName,
-  CUSTOMER_HEADERS.customerPO,
-  CUSTOMER_HEADERS.shipToCountry,
-  CUSTOMER_HEADERS.partNumber,
-  CUSTOMER_HEADERS.poNum,
-  CUSTOMER_HEADERS.orderQty,
-  CUSTOMER_HEADERS.unitCost,
-  CUSTOMER_HEADERS.purchaseAmount,
-  CUSTOMER_HEADERS.poDueDate,
-  CUSTOMER_HEADERS.qcResult,
-  CUSTOMER_HEADERS.qcInspectionDate,
-  CUSTOMER_HEADERS.purchasePointName,
-]
 
 export interface CustomerScheduleSources {
   dg?: ScheduleRow[] | null
@@ -266,11 +238,11 @@ function compareCustomerToSchedule(
   }
   addTextMismatch(mismatches, CUSTOMER_HEADERS.partNumber, customerRow.partNumber, scheduleRow.货号)
   addTextMismatch(mismatches, CUSTOMER_HEADERS.poNum, customerRow.poNum, scheduleRow.tomyPO)
-  addNumberMismatch(mismatches, CUSTOMER_HEADERS.orderQty, customerRow.orderQty, scheduleRow.数量)
+  addRequiredNumberMismatch(mismatches, CUSTOMER_HEADERS.orderQty, customerRow.orderQty, scheduleRow.数量, 0)
   addRequiredNumberMismatch(mismatches, CUSTOMER_HEADERS.unitCost, customerRow.unitCost, scheduleRow.单价USD, 0.0005)
   addRequiredNumberMismatch(mismatches, CUSTOMER_HEADERS.purchaseAmount, customerRow.purchaseAmount, scheduleRow.金额USD, 0.005)
 
-  if (scheduleRow.PO走货期 && !sameDate(customerRow.poDueDate, scheduleRow.PO走货期)) {
+  if (!sameDate(customerRow.poDueDate, scheduleRow.PO走货期)) {
     mismatches.push({
       field: CUSTOMER_HEADERS.poDueDate,
       scheduleValue: customerRow.poDueDate,
@@ -351,6 +323,12 @@ export function reconcileCustomerSchedule(
 
   const claimedRows = new Set<string>()
   for (const customerRow of customerRows) {
+    if (!normalizedText(customerRow.poNum) || !normalizedText(customerRow.partNumber)) {
+      const reason = `客户排期第 ${customerRow.rowIndex} 行缺少 PO Num 或 Part Number，未核对`
+      result.errors.push(reason)
+      result.unmatchedRows.push({ customerRowIndex: customerRow.rowIndex, tomyPO: customerRow.poNum ?? '', 货号: customerRow.partNumber ?? '', purchasePointName: customerRow.purchasePointName, reason })
+      continue
+    }
     const expectedFactory = inferFactoryCode(customerRow.purchasePointName)
     const candidates = (index.get(customerKey(customerRow.poNum, customerRow.partNumber)) ?? [])
       .filter((source) => expectedFactory === null || source.factoryCode === expectedFactory)
@@ -380,6 +358,7 @@ export function reconcileCustomerSchedule(
         货号: customerRow.partNumber ?? '',
         count: ambiguousCount,
       })
+      continue
     }
 
     claimedRows.add(`${matchedSource.factoryCode}:${matchedSource.row.rowIndex}`)
@@ -410,54 +389,17 @@ export async function writeAnnotatedCustomerSchedule(
   await workbook.xlsx.load(await prepareScheduleWorkbook(customerBuffer) as unknown as Parameters<typeof workbook.xlsx.load>[0])
   const worksheet = findCustomerWorksheet(workbook)
   const columns = buildColumnMap(worksheet.getRow(1))
-  const statusColumn = worksheet.columnCount + 1
-  const statusHeader = worksheet.getRow(1).getCell(statusColumn)
-  statusHeader.value = '核对状态'
-  statusHeader.font = { ...statusHeader.font, bold: true }
-  statusHeader.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9EAF7' } }
-  worksheet.getColumn(statusColumn).width = 12
-
-  const fieldColumns = new Map<string, number>()
-  for (const header of CUSTOMER_CHECK_HEADERS) {
-    const column = columns.get(header)
-    if (column !== undefined) fieldColumns.set(header, column)
-  }
-
-  const ambiguousRowIndexes = new Set(result.ambiguousRows.map((row) => row.customerRowIndex))
+  const annotations = new Map<number, CellAnnotation>()
+  const fields = (fill: string) => new Map(CUSTOMER_CHECK_HEADERS.map(header => [columns.get(header)!, fill]))
   for (const match of result.matched) {
-    const row = worksheet.getRow(match.customerRowIndex)
-    for (const header of CHECKED_HEADERS) {
-      const column = fieldColumns.get(header)
-      if (column === undefined) continue
-      const cell = row.getCell(column)
-      cell.style = { ...cell.style, fill: { ...GREEN_FILL } }
-    }
-    for (const mismatch of match.mismatches) {
-      const column = fieldColumns.get(mismatch.field)
-      if (column === undefined) continue
-      const cell = row.getCell(column)
-      cell.style = { ...cell.style, fill: { ...RED_FILL } }
-      cell.note = `排期/核对规则值: ${displayValue(mismatch.poValue)}`
-    }
-    const statusCell = row.getCell(statusColumn)
-    statusCell.value = ambiguousRowIndexes.has(match.customerRowIndex)
-      ? '重复匹配'
-      : match.mismatches.length > 0 ? '有差异' : '已核对'
-    statusCell.note = `核对来源: ${match.sourceSchedule}`
+    const colors = fields('FFC6EFCE')
+    for (const mismatch of match.mismatches) { const column = columns.get(mismatch.field); if (column !== undefined) colors.set(column, 'FFFFC7CE') }
+    annotations.set(match.customerRowIndex, { status: match.mismatches.length ? '有差异' : '已核对',
+      detail: [`核对来源: ${match.sourceSchedule}`, ...match.mismatches.map(m => `${m.field}: 排期/核对规则值 ${displayValue(m.poValue)}`)].join('；'), fields: colors })
   }
-
-  for (const unmatched of result.unmatchedRows) {
-    const row = worksheet.getRow(unmatched.customerRowIndex)
-    for (const header of CUSTOMER_CHECK_HEADERS) {
-      const column = fieldColumns.get(header)
-      if (column === undefined) continue
-      const cell = row.getCell(column)
-      cell.style = { ...cell.style, fill: { ...YELLOW_FILL } }
-    }
-    const statusCell = row.getCell(statusColumn)
-    statusCell.value = '排期未匹配'
-    statusCell.note = '未在已上传的东莞/印尼排期中找到同一 PO Num + Part Number'
-  }
-
-  return Buffer.from(await workbook.xlsx.writeBuffer())
+  for (const row of result.ambiguousRows) annotations.set(row.customerRowIndex, { status: '多条匹配，待确认',
+    detail: `同一 PO Num + Part Number 有 ${row.count} 条候选，未选取或核对任何一条`, fields: fields('FFFFEB9C') })
+  for (const row of result.unmatchedRows) annotations.set(row.customerRowIndex, { status: '排期未匹配',
+    detail: row.reason ?? '未在已上传的东莞/印尼排期中找到同一 PO Num + Part Number', fields: fields('FFFFEB9C') })
+  return patchCustomerWorkbook(customerBuffer, worksheet.id, annotations)
 }

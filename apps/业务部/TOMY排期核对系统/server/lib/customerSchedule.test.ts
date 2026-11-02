@@ -124,7 +124,7 @@ describe('customer schedule reconciliation', () => {
     expect((sheet.getCell(2, column('Ship To Cust Name')).fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FFC6EFCE')
     expect((sheet.getCell(2, column('Unit Cost')).fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FFC6EFCE')
     expect((sheet.getCell(2, column('Purchase Amount')).fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FFC6EFCE')
-    expect(sheet.getCell(2, column('Order Qty')).note).toContain('600')
+    expect(String(sheet.getCell(2, CUSTOMER_CHECK_HEADERS.length + 2).value)).toContain('Order Qty: 排期/核对规则值 600')
     expect(sheet.getCell(2, CUSTOMER_CHECK_HEADERS.length + 1).value).toBe('有差异')
   })
 

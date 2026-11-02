@@ -1,14 +1,22 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'fs'
-import { resolve } from 'path'
 import { parseScheduleExcel } from './excelParser.js'
 import ExcelJS from 'exceljs'
 
-// Load real Excel fixtures from project root
-const PROJECT_ROOT = resolve(import.meta.dirname, '../../')
-
-const dongguanBuffer = readFileSync(resolve(PROJECT_ROOT, '2026年TOMY东莞排期3-18.xlsx'))
-const indonesiaBuffer = readFileSync(resolve(PROJECT_ROOT, '2026年TOMY印尼排期3-18.xlsx'))
+// Public, deterministic in-memory workbooks. No local business files are read.
+async function syntheticSchedule(indonesia: boolean): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook()
+  const sheet = workbook.addWorksheet('总排期')
+  sheet.addRow(['接单期', '国家', indonesia ? '第三客户名称' : '客名', '客跟单',
+    indonesia ? 'TOMY PO' : 'Tomy PO', indonesia ? 'CUSTOMER PO' : 'Cust. PO NO.',
+    '货号', '数量', '外箱', '总箱数', 'PO走货期', '日期码', '箱唛资料', '客贴纸', '单价USD', '金额USD'])
+  const count = indonesia ? 210 : 35
+  for (let i = 0; i < count; i++) sheet.addRow([new Date(2026, 0, 1), '中国', 'Fixture customer', 'Fixture owner',
+    String(10000000 + i), `C-${i}`, `SKU-${i}`, { formula: '100*2', result: 200 }, 20,
+    { formula: '200/20', result: 10 }, new Date(2026, 2, 20), 'FIXTURE', 'Fixture mark', '', 2, 400])
+  sheet.addRow(['', '', '', 'Blank filler without PO'])
+  return Buffer.from(await workbook.xlsx.writeBuffer())
+}
+const [dongguanBuffer, indonesiaBuffer] = await Promise.all([syntheticSchedule(false), syntheticSchedule(true)])
 
 describe('parseScheduleExcel', { timeout: 30000 }, () => {
   describe('Dongguan file', () => {

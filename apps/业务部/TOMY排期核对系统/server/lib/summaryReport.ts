@@ -115,9 +115,22 @@ export function buildSummaryReport(
 
 
   for (const item of customer.unmatchedRows) {
-    lines.push(`PO: ${item.tomyPO}  货号: ${item.货号}  来源: ${CUSTOMER_LABEL}`)
+    lines.push(`PO: ${item.tomyPO}  货号: ${item.货号}  来源: ${CUSTOMER_LABEL} 第 ${item.customerRowIndex} 行`)
   }
 
+  lines.push('')
+
+  const ambiguous = [
+    ...dg.ambiguousPOItems.map(row => ({ ...row, label: DG_LABEL })),
+    ...id.ambiguousPOItems.map(row => ({ ...row, label: ID_LABEL })),
+    ...rrm.ambiguousPOItems.map(row => ({ ...row, label: RRM_LABEL })),
+    ...customer.ambiguousRows.map(row => ({ ...row, label: `${CUSTOMER_LABEL} 第 ${row.customerRowIndex} 行` })),
+  ]
+  lines.push(`【多条匹配，待确认】共 ${ambiguous.length} 条`)
+  for (const row of ambiguous) lines.push(`PO: ${row.tomyPO}  货号: ${row.货号}  来源: ${row.label}  候选: ${row.count} 条`)
+  for (const [label, result] of [[DG_LABEL, dg], [ID_LABEL, id], [RRM_LABEL, rrm], [CUSTOMER_LABEL, customer]] as const) {
+    for (const error of result.errors) lines.push(`错误 [${label}]: ${error}`)
+  }
   lines.push('')
 
   // Section 3: Summary counts

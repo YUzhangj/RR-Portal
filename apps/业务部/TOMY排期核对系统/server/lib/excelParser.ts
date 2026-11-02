@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs'
+import JSZip from 'jszip'
 import { prepareScheduleWorkbook } from './prepareScheduleWorkbook.js'
 import type { ScheduleRow } from '../types/index.js'
 
@@ -60,30 +61,46 @@ function getCellValue(row: ExcelJS.Row, colIndex: number | undefined): unknown {
   return unwrapCellValue(cell.value)
 }
 
-function hasBlueFont(cell: ExcelJS.Cell): boolean {
+function hasBlueFont(cell: ExcelJS.Cell, theme: string, palette?: string[]): boolean {
   const color = cell.font?.color
   if (!color) return false
-  if (color.argb) {
-    const rgb = color.argb.slice(-6)
+  const tint = (color as typeof color & { tint?: number }).tint
+  if (tint === 1 || tint === -1) return false
+  let rgb = color.argb?.slice(-6)
+  const indexed = (color as typeof color & { indexed?: number }).indexed
+  if (indexed !== undefined) rgb = palette ? palette[indexed]?.slice(-6) : ({ 4: '0000FF', 12: '0000FF' } as Record<number, string>)[indexed]
+  if (color.theme !== undefined) {
+    const names = ['lt1', 'dk1', 'lt2', 'dk2', 'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6', 'hlink', 'folHlink']
+    const name = names[color.theme]
+    const block = name && new RegExp(`<a:${name}>[\\s\\S]*?</a:${name}>`).exec(theme)?.[0]
+    rgb = block ? /<a:srgbClr\b[^>]*\bval="([A-Fa-f0-9]{6})"/.exec(block)?.[1]
+      ?? /<a:sysClr\b[^>]*\blastClr="([A-Fa-f0-9]{6})"/.exec(block)?.[1] : undefined
+  }
+  if (rgb && /^[A-Fa-f0-9]{6}$/.test(rgb)) {
     const red = Number.parseInt(rgb.slice(0, 2), 16)
     const green = Number.parseInt(rgb.slice(2, 4), 16)
     const blue = Number.parseInt(rgb.slice(4, 6), 16)
     return Number.isFinite(red) && Number.isFinite(green) && Number.isFinite(blue)
       && blue > red && blue > green
   }
-  const indexed = (color as typeof color & { indexed?: number }).indexed
-  if (indexed !== undefined) return indexed === 5 || indexed === 12
-  if (color.theme !== undefined) return color.theme === 4 || color.theme === 10
   return false
+}
+
+function finiteNumber(raw: unknown): number | null {
+  if (raw == null || typeof raw === 'string' && !raw.trim()) return null
+  const value = Number(typeof raw === 'string' ? raw.replace(/,/g, '') : raw)
+  return Number.isFinite(value) ? value : null
 }
 
 function parseHoldDate(value: unknown, referenceDate: Date | null): Date | null {
   if (typeof value !== 'string') return null
+  const explicit = value.match(/\b(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})\s*(?:ON\s*)?HOLD\b/i)
   const match = value.match(/\b(\d{1,2})[\/.\-](\d{1,2})\s*(?:ON\s*)?HOLD\b/i)
   if (!match) return null
-  const month = Number(match[1])
-  const day = Number(match[2])
-  const year = referenceDate?.getFullYear() ?? new Date().getFullYear()
+  const month = Number(explicit?.[2] ?? match[1])
+  const day = Number(explicit?.[3] ?? match[2])
+  const year = explicit ? Number(explicit[1]) : referenceDate?.getFullYear()
+  if (year === undefined) return null
   const parsed = new Date(year, month - 1, day)
   return parsed.getFullYear() === year
     && parsed.getMonth() === month - 1
@@ -111,6 +128,12 @@ function parseHoldDate(value: unknown, referenceDate: Date | null): Date | null 
 export async function parseScheduleExcel(buffer: Buffer, sheetName?: string): Promise<ScheduleRow[]> {
   const workbook = new ExcelJS.Workbook()
   await workbook.xlsx.load(await prepareScheduleWorkbook(buffer) as unknown as Parameters<typeof workbook.xlsx.load>[0])
+  const theme = (workbook.model.themes as unknown as { theme1?: string })?.theme1 ?? ''
+  // Excel permits a custom indexed palette; never assume index 4 remains blue.
+  const rawZip = await JSZip.loadAsync(buffer)
+  const rawStyles = await rawZip.file('xl/styles.xml')?.async('string') ?? ''
+  const indexedColors = /<indexedColors\b[^>]*>([\s\S]*?)<\/indexedColors>/.exec(rawStyles)
+  const palette = indexedColors ? [...indexedColors[1].matchAll(/<rgbColor\b[^>]*\brgb=["']([A-Fa-f0-9]{8})["']/g)].map(m => m[1]) : undefined
 
   let ws: ExcelJS.Worksheet | undefined
 
@@ -232,9 +255,7 @@ export async function parseScheduleExcel(buffer: Buffer, sheetName?: string): Pr
 
     // Extract numeric fields (may be formula cells)
     const rawShuLiang = getCellValue(row, shuLiangCol)
-    const shuLiang = rawShuLiang !== null && rawShuLiang !== undefined
-      ? (Number(rawShuLiang) || null)
-      : null
+    const shuLiang = finiteNumber(rawShuLiang)
 
     const rawWaiXiang = getCellValue(row, waiXiangCol)
     const waiXiang = rawWaiXiang !== null && rawWaiXiang !== undefined
@@ -259,7 +280,7 @@ export async function parseScheduleExcel(buffer: Buffer, sheetName?: string): Pr
     const shiJiYanHuoCell = shiJiYanHuoQiCol === undefined ? null : row.getCell(shiJiYanHuoQiCol)
     const shiJiYanHuoTongGuo = shiJiYanHuoQi !== null
       && shiJiYanHuoCell !== null
-      && hasBlueFont(shiJiYanHuoCell)
+      && hasBlueFont(shiJiYanHuoCell, theme, palette)
     const actualInspectionText = typeof rawShiJiYanHuoQi === 'string'
       ? rawShiJiYanHuoQi.trim()
       : ''
@@ -298,16 +319,10 @@ export async function parseScheduleExcel(buffer: Buffer, sheetName?: string): Pr
 
     // Extract USD unit price and amount used by customer schedule reconciliation.
     const rawDanJiaUsd = getCellValue(row, danJiaUsdCol)
-    const parsedDanJiaUsd = rawDanJiaUsd === null || rawDanJiaUsd === undefined
-      ? Number.NaN
-      : Number(rawDanJiaUsd)
-    const danJiaUsd = Number.isFinite(parsedDanJiaUsd) ? parsedDanJiaUsd : null
+    const danJiaUsd = finiteNumber(rawDanJiaUsd)
 
     const rawJinEUsd = getCellValue(row, jinEUsdCol)
-    const parsedJinEUsd = rawJinEUsd === null || rawJinEUsd === undefined
-      ? Number.NaN
-      : Number(rawJinEUsd)
-    const jinEUsd = Number.isFinite(parsedJinEUsd) ? parsedJinEUsd : null
+    const jinEUsd = finiteNumber(rawJinEUsd)
 
     rows.push({
       rowIndex: rowIdx,
