@@ -4,7 +4,6 @@ import {
   ArrowLeft,
   BadgeCheck,
   CircleDashed,
-  ClipboardList,
   Download,
   ExternalLink,
   FilePlus2,
@@ -166,13 +165,6 @@ export default function ProjectView({
           >
             <Files className="h-4 w-4" /> 全部文件
           </button>
-          <button
-            onClick={() => onNavigate({ type: "workbench", client, year, project })}
-            className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-cyan-300 hover:bg-slate-800"
-            title="按 EPMS 制单台流程做资料（草稿/审核/归档/防串单锁）"
-          >
-            <ClipboardList className="h-4 w-4" /> 制单台
-          </button>
           <Button size="sm" variant="ghost" onClick={load} title="重新扫描">
             <RefreshCw className="h-4 w-4" />
           </Button>
@@ -270,7 +262,7 @@ export default function ProjectView({
                                 <Button
                                   size="sm"
                                   onClick={() => createFromTemplate(dt)}
-                                  disabled={!canEdit || (!dt.template || busyRow === dt.name)}
+                                  disabled={!canEdit || !dt.template || busyRow === dt.name}
                                   title={dt.template ? `以「${dt.template}」为模板新建` : `模板库中还没有「${dt.name}」模板`}
                                 >
                                   <FilePlus2 className="mr-1 h-3.5 w-3.5" /> 从模板新建
@@ -279,7 +271,7 @@ export default function ProjectView({
                                   size="sm"
                                   variant="outline"
                                   onClick={() => pickUpload(dt)}
-                                  disabled={!canEdit || (busyRow === dt.name)}
+                                  disabled={!canEdit || busyRow === dt.name}
                                 >
                                   <UploadCloud className="mr-1 h-3.5 w-3.5" /> 上传
                                 </Button>

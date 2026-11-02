@@ -25,6 +25,8 @@ function requireEdit() {
 export const api = {
   config: () => req<AppConfig>("api/config"),
 
+  editorAccess: (path: string) => req<{ readOnly: boolean; reason?: string }>(`api/editor-access?path=${enc(path)}`),
+
   list: (path: string) => req<{ path: string; entries: DirEntry[] }>(`api/list?path=${enc(path)}`),
 
   overview: () => req<Overview>("api/overview"),
@@ -107,7 +109,7 @@ export const api = {
     dirPath: string,
     file: File,
     onProgress?: (pct: number) => void,
-    opts?: { overwrite?: boolean; baseMtime?: number; lockToken?: string },
+    opts?: { overwrite?: boolean; baseMtime?: number },
   ): Promise<{ ok: true; name: string }> {
     try { requireEdit(); } catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
@@ -117,7 +119,6 @@ export const api = {
       if (opts?.baseMtime) params.push(`baseMtime=${opts.baseMtime}`);
       xhr.open("POST", `api/upload?${params.join("&")}`);
       xhr.setRequestHeader("X-EPMS-Request", "1");
-      if (opts?.lockToken) xhr.setRequestHeader("X-EPMS-Lock-Token", opts.lockToken);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
       };
@@ -135,33 +136,12 @@ export const api = {
     });
   },
 
-  /* ---------- Server-verified core account + EPMS ---------- */
+  /* ---------- Server-verified personal account ---------- */
   epmsSession: () => req<EpmsSession>("api/epms/session"),
   epmsLogin: (username: string, password: string) =>
     req<EpmsSession>("api/epms/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) }),
   epmsLogout: () => req<{ ok: true }>("api/epms/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }),
-  epmsGet: (path: string, doc: string) =>
-    req<EpmsRecordPublic>("api/epms?path=" + enc(path) + "&doc=" + enc(doc)),
-  epmsSave: (path: string, doc: string, data: unknown, lockToken: string, version: number) =>
-    req<EpmsRecordPublic>("api/epms/save", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, doc, data, lockToken, version }),
-    }),
-  epmsLock: (path: string, doc: string, lockToken?: string) =>
-    req<EpmsRecordPublic>("api/epms/lock", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, doc, lockToken }),
-    }),
-  epmsUnlock: (path: string, doc: string, lockToken: string) =>
-    req<{ ok: true }>("api/epms/unlock", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, doc, lockToken }),
-    }),
-  epmsStatus: (path: string, doc: string, action: "submit" | "approve" | "return", lockToken: string, version: number) =>
-    req<EpmsRecordPublic>("api/epms/status", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, doc, action, lockToken, version }),
-    }),
+
 };
 
 export interface EpmsSession {
@@ -170,27 +150,4 @@ export interface EpmsSession {
   canRead: boolean;
   canEdit: boolean;
   canReview: boolean;
-}
-export interface EpmsRecordPublic {
-  status: "none" | "draft" | "pending" | "approved";
-  version: number;
-  data?: unknown;
-  by?: string;
-  byId?: string;
-  createdBy?: { id: string; name: string };
-  submittedBy?: { id: string; name: string };
-  updatedAt?: number;
-  docNo?: string;
-  lock?: { by: string; actorId: string; at: number } | null;
-  lockTtl?: number;
-  lockToken?: string;
-  integrityStatus?: "verified" | "changed" | "unavailable";
-  integrityChanged?: boolean | null;
-  history?: { at: number; by: string; action: string }[];
-}
-export interface EditorLease {
-  projectPath: string;
-  doc: string;
-  token: string;
-  readOnly?: boolean;
 }

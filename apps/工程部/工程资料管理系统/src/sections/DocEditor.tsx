@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ensureLuckysheet } from "@/lib/luckysheet-loader";
 import { luckyToXlsx } from "@/lib/lucky-to-xlsx";
-import { api, type EditorLease } from "@/lib/api";
+import { api } from "@/lib/api";
 import { useEpmsAccess } from "@/lib/epms-access";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, Download, Loader2, Save } from "lucide-react";
@@ -18,27 +18,15 @@ export default function DocEditor({
   name,
   onClose,
   onSaved,
-  lease,
+  onDirtyChange,
 }: {
   path: string;
   name: string;
   onClose: () => void;
   onSaved: () => void;
-  lease?: EditorLease | null;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const { session } = useEpmsAccess();
-  const [leaseValid, setLeaseValid] = useState(Boolean(lease?.token && !lease.readOnly));
-  const writable = Boolean(session?.canEdit && (!lease || (!lease.readOnly && leaseValid)));
-  useEffect(() => {
-    if (!lease?.token || !(session?.canEdit || session?.canReview)) { setLeaseValid(false); return; }
-    let alive = true;
-    const renew = () => api.epmsLock(lease.projectPath, lease.doc, lease.token).then(() => {
-      if (alive) setLeaseValid(true);
-    }).catch(() => { if (alive) { setLeaseValid(false); toast.error("编辑锁已失效，保存已停用；可先下载当前内容"); } });
-    void renew();
-    const timer = setInterval(() => { void renew(); }, 60000);
-    return () => { alive = false; clearInterval(timer); };
-  }, [lease, session?.canEdit, session?.canReview]);
   const [phase, setPhase] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -47,13 +35,17 @@ export default function DocEditor({
   const dirtyRef = useRef(false);
   const destroyedRef = useRef(false);
   const [resolvedPath, setResolvedPath] = useState(path);
+  const [access, setAccess] = useState<{ requestedPath: string; path: string; actorId?: string; readOnly: boolean; reason?: string } | null>(null);
+  const writable = Boolean(session?.canEdit && access?.readOnly === false && access.requestedPath === path
+    && access.path === resolvedPath && access.actorId === session.id);
   const dir = resolvedPath.includes("/") ? resolvedPath.slice(0, resolvedPath.lastIndexOf("/")) : "";
   const fileName = resolvedPath.split("/").pop() || name;
 
   const markDirty = useCallback(() => {
     dirtyRef.current = true;
     setDirty(true);
-  }, []);
+    onDirtyChange?.(true);
+  }, [onDirtyChange]);
 
   useEffect(() => {
     destroyedRef.current = false;
@@ -75,6 +67,20 @@ export default function DocEditor({
             throw new Error("旧版 .xls 文件暂不支持网页编辑，请下载后用 Excel 打开编辑");
           }
         }
+        const checked = await api.editorAccess(p).catch(() => ({ readOnly: true, reason: "暂时无法核对编辑权限，请重新登录或联系管理员；当前仅可查看和下载" }));
+        if (checked.readOnly && [
+          "审核中或已归档资料不可通过文件接口改写、改名或删除",
+          "含制单记录的项目不能通过旧文件接口移动或删除",
+          "编辑锁已失效或属于其他窗口，请重新读取并获取锁",
+        ].includes(checked.reason || "")) checked.reason = "历史受控资料已保留，当前界面仅供查看";
+        if (cancelled) return;
+        const canWrite = Boolean(session?.canEdit && checked.readOnly === false);
+        setAccess({ ...checked, requestedPath: path, path: p, actorId: session?.id });
+        setResolvedPath(p);
+        setPhase("loading");
+        dirtyRef.current = false;
+        setDirty(false);
+        onDirtyChange?.(false);
         await ensureLuckysheet();
         // 记录打开时的修改时间，用于保存冲突检测
         try {
@@ -101,20 +107,22 @@ export default function DocEditor({
               data: exportJson.sheets,
               title: fileName,
               lang: "zh",
-              allowEdit: writable,
-              showtoolbar: writable,
+              allowEdit: canWrite,
+              showtoolbar: canWrite,
               showinfobar: false,
               showsheetbar: true,
               showstatisticBar: true,
               allowCopy: true,
-              enableAddRow: writable,
+              enableAddRow: canWrite,
               enableAddBackTop: true,
             });
             setPhase("ready");
             // 任何键盘/鼠标操作都标记为未保存
             const el = document.getElementById(CONTAINER_ID);
-            el?.addEventListener("keydown", markDirty);
-            el?.addEventListener("mousedown", markDirty);
+            if (canWrite) {
+              el?.addEventListener("keydown", markDirty);
+              el?.addEventListener("mousedown", markDirty);
+            }
           },
           (err: unknown) => {
             if (cancelled) return;
@@ -132,6 +140,11 @@ export default function DocEditor({
     return () => {
       cancelled = true;
       destroyedRef.current = true;
+      const el = document.getElementById(CONTAINER_ID);
+      el?.removeEventListener("keydown", markDirty);
+      el?.removeEventListener("mousedown", markDirty);
+      dirtyRef.current = false;
+      onDirtyChange?.(false);
       try {
         window.luckysheet?.destroy?.();
       } catch {
@@ -139,7 +152,7 @@ export default function DocEditor({
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, session?.id]);
+  }, [path, session?.id, session?.canEdit]);
 
   // 关闭页面前提示未保存
   useEffect(() => {
@@ -160,9 +173,10 @@ export default function DocEditor({
       const sheets = window.luckysheet.getAllSheets();
       const blob = await luckyToXlsx(sheets, fileName);
       const file = new File([blob], fileName, { type: blob.type });
-      await api.upload(dir, file, undefined, { overwrite: true, baseMtime, lockToken: lease?.token || undefined });
+      await api.upload(dir, file, undefined, { overwrite: true, baseMtime });
       dirtyRef.current = false;
       setDirty(false);
+      onDirtyChange?.(false);
       const st = await api.stat(resolvedPath).catch(() => null);
       if (st) setBaseMtime(st.mtime);
       toast.success("已保存到系统");
@@ -177,7 +191,7 @@ export default function DocEditor({
     } finally {
       setSaving(false);
     }
-  }, [saving, phase, dir, fileName, baseMtime, resolvedPath, onSaved, writable, lease]);
+  }, [saving, phase, writable, dir, fileName, baseMtime, resolvedPath, onSaved, onDirtyChange]);
 
   // Ctrl+S 保存
   useEffect(() => {
@@ -233,6 +247,10 @@ export default function DocEditor({
           保存 (Ctrl+S)
         </Button>
       </div>
+
+      {phase === "ready" && !writable && <div role="status" className="shrink-0 border-b bg-amber-50 px-3 py-2 text-sm text-amber-900">
+        只读：{access?.reason || "当前账号没有工程资料编辑权限，可查看和下载"}
+      </div>}
 
       {/* 编辑区 */}
       <div className="relative min-h-0 flex-1 bg-white">

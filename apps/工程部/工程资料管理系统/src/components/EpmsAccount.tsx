@@ -32,7 +32,7 @@ export function CoreAccountControl({ beforeLogout }: { beforeLogout?: () => Prom
   return (
     <div className="flex max-w-full flex-wrap items-center gap-2 text-xs">
       {session ? <>
-        <span>{session.name} · {session.canEdit ? "可制单" : "只读"}{session.canReview ? " · 可审核" : ""}</span>
+        <span>{session.name} · {session.canEdit ? "可编辑" : "只读"}</span>
         <button type="button" disabled={busy} className="min-h-11 px-2 underline" onClick={async () => {
           setBusy(true); setFailure("");
           try { await beforeLogout?.(); await logout(); } catch (cause) { setFailure((cause as Error).message); }
@@ -42,7 +42,7 @@ export function CoreAccountControl({ beforeLogout }: { beforeLogout?: () => Prom
         {loading ? "正在验证账号…" : "核心账号登录"}
       </button>}
       {(error || failure) && <span role="status" className="text-destructive">{failure || error}</span>}
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={(value) => { setOpen(value); if (!value) setPassword(""); }}>
         <DialogContent>
           <DialogHeader><DialogTitle>使用核心系统个人账号登录</DialogTitle><DialogDescription>使用门户个人账号，姓名、部门和权限以账号资料为准。</DialogDescription></DialogHeader>
           <form className="space-y-3" onSubmit={async (event) => {

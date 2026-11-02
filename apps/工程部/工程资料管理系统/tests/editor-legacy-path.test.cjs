@@ -12,24 +12,29 @@ const page = fs.readFileSync(path.join(app, 'src/sections/DocEditor.tsx'), 'utf8
 const tree = ts.createSourceFile('DocEditor.tsx', page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 let effect;
 function visit(node) {
-  if (ts.isCallExpression(node) && node.expression.getText(tree) === 'useEffect' && node.arguments[0]?.getText(tree).includes('ensureLuckysheet')) effect = node.arguments[0];
+  if (ts.isCallExpression(node) && node.expression.getText(tree) === 'useEffect' && node.arguments[1]?.getText(tree) === '[path, session?.id, session?.canEdit]') effect = node.arguments[0];
   ts.forEachChild(node, visit);
 }
 visit(tree); assert.ok(effect);
 const effectJs = ts.transpileModule('(' + effect.getText(tree) + ')', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 
-async function open(file, exists) {
+async function open(file, exists, replayEffect = false, access = { readOnly: false }, canEdit = true) {
   const calls = [], values = {};
-  const context = vm.createContext({ writable: true, path: file, fileName: path.basename(file), dirtyRef: { current: false }, destroyedRef: { current: false }, CONTAINER_ID: 'test-editor',
-    api: { stat: async p => { calls.push(['stat', p]); if (!exists.includes(p)) throw Error('404'); return { mtime: 100, size: 1 }; }, fileUrl: p => p },
+  const context = vm.createContext({ path: file, fileName: path.basename(file), dirtyRef: { current: false }, destroyedRef: { current: false }, CONTAINER_ID: 'test-editor',
+    session: { id: 'synthetic-user', canEdit },
+    api: { stat: async p => { calls.push(['stat', p]); if (!exists.includes(p)) throw Error('404'); return { mtime: 100, size: 1 }; }, fileUrl: p => p,
+      editorAccess: async p => { calls.push(['access', p]); if (access instanceof Error) throw access; return access; } },
     fetch: async p => { calls.push(['fetch', p]); return { ok: true, arrayBuffer: async () => new ArrayBuffer(1) }; },
     ensureLuckysheet: async () => calls.push(['engine']),
-    window: { LuckyExcel: { transformExcelToLucky: (_buf, cb) => cb({ sheets: [{}] }) }, luckysheet: { create: () => calls.push(['create']), destroy() {} } },
+    window: { LuckyExcel: { transformExcelToLucky: (_buf, cb) => cb({ sheets: [{}] }) }, luckysheet: { create: options => calls.push(['create', options]), destroy() {} } },
     setResolvedPath: p => { values.resolvedPath = p; }, setBaseMtime: n => { values.baseMtime = n; },
-    setError: e => { values.error = e; }, setPhase: p => { values.phase = p; },
-    document: { getElementById: () => ({ addEventListener() {} }) }, markDirty() {},
+    setError: e => { values.error = e; }, setPhase: p => { values.phase = p; }, setAccess: value => { values.access = value; }, setDirty() {}, onDirtyChange() {},
+    document: { getElementById: () => ({ addEventListener() {}, removeEventListener() {} }) }, markDirty() {},
   });
-  vm.runInContext(effectJs, context)();
+  const setup = vm.runInContext(effectJs, context);
+  const cleanup = setup();
+  // React StrictMode replays setup after cleanup on the same mounted refs.
+  if (replayEffect) { cleanup(); setup(); }
   for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r));
   return { calls, values };
 }
@@ -55,6 +60,31 @@ test('other document types never enter the Excel resolver or workbook parser', a
   }
 });
 
+test('editor still initializes after StrictMode cleanup replays its effect', async () => {
+  const result = await open('客户/排模表.xlsx', ['客户/排模表.xlsx'], true);
+  assert.equal(result.values.phase, 'ready');
+  assert.equal(result.calls.filter(c => c[0] === 'create').length, 1);
+});
+
+test('editor is read-only for readers, controlled documents, or failed access checks', async () => {
+  for (const [access, canEdit] of [[{ readOnly: false }, false], [{ readOnly: true, reason: '历史受控资料只读' }, true], [new Error('offline'), true]]) {
+    const result = await open('客户/排模表.xlsx', ['客户/排模表.xlsx'], false, access, canEdit);
+    assert.equal(result.values.phase, 'ready');
+    const options = result.calls.find(c => c[0] === 'create')[1];
+    assert.equal(options.allowEdit, false);
+    assert.equal(options.enableAddRow, false);
+    assert.equal(options.showtoolbar, false);
+    if (access instanceof Error) assert.equal(result.values.access.readOnly, true);
+  }
+});
+
+test('historical protection uses a read-only explanation without hiding corrupt-record errors', async () => {
+  const historical = await open('客户/排模表.xlsx', ['客户/排模表.xlsx'], false, { readOnly: true, reason: '编辑锁已失效或属于其他窗口，请重新读取并获取锁' });
+  assert.equal(historical.values.access.reason, '历史受控资料已保留，当前界面仅供查看');
+  const damaged = await open('客户/排模表.xlsx', ['客户/排模表.xlsx'], false, { readOnly: true, reason: '单据记录损坏，原资料已保留' });
+  assert.equal(damaged.values.access.reason, '单据记录损坏，原资料已保留');
+});
+
 // Extract actual read-only route dependencies and handler, rather than reimplement selection.
 const server = fs.readFileSync(path.join(app, 'vite-plugin-docs-api.ts'), 'utf8');
 const source = ts.createSourceFile('plugin.ts', server, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -68,7 +98,7 @@ test('actual doctypes route prefers xlsx case-insensitively while retaining lega
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'docs-legacy-path-'));
   try {
     const project = '客户/2026/项目';
-    for (const name of ['a/排模表.xls', 'b/排模表.XLSX', 'a/排模图.xls', 'a/外购清单.xls']) {
+    for (const name of ['a/排模表.xls', 'b/排模表.XLSX', 'a/排模图.xls']) {
       const p = path.join(root, project, name); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, 'synthetic');
     }
     let result;
@@ -78,42 +108,7 @@ test('actual doctypes route prefers xlsx case-insensitively while retaining lega
     assert.equal(result.status, 200);
     assert.equal(result.body.items.find(i => i.name === '排模表').existing, 'b/排模表.XLSX');
     assert.equal(result.body.items.find(i => i.name === '排模图').existing, 'a/排模图.xls');
-    assert.equal(result.body.items.find(i => i.name === '外购件清单').existing, 'a/外购清单.xls');
     await context.handler({ res: {}, url: new URL('http://local/api/doctypes?project=../outside'), root, projectRoot: root });
     assert.ok(result.body.items.every(i => i.existing === null));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
-});
-
-test('actual loading effect survives cleanup/setup reuse and rejects its stale parser callback', async () => {
-  const calls = [], values = {}, parserCallbacks = [];
-  const context = vm.createContext({
-    writable: true, path: '客户/排模表.xlsx', fileName: '排模表.xlsx',
-    destroyedRef: { current: false }, CONTAINER_ID: 'strict-editor',
-    api: { stat: async () => ({ mtime: 100 }), fileUrl: p => p },
-    fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(1) }),
-    ensureLuckysheet: async () => {},
-    window: { LuckyExcel: { transformExcelToLucky: (_buf, cb) => parserCallbacks.push(cb) },
-      luckysheet: { create: () => calls.push('create'), destroy: () => calls.push('destroy') } },
-    setResolvedPath() {}, setBaseMtime() {}, setError: e => { values.error = e; },
-    setPhase: p => { values.phase = p; }, markDirty() {},
-    document: { getElementById: () => ({ addEventListener() {} }) },
-  });
-  const setup = vm.runInContext(effectJs, context);
-  const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)); };
-  const cleanupFirst = setup();
-  await flush();
-  assert.equal(parserCallbacks.length, 1);
-  cleanupFirst();
-  const cleanupSecond = setup();
-  await flush();
-  assert.equal(parserCallbacks.length, 2);
-  parserCallbacks[0]({ sheets: [{}] });
-  assert.deepEqual(calls, ['destroy'], 'cancelled first parser must not create an editor');
-  parserCallbacks[1]({ sheets: [{}] });
-  assert.equal(values.phase, 'ready', 'reused effect must clear its prior destroyed flag');
-  assert.equal(values.error, undefined);
-  assert.deepEqual(calls, ['destroy', 'create']);
-  cleanupSecond();
-  parserCallbacks[1]({ sheets: [{}] });
-  assert.deepEqual(calls, ['destroy', 'create', 'destroy'], 'late callback after final cleanup stays inert');
 });

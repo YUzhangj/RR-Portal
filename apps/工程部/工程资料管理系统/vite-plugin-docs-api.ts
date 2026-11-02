@@ -604,25 +604,36 @@ async function epmsJsonBody(req: IncomingMessage): Promise<Record<string, unknow
   try { const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8")); if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("shape"); return body as Record<string, unknown>; }
   catch { throw new EpmsError(400, "请求内容格式错误"); }
 }
-async function epmsDispatch(req: IncomingMessage, res: ServerResponse, url: URL, store: EpmsStore, options: DocsApiOptions): Promise<void> {
+// Only account identity endpoints remain. No document lock, save, submit or approval API is registered.
+async function accountDispatch(req: IncomingMessage, res: ServerResponse, url: URL, store: EpmsStore, options: DocsApiOptions): Promise<void> {
   res.setHeader("Cache-Control", "no-store");
   if (url.pathname === "/api/epms/login" || url.pathname === "/api/epms/logout") {
     if (req.method !== "POST") throw new EpmsError(405, "方法不允许");
     if (!options.coreAuth) throw new EpmsError(503, "账号验证服务尚未配置");
     return json(res, 200, url.pathname.endsWith("/login") ? await options.coreAuth.login(req, res, await epmsJsonBody(req)) : await options.coreAuth.logout(req, res));
   }
-  if (!options.authenticateEpms) throw new EpmsError(503, "工程制单台受信任账号验证尚未配置");
-  const actor = await options.authenticateEpms(req); await store.session(actor);
-  if (url.pathname === "/api/epms/session" && req.method === "GET") return json(res, 200, await store.session(actor));
-  if (url.pathname === "/api/epms" && req.method === "GET") return json(res, 200, await store.get(url.searchParams.get("path"), url.searchParams.get("doc"), actor));
-  if (!["/api/epms/lock", "/api/epms/unlock", "/api/epms/save", "/api/epms/status"].includes(url.pathname)) throw new EpmsError(404, "接口不存在");
-  if (req.method !== "POST") throw new EpmsError(405, "方法不允许");
-  const b = await epmsJsonBody(req);
-  const record = url.pathname === "/api/epms/lock" ? await store.lock(b.path, b.doc, actor, b.lockToken)
-    : url.pathname === "/api/epms/unlock" ? await store.unlock(b.path, b.doc, actor, b.lockToken)
-    : url.pathname === "/api/epms/save" ? await store.save(b.path, b.doc, actor, b.data, b.version, b.lockToken)
-    : await store.status(b.path, b.doc, actor, b.action, b.version, b.lockToken);
-  json(res, 200, record);
+  if (req.method !== "GET") throw new EpmsError(405, "方法不允许");
+  return json(res, 200, await store.session(options.authenticateEpms ? await options.authenticateEpms(req) : null));
+}
+async function editorAccess(req: IncomingMessage, res: ServerResponse, url: URL, root: string, store: EpmsStore, options: DocsApiOptions): Promise<void> {
+  res.setHeader("Cache-Control", "no-store");
+  if (req.method !== "GET") throw new EpmsError(405, "方法不允许");
+  const relative = url.searchParams.get("path") || "";
+  await legacyDocumentPath(root, relative);
+  const abs = resolveSafe(root, relative);
+  if (!relative || !abs || !fs.existsSync(abs) || !fs.statSync(abs).isFile()) throw new EpmsError(404, "文件不存在");
+  const actor = options.authenticateEpms ? await options.authenticateEpms(req) : null;
+  if (!actor) return json(res, 200, { readOnly: true, reason: "请先登录有工程资料编辑权限的账号" });
+  await store.session(actor);
+  if (!actor.canEdit) return json(res, 200, { readOnly: true, reason: "当前账号只有查看权限" });
+  try {
+    // Same canonical path/record parser and writer queue, but never issue a lock or change a record.
+    await store.withFileMutation([relative], () => Promise.resolve(actor), undefined, async () => {});
+    return json(res, 200, { readOnly: false });
+  } catch (e) {
+    if (e instanceof EpmsError) return json(res, 200, { readOnly: true, reason: e.message });
+    throw e;
+  }
 }
 function rejectInternalPaths(value: unknown): void {
   if (typeof value === "string" && value.split(/[\\/]/).some(p => p.toLowerCase() === ".epms" || p.toLowerCase().startsWith(".epms-"))) throw new EpmsError(403, "制单状态目录不允许通过文件接口访问");
@@ -669,7 +680,8 @@ async function legacyMutation(req: IncomingMessage, url: URL, root: string, epms
   else if (url.pathname === "/api/restore") targets = async () => [await trashRestoreTarget(root, b.trashName)];
   else targets = async () => { await verifyTrashForPurge(root, b.trashName); return [TRASH_DIRNAME + "/" + validateTrashName(b.trashName)]; };
 
-  const token = req.headers["x-epms-lock-token"];
+  // Retired workbench locks never authorize a legacy write after rollback.
+  const token = undefined;
   const checkedTargets = async () => {
     const selected = typeof targets === "function" ? await targets() : targets;
     if (url.pathname === "/api/copy") await legacyDocumentPath(root, String(b.src || ""));
@@ -686,15 +698,18 @@ export function docsApi(input: DocsApiOptions = {}): Plugin {
   let epms: EpmsStore;
   const middleware = (req: Connect.IncomingMessage, res: ServerResponse, next: () => void) => {
     const url = new URL(req.url || "/", "http://localhost");
-    if (url.pathname === "/api/epms" || url.pathname.startsWith("/api/epms/")) {
-      epmsDispatch(req, res, url, epms, options).catch(e => fail(res, e instanceof EpmsError ? e.status : 500, e instanceof EpmsError ? e.message : "服务器内部错误，原资料已保留"));
-      return;
+    const report = (e: unknown) => fail(res, e instanceof EpmsError ? e.status : 500, e instanceof EpmsError ? e.message : "服务器内部错误，原资料已保留");
+    if (["/api/epms/login", "/api/epms/logout", "/api/epms/session"].includes(url.pathname)) {
+      accountDispatch(req, res, url, epms, options).catch(report); return;
     }
+    if (url.pathname === "/api/epms" || url.pathname.startsWith("/api/epms/")) {
+      return fail(res, 404, "工程制单台已停用，原记录已保留");
+    }
+    if (url.pathname === "/api/editor-access") { editorAccess(req, res, url, root, epms, options).catch(report); return; }
     const route = routes[url.pathname];
     if (!route) return next();
     if (req.method !== route.method) return fail(res, 405, "方法不允许");
-    legacyMutation(req, url, root, epms, options, () => route.handler({ req, res, url, root, projectRoot }))
-      .catch((e) => fail(res, e instanceof EpmsError ? e.status : 500, e instanceof EpmsError ? e.message : "服务器内部错误，原资料已保留"));
+    legacyMutation(req, url, root, epms, options, () => route.handler({ req, res, url, root, projectRoot })).catch(report);
   };
   return {
     name: "docs-api",
@@ -703,13 +718,7 @@ export function docsApi(input: DocsApiOptions = {}): Plugin {
       root = loadRoot(config.root);
       epms = new EpmsStore(root, options.captureEpmsSnapshot);
     },
-    // 开发模式（npm run dev）
-    configureServer(server) {
-      server.middlewares.use(middleware);
-    },
-    // 生产模式（npm run preview，服务 dist/ 打包产物）
-    configurePreviewServer(server) {
-      server.middlewares.use(middleware);
-    },
+    configureServer(server) { server.middlewares.use(middleware); },
+    configurePreviewServer(server) { server.middlewares.use(middleware); },
   };
 }
