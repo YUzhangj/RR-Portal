@@ -6580,6 +6580,7 @@ function _buildImportPlan(mode) {
   let nextId = mode === 'replace' ? 1 : state.nextId;
   let skipped = 0;
   let dateWarn = 0;
+  const dateWarnRows = [];   /* 日期异常的行号，方便用户定位 */
 
   _importParsedRows.forEach(row => {
     const rawDate = dateCol ? String(row[dateCol] ?? '').trim() : '';
@@ -6588,7 +6589,7 @@ function _buildImportPlan(mode) {
     if (!rawDate && !rawSup) { skipped++; return; }
 
     const parsedDate = _parseDate(rawDate);
-    if (rawDate && !parsedDate) dateWarn++;
+    if (rawDate && !parsedDate) { dateWarn++; dateWarnRows.push({ row: newRecs.length + 1, value: rawDate }); }
     const date     = parsedDate || '';
     const inspDate = inspCol ? (_parseDate(String(row[inspCol] ?? '').trim()) || date) : date;
 
@@ -6650,6 +6651,7 @@ function _buildImportPlan(mode) {
   const warningTexts = [
     ..._importWarnings.map(w => w.msg),
     ...(dateWarn ? ['有 ' + dateWarn + ' 行日期无法识别，导入后日期会留空，请确认是否继续。'] : []),
+    ...(dateWarnRows.length ? ['日期异常位置：' + dateWarnRows.slice(0, 10).map(x => '第 ' + x.row + ' 行「' + x.value + '」').join('，') + (dateWarnRows.length > 10 ? ' 等 ' + dateWarnRows.length + ' 行' : '')] : []),
     ...(skipped ? ['有 ' + skipped + ' 行为空行或缺少关键内容，已自动跳过。'] : []),
     ...(mode === 'replace' ? ['当前选择「替换全部数据」，确认后会覆盖现有 ' + state.records.length + ' 条验货记录。'] : []),
   ];
