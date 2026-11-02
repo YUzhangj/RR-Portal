@@ -27,10 +27,14 @@ export async function patchCustomerWorkbook(buffer: Buffer, sheetId: number, ann
   const sheetPath = path.posix.normalize(target.startsWith('/') ? target.slice(1) : 'xl/' + target)
   if (!/^xl\/worksheets\/[^/]+\.xml$/.test(sheetPath)) return fail()
   let xml = await read(sheetPath), styles = await read('xl/styles.xml')
-  if (/<!DOCTYPE|<!ENTITY|<!--[\s\S]*?<c\b/.test(xml) || !/<sheetData\b/.test(xml)) return fail()
+  if (/<!DOCTYPE|<!ENTITY/.test(xml) || !/<sheetData\b/.test(xml)) return fail()
   const data = /<sheetData\b[^>]*>([\s\S]*?)<\/sheetData>/.exec(xml)
-  if (!data || [...xml.matchAll(/<sheetData\b/g)].length !== 1) return fail()
-  const lastColumn = [...data[1].matchAll(/<c\b[^>]*\br=["']([A-Z]+)\d+["']/g)].reduce((max, m) => Math.max(max, colNumber(m[1])), 0)
+  const sections = xml.matchAll(/<sheetData\b/g)
+  if (!data || sections.next().done || !sections.next().done) return fail()
+  for (const comment of data[1].matchAll(/<!--[\s\S]*?-->/g)) if (/<(?:c|row)\b/.test(comment[0])) return fail()
+  for (const comment of styles.matchAll(/<!--[\s\S]*?-->/g)) if (/<(?:xf|fill)\b/.test(comment[0])) return fail()
+  let lastColumn = 0
+  for (const cell of data[1].matchAll(/<c\b[^>]*\br=["']([A-Z]+)\d+["']/g)) lastColumn = Math.max(lastColumn, colNumber(cell[1]))
   if (lastColumn + 2 > 16384) throw new Error('客户排期表已占用 Excel 最后列，无法追加核对状态和说明')
   const statusCol = lastColumn + 1, detailCol = statusCol + 1
   const columnStyles = [...(xml.match(/<cols\b[^>]*>[\s\S]*?<\/cols>/)?.[0] ?? '').matchAll(/<col\b[^>]*\/>/g)]

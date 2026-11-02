@@ -94,12 +94,13 @@ function finiteNumber(raw: unknown): number | null {
 
 function parseHoldDate(value: unknown, referenceDate: Date | null): Date | null {
   if (typeof value !== 'string') return null
-  const explicit = value.match(/\b(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})\s*(?:ON\s*)?HOLD\b/i)
-  const match = value.match(/\b(\d{1,2})[\/.\-](\d{1,2})\s*(?:ON\s*)?HOLD\b/i)
-  if (!match) return null
-  const month = Number(explicit?.[2] ?? match[1])
-  const day = Number(explicit?.[3] ?? match[2])
-  const year = explicit ? Number(explicit[1]) : referenceDate?.getFullYear()
+  const explicit = value.match(/(?<![\d\/.\-])(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})\s*(?:ON\s*)?HOLD\b/i)
+  const monthFirst = value.match(/(?<![\d\/.\-])(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})\s*(?:ON\s*)?HOLD\b/i)
+  const match = value.match(/(?<![\d\/.\-])(\d{1,2})[\/.\-](\d{1,2})\s*(?:ON\s*)?HOLD\b/i)
+  if (!explicit && !monthFirst && !match) return null
+  const month = Number(explicit?.[2] ?? monthFirst?.[1] ?? match?.[1])
+  const day = Number(explicit?.[3] ?? monthFirst?.[2] ?? match?.[2])
+  const year = explicit ? Number(explicit[1]) : monthFirst ? Number(monthFirst[3]) : referenceDate?.getFullYear()
   if (year === undefined) return null
   const parsed = new Date(year, month - 1, day)
   return parsed.getFullYear() === year

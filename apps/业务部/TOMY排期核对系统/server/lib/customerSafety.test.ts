@@ -110,6 +110,14 @@ describe('actual inspection color and preservation', () => {
     expect((await inspection({ indexed: 4 } as any, false, true)).验货状态).toBe('Pending')
     expect((await inspection({ theme: 4, tint: 1 })).验货状态).toBe('Pending')
   })
+  it('parses only whole Hold dates and never reinterprets the tail of a two-digit-year date', async () => {
+    const w = new ExcelJS.Workbook(), s = w.addWorksheet('总排期')
+    s.addRow(['Tomy PO', '货号', '验货期', '实际验货期'])
+    for (const [i, value] of ['9/8/26 Hold', '2026/9/8 Hold', '9/8/2026 Hold', '11/2 Hold', '1-2-9/8 Hold'].entries()) s.addRow([String(i + 1), 'A1', new Date(2026, 10, 1), value])
+    const rows = await parseScheduleExcel(Buffer.from(await w.xlsx.writeBuffer()))
+    expect(rows[0].验货状态日期).toBeNull(); expect(rows[4].验货状态日期).toBeNull()
+    expect(rows[1].验货状态日期).toEqual(new Date(2026, 8, 8)); expect(rows[2].验货状态日期).toEqual(new Date(2026, 8, 8)); expect(rows[3].验货状态日期).toEqual(new Date(2026, 10, 2))
+  })
   it('preserves unknown archive parts, original comments, formulas and other sheets', async () => {
     const w = new ExcelJS.Workbook(); await w.xlsx.load(await workbook() as any)
     w.worksheets[0].getCell('F2').note = 'ORIGINAL-NOTE-KEEP'
@@ -118,9 +126,11 @@ describe('actual inspection color and preservation', () => {
     const image = w.addImage({ extension: 'png', base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6S5QAAAAASUVORK5CYII=' })
     other.addImage(image, 'D3:E4')
     const z = await JSZip.loadAsync(await w.xlsx.writeBuffer()); z.file('customXml/item1.xml', '<keep>ORIGINAL-OPAQUE-DATA</keep>')
+    z.file('xl/worksheets/sheet1.xml', (await z.file('xl/worksheets/sheet1.xml')!.async('string')).replace('<sheetData>', '<!-- ORIGINAL SAFE XML COMMENT --><sheetData>'))
     const input = await z.generateAsync({ type: 'nodebuffer' })
     const result = reconcileCustomerSchedule([customer()], { rrm: [source({ 数量: 599 })] })
     const out = await writeAnnotatedCustomerSchedule(input, result), archive = await JSZip.loadAsync(out)
+    expect(await archive.file('xl/worksheets/sheet1.xml')!.async('string')).toContain('<!-- ORIGINAL SAFE XML COMMENT -->')
     expect(Object.keys(archive.files).sort()).toEqual(Object.keys(z.files).sort())
     for (const [name, entry] of Object.entries(z.files)) if (!entry.dir && !['xl/worksheets/sheet1.xml', 'xl/styles.xml'].includes(name)) {
       expect(await archive.file(name)!.async('nodebuffer'), name).toEqual(await entry.async('nodebuffer'))

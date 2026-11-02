@@ -25,6 +25,17 @@ describe('sparse schedule workbook preparation', () => {
     await expect(prepareScheduleWorkbook(await archive.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }))).rejects.toThrow(/结构行过多/)
   })
 
+  it('rejects dense cell and style records while counting, before ExcelJS allocation', async () => {
+    const book = new ExcelJS.Workbook(); book.addWorksheet('总排期').addRow(['Tomy PO', '货号'])
+    const base = Buffer.from(await book.xlsx.writeBuffer())
+    const cells = await JSZip.loadAsync(base), name = 'xl/worksheets/sheet1.xml'
+    cells.file(name, (await cells.file(name)!.async('string')).replace('</sheetData>', '<row r="2">' + '<c r="A2"/>'.repeat(150001) + '</row></sheetData>'))
+    await expect(prepareScheduleWorkbook(await cells.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }))).rejects.toThrow(/单元格或结构行过多/)
+    const styles = await JSZip.loadAsync(base)
+    styles.file('xl/styles.xml', (await styles.file('xl/styles.xml')!.async('string')).replace('</cellXfs>', '<xf/>'.repeat(20001) + '</cellXfs>'))
+    await expect(prepareScheduleWorkbook(await styles.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }))).rejects.toThrow(/样式或共享文本过多/)
+  })
+
   it('keeps cells, formulas, styled blanks, interior heights and structural rows unchanged', () => {
     const xml = '<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row>' +
       '<row r="2" ht="25"/><row r="3"><c r="A3"><f>A1+1</f><v>2</v></c><c r="B3" s="2"/></row>' +

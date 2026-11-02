@@ -90,15 +90,19 @@ export function prepareScheduleWorkbook(buffer: Buffer): Promise<Buffer> {
         if (!entry) continue
         const xml = await readBoundedXml(entry)
         const limit = name.endsWith('styles.xml') ? 20000 : 150000
-        if ([...xml.matchAll(name.endsWith('styles.xml') ? /<(?:xf|font|fill|border)\b/g : /<si\b/g)].length > limit) throw new Error('工作簿样式或共享文本过多，请拆分后上传')
+        let count = 0
+        for (const _match of xml.matchAll(name.endsWith('styles.xml') ? /<(?:xf|font|fill|border)\b/g : /<si\b/g)) {
+          if (++count > limit) throw new Error('工作簿样式或共享文本过多，请拆分后上传')
+        }
       }
       for (const [name, entry] of Object.entries(zip.files)) {
         if (!/^xl\/worksheets\/sheet\d+\.xml$/.test(name)) continue
         const original = await readBoundedXml(entry)
         const compact = trimTrailingEmptyRows(original)
-        cellCount += [...compact.matchAll(/<c\b/g)].length
-        rowCount += [...compact.matchAll(/<row\b/g)].length
-        if (cellCount > 150000 || rowCount > 100000) throw new Error('工作簿有效单元格或结构行过多，请拆分后上传')
+        let columns = 0
+        for (const _match of compact.matchAll(/<col\b/g)) if (++columns > 16384) throw new Error('工作簿列格式记录过多，请拆分后上传')
+        for (const _match of compact.matchAll(/<c\b/g)) if (++cellCount > 150000) throw new Error('工作簿有效单元格或结构行过多，请拆分后上传')
+        for (const _match of compact.matchAll(/<row\b/g)) if (++rowCount > 100000) throw new Error('工作簿有效单元格或结构行过多，请拆分后上传')
         if (compact !== original) {
           zip.file(name, compact)
           changed = true
