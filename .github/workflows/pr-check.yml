@@ -52,6 +52,7 @@ jobs:
           DB_PASSWORD: postgres
           DB_NAME: indo_shipping
           SUPPLIER_SYNC_TEST_CONNECTION: 'Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=indo_shipping;Pooling=false'
+          SHIPMENT_TEXT_TEST_CONNECTION: 'Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=indo_shipping;Pooling=false'
 
       - uses: actions/setup-node@v4
         with:
