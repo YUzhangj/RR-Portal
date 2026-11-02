@@ -196,7 +196,7 @@ function EngineeringApp() {
           toast.success("项目已创建，资料目录结构已生成");
           const seg = path.split("/");
           if (seg.length === 3) {
-            setView({ type: "project", client: seg[0], year: seg[1], project: seg[2] });
+            navigate({ type: "project", client: seg[0], year: seg[1], project: seg[2] });
           } else {
             goPath(path);
           }

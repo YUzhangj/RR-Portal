@@ -13,6 +13,12 @@ function visit(node) {
     callbacks[node.name.getText(tree)] = ts.transpileModule('(' + node.initializer.arguments[0].getText(tree) + ')', {
       compilerOptions: { target: ts.ScriptTarget.ES2022 },
     }).outputText;
+  if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && node.tagName.getText(tree) === 'NewProjectDialog') {
+    const created = node.attributes.properties.find(prop => ts.isJsxAttribute(prop) && prop.name.getText(tree) === 'onCreated');
+    callbacks.projectCreated = ts.transpileModule('(' + created.initializer.expression.getText(tree) + ')', {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+  }
   ts.forEachChild(node, visit);
 }
 visit(tree);
@@ -41,4 +47,25 @@ test('clean or non-editor views navigate without an unsaved prompt', () => {
     vm.runInContext(callbacks.navigate, scope)({ type: 'recent' });
     assert.equal(next.type, 'recent'); assert.equal(prompts, 0);
   }
+});
+
+
+test('project creation from the header cannot discard a dirty workbook when leaving is cancelled', () => {
+  const states = [], dialogs = []; let refreshes = 0, notices = 0;
+  const scope = vm.createContext({ view: { type: 'editor', path: 'unsaved.xlsx' }, editorDirty: true,
+    setView: value => states.push(value), setDialog: value => dialogs.push(value), refresh: () => refreshes++,
+    toast: { success: () => notices++ }, window: { confirm: () => false } });
+  scope.allowLeaveEditor = vm.runInContext(callbacks.allowLeaveEditor, scope);
+  scope.navigate = vm.runInContext(callbacks.navigate, scope);
+  scope.goPath = vm.runInContext(callbacks.goPath, scope);
+  const created = vm.runInContext(callbacks.projectCreated, scope);
+  created('client/2026/new-project');
+  created('client/2026/new-project/nested');
+  assert.equal(states.length, 0);
+  assert.deepEqual(dialogs, [null, null]);
+  assert.equal(refreshes, 2); assert.equal(notices, 2);
+  scope.window.confirm = () => true;
+  created('client/2026/new-project');
+  assert.equal(states.length, 1); assert.equal(states[0].type, 'project');
+  assert.equal(states[0].project, 'new-project');
 });
