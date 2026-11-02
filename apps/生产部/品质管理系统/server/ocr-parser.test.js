@@ -257,3 +257,20 @@ test('three actual row POs and delivered slash quantities remain exact alongside
     ]);
   }
 });
+
+test('split-name columns keep actual delivered quantity instead of amount for both slash widths', () => {
+  for (const nameHeaders of [['货', '名'], ['貨', '名']]) {
+    for (const heading of ['送货数/总单数', '发货数/总单数', '送貨數／總單數', '發貨數／總單數']) {
+      for (const slash of ['/', '／']) {
+        for (const mergedName of [false, true]) {
+          const head = ['订单号', '货号', ...nameHeaders, heading, '金额', '单位'];
+          const row = ['PO-ONE', 'P01', '塑胶零件', ...(mergedName ? [] : ['']), '984' + slash + '3000', '9.99', '个'];
+          const text = '| ' + head.join(' | ') + ' |\n| ' + row.join(' | ') + ' |';
+          assert.deepEqual(parse(text).items,
+            [{ ...item('P01', '塑胶零件', '984'), orderNo: 'PO-ONE' }],
+            heading + ', separator ' + slash + ', merged name ' + mergedName);
+        }
+      }
+    }
+  }
+});

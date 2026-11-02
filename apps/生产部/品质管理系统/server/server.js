@@ -264,7 +264,7 @@ function parseDeliveryNote(text) {
         const cells = splitRow(row);
         if (cells.every(c => !c)) continue;   /* 空白可能是分页间隔，不能截断后续真实明细 */
         const raw = i => (i >= 0 && i < cells.length ? cells[i] : '');
-        const numeric = v => /^\d[\d,.]*(?:\s*\/.*)?$/.test(v);
+        const numeric = v => /^\d[\d,.]*(?:\s*[/／].*)?$/.test(v);
         /* 合并品名格会令后续所有列左移；短一格时即便下一列金额也是数字，也应按行宽校正。 */
         const shifted = splitNameHdr && cQty > cName && numeric(raw(cQty - 1)) &&
           (cells.length === head.length - 1 || !numeric(raw(cQty)));
