@@ -227,6 +227,11 @@ test('packaging and signature-prefixed product names are never blanket-filtered 
     assert.deepEqual(parse('| 品名 | 数量 | 单位 |\n| ' + name + ' | 1000 | 个 |').items, [item('', name, '1000')]);
     assert.deepEqual(parse(table([['P-001', name, '', '个']])).items, [item('P-001', name, '', '个')]);
   }
+  // Some suppliers use the product-number column as the only goods description.
+  // Its missing name COLUMN is different from a blank name CELL beside a footer label.
+  for (const name of ['胶袋', '胶卡板', '木卡板']) {
+    assert.deepEqual(parse('| 货号 | 数量 | 单位 |\n| ' + name + ' | 1000 | 个 |').items, [item(name, name, '1000')]);
+  }
 });
 
 test('only structurally empty footer labels are excluded, while ambiguous goods remain for correction', () => {
