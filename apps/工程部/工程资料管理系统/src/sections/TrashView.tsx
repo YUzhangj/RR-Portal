@@ -1,4 +1,3 @@
-import { useEpmsAccess } from "@/lib/epms-access";
 import { useEffect, useState } from "react";
 import { FolderOpen, Loader2, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -25,7 +24,6 @@ export default function TrashView({
   refreshKey: number;
   onChanged: () => void;
 }) {
-  const canEdit = Boolean(useEpmsAccess().session?.canEdit);
   const [items, setItems] = useState<TrashItem[] | null>(null);
   const [purgeTarget, setPurgeTarget] = useState<TrashItem | null>(null);
   const [busy, setBusy] = useState(false);
@@ -110,10 +108,10 @@ export default function TrashView({
                   <TableCell className="text-right tabular-nums text-slate-500">{formatSize(it.size)}</TableCell>
                   <TableCell className="text-slate-500">{formatTime(it.deletedAt)}</TableCell>
                   <TableCell className="text-right">
-                    <Button disabled={!canEdit} size="sm" variant="outline" className="mr-2" onClick={() => restore(it)}>
+                    <Button size="sm" variant="outline" className="mr-2" onClick={() => restore(it)}>
                       <RotateCcw className="mr-1 h-3.5 w-3.5" /> 还原
                     </Button>
-                    <Button disabled={!canEdit} aria-label="彻底删除" size="sm" variant="ghost" className="text-red-600" onClick={() => setPurgeTarget(it)}>
+                    <Button size="sm" variant="ghost" className="text-red-600" onClick={() => setPurgeTarget(it)}>
                       <Trash2 className="h-3.5 w-3.5" />
                     </Button>
                   </TableCell>
@@ -134,7 +132,7 @@ export default function TrashView({
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={purge} disabled={!canEdit || (busy)} className="bg-red-600 hover:bg-red-700">
+            <AlertDialogAction onClick={purge} disabled={busy} className="bg-red-600 hover:bg-red-700">
               {busy && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />} 永久删除
             </AlertDialogAction>
           </AlertDialogFooter>

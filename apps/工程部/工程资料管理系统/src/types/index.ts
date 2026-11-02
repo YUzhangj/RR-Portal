@@ -41,13 +41,11 @@ export interface AppConfig {
 }
 
 export type View =
-  | { type: "dashboard" }
   | { type: "clients" }
   | { type: "client"; client: string }
   | { type: "project"; client: string; year: string; project: string }
   | { type: "explorer"; path: string }
   | { type: "editor"; path: string; name: string }
-  | { type: "workbench"; client: string; year: string; project: string }
   | { type: "search" }
   | { type: "recent" }
   | { type: "trash" };
@@ -65,21 +63,4 @@ export interface ProjectInfo {
   subdirs: string[];
   fileCount: number;
   mtime: number;
-}
-
-export interface DashboardProject {
-  path: string;
-  project: string;
-  client: string;
-  year: string;
-  mtime: number;
-  docs: Record<string, boolean>;
-  done: number;
-  total: number;
-}
-export interface Dashboard {
-  scannedAt: number;
-  docTypes: string[];
-  stats: { projects: number; complete: number; incomplete: number; readiness: number };
-  projects: DashboardProject[];
 }

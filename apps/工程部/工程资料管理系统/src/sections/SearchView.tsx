@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Download, ExternalLink, Eye, Loader2, Search as SearchIcon } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
@@ -106,12 +106,10 @@ export function FileResultList({
 /* ---------- 全盘搜索 ---------- */
 
 export default function SearchView({
-  request,
   onNavigate,
   onOpenDialog,
   onOpenEditor,
 }: {
-  request?: { text: string; id: number };
   onNavigate: (v: View) => void;
   onOpenDialog: (d: DialogState) => void;
   onOpenEditor: (path: string, name: string) => void;
@@ -121,8 +119,8 @@ export default function SearchView({
   const [items, setItems] = useState<WalkItem[] | null>(null);
   const [searched, setSearched] = useState("");
 
-  const run = useCallback(async (term: string) => {
-    const query = term.trim();
+  const run = async () => {
+    const query = q.trim();
     if (!query) return;
     setLoading(true);
     setSearched(query);
@@ -135,12 +133,7 @@ export default function SearchView({
     } finally {
       setLoading(false);
     }
-  }, []);
-  useEffect(() => {
-    if (!request?.text) return;
-    setQ(request.text);
-    void run(request.text);
-  }, [request, run]);
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -150,10 +143,10 @@ export default function SearchView({
             placeholder="输入文件名关键词，在整个资料库中搜索…"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && run(q)}
+            onKeyDown={(e) => e.key === "Enter" && run()}
             autoFocus
           />
-          <Button onClick={() => void run(q)} disabled={loading || !q.trim()}>
+          <Button onClick={run} disabled={loading || !q.trim()}>
             {loading ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <SearchIcon className="mr-1.5 h-4 w-4" />}
             搜索
           </Button>
