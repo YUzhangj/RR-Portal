@@ -2154,6 +2154,9 @@ function filterRecords() {
 
     setText('recordCount', `共 ${filteredRecs.length} 条`);
 
+    /* 渲染上限：数据量大时只渲染前 300 行，避免整表 innerHTML 卡死页面 */
+    const renderRows = _recordsShowAll ? filteredRecs : filteredRecs.slice(0, RECORDS_PAGE_SIZE);
+
     const wrap = document.getElementById('recordsTableWrap');
     if (!wrap) return;
 
@@ -2172,7 +2175,17 @@ function filterRecords() {
       if (!visibleIds.has(id)) _selectedIds.delete(id);
     }
 
-    wrap.innerHTML = `<table id="recordsTable" style="table-layout:fixed;width:100%;min-width:1778px">
+    const capBar = (!_recordsShowAll && filteredRecs.length > RECORDS_PAGE_SIZE)
+      ? `<div style="display:flex;align-items:center;gap:10px;padding:6px 4px;font-size:12px;color:var(--text-dim)">
+           已显示前 ${RECORDS_PAGE_SIZE} 条（共 ${filteredRecs.length} 条）
+           <button class="action-btn" onclick="_recordsShowAll=true;filterRecords()">显示全部</button>
+         </div>`
+      : (_recordsShowAll && filteredRecs.length > RECORDS_PAGE_SIZE
+          ? `<div style="display:flex;align-items:center;gap:10px;padding:6px 4px;font-size:12px;color:var(--text-dim)">
+               全部 ${filteredRecs.length} 条（数据量大时可能卡顿）
+               <button class="action-btn" onclick="_recordsShowAll=false;filterRecords()">只显示前 ${RECORDS_PAGE_SIZE} 条</button>
+             </div>` : '');
+    wrap.innerHTML = capBar + `<table id="recordsTable" style="table-layout:fixed;width:100%;min-width:1778px">
       <colgroup>
         <col style="width:36px"/>   <!-- 复选框 -->
         <col style="width:44px"/>   <!-- # -->
@@ -2220,7 +2233,7 @@ function filterRecords() {
         <th style="text-align:center">检验员</th>
         <th style="text-align:center">操作</th>
       </tr></thead>
-      <tbody>${filteredRecs.map(r => {
+      <tbody>${renderRows.map(r => {
         const bc       = isPass(r) ? 'badge-pass' : isFail(r) ? 'badge-rej' : r.result==='COND' ? 'badge-cond' : 'badge-hold';
         const rt       = parseRate(r.defectRate) ?? 0;
         const checked  = _selectedIds.has(r.id) ? 'checked' : '';
@@ -4690,16 +4703,20 @@ function resetSingleEntryFormForNext() {
   /* 连续录入：保留 供应商/客户/类型（类似手动批量录入，通常同一批），
      其余字段清空；检验员由 clearForm 默认当前登录账号 */
   const _keep = {
-    supplier: getVal('f_supplier'),
-    client:   getVal('f_client'),
-    type:     document.getElementById('f_type')?.value || '成品',
-    aqlLevel: getVal('f_aqlLevel'),
+    supplier:    getVal('f_supplier'),
+    client:      getVal('f_client'),
+    processType: getVal('f_processType'),
+    productNo:   getVal('f_productNo'),
+    type:        document.getElementById('f_type')?.value || '成品',
+    aqlLevel:    getVal('f_aqlLevel'),
   };
   clearForm();
-  setVal('f_supplier', _keep.supplier);
-  setVal('f_client',   _keep.client);
-  setVal('f_type',     _keep.type);
-  setVal('f_aqlLevel', _keep.aqlLevel || 'MAJ 1.0,MIN 2.5');
+  setVal('f_supplier',    _keep.supplier);
+  setVal('f_client',      _keep.client);
+  setVal('f_processType', _keep.processType);   /* 连续录入同加工类型居多，保留 */
+  setVal('f_productNo',   _keep.productNo);     /* 连续录入同货号居多，保留 */
+  setVal('f_type',        _keep.type);
+  setVal('f_aqlLevel',    _keep.aqlLevel || 'MAJ 1.0,MIN 2.5');
   syncAqlLevelPills();
   const dateEl     = document.getElementById('f_date');
   const inspDateEl = document.getElementById('f_inspDate');
@@ -4966,6 +4983,8 @@ const REVIEW_STATUS_META = {
   approved: { label: '已审核', cls: 'rs-approved' },
 };
 let _reviewTab   = 'pending';
+let _recordsShowAll = false;          /* 验货明细：是否显示全部（默认只渲染前 300 条防卡死） */
+const RECORDS_PAGE_SIZE = 300;
 let _reviewSelected = new Set();   /* 审核中心批量操作选中集 */
 let _reviewBatchObserver = null;
 let _rejectingId = null;
@@ -6606,7 +6625,7 @@ function _buildImportPlan(mode) {
       orderNo:     ordCol ? String(row[ordCol] ?? '').trim() : '',
       productNo,
       productName: nameCol  ? String(row[nameCol]  ?? '').trim() : '',
-      type:        typeCol  ? _normalizeType(String(row[typeCol] ?? '').trim()) : '成品',
+      type:        typeCol  ? _normalizeType(String(row[typeCol] ?? '').trim()) : '来料',
       qty,
       sampleQty:   smpQty,
       pass:        passFinal,
@@ -6906,7 +6925,7 @@ function _normalizeResult(raw) {
 
 /* 类型标准化 */
 function _normalizeType(raw) {
-  if (!raw) return '成品';
+  if (!raw) return '来料';   /* 未提供类型时默认来料（与新增记录一致） */
   if (raw.includes('半') || raw.includes('Semi')) return '半成品';
   if (raw.includes('成品') || raw.includes('Finish')) return '成品';
   return raw;
