@@ -217,3 +217,38 @@ test('an anchored goods row with unreadable quantity remains available for manua
   assert.deepEqual(parse(table([['P001', '塑胶零件', '', '个']])).items,
     [item('P001', '塑胶零件', '', '个')]);
 });
+
+test('packaging and signature-prefixed product names are never blanket-filtered as footer text', () => {
+  const names = ['胶箱', '膠箱', '钙箱', '鈣箱', '胶袋', '膠袋', '纸箱', '紙箱', '平卡', '大平卡',
+    '卡板', '胶卡板', '膠卡板', '木卡板', '吸塑托盘', '周转箱', '送货人标签', '收货人贴纸', '开单人记录纸', '制单贴纸', '审核标签'];
+  const rows = names.map((name, i) => ['P-' + (i + 10), name, String(i + 100), '个']);
+  assert.deepEqual(parse(table(rows)).items, rows.map(row => item(...row)));
+  for (const name of ['胶袋', '纸箱', '胶卡板']) {
+    assert.deepEqual(parse('| 品名 | 数量 | 单位 |\n| ' + name + ' | 1000 | 个 |').items, [item('', name, '1000')]);
+    assert.deepEqual(parse(table([['P-001', name, '', '个']])).items, [item('P-001', name, '', '个')]);
+  }
+});
+
+test('only structurally empty footer labels are excluded, while ambiguous goods remain for correction', () => {
+  const footerRows = ['胶卡板', '膠卡板', '木卡板', '大平卡', '送货人', '收貨人', '开单人', '製單人', '審核人']
+    .map(label => [label, '', '2', '']);
+  assert.deepEqual(parse(table([goodRow, ...footerRows, ['', '送货人', '', ''], ['', '審核', '', '']])).items, [item(...goodRow)]);
+  assert.deepEqual(parse(table([['P-SIGN', '送货人', '12', '张'], ['P-REVIEW', '审核标签', '', '张']])).items,
+    [item('P-SIGN', '送货人', '12', '张'), item('P-REVIEW', '审核标签', '', '张')]);
+});
+
+test('three actual row POs and delivered slash quantities remain exact alongside packaging goods and footer labels', () => {
+  for (const [header, slash] of [['送货数/总单数', '/'], ['送貨數／總單數', '／'],
+    ['发货数/总单数', '/'], ['發貨數／總單數', '／'], ['送貨数/总单数', '/'], ['发貨數／總單數', '／']]) {
+    const fields = parse('| 订单号 | 货号 | 品名 | ' + header + ' | 单位 |\n' +
+      '| PO-ONE | P01 | 胶箱部件 | 984' + slash + '1000 | 个 |\n' +
+      '| PO-TWO | P02 | 胶袋 | 204' + slash + '300 | 个 |\n' +
+      '| PO-THREE | P03 | 吸塑托盘 | 588' + slash + '600 | 个 |\n' +
+      '| | 胶箱 | | 2 | 箱 |\n| | | 收货人 | | |');
+    assert.deepEqual(fields.items, [
+      { ...item('P01', '胶箱部件', '984'), orderNo: 'PO-ONE' },
+      { ...item('P02', '胶袋', '204'), orderNo: 'PO-TWO' },
+      { ...item('P03', '吸塑托盘', '588'), orderNo: 'PO-THREE' },
+    ]);
+  }
+});

@@ -225,6 +225,38 @@ test('IQC report means retain two decimal places for single and multi-dimensiona
   }
 });
 
+test('IQC report actual sample cells retain two decimals and explicit numeric zero without changing raw measurements', () => {
+  const aqlRow = { range: '1-50', sample: 20, cr: 0, maj065: 0, maj10: 1, min25: 1, func_sample: 20, m065: 0 };
+  const build = loadFunction(reportSource, '_buildIQCCanvas', {
+    document: { createElement: () => ({ id: '', innerHTML: '' }) },
+    _todayStr: () => '2026-11-02', _iqcGetRow: () => aqlRow, IQC_AQL_TABLE: [aqlRow],
+  });
+  const cells = record => {
+    const html = build(record).innerHTML;
+    const measurementRow = html.match(/<tr class="meas-row">([\s\S]*?)<\/tr>/)[1];
+    return Array.from(measurementRow.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g), match => match[1].replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ''));
+  };
+  const cases = [
+    [{ item: 'Single', standard: '15.35', tolerance: '0.12', values: ['15.35','15.16',0,'0'], avg: '99' },
+      ['Single','15.35±0.12','15.35','15.16','0','0'], '7.63'],
+    [{ item: 'LW', measureType: 'LW', standardL: 0, toleranceL: 0, standardW: '2.345', toleranceW: '0.12', lValues: [0,'1.234'], wValues: ['2.345','2.355'] },
+      ['LW','0±0*2.35±0.12','0*2.35','1.23*2.35'], '0.62*2.35'],
+    [{ item: 'LWH', measureType: 'LWH', lValues: [0], wValues: ['1.236'], hValues: ['2.678'] },
+      ['LWH','','0*1.24*2.68'], '0.00*1.24*2.68'],
+    [{ item: 'Raw average', values: ['2.344','2.344','2.349'], avg: '9.9' },
+      ['Raw average','','2.34','2.34','2.35'], '2.35'],
+    [{ item: 'PF', measureType: 'PF', values: ['P','F'], standard: 'P/F' },
+      ['PF','P/F','P','F'], '—'],
+  ];
+  for (const [measurement, expectedPrefix, expectedMean] of cases) {
+    const record = { id: 1, qty: 100, sampleQty: 20, measurements: [measurement] }, before = JSON.stringify(record);
+    const rendered = cells(record);
+    assert.deepEqual(rendered.slice(0, expectedPrefix.length), expectedPrefix, measurement.item);
+    assert.equal(rendered[10], expectedMean, measurement.item);
+    assert.equal(JSON.stringify(record), before, measurement.item);
+  }
+});
+
 test('basic record entry does not grant defect-library management', () => {
   const checkedActions = [];
   const context = {
