@@ -461,4 +461,3 @@ export async function writeAnnotatedCustomerSchedule(
 
   return Buffer.from(await workbook.xlsx.writeBuffer())
 }
-
