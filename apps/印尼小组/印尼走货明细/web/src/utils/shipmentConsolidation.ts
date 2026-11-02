@@ -4,6 +4,7 @@ import { effectiveCustomsCompany, sortShipmentItems } from './shipmentOrder'
 import { invoiceCustomsCompany } from './shipmentInvoice'
 import { shipmentChargeQuantity, shipmentPurchaseAmount } from './shipmentPurchase'
 import { isPaperRope, parseShipmentPacking, shipmentWeightQuantity } from './shipmentWeight'
+import { shipmentDecimalTicks } from './shipmentDecimal'
 
 type BatchItem = CustomsItem & { outbound_id?: number; carton_no?: string; material_snapshot?: unknown }
 
@@ -14,7 +15,18 @@ export function consolidateShipmentItems<T extends BatchItem>(
 ): Array<T & { sources: T[]; outbound_ids: number[]; purchase_charge_ratio?: number }> {
   const groups = new Map<string, T & { sources: T[]; outbound_ids: number[]; purchase_charge_ratio?: number }>()
   const text = (value: unknown) => String(value ?? '').trim()
-  const sum = (a: unknown, b: unknown) => Number(((Number(a) || 0) + (Number(b) || 0)).toPrecision(15))
+  const sum = (...values: unknown[]) => {
+    const numbers = values.map(value => Number(value) || 0)
+    const ticks = numbers.map(shipmentDecimalTicks)
+    // Stored qty/kg have four decimal places. Preserve them rather than cutting
+    // a valid large batch total down to fifteen significant digits.
+    if (ticks.every((value): value is number => value != null)) {
+      const total = ticks.reduce((result, value) => result + BigInt(value), 0n)
+      if (total >= -BigInt(Number.MAX_SAFE_INTEGER) && total <= BigInt(Number.MAX_SAFE_INTEGER))
+        return Number(total) / 10000
+    }
+    return Number(numbers.reduce((a, b) => a + b, 0).toPrecision(15))
+  }
   // Sort before choosing the surviving position: shared-carton ordering also
   // determines which contract owns a company's final-line surcharge.
   sortShipmentItems(items, materials, fallback).forEach((item, index) => {
@@ -60,8 +72,8 @@ export function consolidateShipmentItems<T extends BatchItem>(
     }
     group.sources.push(item)
     group.outbound_ids = [...new Set([...group.outbound_ids, item.outbound_id!])]
-    group.qty = sum(group.qty, item.qty)
-    group.kg = sum(group.kg, item.kg)
+    group.qty = sum(...group.sources.map(source => source.qty))
+    group.kg = sum(...group.sources.map(source => source.kg))
     // PO prices may differ. Preserve each batch's amount instead of applying
     // the first purchase order's price to the combined quantity.
     const chargeQty = group.sources.reduce((qty, source) => qty + shipmentChargeQuantity(source), 0)

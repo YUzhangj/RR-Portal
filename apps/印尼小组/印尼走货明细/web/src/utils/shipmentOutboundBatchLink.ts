@@ -2,6 +2,7 @@ import type { Material } from '../api/client'
 import { linkShipmentOutbound, remainingOutboundQuantity, shipmentQuantityUnit, type LinkableShipmentRow, type ShipmentOutboundSource } from './shipmentOutboundLink'
 import { shipmentKgWeight } from './shipmentWeight'
 import { shipmentScope } from './shipmentOrder'
+import { shipmentDecimalTicks as decimalTicks } from './shipmentDecimal'
 
 interface BatchRow extends LinkableShipmentRow {
   id?: number; kg?: number; cartons?: number; qty_per_carton?: string
@@ -12,17 +13,24 @@ export interface ShipmentOutboundAllocation { source: ShipmentOutboundSource; qt
 // Allocate integer ticks and assign remainders deterministically, so Save/reload
 // cannot increase the original total through independent batch rounding.
 function splitWeight(total: number, quantities: number[]): number[] {
-  const ticks = Math.round(total * 10000)
-  if (!Number.isSafeInteger(ticks) || ticks < 0 || Math.abs(ticks / 10000 - total) > 1e-8)
+  const ticks = decimalTicks(total)
+  if (ticks == null || ticks < 0)
     throw new Error('本行重量超出可分配精度，请核对后关联')
-  const sum = quantities.reduce((a, b) => a + b, 0)
-  const shares = quantities.map(qty => ticks * qty / sum)
-  const result = shares.map(Math.floor)
-  const order = shares.map((value, index) => ({ index, fraction: value - result[index] }))
-    .sort((a, b) => b.fraction - a.fraction || a.index - b.index)
+  // Products can exceed Number's integer precision even when each input fits.
+  // Integer division/remainders retain the exact fourth-decimal owner.
+  const quantityTicks = quantities.map(qty => BigInt(decimalTicks(qty)!))
+  const sum = quantityTicks.reduce((a, b) => a + b, 0n)
+  const products = quantityTicks.map(qty => BigInt(ticks) * qty)
+  const result = products.map(product => Number(product / sum))
+  const order = products.map((product, index) => ({ index, remainder: product % sum }))
+    .sort((a, b) => a.remainder === b.remainder ? a.index - b.index : a.remainder > b.remainder ? -1 : 1)
   const remainder = ticks - result.reduce((a, b) => a + b, 0)
   for (let i = 0; i < remainder; i++) result[order[i % order.length].index]++
-  return result.map(value => value / 10000)
+  return result.map(value => {
+    const weight = value / 10000
+    if (decimalTicks(weight) !== value) throw new Error('分配重量超出有效精度，请核对后关联')
+    return weight
+  })
 }
 
 /** One visible packing row, original allocations and purchase sources per batch. */
@@ -40,7 +48,7 @@ export function linkShipmentOutboundBatches<T extends BatchRow>(
     throw new Error('只能关联同一物料 ID 的多个出库批次')
   const currentMaterial = materials.get(row.material_id!) || row.material_snapshot || material
   const quantities = allocations.map(({ source, qty }) => {
-    if (!Number.isFinite(qty) || qty <= 0 || !Number.isSafeInteger(Math.round(qty * 10000)) || Math.abs(qty * 10000 - Math.round(qty * 10000)) > 1e-6)
+    if (qty <= 0 || decimalTicks(qty) == null)
       throw new Error(`OUT-${source.outbound_id} 的分配数量须大于 0，最多保留 4 位小数`)
     const remaining = remainingOutboundQuantity(rows, rowKey, source)
     if (!Number.isFinite(remaining) || qty > remaining + 1e-8)
@@ -49,8 +57,10 @@ export function linkShipmentOutboundBatches<T extends BatchRow>(
       throw new Error(`OUT-${source.outbound_id} 缺少采购单价，请补齐后关联`)
     return qty
   })
-  const total = Number(quantities.reduce((a, b) => a + b, 0).toFixed(4))
-  if (!Number.isSafeInteger(Math.round(total * 10000))) throw new Error('分配合计超出有效范围，请核对数量')
+  const totalTicks = quantities.reduce((sum, qty) => sum + BigInt(decimalTicks(qty)!), 0n)
+  if (totalTicks > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('分配合计超出有效范围，请核对数量')
+  const total = Number(totalTicks) / 10000
+  if (decimalTicks(total) !== Number(totalTicks)) throw new Error('分配合计超出有效精度，请核对数量')
   if (!Number.isFinite(row.qty ?? 0) || Number(row.qty || 0) < 0)
     throw new Error('本行送货数量无效，请核对后关联')
   if (Number(row.qty) > 0 && Math.abs(total - Number(row.qty)) > 1e-8)

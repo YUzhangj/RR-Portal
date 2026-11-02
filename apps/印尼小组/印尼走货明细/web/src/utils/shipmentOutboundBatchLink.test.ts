@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs'
 import * as XLSX from 'xlsx'
 import { buildCustomsWorkbook } from './customsExport'
 import type { LinkableShipmentRow } from './shipmentOutboundLink'
+import { shipmentDecimalTicks } from './shipmentDecimal'
 
 const material: Material = { id: 926, product_code: 'L21106', name_zh: '收缩袋', spec: '0.03*430*640MM',
   supplier: '供应商A', unit_kg: 'KGM', net_per_pc: .001, length: 30, width: 20, height: 10 }
@@ -89,6 +90,55 @@ describe('one packing row linked to multiple outbound batches', () => {
     expect(result.map(item => item.kg)).toEqual([0, .0001])
     const { items, mats } = editorRows(result)
     expect(consolidateShipmentItems(items, mats)).toHaveLength(1)
+  })
+
+  it('accepts valid four-decimal quantities despite binary multiplication dust', () => {
+    const result = link({ ...row, qty: 10000001.0005, kg: 1 }, [
+      { source: { ...sources[0], allocatable_qty: 10000000.0005 }, qty: 10000000.0005 },
+      { source: sources[1], qty: 1 },
+    ])
+    expect(result.map(item => item.qty)).toEqual([10000000.0005, 1])
+    expect(result.reduce((sum, item) => sum + item.kg!, 0)).toBe(1)
+  })
+
+  it('assigns exact weight remainders without unsafe intermediate Number products', () => {
+    const result = link({ ...row, qty: 151202899582.6808, kg: 54946953283.4895 }, [
+      { source: { ...sources[0], allocatable_qty: 61344650495.3725 }, qty: 61344650495.3725 },
+      { source: { ...sources[1], allocatable_qty: 89858249087.3083 }, qty: 89858249087.3083 },
+    ])
+    expect(result.map(item => item.kg)).toEqual([22292572789.704, 32654380493.7855])
+    const { items, mats } = editorRows(result)
+    expect(consolidateShipmentItems(items, mats)[0]).toMatchObject({ qty: 151202899582.6808, kg: 54946953283.4895 })
+  })
+
+  it('parses the serialized decimal rather than a rounded binary product near the integer boundary', () => {
+    expect(shipmentDecimalTicks(700000000004.206)).toBe(7000000000042060)
+    const selected = [
+      { source: { ...sources[0], allocatable_qty: 700000000004.206 }, qty: 700000000004.206 },
+      { source: sources[1], qty: 1 },
+    ]
+    const { items, mats } = editorRows(link({ ...row, qty: 700000000005.206, kg: 700000000004.206 }, selected))
+    const display = consolidateShipmentItems(items, mats)[0]
+    expect(JSON.parse(JSON.stringify(display))).toMatchObject({ qty: 700000000005.206, kg: 700000000004.206 })
+  })
+
+  it('rejects a split whose exact fourth-decimal tick cannot survive JSON Number serialization', () => {
+    expect(() => link({ ...row, qty: 1000, kg: 800000000000.0502 }, [
+      { source: sources[0], qty: 999 }, { source: sources[1], qty: 1 },
+    ])).toThrow('分配重量超出有效精度')
+  })
+
+  it('preserves zero-priced and entirely free spare batches without inventing a charge', () => {
+    const result = link(row, [
+      { source: { ...sources[0], price: 0 }, qty: 9000 },
+      { source: { ...sources[1], purchase_charge_ratio: 0 }, qty: 20000 },
+    ])
+    expect(result.map(item => [item.price, item.purchase_charge_ratio])).toEqual([[0, 1], [.3, 0]])
+    const { items, mats } = editorRows(result)
+    const display = consolidateShipmentItems(items, mats)
+    expect(display).toHaveLength(1)
+    expect(shipmentPurchaseAmount(display[0])).toBe(0)
+    expect(display[0]).toMatchObject({ qty: 29000, kg: 10.208, cartons: 3 })
   })
 
   it.each([[], [allocations[0]], [allocations[0], allocations[0]],

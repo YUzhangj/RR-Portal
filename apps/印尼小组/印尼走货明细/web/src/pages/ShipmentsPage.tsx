@@ -1248,9 +1248,15 @@ export default function ShipmentsPage() {
   // Totals (for footer of items table)
   const tot = useMemo(() => {
     let cbm = 0, gross = 0, net = 0
+    // A newly split outbound link keeps the original physical cartons on every
+    // source row. Count that packing once, while legacy rows retain their basis.
+    const repeatedPacking = new Set(consolidatedItems
+      .filter(group => !!group.material_snapshot?.shipment_outbound_link_group)
+      .flatMap(group => group.sources.slice(1).map(source => source._rowKey)))
     for (const it of items) {
       const m = it.material_id != null ? matMap.get(it.material_id) : null
-      cbm += (Number(m?.length) || 0) * (Number(m?.width) || 0) * (Number(m?.height) || 0) / 1e6 * (Number(it.cartons) || 0)
+      if (!repeatedPacking.has(it._rowKey))
+        cbm += (Number(m?.length) || 0) * (Number(m?.width) || 0) * (Number(m?.height) || 0) / 1e6 * (Number(it.cartons) || 0)
       const weightQty = shipmentWeightQuantity(m?.name_zh, it.qty)
       gross += shipmentGrossPerPc(m?.weight_per_carton, effectiveWeighingQty(it, m)) * weightQty
       net += (Number(m?.net_per_pc) || 0) * weightQty
@@ -1263,7 +1269,7 @@ export default function ShipmentsPage() {
       amount: items.reduce((s, it) => s + shipmentPurchaseAmount(it), 0),
       cbm, gross, net,
     }
-  }, [items, matMap])
+  }, [items, matMap, consolidatedItems, cartonRows])
 
   return (
     <div style={{ padding: 16 }}>

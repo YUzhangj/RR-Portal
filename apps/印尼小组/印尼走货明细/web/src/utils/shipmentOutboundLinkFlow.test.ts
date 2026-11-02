@@ -5,14 +5,21 @@ import { expect, it, vi } from 'vitest'
 import { linkShipmentOutboundBatches } from './shipmentOutboundBatchLink'
 import { consolidateShipmentItems } from './shipmentConsolidation'
 import { parseShipmentPacking } from './shipmentWeight'
+import { cartonLayout } from './shipmentOrder'
+import { shipmentGrossPerPc, shipmentWeightQuantity } from './shipmentWeight'
+import { shipmentPurchaseAmount } from './shipmentPurchase'
+import type { Material } from '../api/client'
 
 const text = readFileSync(new URL('../pages/ShipmentsPage.tsx', import.meta.url), 'utf8')
 const tree = ts.createSourceFile('page.tsx', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
 let handler = ''
 let validateHandler = ''
+let totalHandler = ''
 function collect(node: ts.Node) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === 'confirmOutboundLink') handler = node.getText(tree)
   if (ts.isFunctionDeclaration(node) && node.name?.text === 'computeValidation') validateHandler = node.getText(tree)
+  if (ts.isVariableDeclaration(node) && node.name.getText(tree) === 'tot' && node.initializer && ts.isCallExpression(node.initializer))
+    totalHandler = node.initializer.arguments[0].getText(tree)
   ts.forEachChild(node, collect)
 }
 collect(tree)
@@ -124,4 +131,31 @@ it('validates the original physical packing total after splitting source allocat
   const result = await runInContext('computeValidation()', context)
   expect(result.hard).toEqual([])
   expect(result.warn.some((message: string) => message.includes('分段合计'))).toBe(false)
+})
+
+it('counts physical CBM once for the new multi-batch link while preserving distinct and legacy packing totals', () => {
+  const material = { id: 66, name_zh: '中边模', unit_kg: 'KGM', length: 30, width: 20, height: 10 }
+  const original = { _rowKey: 1, material_id: 66, material_snapshot: undefined as Material | undefined,
+    qty: 10, kg: 2.0001, cartons: 2, qty_per_carton: '1/4 2/6' }
+  const sources = [
+    { source: { outbound_id: 7, material_id: 66, allocatable_qty: 4, price: 2 }, qty: 4 },
+    { source: { outbound_id: 8, material_id: 66, allocatable_qty: 6, price: 3 }, qty: 6 },
+  ]
+  const linked = linkShipmentOutboundBatches([original], 1, sources, material, new Map([[66, material]]), 'physical')
+    .map((item, index) => ({ ...item, _rowKey: index + 1, material_id: -(index + 1) }))
+  const totals = (items: typeof linked) => {
+    const matMap = new Map(items.map(item => [item.material_id, item.material_snapshot!]))
+    const context = createContext({ items, matMap, consolidatedItems: consolidateShipmentItems(items, matMap),
+      cartonRows: cartonLayout(items, matMap), shipmentGrossPerPc, shipmentWeightQuantity, shipmentPurchaseAmount,
+      effectiveWeighingQty: () => 0 })
+    return runInContext(ts.transpileModule(`(${totalHandler})()`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context)
+  }
+  expect(totals(linked)).toMatchObject({ cbm: .012, cartons: 2, qty: 10, amount: 26 })
+  expect(totals(linked).kg).toBeCloseTo(2.0001, 8)
+  const distinctPacking = linked.map((item, index) => index ? { ...item, qty_per_carton: '1/2 2/4' } : item)
+  expect(totals(distinctPacking).cbm).toBe(.024)
+  const distinctGroup = linked.map((item, index) => index ? { ...item, carton_group: 'other' } : item)
+  expect(totals(distinctGroup).cbm).toBe(.024)
+  const legacy = linked.map(item => ({ ...item, material_snapshot: { ...item.material_snapshot!, shipment_outbound_link_group: undefined } }))
+  expect(totals(legacy).cbm).toBe(.024)
 })
