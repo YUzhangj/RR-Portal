@@ -1932,10 +1932,10 @@ function _buildIQCCanvas(r) {
         <th style="font-size:7px;border-right:1px solid #222;border-bottom:1px solid #222">判定</th>
       </tr>
       ${(() => {
-        /* 格式化：整数不留小数，小数最多1位 */
+        /* 格式化：整数不留小数，小数保留两位；仅改变报告显示，不修改原始测量数据 */
         function _fmt(v) {
           const n=parseFloat(v); if(isNaN(n)) return v||'';
-          return Number.isInteger(n)?String(n):n.toFixed(1);
+          return Number.isInteger(n)?String(n):n.toFixed(2);   /* 测量数值保留两位小数 */
         }
         function _ra(arr) {
           const f=(arr||[]).filter(v=>v!=='');
@@ -1944,7 +1944,7 @@ function _buildIQCCanvas(r) {
             ?(n.reduce((a,b)=>a+b,0)/n.length).toFixed(2):null;   /* 平均值保留两位小数 */
         }
         function _stdTol(std,tol) {
-          const s=(std||'').trim(),t=(tol||'').trim();
+          const s=String(std??'').trim(),t=String(tol??'').trim();
           return s&&t?`${_fmt(s)}±${_fmt(t)}`:_fmt(s)||'';
         }
         /* 竖排多行 div 显示 */
@@ -1983,7 +1983,7 @@ function _buildIQCCanvas(r) {
             const L=m.lValues||[],W=m.wValues||[];
             return {
               stdLines: _star(_stdTol(m.standardL,m.toleranceL),_stdTol(m.standardW,m.toleranceW)),
-              valLines: Array.from({length:8},(_,j)=>_star(_fmt(L[j]||''),_fmt(W[j]||''))),
+              valLines: Array.from({length:8},(_,j)=>_star(_fmt(L[j]??''),_fmt(W[j]??''))),
               avgLines: _star(_ra(L)||'', _ra(W)||''),
             };
           }
@@ -1991,12 +1991,12 @@ function _buildIQCCanvas(r) {
             const L=m.lValues||[],W=m.wValues||[],H=m.hValues||[];
             return {
               stdLines: _star(_stdTol(m.standardL,m.toleranceL),_stdTol(m.standardW,m.toleranceW),_stdTol(m.standardH,m.toleranceH)),
-              valLines: Array.from({length:8},(_,j)=>_star(_fmt(L[j]||''),_fmt(W[j]||''),_fmt(H[j]||''))),
+              valLines: Array.from({length:8},(_,j)=>_star(_fmt(L[j]??''),_fmt(W[j]??''),_fmt(H[j]??''))),
               avgLines: _star(_ra(L)||'', _ra(W)||'', _ra(H)||''),
             };
           }
           /* single */
-          const vs=[...(m.values||[]),...Array(8).fill('')].slice(0,8).map(v=>v?_fmt(v):'');
+          const vs=[...(m.values||[]),...Array(8).fill('')].slice(0,8).map(_fmt);
           const rawAvg=_ra(m.values||[])||m.avg||'—';
           return {
             stdLines: _lines(_stdTol(m.standard,m.tolerance)||m.standard||''),
