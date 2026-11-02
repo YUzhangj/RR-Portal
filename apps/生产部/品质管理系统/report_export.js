@@ -1935,7 +1935,7 @@ function _buildIQCCanvas(r) {
         /* 格式化：整数不留小数，小数最多1位 */
         function _fmt(v) {
           const n=parseFloat(v); if(isNaN(n)) return v||'';
-          return Number.isInteger(n)?String(n):n.toFixed(1);
+          return Number.isInteger(n)?String(n):n.toFixed(2);   /* 测量数值保留两位小数 */
         }
         function _ra(arr) {
           const f=(arr||[]).filter(v=>v!=='');

@@ -254,6 +254,7 @@ function parseDeliveryNote(text) {
       let   cQty   = head.findIndex(h => /^(数|數)\s*量$/.test(h));
       if (cQty === -1) cQty = find(/交货数量|交貨數量|到货数量|到貨數量|送货数量|送貨數量|实送数量|實送數量/);
       if (cQty === -1) cQty = head.findIndex(h => /^(送货数|送貨數)\s*[/／]/.test(h));   /* 广大：「送货数/总单数」即数量列，取斜杠前 */
+      if (cQty === -1) cQty = head.findIndex(h => /^(送货数|送貨數)\s*[/／]/.test(h));   /* 广大：「送货数/总单数」即数量列，取斜杠前 */
       if (cQty === -1) cQty = find(/送货|送貨|实送|實送/, /欠|总|總/);
       if (cQty === -1) cQty = find(/数量|數量/, /欠|总|總/);
       if (cQty === -1) cQty = find(/备品|備品/);   /* 台聚：模型偶发丢「数量」表头，数量值落在备品数列 */
@@ -288,6 +289,7 @@ function parseDeliveryNote(text) {
         if (/^(合计|总计|合計|總計)/.test(no) || /^(合计|总计|合計|總計)/.test(name)) continue;   /* 合计行 */
         if (/^[-—–=]+$/.test(no) || /^[-—–=]+$/.test(name)) continue;   /* 分隔线碎片行 */
         if (/^[\d\/.]+$/.test(name) && !no && !/^\d+(?:\.\d+)?$/.test(qty)) continue;   /* 仅丢弃无货号、无可靠数量的数字碎片 */
+        if (/^(胶箱|膠箱|钙箱|鈣箱|胶袋|膠袋|纸箱|紙箱|平卡|大平卡|卡板|胶卡板|膠卡板|木卡板|吸塑|周转箱|送货人|送貨人|收货人|收貨人|开单人|開單人|制单|审核|審核)/.test(name)) continue;   /* 包装统计/签字区 */
         if (/^(数量|數量|单位|單位|备注|備注|箱数|箱數|总数|總數|完成)$/.test(name)) continue;   /* 表头/备注单词碎片 */
         if (/送货数|送貨数/.test(name) && /箱数|箱數|总单|總單|总数|總數/.test(name)) continue;   /* 表头混合碎片（已送货数/总箱数/总数） */
         if (!qty && !/\s\d{2,}$/.test(name) && /查验|签收|收妥|逾期|差错|通知|不负责|拒不退换/.test(name)) continue;   /* 无货品数量依据的表尾说明；签收贴纸等正常货品保留 */
