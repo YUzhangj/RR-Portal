@@ -15,14 +15,18 @@ async function api(path, options = {}) {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   });
-  if (response.status === 401) {
+  const errorBody = response.ok ? null : await response.json().catch(() => ({}));
+  // An incorrect current password is a validation failure, not an expired session.
+  const incorrectCurrentPassword = path === '/auth/change-password'
+    && errorBody?.error === '当前密码错误';
+  if (response.status === 401 && !incorrectCurrentPassword) {
     if (!authRedirectStarted) {
       authRedirectStarted = true;
       window.location.replace('./index.html?next=verification');
     }
     throw new Error('登录状态已失效，正在返回登录页…');
   }
-  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || response.statusText);
+  if (!response.ok) throw new Error(errorBody.error || response.statusText);
   return response.json();
 }
 
@@ -267,6 +271,7 @@ let activeDepartment = null;
 let sectionDirty = false;
 let sectionSavePending = false;
 let versionLoadPending = false;
+let factorySwitchPending = false;
 let taskRequestSequence = 0;
 let comparisonState = { quoteId: null, baseline: 'quote', targets: null, dept: 'all', changedOnly: true, query: '' };
 let comparisonRefreshToken = 0;
@@ -283,6 +288,106 @@ const COSTING_BASIS_COLUMNS = {
 
 function canManageCostingBasis() {
   return me?.role === 'admin' || Boolean(me?.perms?.['账号管理']?.can_admin);
+}
+
+function hasPermission(user, menu, action) {
+  return Boolean(user?.perms?.[menu]?.[`can_${action}`]);
+}
+
+async function switchFactory(factoryCode) {
+  if (factoryCode === me.active_factory_code || factorySwitchPending
+    || sectionSavePending || versionLoadPending || workshopSavePending) return;
+  if (sectionDirty && !confirm('当前部门有未保存修改，切换厂区会放弃这些修改。确认继续？')) return;
+  const previousFactory = me.active_factory_code;
+  factorySwitchPending = true;
+  versionLoadPending = true;
+  const content = document.querySelector('main.verification-page');
+  const wasInert = content?.inert;
+  if (content) content.inert = true;
+  $('factory-switch').querySelectorAll('button').forEach(button => { button.disabled = true; });
+  try {
+    await api('/auth/factory', { method: 'POST', body: JSON.stringify({ factory_code: factoryCode }) });
+    // Recreate the entire workspace in the new factory. Old detail callbacks,
+    // drafts and pending reads must not be reused with the changed session.
+    sectionDirty = false;
+    window.location.href = './verification.html';
+  } catch (error) {
+    // The session cookie may already have changed even when the response was
+    // interrupted or its JSON could not be read. Never unlock an old factory's
+    // editors until the server has confirmed the effective session factory.
+    let currentUser;
+    try {
+      currentUser = await api('/auth/me');
+      if (!currentUser?.active_factory_code) throw new Error('无法确认当前厂区');
+    } catch {
+      alert('未能确认当前厂区，已暂停编辑以防保存到错误厂区。请用浏览器刷新页面后再继续。');
+      return;
+    }
+    if (currentUser.active_factory_code !== previousFactory) {
+      sectionDirty = false;
+      window.location.href = './verification.html';
+      return;
+    }
+    me = currentUser;
+    factorySwitchPending = false;
+    versionLoadPending = false;
+    if (content) content.inert = wasInert;
+    alert(error.message);
+    renderUserHeader();
+  }
+}
+
+function renderUserHeader() {
+  if (!me) return;
+  const roleZh = { admin: '管理员', supervisor: '主管', staff: '员工' }[me.role] || me.role;
+  $('who-chip').textContent = `${me.dept_name} · ${roleZh} · ${me.display_name || me.username}`;
+  $('user-chip').classList.remove('hidden');
+  const factoryChip = $('factory-chip');
+  const factorySwitch = $('factory-switch');
+  factoryChip.textContent = me.active_factory_name || me.active_factory_code || '';
+  const availableFactories = me.factories || [];
+  if (me.can_switch_factory && availableFactories.length > 1) {
+    factorySwitch.innerHTML = availableFactories.map(factory => `<button type="button" class="top-factory-btn ${factory.code === me.active_factory_code ? 'active' : ''}" data-code="${esc(factory.code)}" aria-pressed="${factory.code === me.active_factory_code}"><span class="factory-dot dot-${esc(factory.code)}"></span>${esc(factory.name_cn)}</button>`).join('');
+    factoryChip.classList.add('hidden');
+    factorySwitch.classList.remove('hidden');
+    factorySwitch.querySelectorAll('.top-factory-btn').forEach(button => {
+      button.onclick = () => switchFactory(button.dataset.code);
+    });
+  } else {
+    factorySwitch.classList.add('hidden');
+    factoryChip.classList.remove('hidden');
+  }
+  $('btn-admin').classList.toggle('hidden', !hasPermission(me, '账号管理', 'admin'));
+}
+
+function openPasswordDialog() {
+  const overlay = document.createElement('div');
+  overlay.className = 'verification-dialog-overlay';
+  overlay.innerHTML = `<div class="verification-dialog" role="dialog" aria-modal="true">
+    <h3>修改密码</h3>
+    <label>当前密码<input type="password" data-current autocomplete="current-password"></label>
+    <label>新密码（≥6 位）<input type="password" data-new autocomplete="new-password"></label>
+    <label>确认新密码<input type="password" data-confirm autocomplete="new-password"></label>
+    <p class="msg" data-message></p>
+    <div><button type="button" data-cancel class="mini">取消</button><button type="button" data-submit>确认</button></div>
+  </div>`;
+  const message = overlay.querySelector('[data-message]');
+  const close = () => overlay.remove();
+  overlay.querySelector('[data-cancel]').onclick = close;
+  overlay.onclick = event => { if (event.target === overlay) close(); };
+  overlay.querySelector('[data-submit]').onclick = async () => {
+    const current = overlay.querySelector('[data-current]').value;
+    const next = overlay.querySelector('[data-new]').value;
+    const confirmNext = overlay.querySelector('[data-confirm]').value;
+    if (next !== confirmNext) { message.textContent = '两次输入的新密码不一致'; return; }
+    if (next.length < 6) { message.textContent = '新密码至少 6 位'; return; }
+    try {
+      await api('/auth/change-password', { method: 'POST', body: JSON.stringify({ current, new: next }) });
+      message.style.color = 'green'; message.textContent = '✓ 修改成功'; setTimeout(close, 900);
+    } catch (error) { message.style.color = ''; message.textContent = error.message; }
+  };
+  document.body.appendChild(overlay);
+  overlay.querySelector('[data-current]').focus();
 }
 
 function costingBasisTable(key, editable) {
@@ -419,6 +524,13 @@ let workshopSavePending = false;
 let listRequestSequence = 0;
 const workshopSelected = new Set();
 const workshopRevisions = new Map();
+const listFilterIds=['verification-search','verification-status-filter','verification-customer-filter',
+  'verification-no-filter','verification-product-filter','verification-table-customer-filter',
+  'verification-version-filter','verification-progress-filter','verification-table-status-filter',
+  'workshop-filter','verification-table-workshop-filter'];
+const pairedListFilters={'verification-status-filter':'verification-table-status-filter','verification-table-status-filter':'verification-status-filter',
+  'verification-customer-filter':'verification-table-customer-filter','verification-table-customer-filter':'verification-customer-filter',
+  'workshop-filter':'verification-table-workshop-filter','verification-table-workshop-filter':'workshop-filter'};
 function updateWorkshopSelection() {
   const selectable=filteredList().filter(row=>row.current_version_id&&row.workshop_revision);
   const all=$('workshop-select-visible');
@@ -428,11 +540,11 @@ function updateWorkshopSelection() {
   $('workshop-target').disabled=workshopSavePending;
   $('workshop-apply').disabled=workshopSavePending||!workshopSelected.size;
 }
-function applyListFilter() {
+function applyListFilter(id) {
+  if(pairedListFilters[id])$(pairedListFilters[id]).value=$(id).value;
   workshopSelected.clear();workshopRevisions.clear();renderList();
   $('workshop-message').textContent='仅调整车间，不改变核价和完成状态';
 }
-$('workshop-filter').onchange = applyListFilter;
 $('workshop-select-visible').onchange = event => {
   if(workshopSavePending)return;
   for(const row of filteredList())if(row.current_version_id&&row.workshop_revision){if(event.target.checked){workshopSelected.add(row.current_version_id);workshopRevisions.set(row.current_version_id,row.workshop_revision);}else {workshopSelected.delete(row.current_version_id);workshopRevisions.delete(row.current_version_id);}}
@@ -462,14 +574,37 @@ function filteredList() {
   const query = ($('verification-search').value || '').trim().toLowerCase();
   const status = $('verification-status-filter').value;
   const customer = $('verification-customer-filter').value;
-  return listState.filter(row => (!status || row.verification_status === status)
-    && (!customer || window.VerificationCustomers.display(row.customer) === customer)
-    && (!$('workshop-filter').value || row.workshop === $('workshop-filter').value)
-    && [row.quote_no, row.product_name, row.customer, row.version, row.current_version_label, row.current_version_category].join(' ').toLowerCase().includes(query));
+  const numberQuery = ($('verification-no-filter').value || '').trim().toLowerCase();
+  const productQuery = ($('verification-product-filter').value || '').trim().toLowerCase();
+  const version = $('verification-version-filter').value;
+  const progress = $('verification-progress-filter').value;
+  return listState.filter(row => {
+    const rowStatus = row.verification_status || 'not_started';
+    const rowCustomer = window.VerificationCustomers.display(row.customer);
+    const approved = num(row.approved_count), total = num(row.total_depts);
+    const rowProgress = total > 0 && approved >= total ? 'completed' : approved > 0 ? 'in_progress' : 'not_started';
+    const statusMatches = !status || (status === 'unfinished' ? !['completed','cancelled'].includes(rowStatus) : rowStatus === status);
+    const versionMatches = !version || (version === 'not_started'
+      ? !row.current_version_label
+      : [row.current_version_label, row.current_version_category].filter(Boolean).includes(version));
+    const progressMatches = !progress || (progress.startsWith('ratio:')
+      ? progress === `ratio:${approved}/${total}` : progress === rowProgress);
+    return statusMatches
+      && (!customer || rowCustomer === customer)
+      && (!$('workshop-filter').value || (row.workshop || '待分配车间') === $('workshop-filter').value)
+      && (!numberQuery || String(row.quote_no || '').toLowerCase().includes(numberQuery))
+      && (!productQuery || String(row.product_name || '').toLowerCase().includes(productQuery))
+      && versionMatches && progressMatches
+      && [row.quote_no, row.product_name, row.customer, row.version, row.current_version_label, row.current_version_category].join(' ').toLowerCase().includes(query);
+  });
 }
 
 function renderList() {
   const rows = filteredList();
+  $('verification-filter-count').textContent = `显示 ${rows.length} / ${listState.length} 款`;
+  const hasFilters = listFilterIds.some(id => String($(id).value || '').trim());
+  $('verification-clear-filters').disabled = !hasFilters;
+  for (const id of listFilterIds) $(id).classList?.toggle('filter-active', Boolean(String($(id).value || '').trim()));
   const visible=new Set(rows.map(row=>row.current_version_id));
   for(const id of workshopSelected)if(!visible.has(id)){workshopSelected.delete(id);workshopRevisions.delete(id);}
   $('verification-list-body').innerHTML = rows.length ? rows.map(row => `<tr class="verification-list-row ${Number(selectedQuoteId) === Number(row.id) ? 'selected' : ''}" data-id="${row.id}">
@@ -502,13 +637,22 @@ async function loadList({refreshSelection=true}={}) {
   renderCostingBasis();
   canAssignWorkshop = Boolean(result.can_assign_workshop);
   $('workshop-assignment').hidden = !canAssignWorkshop;
-  $('who-chip').textContent = `${me.dept_name} · ${me.display_name || me.username}`;
+  renderUserHeader();
   const names = listState.map(row => window.VerificationCustomers.display(row.customer));
   const customers = me.role === 'admin' || me.perms?.['账号管理']?.can_admin ? window.VerificationCustomers.options(names) : [...new Set(names)].sort();
   const selectedCustomer=$('verification-customer-filter').value;
   $('verification-customer-filter').innerHTML = '<option value="">全部客户</option>'
     + customers.map(customer => `<option value="${esc(customer)}">${esc(customer)}</option>`).join('');
   $('verification-customer-filter').value=customers.includes(selectedCustomer)?selectedCustomer:'';
+  const tableCustomer=$('verification-table-customer-filter').value;
+  $('verification-table-customer-filter').innerHTML = '<option value="">全部</option>'
+    + customers.map(customer => `<option value="${esc(customer)}">${esc(customer)}</option>`).join('');
+  $('verification-table-customer-filter').value=customers.includes(tableCustomer)?tableCustomer:'';
+  const selectedVersion=$('verification-version-filter').value;
+  const versions=[...new Set(listState.flatMap(row=>[row.current_version_label,row.current_version_category]).filter(Boolean))].sort();
+  $('verification-version-filter').innerHTML = '<option value="">全部</option><option value="not_started">待创建</option>'
+    + versions.map(value=>`<option value="${esc(value)}">${esc(value)}</option>`).join('');
+  $('verification-version-filter').value=selectedVersion==='not_started'||versions.includes(selectedVersion)?selectedVersion:'';
   if(!canAssignWorkshop){workshopSelected.clear();workshopRevisions.clear();}
   renderList();
   if (refreshSelection&&listState.length) {
@@ -1393,37 +1537,37 @@ function renderTaxComparison(sources, summaries) {
   </section>`;
 }
 
-$('verification-search').oninput = applyListFilter;
-$('verification-status-filter').onchange = applyListFilter;
-$('verification-customer-filter').onchange = applyListFilter;
+for (const id of listFilterIds) {
+  const eventName = ['verification-search', 'verification-no-filter', 'verification-product-filter'].includes(id)
+    ? 'oninput'
+    : 'onchange';
+  $(id)[eventName] = () => applyListFilter(id);
+}
+$('verification-clear-filters').onclick = () => {
+  for (const id of listFilterIds) $(id).value = '';
+  workshopSelected.clear();
+  workshopRevisions.clear();
+  renderList();
+  $('workshop-message').textContent = '仅调整车间，不改变核价和完成状态';
+};
 $('verification-preview').addEventListener('click', event => {
   if (event.target.closest('#verification-open-detail')) openDetail('workflow');
   if (event.target.closest('#verification-open-compare')) openDetail('compare');
 });
-$('verification-records').onclick = () => {
-  $('verification-status-filter').value = $('verification-status-filter').value === 'completed' ? '' : 'completed';
-  $('verification-records').classList.toggle('active', $('verification-status-filter').value === 'completed');
-  applyListFilter();
-};
-$('verification-export').onclick = () => {
-  const rows = [['货号', '产品', '版本', '客户', '当前核价版本', '部门进度', '核价状态'], ...filteredList().map(row => [
-    row.quote_no, row.product_name, row.version || '', row.customer || '',
-    versionTitle({ label: row.current_version_label || '待创建', category: row.current_version_category }), `${num(row.approved_count)}/${num(row.total_depts)}`,
-    VERSION_STATUS[row.verification_status] || '待创建',
-  ])];
-  const csv = '\ufeff' + rows.map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
-  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `核价任务_${new Date().toISOString().slice(0, 10)}.csv`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-};
-
 const linkedQuoteId=Number(new URLSearchParams(window.location.search).get('quote_id'));
 if(Number.isSafeInteger(linkedQuoteId)&&linkedQuoteId>0)selectedQuoteId=linkedQuoteId;
+$('btn-change-pwd').onclick = event => {
+  event.preventDefault();
+  openPasswordDialog();
+};
+$('btn-logout').onclick = async event => {
+  event.preventDefault();
+  try {
+    await api('/auth/logout', { method: 'POST' });
+  } finally {
+    window.location.href = './index.html';
+  }
+};
 loadList().catch(error => {
   $('verification-list-body').innerHTML = `<tr><td colspan="7" class="summary-empty">${esc(error.message)}</td></tr>`;
 });

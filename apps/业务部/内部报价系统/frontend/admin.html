@@ -15,10 +15,24 @@
         <select id="factory-switch" aria-label="切换厂区"></select>
       </div>
       <span id="who-chip"></span>
-      <a href="./index.html">← 报价单</a>
+      <a href="./index.html" id="admin-return">← 报价单</a>
       <a href="#" id="btn-logout">登出</a>
     </div>
   </div>
+
+  <script>
+    (function () {
+      var from = new URLSearchParams(location.search).get('from');
+      var link = document.getElementById('admin-return');
+      if (from === 'verification') {
+        link.href = './verification.html';
+        link.textContent = '← 核价任务';
+      } else {
+        link.href = './index.html';
+        link.textContent = '← 报价单';
+      }
+    })();
+  </script>
 
   <div id="app">
     <section class="card" style="margin-bottom:16px">
