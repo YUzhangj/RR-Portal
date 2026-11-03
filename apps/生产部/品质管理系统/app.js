@@ -3859,12 +3859,13 @@ function _combineMeasStandard(row) {
 /* ── 判断单值是否在 标准±公差 内 ── */
 function _inTol(valStr, stdStr, tolStr) {
   const v=parseFloat(valStr), std=parseFloat(stdStr), tol=parseFloat(tolStr);
-  if (isNaN(v)||isNaN(std)) return null;
-  if (isNaN(tol)||!tolStr) return null;
-  /* 浮点误差：2.3+0.05=2.3500000000000001，边界值 2.35 会被误判出格。
-     按小数位数量化到 1e-9 再比较（边界含等号） */
-  const EPS = 1e-9;
-  return v >= std - tol - EPS && v <= std + tol + EPS;
+  if (!Number.isFinite(v)||!Number.isFinite(std)||!Number.isFinite(tol)||!tolStr) return null;
+  if (tol < 0) return false;
+  if (tol === 0) return v === std;
+  /* 只容纳二进制浮点在当前数量级的舍入误差，不额外放宽实际公差。
+     例如 2.3 + 0.05 的浮点边界略低于 2.35；1e-9 固定余量会放行真实超差。 */
+  const eps = Number.EPSILON * Math.max(Math.abs(v), Math.abs(std), Math.abs(tol));
+  return v >= std - tol - eps && v <= std + tol + eps;
 }
 
 /* ── 自动判定 PASS / FAIL ── */

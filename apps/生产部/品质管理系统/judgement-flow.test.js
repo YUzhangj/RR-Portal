@@ -166,15 +166,43 @@ test('free-text legacy defect notes survive editing without structured rows', ()
   b.ctx.openEditModal(1); b.ctx.saveRecord(); assert.equal(b.json('state.records[0]').defect, 'legacy note');
 });
 
-test('continue entry retains supplier customer process product type and AQL but clears prior document values', () => {
+test('continue entry retains supplier customer process product delivery number type and AQL but clears prior item values', () => {
   const b = browser();
   for (const [id,value] of Object.entries({ f_client:'Synthetic Client', f_processType:'Synthetic Process', f_productNo:'P-001',
     f_productName:'Prior Name', f_orderNo:'PO-OLD', f_deliveryNo:'DL-OLD', f_remark:'Prior Note', f_defect:'Prior Defect' })) b.element(id,value);
   b.ctx.getCustomerOptions=()=>['Synthetic Client']; b.ctx.getProcessTypeOptions=()=>['Synthetic Process'];
   b.ctx._loadDefectRows([defect(2)]); b.ctx.saveRecord({continueEntry:true});
   assert.equal(b.json('state.records[0]').processType, 'Synthetic Process');
+  assert.equal(b.json('state.records[0]').deliveryNo, 'DL-OLD');
   for (const [id,value] of Object.entries({ f_supplier:'Test Supplier', f_client:'Synthetic Client', f_processType:'Synthetic Process',
-    f_productNo:'P-001', f_type:'成品', f_aqlLevel:'MAJ 0.65' })) assert.equal(b.elements.get(id).value, value);
-  for (const id of ['f_productName','f_orderNo','f_deliveryNo','f_remark','f_defect','f_qty','f_sampleQty']) assert.equal(b.elements.get(id).value, '');
+    f_productNo:'P-001', f_deliveryNo:'DL-OLD', f_type:'成品', f_aqlLevel:'MAJ 0.65' })) assert.equal(b.elements.get(id).value, value);
+  for (const id of ['f_productName','f_orderNo','f_remark','f_defect','f_qty','f_sampleQty']) assert.equal(b.elements.get(id).value, '');
   assert.deepEqual(b.json('_defectRows'), []); assert.deepEqual(b.json('_measRows'), []); assert.equal(b.json('editingId'), null);
+});
+
+
+test('measurement tolerance includes exact decimal boundaries without admitting real excess', () => {
+  const b=browser();
+  for (const value of ['2.25','2.35']) {
+    assert.equal(b.ctx._inTol(value,'2.3','0.05'),true);
+    assert.equal(b.ctx._autoJudgeMeas({standard:'2.3',tolerance:'0.05',values:[value]}),'PASS');
+  }
+  for (const value of ['2.2499999999','2.3500000001']) {
+    assert.equal(b.ctx._inTol(value,'2.3','0.05'),false);
+    assert.equal(b.ctx._autoJudgeMeas({standard:'2.3',tolerance:'0.05',values:[value]}),'FAIL');
+  }
+  assert.equal(b.ctx._autoJudgeMeas({measureType:'LW',standardL:'2.3',toleranceL:'0.05',lValues:['2.35'],standardW:'2.3',toleranceW:'0.05',wValues:['2.25']}),'PASS');
+  assert.equal(b.ctx._autoJudgeMeas({measureType:'LW',standardL:'2.3',toleranceL:'0.05',lValues:['2.3500000001'],standardW:'2.3',toleranceW:'0.05',wValues:['2.25']}),'FAIL');
+});
+
+test('tolerance guard scales down and preserves exact zero, negative and missing tolerance behavior', () => {
+  const b=browser();
+  assert.equal(b.ctx._inTol('1.0500000001e-12','1e-12','5e-14'),false);
+  assert.equal(b.ctx._inTol('-2.35','-2.3','0.05'),true);
+  assert.equal(b.ctx._inTol('-2.3500000001','-2.3','0.05'),false);
+  assert.equal(b.ctx._inTol('2.3','2.3','0'),true);
+  assert.equal(b.ctx._inTol('2.3000000000000003','2.3','0'),false);
+  assert.equal(b.ctx._inTol('2.3','2.3','-0.0000000001'),false);
+  for (const args of [['2.3','2.3',''],['','2.3','0.05'],['2.3','','0.05'],['Infinity','2.3','0.05']])
+    assert.equal(b.ctx._inTol(...args),null);
 });
