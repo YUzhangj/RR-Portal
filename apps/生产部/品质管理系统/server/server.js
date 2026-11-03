@@ -232,6 +232,7 @@ function parseDeliveryNote(text) {
       t = t.replace(/^&+\s*/, '').trim();
       if (!t || t === '送货单' || t === '送貨單' || t === fields.deliveryNo || t.startsWith('|') || /[{\\]/.test(t)) continue;
       if (/客户|客戶|收货|收貨|日期|单号|單號|NO\.?|地址|电话|電話|备注|備注| Tel|DATE|DELIVERY|MESSRS|^\d/i.test(t)) continue;
+      if (/路|大厦|大廈|工业|工業|管理区|管理區|KOWLOON|HONG ?KONG|^TEL|^FAX|传真|傳真/i.test(t)) continue;   /* 地址/电话特征行不是供应商 */
       if (/[：:]$/.test(t)) continue;
       if (/^(货号|貨號|品名|名称|名稱|数量|數量|单位|單位|订单号|訂單號|备注|備注|序号|序號|送货单|送貨單)$/.test(t)) continue;
       if (t.length >= 2 && t.length <= 20) { fields.supplier = t; break; }
@@ -294,7 +295,7 @@ function parseDeliveryNote(text) {
         if (/^[-—–=]+$/.test(no) || /^[-—–=]+$/.test(name)) continue;   /* 分隔线碎片行 */
         if (/^[\d\/.]+$/.test(name) && !no && !/^\d+(?:\.\d+)?$/.test(qty)) continue;   /* 仅丢弃无货号、无可靠数量的数字碎片 */
         if (/^(胶箱|膠箱|钙箱|鈣箱|胶袋|膠袋|纸箱|紙箱|平卡|大平卡|卡板|胶卡板|膠卡板|木卡板|吸塑|周转箱|送货人|送貨人|收货人|收貨人|开单人|開單人|制单|审核|審核|退卡板|退纸箱|退紙箱|退胶箱|退膠箱|退胶袋|退膠袋)/.test(name)) continue;   /* 包装统计/包装退回/签字区 */
-        if (/^(数量|數量|单位|單位|备注|備注|箱数|箱數|总数|總數|完成)$/.test(name)) continue;   /* 表头/备注单词碎片 */
+        if (/^(数量|數量|单位|單位|备注|備注|箱数|箱數|总数|總數|完成|料型|單重|单重|總重|总重|貨名|货名|品名|貨號|货号|颜色|顏色|序号|序號|名称|名稱)$/.test(name)) continue;   /* 表头/备注单词碎片 */
         if (/送货数|送貨数/.test(name) && /箱数|箱數|总单|總單|总数|總數/.test(name)) continue;   /* 表头混合碎片（已送货数/总箱数/总数） */
         if (!qty && !/\s\d{2,}$/.test(name) && /查验|签收|收妥|逾期|差错|通知|不负责|拒不退换/.test(name)) continue;   /* 无货品数量依据的表尾说明；签收贴纸等正常货品保留 */
         if (!no && !get(cQty) && /^[A-Za-z0-9][A-Za-z0-9\-_.]{5,}$/.test(name) && /\d/.test(name)) {
