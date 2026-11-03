@@ -17,14 +17,14 @@ function browser({ authenticated = true, pathname = '/qc/', cached = [], handler
   let data = bootstrap(), status = authenticated ? 200 : 401, reloads = 0, shows = 0;
   function element(id, value = '') {
     const el = { id, value, textContent: '', innerHTML: '', style: {}, dataset: {}, disabled: false, children: [],
-      setAttribute() {}, focus() {}, appendChild(child) { this.children.push(child); },
+      setAttribute() {}, focus() {}, click() { this.clicked = true; }, remove() { this.removed = true; }, appendChild(child) { this.children.push(child); },
       classList: { add() {}, remove() {}, contains() { return false; }, toggle() {} } };
     elements.set(id, el); return el;
   }
   for (const id of ['loginScreen','appWrapper','loginUsername','loginPassword','loginError','companySelector','userModal','userModalErr',
     'umUsername','umPassword','umPassword2','umRole','umName','umDept']) element(id);
   const button = element('loginButton');
-  const ctx = { console: { log() {}, warn() {}, error() {} }, URLSearchParams, URL, Promise,
+  const ctx = { console: { log() {}, warn() {}, error() {} }, URLSearchParams, URL, Blob, Promise,
     setTimeout() {}, clearTimeout() {}, setInterval() {}, requestAnimationFrame() {},
     addEventListener(event, fn) { if (event === 'beforeunload') unloadListeners.add(fn); },
     removeEventListener(event, fn) { if (event === 'beforeunload') unloadListeners.delete(fn); }, navigator: {},
@@ -499,4 +499,115 @@ test('import plan preserves source values and reports the actual worksheet row f
   assert.equal(plan.records[0].date,''); assert.equal(plan.records[0].productNo,'P-001'); assert.equal(plan.records[0].orderNo,'PO-01');
   assert.equal(plan.records[0].type,'来料'); assert.equal(plan.records[0].qty,12);
   assert.ok(plan.warningTexts.some(w=>w.includes('第 8 行「not-a-date」')));
+});
+
+async function recoveryDraft({ initial = [], local = initial, server = initial, replacement = false, quota = false } = {}) {
+  const b = browser({ handler: url => url.includes('/api/records') ? Promise.resolve({ ok: false, status: 500 }) : undefined });
+  b.setBootstrap({ ...bootstrap(), records: initial, nextId: 501 }); b.ctx.__QC_BOOTSTRAP();
+  b.store.set(prefix + 'records', JSON.stringify({ records: local, nextId: 502 }));
+  b.ctx.__QC_FORCE_REPLACE = replacement; if (quota) failDraftStorage(b);
+  await b.ctx.__QC_SYNC_NOW();
+  const key = prefix + 'pending_records_qc-admin', original = b.store.get(key);
+  b.setBootstrap({ ...bootstrap(), records: server, nextId: 501 }); b.ctx.__QC_BOOTSTRAP(); b.ctx.initData();
+  return { b, key, original };
+}
+const versioned = (id, productNo, updatedAt = '2026-11-03T01:00:00Z') => ({ id, productNo, updatedAt });
+
+for (const kind of ['deleted', 'updated', 'timezone-format', 'collision']) test('draft recovery blocks remote ' + kind + ' without replay or resurrection', async () => {
+  const initial = kind === 'collision' ? [] : [versioned(1, 'original')];
+  const local = kind === 'collision' ? [versioned(501, 'local-new')] : [versioned(1, 'local-edit', '2026-11-03T03:00:00Z')];
+  const server = kind === 'deleted' ? [] : kind === 'collision' ? [versioned(501, 'server-new')] :
+    [versioned(1, 'server-latest', kind === 'timezone-format' ? '2026-11-03T09:00:00+08:00' : '2026-11-03T02:00:00Z')];
+  const { b, key, original } = await recoveryDraft({ initial, local, server });
+  assert.equal(b.ctx.__QC_DRAFT_RECOVERY_BLOCKED, true);
+  assert.deepEqual(plain(b.run('state.records')), server);
+  assert.equal(b.store.get(key), original);
+  const backups = [...b.store].filter(([key]) => key.includes('_conflict_'));
+  assert.equal(backups.length, 1); assert.equal(backups[0][1], original);
+  const before = b.calls.length; assert.equal(await b.ctx.__QC_SYNC_NOW(), false); assert.equal(b.calls.length, before);
+  for (const action of ['createRecord','editRecord','deleteRecord','batchDelete','reviewRecord','importData']) assert.equal(b.ctx.can(action), false);
+  const banner = [...b.elements.values()].find(el => el.id === 'qcSyncNotice');
+  assert.deepEqual(banner.children.slice(-2).map(el => el.textContent), ['下载原草稿','放弃待恢复草稿']);
+  assert.equal(b.ctx.__QC_DOWNLOAD_BLOCKED_DRAFT(), true);
+  assert.equal([...b.elements.values()].find(el => el.download).clicked, true);
+});
+
+test('provable local edits and new rows recover alongside unrelated fresh server additions', async () => {
+  const initial = [versioned(1, 'original')], local = [versioned(1, 'edited', '2026-11-03T02:00:00Z'), versioned(501, 'new')];
+  const { b } = await recoveryDraft({ initial, local, server: [...initial, versioned(42, 'other-actor')] });
+  assert.equal(b.ctx.__QC_DRAFT_RECOVERY_BLOCKED, false);
+  assert.deepEqual(plain(b.run('state.records')).map(r => [r.id,r.productNo]), [[1,'edited'],[42,'other-actor'],[501,'new']]);
+  assert.equal(b.calls.filter(c => c.method === 'POST').length, 1);
+});
+
+test('replacement recovery never restores a deleted row after the server baseline changed', async () => {
+  const { b, key, original } = await recoveryDraft({ initial: [versioned(1,'original')], local: [versioned(1,'stale')], server: [], replacement: 1 });
+  assert.deepEqual(plain(b.run('state.records')), []); assert.equal(b.ctx.__QC_FORCE_REPLACE, false);
+  assert.equal(b.ctx.__QC_DRAFT_RECOVERY_BLOCKED, true); assert.equal(b.store.get(key), original);
+});
+
+test('volatile recovery compares against the actual new bootstrap, not the old page cache', async () => {
+  const { b } = await recoveryDraft({ initial: [versioned(1,'original')], local: [versioned(1,'stale')], server: [], quota: true });
+  assert.equal(b.ctx.__QC_DRAFT_RECOVERY_BLOCKED, true); assert.deepEqual(plain(b.run('state.records')), []);
+  assert.equal(b.unloadListeners.size, 1); assert.equal(await b.ctx.__QC_SYNC_NOW(), false);
+});
+
+test('legacy drafts without a baseline stay intact and require explicit download/discard', () => {
+  const key = prefix + 'pending_records_qc-admin';
+  const raw = JSON.stringify({ owner:'qc-admin', company, token:'legacy', revision:1, state:{records:[versioned(501,'unknown-old')]}, deletedIds:[] }, null, 2);
+  const b = browser({ cached:[[key,raw]] }); b.ctx.initData();
+  assert.equal(b.ctx.__QC_DRAFT_RECOVERY_BLOCKED, true); assert.deepEqual(plain(b.run('state.records')), []);
+  assert.equal(b.store.get(key), raw);
+  b.ctx.confirm = () => false; assert.equal(b.ctx.__QC_DISCARD_BLOCKED_DRAFT(), false); assert.equal(b.store.get(key), raw);
+  b.ctx.confirm = () => true; assert.equal(b.ctx.__QC_DISCARD_BLOCKED_DRAFT(), true);
+  assert.equal(b.store.has(key), false); assert.equal(b.reloads, 1);
+  assert.equal([...b.store].filter(([key]) => key.includes('_conflict_'))[0][1], raw);
+  assert.equal(b.calls.some(c => c.method === 'POST'), false);
+});
+
+test('conflict discard protects another tab draft and blocked controls disappear for another account', async () => {
+  const { b, key } = await recoveryDraft({ initial:[versioned(1,'original')], local:[versioned(1,'local')], server:[] });
+  const other = { ...JSON.parse(b.store.get(key)), token:'another-tab' }; b.store.set(key, JSON.stringify(other));
+  assert.equal(b.ctx.__QC_DISCARD_BLOCKED_DRAFT(), false); assert.equal(JSON.parse(b.store.get(key)).token, 'another-tab');
+  b.setBootstrap(bootstrap({ username:'alice', role:'viewer', enabled:true })); b.ctx.__QC_BOOTSTRAP();
+  assert.equal(b.ctx.__QC_DRAFT_RECOVERY_BLOCKED, false); assert.equal(b.ctx.__QC_DOWNLOAD_BLOCKED_DRAFT(), false);
+  assert.equal(b.store.has(key), true); assert.equal(b.ctx.__QC_DISCARD_BLOCKED_DRAFT(), false);
+});
+
+test('company-mismatched drafts never enter the current company record cache', () => {
+  const key = prefix + 'pending_records_qc-admin', draft = { owner:'qc-admin',company:'sy-huadeng',state:{records:[versioned(501,'other-company')]} };
+  const b = browser({ cached:[[key,JSON.stringify(draft)]] }); b.ctx.initData();
+  assert.deepEqual(plain(b.run('state.records')), []); assert.equal(b.ctx.__QC_DRAFT_RECOVERY_BLOCKED, false);
+  assert.equal(b.store.get(key), JSON.stringify(draft));
+});
+
+
+test('conflict guard prevents local persistence and preserves immutable backups across bootstrap retries', async () => {
+  const {b,key,original}=await recoveryDraft({initial:[versioned(1,'original')],local:[versioned(1,'local')],server:[]});
+  await b.ctx.__QC_SYNC_NOW(); b.run('state={records:[{id:99}],nextId:100}');
+  assert.equal(b.ctx.persist(),false); assert.equal(b.store.get(key),original);
+  assert.deepEqual(JSON.parse(b.store.get(prefix+'records')).records,[]);
+  const backups=[...b.store].filter(([key])=>key.includes('_conflict_'));
+  b.ctx.__QC_BOOTSTRAP(); assert.equal(b.store.get(backups[0][0]),original);
+  assert.equal([...b.store].filter(([key])=>key.includes('_conflict_')).length,1);
+});
+
+for (const raw of ['{bad-json', JSON.stringify({owner:'qc-admin',company,state:{records:null},token:'invalid-shape'})])
+test('unreadable or invalid own draft is preserved and blocks replay: '+raw.slice(0,20),async()=>{
+  const key=prefix+'pending_records_qc-admin', b=browser({cached:[[key,raw]]}); b.ctx.initData();
+  assert.equal(b.ctx.__QC_DRAFT_RECOVERY_BLOCKED,true); assert.equal(b.store.get(key),raw);
+  assert.deepEqual(plain(b.run('state.records')),[]); assert.equal(await b.ctx.__QC_SYNC_NOW(),false);
+  assert.equal(b.store.get(key),raw);
+});
+
+
+test('a remotely allocated then deleted id cannot be mistaken for a new unsynced row',async()=>{
+  const b=browser({handler:url=>url.includes('/api/records')?Promise.resolve({ok:false,status:500}):undefined});
+  b.store.set(prefix+'records',JSON.stringify({records:[versioned(501,'local-new')],nextId:502}));
+  await b.ctx.__QC_SYNC_NOW(); const original=b.store.get(prefix+'pending_records_qc-admin');
+  b.setBootstrap({...bootstrap(),records:[],nextId:502}); b.ctx.__QC_BOOTSTRAP(); b.ctx.initData();
+  assert.equal(b.ctx.__QC_DRAFT_RECOVERY_BLOCKED,true); assert.deepEqual(plain(b.run('state.records')),[]);
+  assert.equal(b.store.get(prefix+'pending_records_qc-admin'),original);
+  const before=b.calls.filter(c=>c.method==='POST').length; assert.equal(await b.ctx.__QC_SYNC_NOW(),false);
+  assert.equal(b.calls.filter(c=>c.method==='POST').length,before);
 });

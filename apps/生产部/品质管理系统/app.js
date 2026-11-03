@@ -181,6 +181,7 @@ function _clearSession() {
 
 /* ── 权限判断（基于权限矩阵；jc 主账号保底全权）── */
 function can(action) {
+  if (window.__QC_DRAFT_RECOVERY_BLOCKED && ['createRecord','editRecord','deleteRecord','batchDelete','importData','reviewRecord'].includes(action)) return false;
   const u = _liveUser();
   if (!u) return false;
   if (u.username === 'jc' && u.role === 'admin') return true;
@@ -3838,12 +3839,31 @@ function autoJudgeByAql(lotQty, defects) {
 
 let _measRows = [];
 
+function _hasMeasValue(value) { return value != null && String(value).trim() !== ''; }
+function _measNumber(value) {
+  if (!_hasMeasValue(value) || !['string','number'].includes(typeof value)) return null;
+  const text = String(value).trim();
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text)) return null;
+  const number = Number(text);
+  return Number.isFinite(number) ? number : null;
+}
+function _invalidMeasNumbers(row) {
+  if (!['single','LW','LWH'].includes(row.measureType||'single')) return false;
+  const axes=row.measureType==='LW' ? ['L','W'] : row.measureType==='LWH' ? ['L','W','H'] : [''];
+  return axes.some(axis=> {
+    const standard=row['standard'+axis], tolerance=row['tolerance'+axis];
+    return (_hasMeasValue(standard)&&_measNumber(standard)===null) ||
+      (_hasMeasValue(tolerance)&&(_measNumber(tolerance)===null||_measNumber(tolerance)<0)) ||
+      (row[axis ? axis.toLowerCase()+'Values' : 'values']||[]).some(value=>_hasMeasValue(value)&&_measNumber(value)===null);
+  });
+}
+
 /* ── 辅助：从数组计算平均值（纯数字）──  */
 function _numAvg(arr) {
-  const nums = arr.filter(v=>v!=='').map(Number).filter(n=>!isNaN(n));
-  return nums.length > 0 && nums.length === arr.filter(v=>v!=='').length
-    ? (nums.reduce((a,b)=>a+b,0)/nums.length).toFixed(2)
-    : null;
+  const nums = arr.filter(_hasMeasValue).map(_measNumber);
+  if (!nums.length || nums.some(n=>n===null)) return null;
+  const average = nums.reduce((a,b)=>a+b,0)/nums.length;
+  return Number.isFinite(average) ? average.toFixed(2) : null;
 }
 
 /* ── 旧 standard 拆分（兼容 × * X 分隔符）── */
@@ -3870,12 +3890,12 @@ function _normalizeMeasRow(row) {
   if (row.toleranceH === undefined) row.toleranceH = '';
   /* 旧 standard 拆分到 standardL/W/H */
   const mt = row.measureType;
-  if ((mt === 'LW' || mt === 'LWH') && !row.standardL && row.standard) {
+  if ((mt === 'LW' || mt === 'LWH') && !_hasMeasValue(row.standardL) && _hasMeasValue(row.standard)) {
     const parts = _splitStandard(row.standard);
     if (parts.length >= 2) {
-      row.standardL = row.standardL || parts[0] || '';
-      row.standardW = row.standardW || parts[1] || '';
-      if (mt === 'LWH') row.standardH = row.standardH || parts[2] || '';
+      if (!_hasMeasValue(row.standardL)) row.standardL = parts[0] || '';
+      if (!_hasMeasValue(row.standardW)) row.standardW = parts[1] || '';
+      if (mt === 'LWH' && !_hasMeasValue(row.standardH)) row.standardH = parts[2] || '';
     }
   }
   return row;
@@ -3885,22 +3905,30 @@ function _normalizeMeasRow(row) {
 function _combineMeasStandard(row) {
   const mt = row.measureType || 'single';
   if (mt === 'LW') {
-    const L=(row.standardL||'').trim(), W=(row.standardW||'').trim();
+    const L=String(row.standardL??'').trim(), W=String(row.standardW??'').trim();
     return [L,W].filter(Boolean).join('×') || row.standard || '';
   }
   if (mt === 'LWH') {
-    const L=(row.standardL||'').trim(),W=(row.standardW||'').trim(),H=(row.standardH||'').trim();
+    const L=String(row.standardL??'').trim(),W=String(row.standardW??'').trim(),H=String(row.standardH??'').trim();
     return [L,W,H].filter(Boolean).join('×') || row.standard || '';
   }
-  return row.standard || '';
+  return row.standard ?? '';
 }
 
 /* ── 判断单值是否在 标准±公差 内 ── */
-function _inTol(valStr, stdStr, tolStr) {
-  const v=parseFloat(valStr), std=parseFloat(stdStr), tol=parseFloat(tolStr);
-  if (isNaN(v)||isNaN(std)) return null;
-  if (isNaN(tol)||!tolStr) return null;
-  return v >= std-tol && v <= std+tol;
+function _inTol(valStr, stdStr, tolStr, dir) {
+  const v=_measNumber(valStr), std=_measNumber(stdStr), tol=_measNumber(tolStr);
+  if (v===null||std===null||tol===null) return null;
+  if (tol < 0) return false;
+  if (tol === 0) return v === std;
+  /* 只容纳二进制浮点在当前数量级的舍入误差，不额外放宽实际公差。
+     例如 2.3 + 0.05 的浮点边界略低于 2.35；1e-9 固定余量会放行真实超差。 */
+  const eps = Number.EPSILON * Math.max(Math.abs(v), Math.abs(std), Math.abs(tol));
+  /* dir：'+' 只正差（标准值~标准+公差）；'-' 只负差（标准-公差~标准值）；默认正负差 */
+  const lo = dir === '+' ? std : std - tol;
+  const hi = dir === '-' ? std : std + tol;
+  if (!Number.isFinite(lo)||!Number.isFinite(hi)) return false;
+  return (dir==='+' ? v>=lo : v>=lo-eps) && (dir==='-' ? v<=hi : v<=hi+eps);
 }
 
 /* ── 自动判定 PASS / FAIL ── */
@@ -3911,39 +3939,21 @@ function _autoJudgeMeas(row) {
     if (!filled.length) return '';
     return filled.some(v=>v==='FAIL') ? 'FAIL' : 'PASS';
   }
-  if (mt === 'single') {
-    const filled=(row.values||[]).filter(v=>v!=='');
-    if (!filled.length || !row.tolerance) return null;
-    const res=filled.map(v=>_inTol(v,row.standard,row.tolerance));
-    if (res.some(r=>r===null)) return null;
-    return res.every(r=>r===true)?'PASS':'FAIL';
-  }
-  if (mt === 'LW') {
-    if (!row.toleranceL && !row.toleranceW) return null;
-    let hasAny=false, allPass=true;
-    for (let j=0;j<8;j++) {
-      const l=row.lValues?.[j]||'',w=row.wValues?.[j]||'';
-      if (!l&&!w) continue; hasAny=true;
-      const rl=_inTol(l,row.standardL,row.toleranceL);
-      const rw=_inTol(w,row.standardW,row.toleranceW);
-      if ((rl!==null&&!rl)||(rw!==null&&!rw)){allPass=false;break;}
+  if (!['single','LW','LWH'].includes(mt)) return null;
+  const axes = mt === 'LW' ? [['lValues','standardL','toleranceL'],['wValues','standardW','toleranceW']]
+    : mt === 'LWH' ? [['lValues','standardL','toleranceL'],['wValues','standardW','toleranceW'],['hValues','standardH','toleranceH']]
+    : [['values','standard','tolerance']];
+  let hasAny=false, allPass=true;
+  for (const [values, standard, tolerance] of axes) {
+    for (const value of (row[values]||[]).slice(0,8)) {
+      if (!_hasMeasValue(value)) continue;
+      hasAny=true;
+      const result=_inTol(value,row[standard],row[tolerance],row.tolDir);
+      if (result===null) return null;
+      if (!result) allPass=false;
     }
-    return hasAny?(allPass?'PASS':'FAIL'):null;
   }
-  if (mt === 'LWH') {
-    if (!row.toleranceL&&!row.toleranceW&&!row.toleranceH) return null;
-    let hasAny=false, allPass=true;
-    for (let j=0;j<8;j++) {
-      const l=row.lValues?.[j]||'',w=row.wValues?.[j]||'',h=row.hValues?.[j]||'';
-      if (!l&&!w&&!h) continue; hasAny=true;
-      const rl=_inTol(l,row.standardL,row.toleranceL);
-      const rw=_inTol(w,row.standardW,row.toleranceW);
-      const rh=_inTol(h,row.standardH,row.toleranceH);
-      if ((rl!==null&&!rl)||(rw!==null&&!rw)||(rh!==null&&!rh)){allPass=false;break;}
-    }
-    return hasAny?(allPass?'PASS':'FAIL'):null;
-  }
-  return null;
+  return hasAny ? (allPass?'PASS':'FAIL') : null;
 }
 
 /* ── 只更新平均值+判定文字（不重建 DOM）── */
@@ -3962,6 +3972,9 @@ function updateMeasAvgAndJudge(rowIdx) {
   if (resSel&&judge) {
     const cur=resSel.value;
     if (!cur||cur==='PASS'||cur==='FAIL'){resSel.value=judge;row.result=judge;}
+  } else if (!judge&&_invalidMeasNumbers(row)) {
+    if (resSel&&(resSel.value==='PASS'||resSel.value==='FAIL')) resSel.value='';
+    row.result='';
   }
   _syncFormResult();
 }
@@ -4021,8 +4034,8 @@ function _getMeasDisplayValues(row) {
     const L = row.lValues || [];
     const W = row.wValues || [];
     return Array.from({length:8}, (_,j) => {
-      const l = L[j]||''; const w = W[j]||'';
-      return (l || w) ? `${l}×${w}` : '';
+      const l = L[j]??''; const w = W[j]??'';
+      return [l,w].some(_hasMeasValue) ? `${l}×${w}` : '';
     });
   }
   if (mt === 'LWH') {
@@ -4030,8 +4043,8 @@ function _getMeasDisplayValues(row) {
     const W = row.wValues || [];
     const H = row.hValues || [];
     return Array.from({length:8}, (_,j) => {
-      const l = L[j]||''; const w = W[j]||''; const h = H[j]||'';
-      return (l || w || h) ? `${l}×${w}×${h}` : '';
+      const l = L[j]??''; const w = W[j]??''; const h = H[j]??'';
+      return [l,w,h].some(_hasMeasValue) ? `${l}×${w}×${h}` : '';
     });
   }
   /* single：旧 values 数组 */
@@ -4045,7 +4058,7 @@ function _measValGrid(rowIdx, label, field, values) {
     `width:100%;box-sizing:border-box;min-width:0`;
   return `<div style="display:grid;grid-template-columns:20px repeat(8,1fr);gap:3px;align-items:center;margin-bottom:3px">
       <span style="font-size:9.5px;color:var(--text-muted);text-align:right">${label}</span>
-      ${Array.from({length:8},(_,j)=>`<input type="text" value="${values[j]||''}"
+      ${Array.from({length:8},(_,j)=>`<input type="text" value="${values[j]??''}"
         style="${inStyle}"
         oninput="updateMeasCell(${rowIdx},'${field}',${j},this.value)"/>`
       ).join('')}
@@ -4120,52 +4133,63 @@ function _renderMeasRows() {
     if (mt === 'single') {
       stdRow = `<div style="display:flex;gap:5px;margin-bottom:4px;align-items:center;flex-wrap:wrap">
         <span style="font-size:10px;color:var(--text-dim)">标准值</span>
-        <input type="text" value="${row.standard||''}" placeholder="如：10.0"
+        <input type="text" value="${row.standard??''}" placeholder="如：10.0"
           style="${inSm};max-width:100px" oninput="updateMeasField(${i},'standard',this.value)"/>
-        <span style="font-size:10px;color:var(--text-dim)">公差±</span>
-        <input type="text" value="${row.tolerance||''}" placeholder="如：0.5"
+        <span style="font-size:10px;color:var(--text-dim)">公差</span>
+        <select style="${inSm};max-width:58px;padding:2px" onchange="updateMeasField(${i},'tolDir',this.value)">
+          ${['±','+','-'].map(d=>`<option value="${d}" ${((row.tolDir||'±')===d)?'selected':''}>${d==='±'?'正负':(d==='+'?'正':'负')}</option>`).join('')}
+        </select>
+        <input type="text" value="${row.tolerance??''}" placeholder="如：0.5"
           style="${inSm}" oninput="updateMeasField(${i},'tolerance',this.value)"/>
       </div>`;
     } else if (mt === 'LW') {
-      stdRow = `<div style="display:grid;grid-template-columns:repeat(4,auto);gap:4px;margin-bottom:4px;align-items:center">
+      stdRow = `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;align-items:center">
         <span style="font-size:10px;color:var(--text-dim)">L</span>
-        <input type="text" value="${row.standardL||''}" placeholder="L标准"
+        <input type="text" value="${row.standardL??''}" placeholder="L标准"
           style="${inSm}" oninput="updateMeasField(${i},'standardL',this.value)"/>
-        <span style="font-size:10px;color:var(--text-dim)">±</span>
-        <input type="text" value="${row.toleranceL||''}" placeholder="公差"
+        <span style="font-size:10px;color:var(--text-dim)">公差</span>
+        <input type="text" value="${row.toleranceL??''}" placeholder="公差"
           style="${inSm}" oninput="updateMeasField(${i},'toleranceL',this.value)"/>
         <span style="font-size:10px;color:var(--text-dim)">W</span>
-        <input type="text" value="${row.standardW||''}" placeholder="W标准"
+        <input type="text" value="${row.standardW??''}" placeholder="W标准"
           style="${inSm}" oninput="updateMeasField(${i},'standardW',this.value)"/>
-        <span style="font-size:10px;color:var(--text-dim)">±</span>
-        <input type="text" value="${row.toleranceW||''}" placeholder="公差"
+        <span style="font-size:10px;color:var(--text-dim)">公差</span>
+        <input type="text" value="${row.toleranceW??''}" placeholder="公差"
           style="${inSm}" oninput="updateMeasField(${i},'toleranceW',this.value)"/>
+        <span style="font-size:10px;color:var(--text-dim)">方向</span>
+        <select style="${inSm};max-width:58px;padding:2px" onchange="updateMeasField(${i},'tolDir',this.value)">
+          ${['±','+','-'].map(d=>`<option value="${d}" ${((row.tolDir||'±')===d)?'selected':''}>${d==='±'?'正负':(d==='+'?'正':'负')}</option>`).join('')}
+        </select>
       </div>`;
     } else if (mt === 'LWH') {
-      stdRow = `<div style="display:grid;grid-template-columns:repeat(6,auto);gap:4px;margin-bottom:4px;align-items:center">
+      stdRow = `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;align-items:center">
         <span style="font-size:10px;color:var(--text-dim)">L</span>
-        <input type="text" value="${row.standardL||''}" placeholder="L标准"
+        <input type="text" value="${row.standardL??''}" placeholder="L标准"
           style="${inSm}" oninput="updateMeasField(${i},'standardL',this.value)"/>
         <span style="font-size:10px;color:var(--text-dim)">W</span>
-        <input type="text" value="${row.standardW||''}" placeholder="W标准"
+        <input type="text" value="${row.standardW??''}" placeholder="W标准"
           style="${inSm}" oninput="updateMeasField(${i},'standardW',this.value)"/>
         <span style="font-size:10px;color:var(--text-dim)">H</span>
-        <input type="text" value="${row.standardH||''}" placeholder="H标准"
+        <input type="text" value="${row.standardH??''}" placeholder="H标准"
           style="${inSm}" oninput="updateMeasField(${i},'standardH',this.value)"/>
-        <span style="font-size:10px;color:var(--text-dim)">±L</span>
-        <input type="text" value="${row.toleranceL||''}" placeholder="公差"
+        <span style="font-size:10px;color:var(--text-dim)">公差L</span>
+        <input type="text" value="${row.toleranceL??''}" placeholder="公差"
           style="${inSm}" oninput="updateMeasField(${i},'toleranceL',this.value)"/>
-        <span style="font-size:10px;color:var(--text-dim)">±W</span>
-        <input type="text" value="${row.toleranceW||''}" placeholder="公差"
+        <span style="font-size:10px;color:var(--text-dim)">公差W</span>
+        <input type="text" value="${row.toleranceW??''}" placeholder="公差"
           style="${inSm}" oninput="updateMeasField(${i},'toleranceW',this.value)"/>
-        <span style="font-size:10px;color:var(--text-dim)">±H</span>
-        <input type="text" value="${row.toleranceH||''}" placeholder="公差"
+        <span style="font-size:10px;color:var(--text-dim)">公差H</span>
+        <input type="text" value="${row.toleranceH??''}" placeholder="公差"
           style="${inSm}" oninput="updateMeasField(${i},'toleranceH',this.value)"/>
+        <span style="font-size:10px;color:var(--text-dim)">方向</span>
+        <select style="${inSm};max-width:58px;padding:2px" onchange="updateMeasField(${i},'tolDir',this.value)">
+          ${['±','+','-'].map(d=>`<option value="${d}" ${((row.tolDir||'±')===d)?'selected':''}>${d==='±'?'正负':(d==='+'?'正':'负')}</option>`).join('')}
+        </select>
       </div>`;
     } else if (mt === 'PF') {
       stdRow = `<div style="display:flex;gap:5px;margin-bottom:4px;align-items:center">
         <span style="font-size:10px;color:var(--text-dim)">判定标准</span>
-        <input type="text" value="${row.standard||''}" placeholder="如：粘油测试"
+        <input type="text" value="${row.standard??''}" placeholder="如：粘油测试"
           style="${inSm};max-width:160px" oninput="updateMeasField(${i},'standard',this.value)"/>
       </div>`;
     }
@@ -4223,8 +4247,9 @@ function _loadMeasRows(measurements) {
   _measRows = Array.isArray(measurements)
     ? measurements.map(m => ({
         item:        m.item        || '',
-        standard:    m.standard    || '',
+        standard:    m.standard ?? '',
         measureType: m.measureType || 'single',
+        tolDir: m.tolDir==='+'||m.tolDir==='-' ? m.tolDir : '±',
         /* 兼容旧结构（values 是字符串数组）和新结构 */
         values:   Array.isArray(m.values) && (typeof m.values[0] !== 'object')
                   ? [...m.values,  ...Array(8).fill('')].slice(0,8)
@@ -4232,13 +4257,13 @@ function _loadMeasRows(measurements) {
         lValues:    m.lValues ? [...m.lValues,...Array(8).fill('')].slice(0,8) : Array(8).fill(''),
         wValues:    m.wValues ? [...m.wValues,...Array(8).fill('')].slice(0,8) : Array(8).fill(''),
         hValues:    m.hValues ? [...m.hValues,...Array(8).fill('')].slice(0,8) : Array(8).fill(''),
-        standardL:  m.standardL  || '',
-        standardW:  m.standardW  || '',
-        standardH:  m.standardH  || '',
-        tolerance:  m.tolerance  || '',
-        toleranceL: m.toleranceL || '',
-        toleranceW: m.toleranceW || '',
-        toleranceH: m.toleranceH || '',
+        standardL:  m.standardL ?? '',
+        standardW:  m.standardW ?? '',
+        standardH:  m.standardH ?? '',
+        tolerance:  m.tolerance ?? '',
+        toleranceL: m.toleranceL ?? '',
+        toleranceW: m.toleranceW ?? '',
+        toleranceH: m.toleranceH ?? '',
         avg:        m.avg        || '',
         result:     m.result     || '',
       }))
@@ -4734,6 +4759,7 @@ function resetSingleEntryFormForNext() {
     client:      getVal('f_client'),
     processType: getVal('f_processType'),
     productNo:   getVal('f_productNo'),
+    deliveryNo:  getVal('f_deliveryNo'),
     type:        document.getElementById('f_type')?.value || '成品',
     aqlLevel:    getVal('f_aqlLevel'),
   };
@@ -4742,6 +4768,7 @@ function resetSingleEntryFormForNext() {
   setVal('f_client',      _keep.client);
   setVal('f_processType', _keep.processType);   /* 连续录入同加工类型居多，保留 */
   setVal('f_productNo',   _keep.productNo);     /* 连续录入同货号居多，保留 */
+  setVal('f_deliveryNo',  _keep.deliveryNo);    /* 连续录入常是同一张送货单，保留 */
   setVal('f_type',        _keep.type);
   setVal('f_aqlLevel',    _keep.aqlLevel || 'MAJ 1.0,MIN 2.5');
   syncAqlLevelPills();
@@ -4822,6 +4849,10 @@ function saveRecord(options = {}) {
   if (ptVal && !getProcessTypeOptions().includes(ptVal)) {
     showToast('加工类型「' + ptVal + '」不在名单中，请先到「供应商&客户管理」添加后再录入', 'error'); return;
   }
+  const invalidMeas=_measRows.findIndex(_invalidMeasNumbers);
+  if (invalidMeas>=0) {
+    showToast(`测量第 ${invalidMeas+1} 项：请填写完整的有限数字，公差不能为负数`, 'error'); return false;
+  }
 
   const qtyText = getVal('f_qty');
   const qtyEl = document.getElementById('f_qty');
@@ -4881,10 +4912,14 @@ function saveRecord(options = {}) {
     pass = parseInt(getVal('f_pass')) || (sample != null ? Math.max(0, sample - fail) : 0);
   }
 
-  /* ── defect 简要文本自动生成 ── */
+  /* ── defect 简要文本自动生成 ──
+     有不良明细行时一律按行重新生成（编辑退回记录改了明细后，
+     列表「不良现象」列不会停留在旧文本；报告本来就按明细行出） */
   let defect = getVal('f_defect');
-  if (!defect && hasDefects) {
+  if (hasDefects) {
     defect = _genDefectText();
+  } else if (editingRecord && Array.isArray(editingRecord.defects) && editingRecord.defects.length) {
+    defect = '';  /* 删除最后一条结构化不良后清除旧汇总，纯文字历史记录仍保留。 */
   }
 
   /* ── 组装 defects 数组（只保留有实质内容的行）── */
@@ -4898,21 +4933,22 @@ function saveRecord(options = {}) {
 
   /* 测量数据 */
   const validMeas = _measRows.filter(m => m.item ||
-    (m.measureType==='single' ? m.values.some(v=>v!=='') :
-     (m.lValues||[]).some(v=>v!=='') || (m.wValues||[]).some(v=>v!=='')));
+    (m.measureType==='LW' ? ['lValues','wValues'] : m.measureType==='LWH' ? ['lValues','wValues','hValues'] : ['values'])
+      .some(field=>(m[field]||[]).some(_hasMeasValue)));
   const measArr = validMeas.length > 0 ? validMeas.map(m => {
     const combinedStd = _combineMeasStandard(m);
     return {
       item:        m.item        || '',
       standard:    combinedStd,         /* 组合后的 standard（供 IQC 报告读取）*/
       measureType: m.measureType || 'single',
-      standardL:   m.standardL  || '',
-      standardW:   m.standardW  || '',
-      standardH:   m.standardH  || '',
-      tolerance:   m.tolerance  || '',
-      toleranceL:  m.toleranceL || '',
-      toleranceW:  m.toleranceW || '',
-      toleranceH:  m.toleranceH || '',
+      tolDir: m.tolDir==='+'||m.tolDir==='-' ? m.tolDir : '±',
+      standardL:   m.standardL ?? '',
+      standardW:   m.standardW ?? '',
+      standardH:   m.standardH ?? '',
+      tolerance:   m.tolerance ?? '',
+      toleranceL:  m.toleranceL ?? '',
+      toleranceW:  m.toleranceW ?? '',
+      toleranceH:  m.toleranceH ?? '',
       values:      m.values     || [],
       lValues:     m.lValues    || [],
       wValues:     m.wValues    || [],

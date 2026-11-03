@@ -148,3 +148,159 @@ test('known description selection updates defaults in place without replacing th
   assert.deepEqual(selects.map(x=>x.value),['MIN 2.5','尺寸/测量']);
   assert.equal(b.json('_defectRows[0]').qty,3); assert.equal(b.elements.get('f_result').value,'PASS');
 });
+
+
+test('editing structured defects regenerates the summary and removing the last row clears it', () => {
+  const b = browser(); b.element('f_defect', 'old defect3');
+  b.run(`state.records=[{id:1,date:'2026-10-20',supplier:'Test Supplier',qty:3000,sampleQty:125,result:'PASS',status:'rejected',
+    defect:'old defect3',defects:[{desc:'old defect',qty:3,level:'MIN 2.5'}]}];`);
+  b.ctx.openEditModal(1); b.ctx._loadDefectRows([defect(2)]); b.ctx.saveRecord();
+  assert.equal(b.json('state.records[0]').defect, 'synthetic defect2');
+  b.ctx.openEditModal(1); b.ctx.removeDefectRow(0); b.ctx.saveRecord();
+  assert.equal(b.json('state.records[0]').defect, ''); assert.deepEqual(b.json('state.records[0]').defects, []);
+});
+
+test('free-text legacy defect notes survive editing without structured rows', () => {
+  const b = browser(); b.element('f_defect');
+  b.run(`state.records=[{id:1,date:'2026-10-20',supplier:'Test Supplier',qty:3000,sampleQty:125,result:'PASS',status:'pending',defect:'legacy note'}];`);
+  b.ctx.openEditModal(1); b.ctx.saveRecord(); assert.equal(b.json('state.records[0]').defect, 'legacy note');
+});
+
+test('continue entry retains supplier customer process product delivery number type and AQL but clears prior item values', () => {
+  const b = browser();
+  for (const [id,value] of Object.entries({ f_client:'Synthetic Client', f_processType:'Synthetic Process', f_productNo:'P-001',
+    f_productName:'Prior Name', f_orderNo:'PO-OLD', f_deliveryNo:'DL-OLD', f_remark:'Prior Note', f_defect:'Prior Defect' })) b.element(id,value);
+  b.ctx.getCustomerOptions=()=>['Synthetic Client']; b.ctx.getProcessTypeOptions=()=>['Synthetic Process'];
+  b.ctx._loadDefectRows([defect(2)]); b.ctx.saveRecord({continueEntry:true});
+  assert.equal(b.json('state.records[0]').processType, 'Synthetic Process');
+  assert.equal(b.json('state.records[0]').deliveryNo, 'DL-OLD');
+  for (const [id,value] of Object.entries({ f_supplier:'Test Supplier', f_client:'Synthetic Client', f_processType:'Synthetic Process',
+    f_productNo:'P-001', f_deliveryNo:'DL-OLD', f_type:'成品', f_aqlLevel:'MAJ 0.65' })) assert.equal(b.elements.get(id).value, value);
+  for (const id of ['f_productName','f_orderNo','f_remark','f_defect','f_qty','f_sampleQty']) assert.equal(b.elements.get(id).value, '');
+  assert.deepEqual(b.json('_defectRows'), []); assert.deepEqual(b.json('_measRows'), []); assert.equal(b.json('editingId'), null);
+});
+
+
+test('measurement tolerance includes exact decimal boundaries without admitting real excess', () => {
+  const b=browser();
+  for (const value of ['2.25','2.35']) {
+    assert.equal(b.ctx._inTol(value,'2.3','0.05'),true);
+    assert.equal(b.ctx._autoJudgeMeas({standard:'2.3',tolerance:'0.05',values:[value]}),'PASS');
+  }
+  for (const value of ['2.2499999999','2.3500000001']) {
+    assert.equal(b.ctx._inTol(value,'2.3','0.05'),false);
+    assert.equal(b.ctx._autoJudgeMeas({standard:'2.3',tolerance:'0.05',values:[value]}),'FAIL');
+  }
+  assert.equal(b.ctx._autoJudgeMeas({measureType:'LW',standardL:'2.3',toleranceL:'0.05',lValues:['2.35'],standardW:'2.3',toleranceW:'0.05',wValues:['2.25']}),'PASS');
+  assert.equal(b.ctx._autoJudgeMeas({measureType:'LW',standardL:'2.3',toleranceL:'0.05',lValues:['2.3500000001'],standardW:'2.3',toleranceW:'0.05',wValues:['2.25']}),'FAIL');
+});
+
+test('tolerance guard scales down and preserves exact zero, negative and missing tolerance behavior', () => {
+  const b=browser();
+  assert.equal(b.ctx._inTol('1.0500000001e-12','1e-12','5e-14'),false);
+  assert.equal(b.ctx._inTol('-2.35','-2.3','0.05'),true);
+  assert.equal(b.ctx._inTol('-2.3500000001','-2.3','0.05'),false);
+  assert.equal(b.ctx._inTol('2.3','2.3','0'),true);
+  assert.equal(b.ctx._inTol('2.3000000000000003','2.3','0'),false);
+  assert.equal(b.ctx._inTol('2.3','2.3','-0.0000000001'),false);
+  for (const args of [['2.3','2.3',''],['','2.3','0.05'],['2.3','','0.05'],['Infinity','2.3','0.05']])
+    assert.equal(b.ctx._inTol(...args),null);
+});
+
+test('one-sided tolerances retain decimal EPS boundaries but never admit the forbidden side or widen zero', () => {
+  const b=browser();
+  for (const [dir,passed,failed] of [
+    ['+', ['2.3','2.35'], ['2.2999999999999994','2.3500000001']],
+    ['-', ['2.25','2.3'], ['2.2499999999','2.3000000000000003']],
+    [undefined, ['2.25','2.35'], ['2.2499999999','2.3500000001']],
+  ]) {
+    for (const value of passed) assert.equal(b.ctx._inTol(value,'2.3','0.05',dir),true);
+    for (const value of failed) assert.equal(b.ctx._inTol(value,'2.3','0.05',dir),false);
+    assert.equal(b.ctx._inTol('2.3000000000000003','2.3',0,dir),false);
+    assert.equal(b.ctx._inTol(0,0,0,dir),true);
+  }
+  assert.equal(b.ctx._inTol('1.05e-12','1e-12','5e-14','+'),true);
+  assert.equal(b.ctx._inTol('1.0500000001e-12','1e-12','5e-14','+'),false);
+  assert.equal(b.ctx._inTol('1e308','1e308','1e308'),false);
+});
+
+test('actual rendered numeric input preserves signed/scientific text and refuses malformed or nonfinite saves', () => {
+  for (const raw of ['-2.35','1e3','2..3','1,25','Infinity','NaN','0x10','2.3mm']) {
+    const b=browser();
+    b.ctx._loadMeasRows([{item:'Numeric',standard:raw==='1e3'?'1000':'-2.35',tolerance:0,values:[''],result:'PASS'}]);
+    b.element('meas-result-0','PASS');
+    const handler=b.elements.get('measRows').innerHTML.match(/oninput="(updateMeasCell\(0,'values',0,[^"]+)"/)[1];
+    b.ctx.numericInput={value:raw};b.run(`(function(){${handler}}).call(numericInput)`);
+    assert.equal(b.ctx.numericInput.value,raw);
+    assert.equal(b.json('_measRows[0].values[0]'),raw);
+    const valid=raw==='-2.35'||raw==='1e3';
+    assert.equal(b.ctx._autoJudgeMeas(b.json('_measRows[0]')),valid?'PASS':null);
+    if (!valid) {
+      assert.equal(b.json('_measRows[0].result'),'');
+      assert.equal(b.ctx.saveRecord(),false);assert.equal(b.writes.length,0);assert.deepEqual(b.json('state.records'),[]);
+    }
+  }
+});
+
+test('LW/LWH evaluate filled numeric zero and reject malformed dimensions instead of silently passing', () => {
+  const b=browser();
+  for (const type of ['LW','LWH']) {
+    const row={item:type,measureType:type,standardL:0,standardW:0,standardH:0,toleranceL:0,toleranceW:0,toleranceH:0,lValues:[0],wValues:[0],hValues:[0]};
+    assert.equal(b.ctx._autoJudgeMeas(row),'PASS');
+    row.wValues=['2x'];assert.equal(b.ctx._autoJudgeMeas(row),null);
+    row.wValues=['Infinity'];assert.equal(b.ctx._autoJudgeMeas(row),null);
+    row.wValues=[0];row.toleranceW=-.1;assert.equal(b.ctx._autoJudgeMeas(row),'FAIL');
+    b.ctx._loadMeasRows([row]);assert.equal(b.ctx.saveRecord(),false);assert.equal(b.writes.length,0);
+  }
+});
+
+test('direction handler, save, SQLite round trip and reopen preserve direction and numeric zero; report agrees', () => {
+  const core=vm.runInNewContext(server.slice(server.indexOf('const RECORD_COLS'),server.indexOf('function replaceUsers'))+';({SCHEMA_SQL,upsertRecords,rowToRecord})');
+  for (const type of ['single','LW','LWH']) for (const dir of ['±','+','-']) {
+    const b=browser(),row={item:type,measureType:type,standard:0,standardL:0,standardW:0,standardH:0,tolerance:0,toleranceL:0,toleranceW:0,toleranceH:0,values:[0],lValues:[0],wValues:[0],hValues:[0]};
+    b.ctx._loadMeasRows([row]);
+    const html=b.elements.get('measRows').innerHTML;
+    assert.match(html,/value="0"/);
+    const handler=html.match(/onchange="(updateMeasField\(0,'tolDir',[^"]+)"/)[1];
+    b.run(`(function(){${handler}}).call({value:${JSON.stringify(dir)}})`);
+    assert.equal(b.json('_measRows[0].tolDir'),dir);
+    b.ctx.saveRecord();const saved=b.json('state.records[0]');
+    assert.equal(saved.measurements[0].tolDir,dir);assert.equal(saved.measurements[0].tolerance,0);
+    const db=new DatabaseSync(':memory:');
+    try {
+      db.exec(core.SCHEMA_SQL);core.upsertRecords(db,[saved]);
+      const stored=core.rowToRecord(db.prepare('SELECT * FROM records WHERE id=501').get());
+      b.ctx._loadMeasRows(stored.measurements);
+      assert.equal(b.json('_measRows[0].tolDir'),dir);assert.equal(b.json('_measRows[0].standard'),type==='single'?0:type==='LW'?'0×0':'0×0×0');
+      assert.equal(b.json('_measRows[0].values[0]'),0);
+      const report=b.ctx._buildIQCCanvas(stored).innerHTML;
+      const cells=Array.from(report.match(/<tr class="meas-row">([\s\S]*?)<\/tr>/)[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g),m=>m[1].replace(/<[^>]*>/g,'').replace(/&nbsp;/g,''));
+      assert.equal(cells[1],Array(type==='LW'?2:type==='LWH'?3:1).fill('0'+dir+'0').join('*'));
+      assert.equal(cells[2],Array(type==='LW'?2:type==='LWH'?3:1).fill('0').join('*'));
+    } finally {db.close();}
+  }
+});
+
+test('legacy rows without direction keep plus-minus behavior and their original caller data', () => {
+  const b=browser(),old={item:'Old',standard:'2.3',tolerance:'0.05',values:['2.25']},before=JSON.stringify(old);
+  b.ctx._loadMeasRows([old]);assert.equal(b.json('_measRows[0].tolDir'),'±');
+  assert.equal(b.ctx._autoJudgeMeas(b.json('_measRows[0]')),'PASS');
+  assert.equal(JSON.stringify(old),before);
+});
+
+test('actual tolerance field keeps a negative input visible, fails judgment and blocks saving rather than making it positive', () => {
+  const b=browser();b.ctx._loadMeasRows([{item:'Numeric',standard:5,tolerance:0,values:['5']}]);
+  const handler=b.elements.get('measRows').innerHTML.match(/oninput="(updateMeasField\(0,'tolerance',[^"]+)"/)[1];
+  b.ctx.toleranceInput={value:'-0.1'};b.run(`(function(){${handler}}).call(toleranceInput)`);
+  assert.equal(b.ctx.toleranceInput.value,'-0.1');assert.equal(b.json('_measRows[0].tolerance'),'-0.1');
+  assert.equal(b.ctx._autoJudgeMeas(b.json('_measRows[0]')),'FAIL');assert.equal(b.ctx.saveRecord(),false);assert.equal(b.writes.length,0);
+});
+
+test('a numeric zero only on the active H axis survives save/report and inactive old arrays do not add empty rows', () => {
+  const b=browser();b.ctx._loadMeasRows([{measureType:'LWH',standardH:0,toleranceH:0,hValues:[0]}]);b.ctx.saveRecord();
+  const record=b.json('state.records[0]');assert.equal(record.measurements.length,1);assert.equal(record.measurements[0].hValues[0],0);
+  assert.match(b.ctx._buildIQCCanvas(record).innerHTML,/0±0/);
+  const c=browser();c.ctx._loadMeasRows([{measureType:'single',values:[],lValues:['42']}]);c.ctx.saveRecord();
+  assert.deepEqual(c.json('state.records[0].measurements'),[]);
+  assert.equal(c.ctx._autoJudgeMeas({measureType:'unknown',standard:0,tolerance:0,values:[0]}),null);
+});

@@ -1934,18 +1934,21 @@ function _buildIQCCanvas(r) {
       ${(() => {
         /* 格式化：整数不留小数，小数保留两位；仅改变报告显示，不修改原始测量数据 */
         function _fmt(v) {
-          const n=parseFloat(v); if(isNaN(n)) return v||'';
+          const text=String(v??'').trim(), n=Number(text);
+          if (!text||!Number.isFinite(n)||!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text)) return v??'';
           return Number.isInteger(n)?String(n):n.toFixed(2);   /* 测量数值保留两位小数 */
         }
         function _ra(arr) {
-          const f=(arr||[]).filter(v=>v!=='');
-          const n=f.map(Number).filter(x=>!isNaN(x));
-          return (n.length>0&&n.length===f.length)
-            ?(n.reduce((a,b)=>a+b,0)/n.length).toFixed(2):null;   /* 平均值保留两位小数 */
+          const f=(arr||[]).filter(v=>v!=null&&String(v).trim()!=='');
+          const n=f.map(v=>Number(String(v).trim()));
+          if (!n.length||n.some(x=>!Number.isFinite(x))||f.some(v=>!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(String(v).trim()))) return null;
+          const average=n.reduce((a,b)=>a+b,0)/n.length;
+          return Number.isFinite(average)?average.toFixed(2):null;   /* 平均值保留两位小数 */
         }
-        function _stdTol(std,tol) {
+        function _stdTol(std,tol,dir) {
           const s=String(std??'').trim(),t=String(tol??'').trim();
-          return s&&t?`${_fmt(s)}±${_fmt(t)}`:_fmt(s)||'';
+          const sym = dir==='+'?'+':(dir==='-'?'-':'±');
+          return s&&t?`${_fmt(s)}${sym}${_fmt(t)}`:_fmt(s)||'';
         }
         /* 竖排多行 div 显示 */
         function _lines(...vals) {
@@ -1982,7 +1985,7 @@ function _buildIQCCanvas(r) {
           if (mt==='LW') {
             const L=m.lValues||[],W=m.wValues||[];
             return {
-              stdLines: _star(_stdTol(m.standardL,m.toleranceL),_stdTol(m.standardW,m.toleranceW)),
+              stdLines: _star(_stdTol(m.standardL,m.toleranceL,m.tolDir),_stdTol(m.standardW,m.toleranceW,m.tolDir)),
               valLines: Array.from({length:8},(_,j)=>_star(_fmt(L[j]??''),_fmt(W[j]??''))),
               avgLines: _star(_ra(L)||'', _ra(W)||''),
             };
@@ -1990,7 +1993,7 @@ function _buildIQCCanvas(r) {
           if (mt==='LWH') {
             const L=m.lValues||[],W=m.wValues||[],H=m.hValues||[];
             return {
-              stdLines: _star(_stdTol(m.standardL,m.toleranceL),_stdTol(m.standardW,m.toleranceW),_stdTol(m.standardH,m.toleranceH)),
+              stdLines: _star(_stdTol(m.standardL,m.toleranceL,m.tolDir),_stdTol(m.standardW,m.toleranceW,m.tolDir),_stdTol(m.standardH,m.toleranceH,m.tolDir)),
               valLines: Array.from({length:8},(_,j)=>_star(_fmt(L[j]??''),_fmt(W[j]??''),_fmt(H[j]??''))),
               avgLines: _star(_ra(L)||'', _ra(W)||'', _ra(H)||''),
             };
@@ -1999,14 +2002,14 @@ function _buildIQCCanvas(r) {
           const vs=[...(m.values||[]),...Array(8).fill('')].slice(0,8).map(_fmt);
           const rawAvg=_ra(m.values||[])||m.avg||'—';
           return {
-            stdLines: _lines(_stdTol(m.standard,m.tolerance)||m.standard||''),
+            stdLines: _lines(_stdTol(m.standard,m.tolerance,m.tolDir)||m.standard||''),
             valLines: vs.map(v=>v?`<div style="line-height:11px;font-size:9px">${v}</div>`:'&nbsp;'),
             avgLines: _lines(rawAvg==='—'?'—':Number.isFinite(Number(rawAvg))?Number(rawAvg).toFixed(2):rawAvg),
           };
         }
 
         const meas=Array.isArray(r.measurements)
-          ?r.measurements.filter(m=>m.item||(m.lValues||m.values)?.some(v=>v!==''))
+          ?r.measurements.filter(m=>m.item||(m.measureType==='LW'?['lValues','wValues']:m.measureType==='LWH'?['lValues','wValues','hValues']:['values']).some(field=>(m[field]||[]).some(v=>v!=null&&String(v).trim()!=='')))
           :[];
         /* 每个测量项目占一行；多维(长宽高)在各单元格内用 * 横排连接，带公差 */
         const rd=meas.slice(0,2).map(m=>{
