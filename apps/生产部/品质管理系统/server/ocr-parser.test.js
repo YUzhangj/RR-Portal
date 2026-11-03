@@ -118,6 +118,36 @@ test('repeat fragments without quantity are removed when the complete same produ
   assert.deepEqual(parse(table([goodRow, ['P-001', '塑胶零件', '', '个']])).items, [item(...goodRow)]);
 });
 const htmlTable = '<table><tr><th>货号</th><th>品名</th><th>数量</th><th>单位</th></tr><tr><td>P-001</td><td>塑胶零件</td><td>1000</td><td>个</td></tr></table>';
+test('truncated HTML retains complete goods rows without inventing the unfinished row', () => {
+  const complete = htmlTable.replace(/<\/table>$/, '');
+  for (const unfinished of [
+    '<tr><td>P-002',
+    '<tr><td>P-002</td><td>半截零件</td><td>999',
+    '<tr><td>P-002</td><td>半截零件</td><td>999</td><td>个</td>',
+  ]) {
+    const fields = parse('宏福制品厂\n日期：2026-11-03\n' + complete + unfinished);
+    assert.equal(fields.supplier, '宏福制品厂');
+    assert.equal(fields.date, '2026-11-03');
+    assert.deepEqual(fields.items, [item(...goodRow)]);
+  }
+});
+test('an unfinished HTML goods row alone cannot manufacture a parsed item or quantity', () => {
+  const header = '<table><tr><th>货号</th><th>品名</th><th>数量</th><th>单位</th></tr>';
+  assert.deepEqual(parse(header + '<tr><td>P-002</td><td>半截零件</td><td>999').items, []);
+  assert.deepEqual(parse('<table><tr><th>货号</th><th>品名</th><th>数量').items, []);
+});
+test('truncated HTML rowspan does not create another goods row from its pending spans', () => {
+  const text = '<table><tr><th>货号</th><th>品名</th><th>数量</th><th>单位</th></tr>' +
+    '<tr><td rowspan="2">P001</td><td>完整零件</td><td>1000</td><td>个</td></tr>' +
+    '<tr><td>半截零件</td><td>2000</td><td>个</td>';
+  assert.deepEqual(parse(text).items, [item('P001', '完整零件', '1000')]);
+});
+test('the production OCR prompt retains its empty-row instruction without skipping nonempty goods', async () => {
+  const r = runtime([htmlTable]);
+  const result = await r.extract();
+  assert.match(r.calls[0].messages[0].content[0].text, /Skip fully empty table rows\./);
+  assert.deepEqual(plain(result.fields.items), [item(...goodRow)]);
+});
 test('HTML normalization keeps supplier, date and delivery number on their original lines', () => {
   const fields = parse('宏福制品厂\n客户：收货公司\n日期：2026-10-23\nDN-123456\n' + htmlTable);
   assert.equal(fields.supplier, '宏福制品厂'); assert.equal(fields.date, '2026-10-23'); assert.equal(fields.deliveryNo, 'DN-123456');
@@ -273,4 +303,199 @@ test('split-name columns keep actual delivered quantity instead of amount for bo
       }
     }
   }
+});
+
+test('the known dot-matrix delivery layout keeps all ten sequenced goods and leading-zero codes', () => {
+  // Synthetic rows only: no customer documents or production records are used.
+  const rows = [
+    ['1', '0254', '8.760', '个'], ['2', 'C031', '2.400', 'PCS'],
+    ['3', '0031', '84', '个'], ['4', '0031', '84', '个'],
+    ['5', 'A011', '0.650', 'KG'], ['6', 'A012', '8.760', 'KG'],
+    ['7', 'A013', '0.650', '个'], ['8', '0032', '1.234.567', '個'],
+    ['9', '0040', '0.06', '个'], ['10', '0041', '1,234', '个'],
+  ];
+  const text = '晶源激光制品厂\n送货单\n0254\n| 序号 | 品名及规格 | 数量 | 单位 |\n' +
+    rows.map(row => '| ' + row.join(' | ') + ' |').join('\n');
+  const fields = parse(text);
+  assert.equal(fields.supplier, '晶源激光制品厂');
+  assert.equal(fields.deliveryNo, '', 'a four-digit goods code is not a delivery number');
+  assert.deepEqual(fields.items, rows.map((row, i) => item(row[1], '',
+    ['8760', '2400', '84', '84', '0.650', '8.760', '0.650', '1234567', '0.06', '1234'][i], row[3])));
+});
+
+test('dot grouping conversion requires the known supplier, delivery document and discrete unit together', () => {
+  for (const prefix of ['其他供应商有限公司\n送货单\n', '晶源激光制品厂\n']) {
+    assert.deepEqual(parse(prefix + table([['P001', '塑胶零件', '8.760', '个']])).items,
+      [item('P001', '塑胶零件', '8.760')], prefix);
+  }
+  for (const unit of ['KG', 'Kg', 'G', '千克', '克', '米', '卷', '桶', '']) {
+    assert.deepEqual(parse('晶源激光制品厂\n发货单\n' + table([['P001', '原材料', '8.760', unit]])).items,
+      [item('P001', '原材料', '8.760', unit)], unit);
+  }
+  for (const qty of ['0.650', '0.006', '0.06', '08.760', '8.76']) {
+    assert.equal(parse('晶源激光制品厂\n送货单\n' + table([['P001', '塑胶零件', qty, '个']])).items[0].qty, qty);
+  }
+});
+
+test('unknown multiple-dot quantities retain their whole original token for manual correction', () => {
+  assert.deepEqual(parse(table([['P001', '塑胶零件', '1.234.567', '个']])).items,
+    [item('P001', '塑胶零件', '1.234.567')]);
+  for (const row of ['P001 塑胶零件 1.234.567 个', 'P001 塑胶零件 个 1.234.567']) {
+    assert.deepEqual(parse('品名 数量 单位\n' + row).items,
+      [item('P001', '塑胶零件', '1.234.567')], row);
+  }
+  assert.deepEqual(parse('| 品名 | 数量 | 单位 |\n| 0254 | 1.234.567 | 个 |').items,
+    [item('', '0254', '1.234.567')], 'an explicit but ambiguous quantity cannot delete a numeric-named goods row');
+});
+
+test('plain-text quantities retain real fractions, and known count units alone use dotted grouping', () => {
+  for (const qty of ['0.650', '8.760', '0.06', '1.234.567']) {
+    for (const row of ['P001 原材料 ' + qty + ' KG', 'P001 原材料 KG ' + qty]) {
+      assert.deepEqual(parse('品名 数量 单位\n' + row).items,
+        [item('P001', '原材料', qty, 'KG')], row);
+    }
+  }
+  for (const row of ['0254 塑胶零件 8.760 個', '0254 塑胶零件 個 8.760']) {
+    assert.deepEqual(parse('晶源激光制品厂\n送货单\n品名 数量 单位\n' + row).items,
+      [item('0254', '塑胶零件', '8760', '個')], row);
+  }
+});
+
+test('numeric-looking product names only become codes in the known code-only layout', () => {
+  for (const name of ['0254', 'C031', '504/504']) {
+    assert.deepEqual(parse('| 品名 | 数量 | 单位 |\n| ' + name + ' | 100 | 个 |').items,
+      [item('', name, '100')], name);
+    assert.deepEqual(parse(table([['P001', name, '100', '个']])).items,
+      [item('P001', name, '100')], name);
+  }
+  assert.deepEqual(parse('晶源激光制品厂\n送货单\n| 序号 | 品名及规格 | 数量 | 单位 |\n' +
+    '| 1 | 0254 | | 个 |\n| 2 | C031 | | 个 |\n| 3 | 0032 | 0032 | 个 |\n| 4 | 001234 | | 个 |').items,
+    [item('0254', '', ''), item('C031', '', ''), item('0032', '', ''), item('001234', '', '')], 'known code-only rows remain available when quantity is unreadable or copied from their code');
+});
+
+test('embedded name quantities do not throw and preserve explicit quantity and unit columns', () => {
+  assert.deepEqual(parse(table([['P001', '折CDU: 1120个', '', '']])).items,
+    [item('P001', '折CDU', '1120')]);
+  assert.deepEqual(parse(table([['P001', '折CDU：1120PCS', '', '张']])).items,
+    [item('P001', '折CDU', '1120', '张')]);
+  assert.deepEqual(parse(table([['P001', '折CDU: 1120个', '900', '个']])).items,
+    [item('P001', '折CDU: 1120个', '900')]);
+});
+
+test('a PO-looking product name cannot override an explicit row order', () => {
+  const fields = parse('| 订单号 | 货号 | 品名 | 数量 | 单位 |\n' +
+    '| PO-ACTUAL | P001 | PO:OTHER-100 | 100 | 个 |\n' +
+    '| PO-NEXT | P002 | PO12345 | 200 | 个 |');
+  assert.equal(fields.orderNo, 'PO-ACTUAL');
+  assert.deepEqual(fields.items, [
+    { ...item('P001', 'PO:OTHER-100', '100'), orderNo: 'PO-ACTUAL' },
+    { ...item('P002', 'PO12345', '200'), orderNo: 'PO-NEXT' },
+  ]);
+});
+
+test('explicit PO metadata in a product-name cell still provides its row order', () => {
+  const fields = parse(table([['P001', 'PO：ABC-1000', '100', '个'], ['P002', 'PO: ABC-2000', '200', '个']]));
+  assert.equal(fields.orderNo, 'ABC-1000');
+  assert.deepEqual(fields.items, [
+    { ...item('P001', '', '100'), orderNo: 'ABC-1000' },
+    { ...item('P002', '', '200'), orderNo: 'ABC-2000' },
+  ]);
+});
+
+test('explicit sequence identity preserves repeated physical goods through every deduplication stage', () => {
+  for (const header of ['序号', '序號', 'NO.']) {
+    const fields = parse('| ' + header + ' | 货号 | 品名 | 数量 | 单位 |\n' +
+      '| 1 | P001 | ABS1L零件 | 84 | 个 |\n' +
+      '| 2 | P001 | ABS1L零件 | 84 | 个 |\n' +
+      '| 02 | P001 | ABS1L零件 | 84 | 个 |');
+    assert.deepEqual(fields.items, [item('P001', 'ABS1L零件', '84'), item('P001', 'ABS1L零件', '84')], header);
+    assert.ok(fields.items.every(row => !('_seq' in row)), 'internal sequence is not part of the record payload');
+  }
+  assert.deepEqual(parse(table([['P001', '塑胶零件', '84', '个'], ['P001', '塑胶零件', '84', '个']])).items,
+    [item('P001', '塑胶零件', '84')], 'a nonempty product number is not a sequence marker');
+  assert.deepEqual(parse('| 序号 | 货号 | 品名 | 数量 | 单位 |\n' +
+    '| 1 | P001 | 塑胶零件 | 84 | 个 |\n| 2 | P001 | 塑胶零件 | | 个 |').items,
+    [item('P001', '塑胶零件', '84'), item('P001', '塑胶零件', '')], 'a separate sequence with unreadable quantity remains for correction');
+});
+
+test('supplier fallback excludes addresses, department fields and arbitrary English headers', () => {
+  for (const lines of ['九龙工业区\nKOWLOON HONG KONG\nTEL 12345678\n品名\n件数',
+    '半成品入库单\n装配部\n提货批次\n数量\n尺寸', 'SHIPMENT\nREFERENCE\n123456',
+    '送货单\n送貨單\n发货单\n發貨單']) {
+    const fields = parse(lines + '\n' + table([goodRow]));
+    assert.equal(fields.supplier, '', lines);
+    assert.deepEqual(fields.items, [item(...goodRow)]);
+  }
+  assert.equal(parse('ACME CO LTD\n' + table([goodRow])).supplier, 'ACME CO LTD');
+  assert.equal(parse('攀登\n' + table([goodRow])).supplier, '攀登');
+});
+
+test('numeric delivery labels retain the whole value including DN12 and parenthesized labels', () => {
+  for (const label of ['送货单号(DN#)', '送貨單號（DN#）', '发货单号(DN#)', 'NO.']) {
+    for (const value of ['DN12', '1ABC', 'A2026-07/09', '20261103001', 'DGHD.2673728']) {
+      assert.equal(parse(label + ': ' + value + '\n' + table([goodRow])).deliveryNo, value, label + ' / ' + value);
+    }
+  }
+  assert.equal(parse('送货单号(DN#): DELIVERY\n' + table([goodRow])).deliveryNo, '');
+});
+test('a labeled document PO precedes line tokens without treating name-cell PO text as header metadata', () => {
+  const fields = parse('订单号(PO#): DOC/123456\n品名 数量 单位\nP001 塑胶零件 100 个');
+  assert.equal(fields.orderNo, 'DOC/123456');
+  const rows = parse('| 订单号 | 货号 | 品名 | 数量 | 单位 |\n| PO-ACTUAL | P001 | PO:OTHER-100 | 100 | 个 |');
+  assert.equal(rows.orderNo, 'PO-ACTUAL');
+  assert.equal(rows.items[0].orderNo, 'PO-ACTUAL');
+  assert.equal(rows.items[0].productName, 'PO:OTHER-100');
+});
+test('explicit complex column positions keep PO, SKU, quantity and fractional trailing measurements distinct', () => {
+  const fields = parse('伟成合成测试制品厂\n订单号(PO#): DOC/123456\n' +
+    '序号 P/I NO. ITEM Description 数量 尺寸(mm) 重量(KG)\n' +
+    '1 PI/20261103-01 000123 合成零件 1000 12.5*20*3 0.650 KG\n' +
+    '2 PI/20261103-02 A031/2 S3 合成零件 20 300 10x20 3.75');
+  assert.equal(fields.orderNo, 'DOC/123456');
+  assert.deepEqual(fields.items, [
+    { ...item('000123', '合成零件', '1000', ''), orderNo: 'PI/20261103-01' },
+    { ...item('A031/2', 'S3 合成零件 20', '300', ''), orderNo: 'PI/20261103-02' },
+  ]);
+});
+test('unknown unitless layouts preserve the full row and require review rather than guessing price, PO or SKU', () => {
+  const examples = [
+    ['ITEM Description 数量', '1 PO100001 SKU001 合成零件 12345 20 1.50'],
+    ['序号 PO 货号 品名 数量 单价 尺寸 重量', '1 PO100001 SKU001 合成零件 1000 20 10*20 0.650'],
+    ['序号 PO 货号 品名 数量 重量', '1 PO100001 SKU001 合成零件 1000 0.650 KG'],
+    ['序号 PO 货号 品名 数量 尺寸 重量', '1 PO100001 SKU001 合成零件 1000 10*20'],
+    ['序号 PO 货号 品名 数量 单位', '1 PO100001 SKU001 合成零件 100 个'],
+  ];
+  for (const [header, raw] of examples) {
+    const fields = parse('其他合成供应商有限公司\n' + header + '\n' + raw);
+    assert.equal(fields.orderNo, '', raw);
+    assert.deepEqual(fields.items, [{ ...item('', '待核对原行：' + raw, '', ''), quantityNeedsReview: true }], raw);
+  }
+});
+test('an uncertain row remains beside a complete unit row without acquiring the preceding SKU', () => {
+  const raw = '1 PO100001 SKU001 合成零件 12345 20 1.50';
+  const fields = parse('品名 数量 单位\nP001 完整零件 100 个\n' + raw);
+  assert.deepEqual(fields.items, [item('P001', '完整零件', '100'),
+    { ...item('', '待核对原行：' + raw, '', ''), quantityNeedsReview: true }]);
+});
+test('ordinary sequence and quantity-unit headers retain the existing reliable unit parsing', () => {
+  for (const header of ['序号 货号 品名 数量 单位', 'NO. ITEM Description QTY 单位']) {
+    assert.deepEqual(parse(header + '\n1 P001 合成零件 100 个').items, [item('P001', '合成零件', '100')], header);
+  }
+});
+test('pipe document metadata remains ahead of the actual goods-table header for PO extraction', () => {
+  const fields = parse('| 订单号：PO-123456 |\n| 货号 | 品名 | 数量 |\n| P001 | 合成零件 | 100 |');
+  assert.equal(fields.orderNo, 'PO-123456');
+  assert.deepEqual(fields.items, [item('P001', '合成零件', '100', '')]);
+});
+test('a malformed or missing sequence under complex columns cannot fall back to interpreting weight as quantity', () => {
+  const header = '序号 PO 货号 品名 数量 尺寸 重量';
+  for (const raw of ['1.0 PO100001 SKU001 合成零件 1000 10*20 650 KG',
+    '① PO100001 SKU001 合成零件 1000 10*20 650 KG',
+    'PO100001 SKU001 合成零件 1000 10*20 650 KG']) {
+    const fields = parse('其他合成供应商有限公司\n' + header + '\n' + raw);
+    assert.deepEqual(fields.items, [{ ...item('', '待核对原行：' + raw, '', ''), quantityNeedsReview: true }], raw);
+    assert.equal(fields.orderNo, '', raw);
+  }
+  const valid = parse(header + '\n1 PO100001 SKU001 合成零件 1000 10*20 650 KG');
+  assert.deepEqual(valid.items, [{ ...item('SKU001', '合成零件', '1000', ''), orderNo:'PO100001' }]);
 });

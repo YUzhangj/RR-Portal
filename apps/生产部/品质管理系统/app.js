@@ -3153,6 +3153,25 @@ function extractFieldsFromOcrText(text) {
   }
 }
 
+/* 验货记录按整数计数；OCR 的小数/多点数量必须人工核对，不能由 parseInt 截断。 */
+function _isIntegerCountText(value) {
+  return /^\d+(?:\.0*)?$/.test(value) && Number.isInteger(Number(value));
+}
+function _markOcrQuantity(raw) {
+  const el = document.getElementById('f_qty');
+  if (!el) return;
+  const source = String(raw == null ? '' : raw).trim();
+  el.dataset.ocrApplied = '1';
+  el.dataset.ocrNeedsReview = source && !_isIntegerCountText(source) ? '1' : '';
+  if (el.dataset.ocrNeedsReview === '1') {
+    showToast('OCR 数量「' + source + '」含小数或格式不明确；当前记录按整数计数，请核对单位并换算为明确整数后保存', 'error');
+  }
+}
+function _clearOcrQuantityReview() {
+  const el = document.getElementById('f_qty');
+  if (el) { delete el.dataset.ocrApplied; delete el.dataset.ocrNeedsReview; }
+}
+
 /* 应用 OCR 字段到单条录入表单 */
 function applyOcrToForm() {
   const ocrDate        = document.getElementById('ocrDate')?.value || '';
@@ -3174,6 +3193,7 @@ function applyOcrToForm() {
   if (ocrOrderNo)     setVal('f_orderNo', ocrOrderNo);
   _syncOrderNoNA();
   if (ocrQty)         setVal('f_qty', ocrQty);
+  _markOcrQuantity(ocrQty);
   if (ocrType)        setVal('f_type', ocrType);
   if (ocrRemark)      setVal('f_remark', ocrRemark);
 
@@ -3479,6 +3499,7 @@ function openEditModal(id) {
     showToast(approved ? '该记录已通过审核并锁定，需由审核人修改或反审核退回' : '当前账号无权限执行此操作', 'error'); return;
   }
   editingId = id;
+  _clearOcrQuantityReview();
   setText('modalTitle', '编辑验货记录');
   /* 编辑时隐藏模式切换，始终显示单条面板 */
   const tabs = document.getElementById('modalModeTabs');
@@ -3529,6 +3550,7 @@ function setVal(id, v) { const el=document.getElementById(id); if(el) el.value=v
 function getVal(id)     { return (document.getElementById(id)?.value || '').trim(); }
 
 function clearForm() {
+  _clearOcrQuantityReview();
   ['f_date','f_inspDate','f_supplier','f_client','f_processType','f_productNo','f_productName',
    'f_deliveryNo','f_orderNo','f_qty','f_sampleQty','f_pass','f_fail','f_defectRate','f_defect','f_qc','f_remark']
     .forEach(id => setVal(id, ''));
@@ -4801,7 +4823,15 @@ function saveRecord(options = {}) {
     showToast('加工类型「' + ptVal + '」不在名单中，请先到「供应商&客户管理」添加后再录入', 'error'); return;
   }
 
-  const qty    = parseInt(getVal('f_qty')) || 0;
+  const qtyText = getVal('f_qty');
+  const qtyEl = document.getElementById('f_qty');
+  if (qtyEl?.dataset.ocrApplied === '1' &&
+      ((qtyText && !_isIntegerCountText(qtyText)) || (!qtyText && qtyEl.dataset.ocrNeedsReview === '1'))) {
+    showToast('OCR 数量不能直接保存：请核对原文和单位，并将来货数量改为明确整数；当前资料已保留', 'error');
+    qtyEl.focus();
+    return false;
+  }
+  const qty    = parseInt(qtyText) || 0;
   let   smpRaw = getVal('f_sampleQty');
   /* 保存前二次校验：如果 qty 有值，sampleQty 应与 AQL 推荐一致 */
   const recommendSmp = qty > 0 ? getAqlSampleSize(qty) : 0;

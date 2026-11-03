@@ -110,14 +110,15 @@
     var items = Array.isArray(fields.items) ? fields.items : [];
     var first = items[0] || {};
 
-    if (fields.date) setV('ocrDate', fields.date);
-    if (fields.supplier) setV('ocrSupplier', fields.supplier);
-    if (fields.deliveryNo) setV('ocrDeliveryNo', fields.deliveryNo);
-    if (fields.orderNo) setV('ocrOrderNo', fields.orderNo);
-    if (fields.type) setV('ocrType', fields.type || '来料');
-    if (first.productNo) setV('ocrProductNo', first.productNo);
-    if (first.productName) setV('ocrProductName', first.productName);
-    if (first.qty) setV('ocrQty', String(first.qty).replace(/[^\d.]/g, ''));
+    /* 每次识别整组替换；缺失字段不能继承上一张图片的日期、货号或PO。 */
+    setV('ocrDate', fields.date || '');
+    setV('ocrSupplier', fields.supplier || '');
+    setV('ocrDeliveryNo', fields.deliveryNo || '');
+    setV('ocrOrderNo', fields.orderNo || '');
+    setV('ocrType', fields.type || '来料');
+    setV('ocrProductNo', first.productNo || '');
+    setV('ocrProductName', first.productName || '');
+    setV('ocrQty', String(first.qty == null ? '' : first.qty).replace(/[^\d.]/g, ''));
 
     var lines = [];
     if (fields.supplier) lines.push('供应商：' + fields.supplier);
@@ -203,7 +204,9 @@
     var it = q.items[q.idx];
     var c = q.common || {};
     if (typeof window.openAddModal === 'function') window.openAddModal();
-    setV('f_date', c.date || '');
+    /* 公共日期为空时回退今天（openAddModal 的默认值），不要把今天清成空 */
+    var date = String(c.date || '').trim();
+    if (date) setV('f_date', date);
     setV('f_supplier', c.supplier || '');
     setV('f_deliveryNo', c.deliveryNo || '');
     setV('f_orderNo', it.orderNo || c.orderNo || '');   /* 多 PO 单：用本条自己的 PO 号 */
@@ -211,6 +214,7 @@
     setV('f_productNo', it.productNo || '');
     setV('f_productName', it.productName || '');
     setV('f_qty', String(it.qty == null ? '' : it.qty).replace(/[^\d.]/g, ''));
+    if (typeof window._markOcrQuantity === 'function') window._markOcrQuantity(it.quantityNeedsReview ? '待核对' : it.qty);
     if (typeof window.onQtyChange === 'function') window.onQtyChange();
     if (typeof window.onProductNoChange === 'function') window.onProductNoChange();
     setT('modalTitle', '新增验货记录（第 ' + (q.idx + 1) + '/' + q.items.length + ' 条）');
@@ -218,8 +222,8 @@
 
   function startQueue(common, items) {
     window.__qcQueue = { common: common, items: items, idx: 0 };
-    loadQueueItem(window.__qcQueue);
     toast('共 ' + items.length + ' 条货品，逐条录入', 'info');
+    loadQueueItem(window.__qcQueue);
   }
 
   function runOriginalOcr() {
@@ -257,7 +261,22 @@
       window.applyOcrToForm = function () {
         var r = window.__qcAiResult;
         if (r && r.items && r.items.length > 1) return startQueue(r.common, r.items);
-        return origApply.apply(this, arguments);
+        var ret = origApply.apply(this, arguments);
+        /* number 输入可能把多点原文清空，仍以原识别值标记待人工核对。 */
+        if (r && r.items && r.items.length === 1 && typeof window._markOcrQuantity === 'function') {
+          var quantity = r.items[0].quantityNeedsReview ? '待核对' : r.items[0].qty;
+          var previewQty = document.getElementById('ocrQty');
+          if (r.items[0].quantityNeedsReview) {
+            var previewNo = document.getElementById('ocrProductNo');
+            var previewOrder = document.getElementById('ocrOrderNo');
+            setV('f_productNo', previewNo ? previewNo.value : '');
+            setV('f_orderNo', previewOrder ? previewOrder.value : '');
+            if (typeof window._syncOrderNoNA === 'function') window._syncOrderNoNA();
+          }
+          if (quantity && typeof window._isIntegerCountText === 'function' && !window._isIntegerCountText(String(quantity)) && !(previewQty && previewQty.value.trim())) setV('f_qty', '');
+          window._markOcrQuantity(quantity);
+        }
+        return ret;
       };
       window.applyOcrToForm.__qcWrapped = true;
     }
