@@ -13,6 +13,7 @@ const {
   weightedColumnFormula,
 } = require('./productMix');
 const { addElectronicTemplateSheet } = require('./exportElectronicTemplate');
+const InjectionPricing = require('../../frontend/injection-pricing');
 
 const RMB = '￥#,##0.00';
 const HKD = '"HK$"#,##0.00';
@@ -1436,13 +1437,19 @@ function renderInjection(ws, row, payload, fxRH, refs, sequenceForMix=false) {
     ws.getCell(row, 7).value = { formula: `E${row}*F${row}`, result: rawUnit };
     ws.getCell(row, 7).numFmt = '0.0000';
     ws.getCell(row, 8).value = r.machine || '';
-    // 啤价 = 机型价 ÷ 套数(J) ÷ 目标数(L)；机型价用反推常量，套数/目标数引用本行可改重算
-    const machinePrice = sp * num(r.sets) * num(r.target);
-    ws.getCell(row, 9).value = (sp && num(r.sets) > 0 && num(r.target) > 0)
-      ? { formula: `${+machinePrice.toFixed(2)}/J${row}/L${row}`, result: sp }
+    // 使用本单真实机型费用，禁止用保存啤价反推费用。历史/手填价不静默改价。
+    const pricing = InjectionPricing.parameters(r, payload.machine_prices);
+    const autoPrice = InjectionPricing.calculate(r, payload.machine_prices);
+    const formulaPrice = r.shot_price_mode === 'auto' && r.catalog_raw_weight == null && num(r.mold_part_index) === 0 &&
+      pricing.valid && r.shot_price != null && r.shot_price !== '' && autoPrice === sp;
+    ws.getCell(row, 9).value = formulaPrice
+      ? { formula: `ROUND(${pricing.price}/J${row}/L${row},4)`, result: sp }
       : sp;
+    if (!formulaPrice && (sp || num(r.mold_part_index) === 0)) {
+      ws.getCell(row, 9).note = '保存啤价（固定值）：历史导入、手动调整或共模分摊。未按普通机型公式重算；如需联动，请在系统中核对机型、套数、目标数后重新套啤价并保存。';
+    }
     ws.getCell(row, 9).numFmt = '0.0000';
-    ws.getCell(row, 10).value = r.sets ?? 1;
+    ws.getCell(row, 10).value = r.sets == null || r.sets === '' ? 1 : r.sets;
     ws.getCell(row, 11).value = r.machine_model || '';
     ws.getCell(row, 12).value = num(r.target);
     ws.getCell(row, 13).value = r.cycle_sec == null || r.cycle_sec === '' ? '' : num(r.cycle_sec);

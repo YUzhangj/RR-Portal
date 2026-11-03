@@ -4122,8 +4122,44 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
       td.appendChild(input);
     },
   };
+  const supplierColumn = {
+    key: 'supplier_name', label: '供应商', width: '140px',
+    renderCell: (td, row, { readonly, onChange }) => {
+      if (readonly) { td.textContent = row.supplier_name || row.supplier_id || '未标供应商'; return; }
+      const input = document.createElement('input');
+      input.type = 'text'; input.value = row.supplier_name || row.supplier_id || '';
+      input.placeholder = '填写供应商'; input.maxLength = 100;
+      input.setAttribute('aria-label', '供应商'); input.style.minWidth = '140px';
+      let original = { supplier_name: row.supplier_name, supplier_id: row.supplier_id };
+      let supplierError = '';
+      input.onfocus = () => { original = { supplier_name: row.supplier_name, supplier_id: row.supplier_id }; };
+      input.oninput = () => {
+        try {
+          const candidate = { ...original };
+          window.SupplierMaterialSync.setSupplier(candidate, input.value,
+            [...payload.hardware, ...payload.aux_materials, ...payload.packaging_materials].filter(item => item !== row));
+          Object.assign(row, candidate);
+          supplierError = '';
+        } catch (error) {
+          // 同名歧义时恢复编辑前的归属，快捷保存也不能提交逐字输入的临时标识。
+          Object.assign(row, original);
+          supplierError = error.message;
+        }
+        input.setCustomValidity(supplierError);
+        onChange();
+      };
+      input.onchange = () => {
+        if (!supplierError) return;
+        input.value = row.supplier_name || row.supplier_id || '';
+        input.setCustomValidity('');
+        alert(supplierError);
+        supplierError = '';
+      };
+      td.appendChild(input);
+    },
+  };
   const freeCols = [
-    { key: 'supplier_name', label: '供应商', readonly: true, calc: r => r.supplier_name || r.supplier_id || '未标供应商', width: '140px' },
+    supplierColumn,
     { key: 'name', label: '零件名称' },
     { key: 'spec', label: '规格' },
     { key: 'qty', label: '用量', type: 'formula', width: '80px' },
@@ -4139,7 +4175,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
   ];
   // 辅助材料：在五金列基础上插入「类别」列（减税明细按类别统计）
   const auxCols = [
-    { key: 'supplier_name', label: '供应商', readonly: true, calc: r => r.supplier_name || r.supplier_id || '未标供应商', width: '140px' },
+    supplierColumn,
     { key: 'name', label: '零件名称' },
     { key: 'spec', label: '规格' },
     { key: 'category', label: '类别', type: 'select', options: MAT_CATEGORIES, width: '120px' },
@@ -4176,7 +4212,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
 
   // 六、包装材料
   const pkCols = [
-    { key: 'supplier_name', label: '供应商', readonly: true, calc: r => r.supplier_name || r.supplier_id || '未标供应商', width: '140px' },
+    supplierColumn,
     { key: 'name', label: '零件名称' },
     { key: 'spec', label: '规格', type: 'textarea' },
     { key: 'category', label: '类别', type: 'select', options: MAT_CATEGORIES, width: '120px' },
@@ -4537,21 +4573,47 @@ const DEFAULT_MACHINE_PRICES = [
 
 // 按 机型 在机型价表里找最匹配
 function lookupMachinePrice(model, prices) {
-  if (!model || !prices || !prices.length) return null;
-  const t = String(model).replace(/\s+/g, '').toUpperCase();
-  // 精确匹配（区间，如 4A-6A → 把 t==4A or 5A or 6A 都识别）
-  const tNum = parseFloat(t);
-  for (const p of prices) {
-    const m = String(p.model).toUpperCase().replace(/\s+/g, '');
-    const rangeMatch = m.match(/^([\d.]+)A?-([\d.]+)A?$/);  // 兼容 "4A-6A" 与 "30-32A"
-    if (rangeMatch) {
-      const lo = +rangeMatch[1], hi = +rangeMatch[2];
-      if (!isNaN(tNum) && tNum >= lo && tNum <= hi) return p;
+  return window.InjectionPricing.lookupMachinePrice(model, prices);
+}
+
+function syncInjectionMolds(payload, refMolds) {
+  const existingRows = new Map(payload.injection.map(row => [engineeringMoldSyncKey(row), row]));
+  payload.injection = refMolds.map(m => {
+    const existing = existingRows.get(engineeringMoldSyncKey(m));
+    const next = {
+      ...(existing || {}),
+      product_group_id: m.product_group_id || '',
+      product_group_name: m.product_group_name || '',
+      product_group_rows: m.product_group_rows || [],
+      product_image: m.product_image || '',
+      source_sheet_name: m.source_sheet_name || '',
+      source_sheet_index: m.source_sheet_index ?? null,
+      mold_no: m.mold_no || existing?.mold_no || '',
+      name: m.name,
+      mold_size: m.mold_size || existing?.mold_size || '',
+      side_action: m.side_action || existing?.side_action || '',
+      material: m.material || existing?.material || '',
+      material_grade: m.material_grade || existing?.material_grade || '',
+      color: m.color || existing?.color || '',
+      cavity: m.cavity || existing?.cavity || '',
+      weight_g: m.weight_g ?? existing?.weight_g ?? null,
+      mold_part_index: m.mold_part_index ?? 0,
+      mold_part_count: m.mold_part_count ?? 1,
+      cycle_sec: m.cycle_sec ?? existing?.cycle_sec ?? null,
+      sets: existing?.sets ?? (m.sets || 1),
+      machine: m.machine || existing?.machine || '',
+      machine_model: m.machine_model || existing?.machine_model || '',
+      target: existing?.target ?? m.target ?? null,
+      material_unit_price: m.material_unit_price ?? existing?.material_unit_price ?? null,
+      shot_price: existing ? existing.shot_price : (m.shot_price ?? null),
+      note: m.note || existing?.note || '',
+    };
+    if (!existing || window.InjectionPricing.signature(existing, payload.machine_prices) !==
+        window.InjectionPricing.signature(next, payload.machine_prices)) {
+      window.InjectionPricing.reprice(next, payload.machine_prices);
     }
-    if (m === t) return p;
-  }
-  // 退而求其次：包含
-  return prices.find(p => t.includes(String(p.model).toUpperCase().replace(/\s+/g,''))) || null;
+    return next;
+  });
 }
 
 // 啤机部料价表默认值（HK$/Lb，2026 年）
@@ -4611,7 +4673,7 @@ function engineeringImagesForInjection(row, refMolds) {
   ].filter(Boolean))];
 }
 
-// 默认只补齐空白料价/啤价，避免进入页面时覆盖人工调整；按钮手动套价时可传 overwrite=true。
+// 默认补齐空白料价、已明确自动计算行的空啤价；历史未标记值保持，按钮套价可传 overwrite=true。
 function applyInjectionReferencePrices(payload, { overwrite = false, material = true, machine = true } = {}) {
   let materialHits = 0;
   let machineHits = 0;
@@ -4636,17 +4698,19 @@ function applyInjectionReferencePrices(payload, { overwrite = false, material = 
 
     if (machine) {
       const matchedMachine = lookupMachinePrice(row.machine_model, payload.machine_prices);
-      const sets = num(row.sets) || 1;
-      const target = num(row.target) || 0;
-      if ((overwrite || isBlankInjectionPrice(row.shot_price)) && matchedMachine && target > 0) {
-        const nextPrice = num(row.mold_part_index) > 0
-          ? 0
-          : +(num(matchedMachine.price) / sets / target).toFixed(4);
+      const nextPrice = window.InjectionPricing.calculate(row, payload.machine_prices);
+      if (row.catalog_raw_weight != null) continue;
+      const shouldPrice = overwrite || (isBlankInjectionPrice(row.shot_price) && row.shot_price_mode === 'auto');
+      if (shouldPrice && nextPrice !== null) {
         if (row.shot_price !== nextPrice) changed = true;
         row.shot_price = nextPrice;
+        row.shot_price_mode = 'auto';
         machineHits++;
-      } else if ((overwrite || isBlankInjectionPrice(row.shot_price)) && row.machine_model && (!matchedMachine || target <= 0)) {
-        machineMisses.push(`${row.machine_model}${target <= 0 ? '(无目标数)' : ''}`);
+      } else if (shouldPrice) {
+        if (row.shot_price !== null) changed = true;
+        row.shot_price = null;
+        row.shot_price_mode = 'auto';
+        machineMisses.push(`${row.machine_model || '(无机型)'}(请补齐有效机型价、套数和目标数)`);
       }
       if (!row.machine && matchedMachine && matchedMachine.normal) {
         row.machine = matchedMachine.normal;
@@ -4750,6 +4814,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       target: m.target ?? null,
       material_unit_price: m.material_unit_price ?? null,
       shot_price: m.shot_price ?? null,
+      shot_price_mode: m.shot_price_mode ?? (isBlankInjectionPrice(m.shot_price) ? 'auto' : undefined),
       note: m.note || '',
     }));
   }
@@ -4769,6 +4834,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     ${canEdit ? `<small style="margin-left:8px"><button id="btn-auto-price" class="mini" type="button">🔄 自动按材质套料价</button></small>` : ''}
     ${canEdit ? `<small style="margin-left:6px"><button id="btn-auto-shot" class="mini" type="button">🔄 自动按机型套啤价</button></small>` : ''}
     </h3>
+    <p class="muted">啤价＝本单机型台班费用 ÷ 目标数 ÷ 套数。修改本行机型、目标数、套数或点击“自动按机型套啤价”后使用自动计算；手填啤价及历史固定值保留，机型费用变化只更新自动计算行。修改后请保存本部门草稿。</p>
     <div id="wb-inj"></div>
     <div id="wb-inj-shared"></div>
     <div id="wb-inj-summary"></div>
@@ -4818,7 +4884,47 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
   ];
   // 参考表改动仅保存到当前报价单，不反向覆盖全局参考表。
   const onMatChange = () => { onChange(); };
-  const onMachChange = () => { onChange(); };
+  const shotRefreshers = new WeakMap();
+  const machineRefreshers = new WeakMap();
+  const priceSignatures = new WeakMap(payload.injection.map(row => [row,
+    window.InjectionPricing.signature(row, payload.machine_prices)]));
+  let refreshInjectionTotals = onChange;
+  const refreshShot = row => {
+    window.InjectionPricing.reprice(row, payload.machine_prices);
+    priceSignatures.set(row, window.InjectionPricing.signature(row, payload.machine_prices));
+    machineRefreshers.get(row)?.();
+    shotRefreshers.get(row)?.();
+  };
+  const pricingCell = (key, refreshers, numeric = false) => (td, row, { readonly, refreshCalcs, onChange }) => {
+    if (readonly) {
+      td.classList.add('ro');
+      const refresh = () => { td.textContent = formatNum(row[key] ?? ''); refreshCalcs(); };
+      refreshers.set(row, refresh);
+      refresh();
+      return;
+    }
+    const input = document.createElement('input');
+    input.type = numeric ? 'number' : 'text';
+    if (numeric) input.step = 'any';
+    input.style.minWidth = numeric ? '100px' : '90px';
+    const refresh = () => { input.value = row[key] ?? ''; refreshCalcs(); };
+    refreshers.set(row, refresh);
+    refresh();
+    input.oninput = () => {
+      row[key] = numeric ? (input.value === '' ? null : Number(input.value)) : input.value;
+      if (key === 'shot_price') row.shot_price_mode = 'manual';
+      refreshCalcs();
+      onChange();
+    };
+    td.appendChild(input);
+  };
+  const refreshChangedMachinePrices = () => {
+    for (const row of payload.injection) {
+      if (row.shot_price_mode === 'auto' &&
+          priceSignatures.get(row) !== window.InjectionPricing.signature(row, payload.machine_prices)) refreshShot(row);
+    }
+  };
+  const onMachChange = () => { refreshChangedMachinePrices(); refreshInjectionTotals(); };
   renderTable(host.querySelector('#wb-material-prices'), mpCols, payload.material_prices, { readonly: !canEditPrices, onChange: onMatChange });
 
   // 机型价表
@@ -4840,6 +4946,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       ]);
       if (mat.length) payload.material_prices = JSON.parse(JSON.stringify(mat));
       if (mac.length) payload.machine_prices = JSON.parse(JSON.stringify(mac));
+      refreshChangedMachinePrices();
       applyInjectionReferencePrices(payload, { overwrite: false });
       onChange();
       renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, userRole);
@@ -4882,39 +4989,8 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
         return;
       } finally { syncBtn.disabled = false; }
       if (!refMolds?.length) { alert('工程部分尚无已保存的模具，请先保存工程模具草稿。'); return; }
-      if (!confirm(`将根据工程已填的 ${refMolds.length} 副模具同步注塑表。已填行（按产品组、模号及名称匹配）会保留其他字段，新增的会追加，工程已删除的会移除。继续？`)) return;
-      const byName = new Map(payload.injection.map(r => [engineeringMoldSyncKey(r), r]));
-      payload.injection = refMolds.map(m => {
-        const existing = byName.get(engineeringMoldSyncKey(m)) || {};
-        return {
-          ...existing,
-          product_group_id: m.product_group_id || '',
-          product_group_name: m.product_group_name || '',
-          product_group_rows: m.product_group_rows || [],
-          product_image: m.product_image || '',
-          source_sheet_name: m.source_sheet_name || '',
-          source_sheet_index: m.source_sheet_index ?? null,
-          mold_no: m.mold_no || existing.mold_no || '',
-          name: m.name,
-          mold_size: m.mold_size || existing.mold_size || '',
-          side_action: m.side_action || existing.side_action || '',
-          material: m.material || existing.material || '',
-          material_grade: m.material_grade || existing.material_grade || '',
-          color: m.color || existing.color || '',
-          cavity: m.cavity || existing.cavity || '',
-          weight_g: m.weight_g ?? existing.weight_g ?? null,
-          mold_part_index: m.mold_part_index ?? 0,
-          mold_part_count: m.mold_part_count ?? 1,
-          cycle_sec: m.cycle_sec ?? existing.cycle_sec ?? null,
-          sets: existing.sets ?? (m.sets || 1),
-          machine: m.machine || existing.machine || '',
-          machine_model: m.machine_model || existing.machine_model || '',
-          target: m.target ?? existing.target ?? null,
-          material_unit_price: m.material_unit_price ?? existing.material_unit_price ?? null,
-          shot_price: num(m.mold_part_index) > 0 ? 0 : (m.shot_price ?? existing.shot_price ?? null),
-          note: m.note || existing.note || '',
-        };
-      });
+      if (!confirm(`将根据工程已填的 ${refMolds.length} 副模具同步注塑表。已填行按产品组、模号及名称匹配，保留啤机已填目标数和套数；机型变化会重算啤价。新增的会追加，工程已删除的会移除。继续？`)) return;
+      syncInjectionMolds(payload, refMolds);
       applyInjectionReferencePrices(payload, { overwrite: false });
       onChange(); renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, userRole);
     };
@@ -5007,13 +5083,15 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     { key: 'material_unit_price', label: '料价 HK$/g', type: 'number', width: '110px' },
     { key: 'raw_unit', label: '原料单价 HK$', readonly: true, width: '100px',
       calc: r => num(r.weight_g) * (1 + num(payload.injection_loss_pct ?? 3)/100) * num(r.material_unit_price) },
-    { key: 'machine', label: '机台', width: '90px', className: 'molding-machine-key' },
-    { key: 'shot_price', label: payload.injection.some(r => r.catalog_raw_weight != null) ? '零件啤工(HK$/件)' : '啤价(HK$/啤)', type: 'number', width: '100px' },
+    { key: 'machine', label: '机台', width: '90px', className: 'molding-machine-key',
+      renderCell: pricingCell('machine', machineRefreshers) },
+    { key: 'shot_price', label: payload.injection.some(r => r.catalog_raw_weight != null) ? '零件啤工(HK$/件)' : '啤价(HK$/啤)', type: 'number', width: '100px',
+      renderCell: pricingCell('shot_price', shotRefreshers, true) },
     { key: 'cavity', label: '出模数', width: '80px' },
     { key: 'side_action', label: '行位', width: '90px' },
-    { key: 'sets', label: '套数', type: 'number', width: '70px' },
-    { key: 'machine_model', label: '机型', width: '90px', className: 'molding-machine-key' },
-    { key: 'target', label: '目标数', type: 'number', width: '100px', className: 'molding-machine-key' },
+    { key: 'sets', label: '套数', type: 'number', width: '70px', onValue: refreshShot },
+    { key: 'machine_model', label: '机型', width: '90px', className: 'molding-machine-key', onValue: refreshShot },
+    { key: 'target', label: '目标数', type: 'number', width: '100px', className: 'molding-machine-key', onValue: refreshShot },
     { key: 'mold_size', label: '模具尺寸', width: '130px' },
     { key: 'cycle_sec', label: '周期(秒)', type: 'number', width: '80px' },
     { key: 'finished_amt', label: '成品金额 HK$', readonly: true, width: '100px',
@@ -5024,6 +5102,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     { key: 'note', label: '备注' },
   ];
   const wrappedOnChange = (() => { const fns = []; const w = () => { fns.forEach(f => f()); onChange(); }; w._fns = fns; return w; })();
+  refreshInjectionTotals = wrappedOnChange;
   const injectionGroupsForTable = injectionProductGroups(payload);
   const showInjectionGroups = injectionGroupsForTable.length > 1;
   const injectionGroupMeta = new Map(injectionGroupsForTable.map((group, index) => [group.key, {
