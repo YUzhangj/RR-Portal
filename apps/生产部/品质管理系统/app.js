@@ -3860,7 +3860,10 @@ function _inTol(valStr, stdStr, tolStr) {
   const v=parseFloat(valStr), std=parseFloat(stdStr), tol=parseFloat(tolStr);
   if (isNaN(v)||isNaN(std)) return null;
   if (isNaN(tol)||!tolStr) return null;
-  return v >= std-tol && v <= std+tol;
+  /* 浮点误差：2.3+0.05=2.3500000000000001，边界值 2.35 会被误判出格。
+     按小数位数量化到 1e-9 再比较（边界含等号） */
+  const EPS = 1e-9;
+  return v >= std - tol - EPS && v <= std + tol + EPS;
 }
 
 /* ── 自动判定 PASS / FAIL ── */
