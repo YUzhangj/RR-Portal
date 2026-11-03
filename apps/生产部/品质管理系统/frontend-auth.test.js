@@ -474,3 +474,29 @@ test('complete write failure keeps only page memory and warns; storage recovery 
   assert.equal(b.run('state.records[0].productNo'), 'quota-draft');
   reject = false; assert.equal(await b.ctx.__QC_SYNC_NOW(), true); assert.equal(b.unloadListeners.size, 0);
 });
+
+
+test('capped records select and delete only visible rows; search still reaches rows outside the cap', () => {
+  const b = browser(), wrap = { innerHTML:'' }, search = { value:'' }, originalGet = b.ctx.document.getElementById;
+  b.ctx.document.getElementById = id => id === 'recordsTableWrap' ? wrap : id === 'searchInput' ? search : originalGet(id);
+  const records = Array.from({length:305}, (_,i) => ({id:i+1,date:'2026-11-03',productNo:'Synthetic-'+String(i+1).padStart(3,'0'),status:'approved'}));
+  b.run('state='+JSON.stringify({records,nextId:306})); b.ctx.filterRecords();
+  assert.equal((wrap.innerHTML.match(/class="row-check"/g)||[]).length, 300);
+  b.ctx._onCheckAll({checked:true}); assert.equal(b.run('_selectedIds.size'), 300); assert.equal(b.run('_selectedIds.has(305)'), false);
+  b.run('_recordsShowAll=true;filterRecords()'); b.ctx._onCheckAll({checked:true}); assert.equal(b.run('_selectedIds.size'),305);
+  b.run('_recordsShowAll=false;filterRecords()'); assert.equal(b.run('_selectedIds.size'),300);
+  b.ctx.batchDelete(); assert.deepEqual(plain(b.run('state.records')).map(r=>r.id), [301,302,303,304,305]);
+  b.run('state='+JSON.stringify({records,nextId:306})); search.value='Synthetic-305'; b.ctx.filterRecords();
+  assert.equal((wrap.innerHTML.match(/class="row-check"/g)||[]).length,1); assert.match(wrap.innerHTML,/Synthetic-305/);
+});
+
+test('import plan preserves source values and reports the actual worksheet row for invalid dates', () => {
+  const b=browser();
+  b.run(`_importHeaderRowIdx=2;_importMappedFields={date:'date',supplier:'supplier',product:'productNo',po:'orderNo',type:'type',qty:'qty'};
+    _importParsedRows=[{date:'',supplier:'',product:'skip'}, {date:'not-a-date',supplier:'Synthetic',product:'P-001',po:'PO-01',type:'',qty:12}];
+    Object.defineProperty(_importParsedRows[1],'__sourceRow',{value:8});`);
+  const plan=plain(b.ctx._buildImportPlan('append')); assert.equal(plan.records.length,1);
+  assert.equal(plan.records[0].date,''); assert.equal(plan.records[0].productNo,'P-001'); assert.equal(plan.records[0].orderNo,'PO-01');
+  assert.equal(plan.records[0].type,'来料'); assert.equal(plan.records[0].qty,12);
+  assert.ok(plan.warningTexts.some(w=>w.includes('第 8 行「not-a-date」')));
+});
