@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>核价板块</title>
+  <script>document.documentElement.dataset.verificationUi = 'precision';</script>
   <link rel="stylesheet" href="./styles.css?v=20261030-full-mold-number-r2">
   <style>
     #workshop-assignment[hidden]{display:none!important}
@@ -19,15 +20,23 @@
   </style>
   <link rel="stylesheet" href="./excel-grid.css?v=20261020-delivery">
   <link rel="stylesheet" href="./verification-compact.css?v=20261031-summary-button">
+  <link rel="stylesheet" href="./verification-precision.css?v=20261103-scale-and-filters-3">
 </head>
 <body>
   <div class="topbar module-topbar">
-    <div class="brand">核价板块 <small>支持直接新建或从已确认报价核价</small></div>
+    <div class="brand"><span class="precision-brand-mark" aria-hidden="true">◈</span><span>核价板块 <small>支持直接新建或从已确认报价核价</small></span></div>
     <nav class="module-switch" aria-label="报价与核价板块">
       <a href="./index.html">报价板块</a>
       <a class="active" href="./verification.html" aria-current="page">核价板块</a>
     </nav>
-    <div id="user-chip"><span id="who-chip"></span></div>
+    <div id="user-chip" class="hidden">
+      <span id="factory-chip" class="factory-single-chip"></span>
+      <div id="factory-switch" class="factory-switcher hidden" role="group" aria-label="切换厂区"></div>
+      <span id="who-chip"></span>
+      <a href="#" id="btn-change-pwd">修改密码</a>
+      <a href="./admin.html?from=verification" id="btn-admin" class="hidden">⚙️ 管理后台</a>
+      <a href="#" id="btn-logout">登出</a>
+    </div>
   </div>
 
   <main class="verification-page verification-ledger-page"><div class="verification-tools"><section id="verification-transfer" class="card" hidden></section><section id="verification-costing-basis"></section></div>
@@ -48,13 +57,16 @@
         <input id="verification-search" type="search" placeholder="搜索货号、产品、客户或版本">
         <select id="verification-status-filter">
           <option value="">全部状态</option>
-          <option value="drafting">填写中</option>
-          <option value="in_review">审核中</option>
-          <option value="ready">待锁定</option>
+          <option value="unfinished">待完成</option>
+          <option value="not_started" data-precision-detail>待创建</option>
+          <option value="drafting" data-precision-detail>填写中</option>
+          <option value="in_review" data-precision-detail>审核中</option>
+          <option value="ready" data-precision-detail>待锁定</option>
           <option value="completed">已完成</option>
         </select>
         <select id="workshop-filter" aria-label="按车间筛选"><option value="">全部车间</option><option>兴信A</option><option>兴信B</option><option>华登</option><option>待分配车间</option></select>
         <select id="verification-customer-filter"><option value="">全部客户</option></select>
+        <div class="verification-filter-tools"><span id="verification-filter-count" role="status" aria-live="polite"></span><button id="verification-clear-filters" class="mini" type="button">清空筛选</button></div>
       </div>
         <div id="workshop-assignment" style="padding:12px;display:flex;align-items:center;flex-wrap:wrap;gap:12px" hidden>
           <label><input id="workshop-select-visible" type="checkbox"> 全选当前筛选结果</label>
@@ -65,7 +77,18 @@
       <div class="verification-master-detail">
         <div class="verification-list-pane">
           <table class="verification-list-table">
-            <thead><tr><th>货号</th><th>产品</th><th>客户</th><th>当前版本</th><th>部门进度</th><th>状态</th><th>所属车间</th></tr></thead>
+            <thead>
+              <tr><th>货号</th><th>产品</th><th>客户</th><th>当前版本</th><th>部门进度</th><th>状态</th><th>所属车间</th></tr>
+              <tr class="verification-column-filters">
+                <th><input id="verification-no-filter" type="search" placeholder="筛选货号" aria-label="筛选货号"></th>
+                <th><input id="verification-product-filter" type="search" placeholder="筛选产品" aria-label="筛选产品"></th>
+                <th><select id="verification-table-customer-filter" aria-label="按客户筛选"><option value="">全部</option></select></th>
+                <th><select id="verification-version-filter" aria-label="按版本筛选"><option value="">全部</option></select></th>
+                <th><select id="verification-progress-filter" aria-label="按部门进度筛选"><option value="">全部</option><option value="not_started">未开始</option><option value="in_progress">进行中</option><option value="completed">已完成</option></select></th>
+                <th><select id="verification-table-status-filter" aria-label="按状态筛选"><option value="">全部</option><option value="unfinished">待完成</option><option value="not_started" data-precision-detail>待创建</option><option value="drafting" data-precision-detail>填写中</option><option value="in_review" data-precision-detail>审核中</option><option value="ready" data-precision-detail>待锁定</option><option value="completed">已完成</option></select></th>
+                <th></th>
+              </tr>
+            </thead>
             <tbody id="verification-list-body"></tbody>
           </table>
         </div>
@@ -78,6 +101,7 @@
   </main>
 
   <script>(function(){var b=location.pathname.replace(/\/[^/]*$/,'');if(!b)return;var f=window.fetch.bind(window);window.fetch=function(u,o){if(typeof u==='string'&&u.indexOf('/api/')===0)u=b+u;return f(u,o)}})();</script>
+  <script>document.querySelectorAll('option[data-precision-detail]').forEach(function (option) { option.remove(); });</script>
   <script>window.__WORKBENCH_EMBED__ = true;</script>
   <script src="./formula-input.js?v=20260731-fraction-export"></script>
 <script src="./jazwares-freight.js?v=20261009"></script>
@@ -89,6 +113,6 @@
   <script src="./excel-valuation.js?v=20261020-delivery"></script>
   <script src="./excel-grid.js?v=20261020-delivery"></script>
   <script src="./verification-transfer.js?v=20261020-compact-v1"></script>
-  <script type="module" src="./verification.js?v=20261031-direct-costing"></script>
+  <script type="module" src="./verification.js?v=20261103-ui-final"></script>
 </body>
 </html>

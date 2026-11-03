@@ -21,6 +21,7 @@ function page(api) {
     listState: [], workshopSelected: new Set(), workshopRevisions: new Map(),
     selectedQuoteId: null, esc: String,
     renderCostingBasis() { rendered.push({user: context.me, basis: context.costingBasisState}); },
+    renderUserHeader() {},
     renderList() {}, selectTask() {},
   };
   context.window.VerificationCustomers = {display: String, options: names => names};
