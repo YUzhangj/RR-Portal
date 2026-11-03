@@ -212,7 +212,7 @@ function parseDeliveryNote(text) {
       const t = ln.trim();
       if (t.startsWith('|')) break;
       if (/^[A-Za-z]{2,6}[.\-]\d{4,}$/.test(t)) { fields.deliveryNo = t; break; }   /* 字母前缀流水号（DGHD.2673728） */
-      if (/^\d{4,8}$/.test(t) && !/^(19|20)\d{2}$/.test(t)) { fields.deliveryNo = t; break; }
+      if (/^\d{5,8}$/.test(t) && !/^(19|20)\d{2}$/.test(t)) { fields.deliveryNo = t; break; }   /* 5-8 位，4 位易误抓货号 */
     }
   }
 
@@ -234,7 +234,9 @@ function parseDeliveryNote(text) {
       if (/客户|客戶|收货|收貨|日期|单号|單號|NO\.?|地址|电话|電話|备注|備注| Tel|DATE|DELIVERY|MESSRS|^\d/i.test(t)) continue;
       if (/路|大厦|大廈|工业|工業|管理区|管理區|KOWLOON|HONG ?KONG|^TEL|^FAX|传真|傳真/i.test(t)) continue;   /* 地址/电话特征行不是供应商 */
       if (/[：:]$/.test(t)) continue;
-      if (/^(货号|貨號|品名|名称|名稱|数量|數量|单位|單位|订单号|訂單號|备注|備注|序号|序號|送货单|送貨單)$/.test(t)) continue;
+      if (/^(货号|貨號|品名|名称|名稱|货名|貨名|数量|數量|件数|件數|尺寸|金额|金額|批次|批次号|批次號|提货|提貨|拉名|车间|車間|装配部|裝配部|半成品|入库单|入庫單|出库单|出庫單|单位|單位|订单号|訂單號|备注|備注|序号|序號|送货单|送貨單)$/.test(t)) continue;
+      if (/件数|件數|批次|提货|提貨|车间|車間|装配|裝配|半成品|入库|入庫|出库|出庫|提货批次/.test(t)) continue;   /* 内部单据栏位词/部门词 */
+      if (!/[一-鿿]/.test(t)) continue;   /* 纯英文/数字行不当供应商 */
       if (t.length >= 2 && t.length <= 20) { fields.supplier = t; break; }
     }
   }

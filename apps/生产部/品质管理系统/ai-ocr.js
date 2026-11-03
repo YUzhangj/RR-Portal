@@ -203,7 +203,9 @@
     var it = q.items[q.idx];
     var c = q.common || {};
     if (typeof window.openAddModal === 'function') window.openAddModal();
-    setV('f_date', c.date || '');
+    /* 公共日期为空时回退今天（openAddModal 的默认值），不要把今天清成空 */
+    if (c.date) setV('f_date', c.date);
+    else { var _t = new Date(); setV('f_date', _t.getFullYear() + '-' + String(_t.getMonth() + 1).padStart(2, '0') + '-' + String(_t.getDate()).padStart(2, '0')); }
     setV('f_supplier', c.supplier || '');
     setV('f_deliveryNo', c.deliveryNo || '');
     setV('f_orderNo', it.orderNo || c.orderNo || '');   /* 多 PO 单：用本条自己的 PO 号 */
