@@ -444,6 +444,8 @@ function parseDeliveryNote(text) {
          品名可含空格；数量、尺寸、重量从明确尾列定位，PO与货号取明确前列。 */
       const plainHeader = lines[hiP];
       const fixedColumns = /^(?:序号|序號|序|NO\.?)\s+(?:订单号|訂單號|PO(?:\s*NO\.?)?|P\/I(?:\s*NO\.?)?)\s+(?:货号|貨號|ITEM(?:\s*NO\.?)?)\s+(?:品名|名称|名稱|货名|貨名|Description)\s+(?:数量|數量|QTY)\s+(?:尺寸|SIZE)(?:[（(](?:MM|CM|M)[）)])?\s+(?:重量|WEIGHT)(?:[（(](?:KG|G)[）)])?$/i.test(plainHeader);
+      /* 艾美斯类：序号 订单编号 货号 货品名称 单位 订单数量 交货数量 … —— 数量取「交货数量」列 */
+      const orderNameUnit = /^(?:序号|序號|序|NO\.?)\s+(?:订单编号|订单号|訂單編號|訂單號)\s+(?:货号|貨號)\s+(?:货品名称|貨品名稱|品名|名称|名稱)\s+(?:单位|單位)(?:\s|$)/i.test(plainHeader);
       const hasOtherNumericColumns = /尺寸|重量|单价|單價|金额|金額|SIZE|WEIGHT|PRICE|AMOUNT/i.test(plainHeader);
       const hasExplicitOrderColumn = /[订訂][单單]|(?:^|\s)PO(?:\s|$)|P\/I/i.test(plainHeader);
       const numericToken = /^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)*$/;
@@ -465,6 +467,25 @@ function parseDeliveryNote(text) {
             const rowOrder = cells[1];
             if (!fields.orderNo) fields.orderNo = rowOrder;
             fields.items.push({ productNo: cells[2], productName: cells.slice(3, qtyAt).join(' '), qty: quantityText(cells[qtyAt], ''), unit: '', orderNo: rowOrder, _seq: cells[0] });
+          } else if (orderNameUnit && /^\d+$/.test(cells[0])) {
+            /* 艾美斯类行：序号 订单编号 [换行折断位] 货品名称… 单位 数量…（货号列本单为空） */
+            let ci = 1;
+            let rowOrder2 = cells[ci++] || '';
+            if (/-\d$/.test(rowOrder2) && /^\d{1,2}$/.test(cells[ci] || '')) rowOrder2 += cells[ci++];   /* BBC2025285-0 换行断成两段 → 拼回 BBC2025285-01 */
+            const unitAt = cells.findIndex((t, k) => k >= ci && /^(个|個|PCS|件|套|卷|张|張|桶|KG|米|箱|包|条|條|颗|顆)$/i.test(t));
+            const name2 = unitAt > ci ? cells.slice(ci, unitAt).join(' ') : '';
+            const nums2 = unitAt === -1 ? [] : cells.slice(unitAt + 1).filter(t => numericToken.test(t));
+            /* 数量列按表头顺序对齐：有「交货/送货数量」取该列，否则取第一列数量 */
+            const headToks = plainHeader.split(/\s+/);
+            const unitHeadAt = headToks.findIndex(t => /^(单位|單位)$/.test(t));
+            const qtyHeads = headToks.slice(unitHeadAt + 1).filter(t => /数量|數量/.test(t));
+            const deliverAt = qtyHeads.findIndex(t => /交货|交貨|送货|送貨/.test(t));
+            const pick = deliverAt !== -1 ? deliverAt : 0;
+            const qty2 = nums2[pick] || '';
+            if (name2 && qty2) {
+              if (!fields.orderNo && rowOrder2.length >= 6) fields.orderNo = rowOrder2;
+              fields.items.push({ productNo: '', productName: name2, qty: quantityText(qty2, cells[unitAt]), unit: cells[unitAt], orderNo: rowOrder2, _seq: cells[0] });
+            } else uncertain(ln, toks);
           } else uncertain(ln, toks);
           continue;
         }
