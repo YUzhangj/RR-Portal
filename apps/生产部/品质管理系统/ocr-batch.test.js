@@ -54,7 +54,8 @@ function browser({ quota = false, backend = false } = {}) {
     let val = String(value); Object.defineProperty(node, 'value', { get: () => val, set: x => { val = String(x); } });
     elements.set(id, node); return node;
   };
-  for (const id of ['f_date','f_inspDate','f_supplier','f_client','f_processType','f_productNo','f_productName','f_deliveryNo','f_orderNo','f_qty','f_sampleQty','f_pass','f_fail','f_defectRate','f_defect','f_qc','f_remark','f_type','f_result','f_aqlLevel','modalOverlay','modalTitle','btnSaveContinue','modalModeTabs']) element(id);
+  for (const id of ['f_date','f_inspDate','f_supplier','f_client','f_processType','f_productNo','f_productName','f_deliveryNo','f_orderNo','f_qty','f_sampleQty','f_pass','f_fail','f_defectRate','f_defect','f_qc','f_remark','f_type','f_result','f_aqlLevel','modalOverlay','modalTitle','btnSaveContinue','modalModeTabs',
+    'ocrDate','ocrSupplier','ocrProductNo','ocrProductName','ocrDeliveryNo','ocrOrderNo','ocrQty','ocrType','ocrRemark']) element(id);
   const ctx = { console, setTimeout() {}, clearTimeout() {}, setInterval() {}, addEventListener() {}, removeEventListener() {}, navigator: {}, location: { pathname: '/qc/' },
     document: { readyState: 'complete', addEventListener: (event, handler) => { if (event === 'DOMContentLoaded') listeners.push(handler); }, getElementById: id => elements.get(id) || null, querySelectorAll: () => [], querySelector: () => null },
     localStorage: { getItem: key => store.get(key) || null, setItem: (key, value) => { if (quota) throw new Error('QuotaExceededError'); store.set(key, value); }, removeItem: key => store.delete(key) },
@@ -99,6 +100,125 @@ test('the OCR queue saves each actual item PO and retains the document fallback 
   }
   assert.deepEqual(b.json('state.records.map(r=>[r.productNo,r.orderNo,r.status])'),
     [['P1','PO-FIRST','pending'],['P2','PO-SECOND','pending'],['P3','PO-DOCUMENT','pending']]);
+});
+test('blank OCR dates preserve the add-form default on every queued item and persist that date', () => {
+  for (const date of ['', '   ', undefined]) {
+    const b = browser();
+    b.ctx.__qcAiResult = { common: { date, supplier: 'Test Supplier' },
+      items: [{ productNo: '0254', productName: '', qty: '8760' }, { productNo: 'C031', productName: '', qty: '2400' }] };
+    b.ctx.applyOcrToForm();
+    for (let i = 0; i < 2; i++) {
+      assert.equal(b.elements.get('f_date').value, '2026-10-21');
+      assert.equal(b.ctx.saveRecord(), true);
+    }
+    assert.deepEqual(b.json('state.records.map(r=>[r.productNo,r.qty,r.date,r.status])'),
+      [['0254',8760,'2026-10-21','pending'],['C031',2400,'2026-10-21','pending']]);
+  }
+});
+test('a recognized OCR date keeps its exact day through queue saves', () => {
+  const b = browser();
+  b.ctx.__qcAiResult = { common: { date: '2026-10-19', supplier: 'Test Supplier' },
+    items: [{ productNo: 'P1', productName: 'Item 1', qty: '100' }, { productNo: 'P2', productName: 'Item 2', qty: '200' }] };
+  b.ctx.applyOcrToForm();
+  for (let i = 0; i < 2; i++) {
+    assert.equal(b.elements.get('f_date').value, '2026-10-19');
+    assert.equal(b.ctx.saveRecord(), true);
+  }
+  assert.deepEqual(b.json('state.records.map(r=>r.date)'), ['2026-10-19','2026-10-19']);
+});
+test('fractional OCR quantities warn and cannot be truncated into a saved record or advance the queue', () => {
+  for (const qty of ['8.760', '0.650', '1.234.567']) {
+    const b = browser();
+    b.ctx.__qcAiResult = { common: { date: '2026-10-20', supplier: 'Test Supplier' },
+      items: [{ productNo: 'P1', productName: 'Item 1', qty, unit: 'KG' }, { productNo: 'P2', productName: 'Item 2', qty: '200' }] };
+    b.ctx.applyOcrToForm();
+    assert.equal(b.messages.at(-1).type, 'error');
+    assert.match(b.messages.at(-1).message, /核对单位/);
+    const before = b.store.get('xingxin_qms_test_records');
+    assert.equal(b.ctx.saveRecord({ continueEntry: true }), false, qty);
+    assert.deepEqual(b.json('state.records'), []);
+    assert.equal(b.ctx.__qcQueue.idx, 0);
+    assert.equal(b.store.get('xingxin_qms_test_records'), before);
+    assert.equal(b.elements.get('f_productNo').value, 'P1');
+    // Real number inputs clear invalid multi-dot text; that must not become qty=0.
+    b.elements.get('f_qty').value = '';
+    assert.equal(b.ctx.saveRecord(), false);
+    assert.deepEqual(b.json('state.records'), []);
+    b.elements.get('f_qty').value = '8760'; // user explicitly corrects/converts the count
+    assert.equal(b.ctx.saveRecord(), true);
+    assert.equal(b.ctx.__qcQueue.idx, 1);
+    assert.deepEqual(b.json('state.records.map(r=>[r.productNo,r.qty,r.status])'), [['P1',8760,'pending']]);
+    assert.equal(b.ctx.saveRecord(), true);
+    assert.deepEqual(b.json('state.records.map(r=>r.qty)'), [8760,200]);
+  }
+});
+test('single-item AI OCR retains the review requirement when a number input clears ambiguous raw text', () => {
+  for (const qty of ['8.760', '1.234.567']) {
+    const b = browser(); b.ctx.openAddModal();
+    b.elements.get('ocrSupplier').value = 'Test Supplier';
+    b.elements.get('ocrProductNo').value = '0254';
+    b.elements.get('ocrQty').value = qty.includes('.', qty.indexOf('.') + 1) ? '' : qty;
+    b.ctx.__qcAiResult = { common: { supplier: 'Test Supplier' }, items: [{ productNo: '0254', productName: '', qty }] };
+    b.ctx.applyOcrToForm();
+    assert.equal(b.messages.at(-1).type, 'error');
+    assert.equal(b.ctx.saveRecord(), false);
+    assert.deepEqual(b.json('state.records'), []);
+    b.elements.get('f_qty').value = '1000';
+    assert.equal(b.ctx.saveRecord(), true);
+    assert.deepEqual(b.json('state.records.map(r=>[r.productNo,r.qty])'), [['0254',1000]]);
+  }
+});
+test('integer, blank and zero OCR quantities keep their existing save behavior', () => {
+  const b = browser();
+  b.ctx.__qcAiResult = { common: { date: '2026-10-20', supplier: 'Test Supplier' },
+    items: ['8760', '', '0', '8.000'].map((qty, i) => ({ productNo: 'P' + i, productName: 'Item ' + i, qty })) };
+  b.ctx.applyOcrToForm();
+  for (let i = 0; i < 4; i++) assert.equal(b.ctx.saveRecord(), true);
+  assert.deepEqual(b.json('state.records.map(r=>r.qty)'), [8760,0,0,8]);
+});
+test('the real frontend writer never posts a truncated OCR quantity and posts the corrected count', async () => {
+  const b = browser({ backend: true });
+  b.ctx.__qcAiResult = { common: { date: '2026-10-20', supplier: 'Test Supplier' },
+    items: [{ productNo: 'P1', productName: 'Item 1', qty: '8.760', unit: 'KG' }, { productNo: 'P2', productName: 'Item 2', qty: '200' }] };
+  b.ctx.applyOcrToForm();
+  assert.equal(b.ctx.saveRecord(), false);
+  await b.ctx.__QC_SYNC_NOW();
+  assert.ok(b.requests.every(request => request.body.records.length === 0));
+  assert.deepEqual(b.json('state.records'), []);
+  b.elements.get('f_qty').value = '8760';
+  assert.equal(b.ctx.saveRecord(), true);
+  await b.ctx.__QC_SYNC_NOW();
+  assert.equal(b.requests.at(-1).body.records[0].qty, 8760);
+  assert.equal(b.requests.at(-1).body.records[0].productNo, 'P1');
+});
+test('an OCR quantity edited into a noninteger is rejected without a partial save', () => {
+  const b = browser(); b.start();
+  b.elements.get('f_qty').value = '1e3';
+  assert.equal(b.ctx.saveRecord(), false);
+  b.elements.get('f_qty').value = '1.5';
+  assert.equal(b.ctx.saveRecord(), false);
+  assert.deepEqual(b.json('state.records'), []);
+  assert.equal(b.ctx.__qcQueue.idx, 0);
+  b.elements.get('f_qty').value = '1500';
+  assert.equal(b.ctx.saveRecord(), true);
+  assert.deepEqual(b.json('state.records.map(r=>r.qty)'), [1500]);
+});
+test('starting a manual record or opening an existing record clears only the OCR review marker', () => {
+  const b = browser(); b.start();
+  b.elements.get('f_qty').value = '1.5';
+  assert.equal(b.ctx.saveRecord(), false);
+  b.ctx.closeModalDirect(); b.ctx.openAddModal();
+  assert.equal(b.elements.get('f_qty').dataset.ocrApplied, undefined);
+  b.elements.get('f_supplier').value = 'Test Supplier';
+  b.elements.get('f_productName').value = 'Manual';
+  assert.equal(b.ctx.saveRecord(), true);
+  assert.equal(b.json('state.records')[0].qty, 0);
+  b.run("state.records.push({id:123,date:'2026-10-01',supplier:'Test Supplier',productName:'Original',qty:7})");
+  b.ctx._markOcrQuantity('1.234.567');
+  b.ctx.openEditModal(123);
+  assert.equal(b.elements.get('f_qty').dataset.ocrApplied, undefined);
+  assert.equal(b.ctx.saveRecord(), true);
+  assert.equal(b.json('state.records.find(r=>r.id===123)').qty, 7);
 });
 test('validation and cancelled sample confirmation leave the current queued item available', () => {
   const b = browser(); b.start(); b.elements.get('f_supplier').value = 'Unlisted'; b.ctx.saveRecord({ continueEntry: true });

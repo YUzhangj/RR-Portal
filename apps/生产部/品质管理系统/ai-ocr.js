@@ -204,8 +204,8 @@
     var c = q.common || {};
     if (typeof window.openAddModal === 'function') window.openAddModal();
     /* 公共日期为空时回退今天（openAddModal 的默认值），不要把今天清成空 */
-    if (c.date) setV('f_date', c.date);
-    else { var _t = new Date(); setV('f_date', _t.getFullYear() + '-' + String(_t.getMonth() + 1).padStart(2, '0') + '-' + String(_t.getDate()).padStart(2, '0')); }
+    var date = String(c.date || '').trim();
+    if (date) setV('f_date', date);
     setV('f_supplier', c.supplier || '');
     setV('f_deliveryNo', c.deliveryNo || '');
     setV('f_orderNo', it.orderNo || c.orderNo || '');   /* 多 PO 单：用本条自己的 PO 号 */
@@ -213,6 +213,7 @@
     setV('f_productNo', it.productNo || '');
     setV('f_productName', it.productName || '');
     setV('f_qty', String(it.qty == null ? '' : it.qty).replace(/[^\d.]/g, ''));
+    if (typeof window._markOcrQuantity === 'function') window._markOcrQuantity(it.qty);
     if (typeof window.onQtyChange === 'function') window.onQtyChange();
     if (typeof window.onProductNoChange === 'function') window.onProductNoChange();
     setT('modalTitle', '新增验货记录（第 ' + (q.idx + 1) + '/' + q.items.length + ' 条）');
@@ -220,8 +221,8 @@
 
   function startQueue(common, items) {
     window.__qcQueue = { common: common, items: items, idx: 0 };
-    loadQueueItem(window.__qcQueue);
     toast('共 ' + items.length + ' 条货品，逐条录入', 'info');
+    loadQueueItem(window.__qcQueue);
   }
 
   function runOriginalOcr() {
@@ -259,7 +260,10 @@
       window.applyOcrToForm = function () {
         var r = window.__qcAiResult;
         if (r && r.items && r.items.length > 1) return startQueue(r.common, r.items);
-        return origApply.apply(this, arguments);
+        var ret = origApply.apply(this, arguments);
+        /* number 输入可能把多点原文清空，仍以原识别值标记待人工核对。 */
+        if (r && r.items && r.items.length === 1 && typeof window._markOcrQuantity === 'function') window._markOcrQuantity(r.items[0].qty);
+        return ret;
       };
       window.applyOcrToForm.__qcWrapped = true;
     }
