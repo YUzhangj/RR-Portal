@@ -30,7 +30,14 @@ export function applyShipmentImport(existing: readonly ExistingShipmentImportRow
     if (oldGroup) affectedGroups.add(oldGroup)
     if (!old.outbound_id) {
       const provided = Object.fromEntries(Object.entries(importValues(row)).filter(([, value]) => present(value)))
-      next[target] = { ...old, ...provided, material_snapshot: mergeShipmentImportMaterial(material, row.material_snapshot) }
+      const snapshot = mergeShipmentImportMaterial(material, row.material_snapshot)
+      // A catalog fallback is not a successfully read file image. Missing,
+      // unreadable or ambiguous file pictures must retain this shipment's image.
+      if (row._fileMaterialFields && !row._fileMaterialFields.includes('image')) {
+        if (material?.image == null) delete snapshot.image
+        else snapshot.image = material.image
+      }
+      next[target] = { ...old, ...provided, material_snapshot: snapshot }
     } else {
       const fileField = (field: keyof ShipmentImportItem) => !row._fileFields || row._fileFields.includes(field)
       const fileMaterialField = (field: keyof Material) => !row._fileMaterialFields || row._fileMaterialFields.includes(field)

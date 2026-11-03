@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { Alert, App, Button, Descriptions, Image, InputNumber, Modal, Select, Space, Table, Upload } from 'antd'
 import { api, type Dictionaries, type Material } from '../api/client'
 import { importShipmentFile, matchShipmentMaterial, planShipmentImport, type ExistingShipmentImportRow, type ShipmentImportItem, type ShipmentImportRow } from '../utils/shipmentImport'
@@ -14,11 +14,18 @@ export default function ShipmentImport({ existing, materials, onImport }: {
   existing: ExistingShipmentImportRow[]; materials: ReadonlyMap<number, Material>
   onImport: (rows: ShipmentImportItem[], targets: number[]) => void | boolean
 }) {
-  const { message } = App.useApp()
+  const { message, modal } = App.useApp()
   const [busy, setBusy] = useState(false)
   const [rows, setRows] = useState<ShipmentImportRow[] | null>(null)
   const [warnings, setWarnings] = useState<string[]>([])
   const [fileName, setFileName] = useState('')
+  const [loadImages, setLoadImages] = useState<Awaited<ReturnType<typeof importShipmentFile>>['loadImages']>()
+  const importContext = useRef({ existing, materials, rows, active: true })
+  useLayoutEffect(() => {
+    const context = { existing, materials, rows, active: true }
+    importContext.current = context
+    return () => { context.active = false }
+  }, [existing, materials, rows])
   const selected = (rows || []).filter(row => row.selected)
   const matching = existing.map(row => ({ ...row, material_snapshot: materials.get(row.material_id!) || row.material_snapshot }))
   const targets = planShipmentImport(selected.map(row => row.item), matching)
@@ -45,6 +52,7 @@ export default function ShipmentImport({ existing, materials, onImport }: {
     return { ...r, item }
   }))
   async function read(file: File) {
+    const context = importContext.current
     setBusy(true)
     try {
       const result = await importShipmentFile(file)
@@ -81,16 +89,52 @@ export default function ShipmentImport({ existing, materials, onImport }: {
       // An incomplete/invalid merged carton count must be reviewed manually.
       const bad = new Set(imported.filter(r => r.item.carton_group && !(Number(r.item.cartons) > 0)).map(r => r.item.carton_group))
       imported.forEach(r => { if (bad.has(r.item.carton_group)) { r.item.carton_group = undefined; r.warnings.push('合并箱数无有效数值，导入后请重新合并') } })
+      if (!context.active) { message.warning('走货明细或导入预览已变化，请重新选择文件'); return false }
+      setLoadImages(() => result.loadImages)
       setRows(imported); setWarnings(notices); setFileName(file.name)
     } catch (e) { message.error(e instanceof Error ? e.message : '读取失败') }
     finally { setBusy(false) }
     return false
   }
-  function confirm() {
-    if (!selected.length) return
+  async function confirm() {
+    if (busy || !selected.length) return
     if (targets.some(t => t < -1)) { message.warning('请取消勾选待核对行：重复匹配无法确定覆盖对象，请核对原明细后重试'); return }
     if (selected.some(r => !linkedTarget(r) && r.item.price != null && !r.item.currency)) { message.warning('请补充采购币种后导入'); return }
-    if (onImport(selected.map(r => r.item), targets) === false) return
+    const context = importContext.current
+    const prepared = loadImages ? selected.map(row => ({
+      ...row, warnings: [...row.warnings], item: { ...row.item, material_snapshot: { ...row.item.material_snapshot } },
+    })) : selected
+    if (loadImages) {
+      setBusy(true)
+      try {
+        await loadImages(prepared)
+        if (!context.active) { message.warning('走货明细已变化，请重新核对后导入'); return }
+        const imageIssues = prepared.flatMap((row, index) => {
+          const warnings = row.warnings.slice(selected[index].warnings.length)
+          return warnings.length ? [{ row, warnings }] : []
+        })
+        if (imageIssues.length) {
+          const proceed = await new Promise<boolean>(resolve => {
+            modal.confirm({
+              title: `${imageIssues.length} 行图片需要核对`,
+              content: <div><p>下列图片未能读取或无法唯一匹配。继续导入将保留已有图片；新增明细不会附上这些图片。</p>
+                <ul style={{ maxHeight: 280, overflow: 'auto', paddingLeft: 20 }}>{imageIssues.map(({ row, warnings }) =>
+                  <li key={row.key}>{row.sheet} 第 {row.row} 行：{warnings.join('；')}</li>)}</ul></div>,
+              okText: '确认导入，保留已有图片', cancelText: '返回核对',
+              onOk: () => { resolve(true) }, onCancel: () => { resolve(false) },
+            })
+          })
+          if (!proceed) return
+          if (!context.active) { message.warning('走货明细已变化，请重新核对后导入'); return }
+        }
+      } catch {
+        message.error('读取 Excel 图片失败，请重试')
+        return
+      } finally { setBusy(false) }
+      if (!context.active) { message.warning('走货明细已变化，请重新核对后导入'); return }
+    }
+    if (onImport(prepared.map(r => r.item), targets) === false) return
+    setLoadImages(undefined)
     setRows(null)
     message.success(`已更新 ${targets.filter(t => t >= 0).length} 行，新增 ${targets.filter(t => t === -1).length} 行，请点击走货单“保存”`)
   }
@@ -98,7 +142,10 @@ export default function ShipmentImport({ existing, materials, onImport }: {
     <Upload accept=".xlsx" showUploadList={false} beforeUpload={read} disabled={busy}>
       <Button size="small" loading={busy}>Excel 导入走货资料</Button>
     </Upload>
-    <Modal title={`导入走货资料 — ${fileName}`} open={rows !== null} width="95vw" onCancel={() => setRows(null)}
+    <Modal title={`导入走货资料 — ${fileName}`} open={rows !== null} width="95vw" loading={busy}
+      closable={!busy} maskClosable={!busy} keyboard={!busy}
+      onCancel={() => { if (!busy) { setRows(null); setLoadImages(undefined) } }}
+      confirmLoading={busy} cancelButtonProps={{ disabled: busy }}
       onOk={confirm} okText="确认导入（相同更新，新增追加）" okButtonProps={{ disabled: !(rows || []).some(r => r.selected) }}>
       <Alert type="info" showIcon message="支持新版清溪表：按列名识别，不依赖固定位置。主明细所有字段及公式缓存值保存在“原表资料”，合同、发票、汇总等配套表不重复导成物料。按货号、中文名、规格、供应商匹配当前明细；唯一匹配更新有值字段，空白保留原值，无匹配则追加。已关联出库行仅更新装箱和报关资料，原出库关联、数量重量、申报单位及采购来源/单价保持不变。重复匹配仍需核对。不改资料库或整柜设置，发票价格按系统规则重算。" />
       {warnings.length > 0 && <Alert type="warning" message={warnings.join('；')} />}

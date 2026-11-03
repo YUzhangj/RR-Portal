@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import JSZip from 'jszip'
 import { DOMParser } from '@xmldom/xmldom'
 import { extractSheetImages } from './engineeringImport'
-import { importShipmentFile } from './shipmentImport'
+import { importShipmentFile, loadShipmentImages, type ShipmentImportRow } from './shipmentImport'
 import { readFileSync } from 'node:fs'
 
 afterEach(() => vi.unstubAllGlobals())
@@ -26,4 +26,17 @@ it('WPS DISPIMG images stay on their exact cells, with escaped quotes and altern
   const images = await extractSheetImages(zip, '明细', true)
   expect(images.map(({ row, col }) => ({ row, col }))).toEqual([{ row: 1, col: 28 }, { row: 2, col: 28 }])
   expect(images[0].dataUrl).toBe('data:image/png;base64,iVBORw==')
+  const rows: ShipmentImportRow[] = [2, 3].map(row => ({
+    key: String(row), sheet: '明细', row, imageCol: 28, selected: true, warnings: [],
+    item: { material_snapshot: {} },
+  }))
+  const resize = vi.fn(async () => 'data:image/jpeg;base64,AA==')
+  await loadShipmentImages(zip, rows.map(row => ({ ...row, imageCol: 0 })), resize)
+  expect(resize).not.toHaveBeenCalled()
+  await loadShipmentImages(zip, rows, resize)
+  expect(resize).toHaveBeenCalledOnce()
+  for (const row of rows) {
+    expect(row.item.material_snapshot.image).toBe('data:image/jpeg;base64,AA==')
+    expect(row.item._fileMaterialFields).toContain('image')
+  }
 })
