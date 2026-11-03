@@ -9,7 +9,8 @@ const source = name => process.env.QMS_TEST_REF
   ? execFileSync('git', ['show', process.env.QMS_TEST_REF + ':apps/生产部/品质管理系统/' + name], { cwd: __dirname, encoding: 'utf8' })
   : fs.readFileSync(path.join(__dirname, name), 'utf8');
 const server = source('server/server.js');
-const parse = vm.runInNewContext(server.slice(server.indexOf('function parseDeliveryNote'), server.indexOf('/* 调用视觉模型')) + ';parseDeliveryNote');
+const parserStart = server.includes('function _parseGrounding(') ? 'function _parseGrounding(' : 'function parseDeliveryNote';
+const parse = vm.runInNewContext(server.slice(server.indexOf(parserStart), server.indexOf('/* 调用视觉模型')) + ';parseDeliveryNote');
 const plain = value => JSON.parse(JSON.stringify(value));
 
 test('traditional split-header rows retain quantity even when the next cell is a numeric amount', () => {
@@ -215,15 +216,27 @@ test('flagged single-item OCR clears a stale form quantity and blocks saving unt
 });
 test('a fresh uncertain recognition clears previous-image metadata through the actual start/apply path', async () => {
   const b = browser(); b.ctx.openAddModal();
+  b.elements.set('ocrPreview', { src: '', style: {} });
+  b.ctx.FileReader = class { readAsDataURL() { this.onload({ target: { result: 'data:image/png;base64,fixture' } }); } };
+  b.ctx.Image = class {
+    constructor() { this.width=100;this.height=200; }
+    set src(value) { this.onload(); }
+  };
+  b.ctx.document.createElement = tag => {
+    assert.equal(tag,'canvas');
+    return {width:0,height:0,getContext:()=>({fillRect(){},translate(){},rotate(){},drawImage(){}}),toDataURL:()=> 'data:image/jpeg;base64,fixture'};
+  };
+  b.ctx.__QC_AUTH = { user: { username:'fixture-admin' } };
+  b.ctx.handleOcrFile({type:'image/png',size:10});
+  // Prefill stale values after actual upload/reset so recognition itself must
+  // replace them. Do not bypass the product image state or decoder contract.
   for (const [id,value] of [['ocrDate','2026-10-01'],['ocrProductNo','PREVIOUS-SKU'],['ocrOrderNo','PREVIOUS-PO'],['ocrDeliveryNo','PREVIOUS-DN'],['ocrQty','777']]) b.elements.get(id).value = value;
   b.elements.get('f_productNo').value = 'STALE-FORM-SKU';
   b.elements.get('f_orderNo').value = 'STALE-FORM-PO';
   b.elements.get('f_qty').value = '777';
-  b.elements.set('ocrPreview', { src: 'data:image/png;base64,fixture' });
   const fields = { date:'', supplier:'Test Supplier', deliveryNo:'', orderNo:'', type:'来料', items:[
     { productNo:'', productName:'待核对原行：1 PO100001 SKU001 合成零件 1000 20 1.50', qty:'', unit:'', quantityNeedsReview:true },
   ] };
-  b.ctx.__QC_AUTH = { user: { username:'fixture-admin' } };
   b.ctx.__QC_REQUEST = async route => ({ok:true,status:200,json:async()=>route==='/api/ai/status'?{ready:true,ocrModel:'fixture-model'}:{ok:true,fields,rawText:'Synthetic raw transcript'}});
   await b.ctx.startOcr();
   for (const id of ['ocrDate','ocrProductNo','ocrOrderNo','ocrDeliveryNo','ocrQty']) assert.equal(b.elements.get(id).value,'',id);

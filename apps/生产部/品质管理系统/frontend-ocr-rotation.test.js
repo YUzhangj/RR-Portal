@@ -1,0 +1,411 @@
+'use strict';
+// Actual app + AI dispatch functions and button handlers in a synthetic VM DOM.
+// Image/Canvas/Tesseract/HTTP are deterministic local doubles, not browser/pixel acceptance.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const test = require('node:test');
+const source = name => fs.readFileSync(path.join(__dirname, name), 'utf8');
+const batch = source('ocr-batch.test.js');
+const browserStart = batch.indexOf('function browser(');
+const browserEnd = batch.indexOf("test('mixed continue");
+assert.ok(browserStart > 0 && browserEnd > browserStart);
+const harness = { vm, source: name => name === 'ai-ocr.js' ? '' : source(name) };
+vm.runInNewContext(batch.slice(browserStart, browserEnd) + ';this.make=browser;', harness);
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const data = text => 'data:image/png;base64,' + Buffer.from(text).toString('base64');
+const valid = (sku = 'SYNTHETIC-01') => ({ ok: true, fields: { supplier: 'Test Supplier', date: '2026-11-03',
+  items: [{ productNo: sku, productName: 'Synthetic part', qty: '12' }] }, rawText: 'Synthetic transcript' });
+const empty = angle => ({ ok: true, needRotate: angle, fields: { items: [] }, rawText: 'Synthetic unreadable response' });
+function fixture(options = {}) {
+  const b = harness.make({backend: options.backend === true}), pendingImages = [], pendingReaders = [], canvasCalls = [], requests = [], handlers = {};
+  b.json = expression => JSON.parse(b.run('JSON.stringify(' + expression + ')'));
+  const config = { width: 100, height: 200, ...options };
+  let serial = 0;
+  for (const id of ['ocrPreview','ocrStatus','ocrRawText','btnStartOcr','btnRotateOcr','btnApplyOcrToForm']) {
+    const node = { src: '', value: '', style: {}, textContent: '', disabled: false,
+      addEventListener(event, fn) { handlers[id + ':' + event] = fn; } };
+    b.elements.set(id, node);
+  }
+  b.ctx.__QC_AUTH = { user: { username: options.backend ? 'fixture-admin' : 'synthetic-ui-admin', enabled: true, role: 'admin' }, company: config.company || 'synthetic-company', csrfToken: 'synthetic-csrf' };
+  b.ctx.__QC_COMPANY = config.company || 'synthetic-company';
+  b.ctx.location.href = 'http://127.0.0.1:18361/index.html';
+  b.ctx.AbortController = AbortController;
+  b.ctx.FileReader = class {
+    readAsDataURL(file) {
+      const finish = () => this.onload({ target: { result: file.dataUrl } });
+      if (config.deferReaders) pendingReaders.push(finish); else finish();
+    }
+  };
+  b.ctx.Image = class {
+    constructor() { this.width = config.width; this.height = config.height; }
+    set src(value) {
+      this._src = value;
+      const finish = () => config.failDecode ? this.onerror() : this.onload();
+      if (config.deferImages) pendingImages.push(finish); else finish();
+    }
+    get src() { return this._src; }
+  };
+  b.ctx.URL = { createObjectURL: file => file.dataUrl, revokeObjectURL() {} };
+  b.ctx.document.createElement = type => {
+    assert.equal(type, 'canvas');
+    const row = { width: 0, height: 0, angle: 0, white: false, source: '' };
+    const canvas = { width: 0, height: 0 };
+    canvasCalls.push(row);
+    canvas.getContext = () => config.noContext ? null : {
+      fillStyle: '', fillRect() { row.white = true; }, translate() {},
+      rotate(radians) { row.angle = Math.round(radians * 180 / Math.PI); },
+      drawImage(image) { row.source = image.src; row.width = canvas.width; row.height = canvas.height; },
+      getImageData() { return { data: new Uint8ClampedArray(4) }; }, putImageData() {},
+    };
+    canvas.toDataURL = () => {
+      if (config.encodeThrows) throw new Error('Synthetic encoding failure');
+      return config.invalidOutput || 'data:image/jpeg;base64,' + Buffer.from('synthetic-output-' + (++serial)).toString('base64');
+    };
+    canvas.toBlob = callback => callback({ type: 'image/png', syntheticSource: row.source, width: row.width, height: row.height });
+    return canvas;
+  };
+  const responses = [];
+  b.ctx.__QC_REQUEST = async (route, request) => {
+    if (route === '/api/session') return { ok: true, status: 200, json: async () => ({ user: {...b.ctx.__QC_AUTH.user}, companies: [b.ctx.__QC_COMPANY], csrfToken: b.ctx.__QC_AUTH.csrfToken }) };
+    if (route === '/api/ai/status') return { ok: true, status: 200, json: async () => ({ ready: !config.local }) };
+    requests.push({ route, ...request, body: JSON.parse(request.body) });
+    if (config.post) return config.post(route, request);
+    const response = responses.length ? responses.shift() : valid();
+    return { ok: true, status: 200, json: async () => response };
+  };
+  vm.runInContext(source('ai-ocr.js'), b.ctx);
+  const upload = (label = 'first') => {
+    const file = { type: 'image/png', size: 100, dataUrl: data(label), label };
+    b.ctx.handleOcrFile(file); return file;
+  };
+  const rotate = () => handlers['btnRotateOcr:click']({ preventDefault() {} });
+  const value = id => b.elements.get(id).value;
+  const preview = () => b.elements.get('ocrPreview').src;
+  const status = () => b.elements.get('ocrStatus').textContent;
+  const controls = () => ['btnStartOcr','btnRotateOcr','btnApplyOcrToForm'].map(id => b.elements.get(id).disabled);
+  return { b, config, responses, pendingImages, pendingReaders, canvasCalls, requests, upload, rotate, value, preview, status, controls };
+}
+
+test('manual rotations are bounded, white-backed, use the immutable original and commit the actual local input', async () => {
+  const x = fixture({ width: 16000, height: 12000 });
+  const file = x.upload();
+  for (const angle of [90,180,270,0]) {
+    await x.rotate();
+    const row = x.canvasCalls.at(-1);
+    assert.equal(row.source, file.dataUrl); assert.equal(row.angle, angle);
+    assert.ok(row.width > 0 && row.height > 0 && row.width <= 2000 && row.height <= 2000);
+    assert.equal(row.white, true);
+    assert.equal(x.b.run('_ocrImageFile'), x.preview());
+    assert.equal(x.b.ctx.__QC_OCR_IMAGE.snapshot().angle, angle);
+  }
+  assert.deepEqual(x.controls(), [false,false,false]);
+});
+
+test('AI retries use distinct absolute directions from the original, and no-items exhaustion preserves edits and queue', async () => {
+  for (const [hint,angles] of [[90,[0,270,90]],[270,[0,90,270]],[180,[0,180]]]) {
+    const x = fixture(); const file = x.upload();
+    x.b.elements.get('ocrProductNo').value = 'CORRECTED';
+    x.b.elements.get('ocrQty').value = '111';
+    const prior = { common: { supplier: 'Test Supplier' }, items: [{ productNo: 'CORRECTED', qty: '111' }] };
+    const queue = { items: [{ productNo: 'QUEUE' }], idx: 0 };
+    x.b.ctx.__qcAiResult = prior; x.b.ctx.__qcQueue = queue;
+    x.responses.push(empty(hint),empty(hint),empty(hint));
+    await x.b.ctx.startOcr();
+    assert.deepEqual(x.canvasCalls.map(row => row.angle), angles);
+    assert.ok(x.canvasCalls.every(row => row.source === file.dataUrl));
+    assert.equal(x.requests.length, angles.length);
+    assert.equal(x.value('ocrProductNo'), 'CORRECTED'); assert.equal(x.value('ocrQty'), '111');
+    assert.equal(x.b.ctx.__qcAiResult, prior); assert.equal(x.b.ctx.__qcQueue, queue); assert.equal(queue.idx, 0);
+    assert.equal(x.preview(), file.dataUrl); assert.match(x.status(), /未识别到货品/);
+    assert.ok(!x.b.messages.some(message => message.type === 'success'));
+  }
+});
+
+test('successful auto-rotation commits the same image sent to AI and preserves manual-review rows without fake success', async () => {
+  const x = fixture(); x.upload();
+  x.responses.push(empty(90), { ok: true, needsManualReview: true, rawText: 'FULL SYNTHETIC RAW', fields: {
+    supplier: 'Test Supplier', items: [{ productNo: '', productName: '待核对原行：Synthetic', qty: '', quantityNeedsReview: true }],
+  } });
+  x.b.ctx.openAddModal(); await x.b.ctx.startOcr();
+  assert.equal(x.b.ctx.__QC_OCR_IMAGE.snapshot().angle, 270);
+  assert.equal(x.preview(), x.requests.at(-1).body.image);
+  assert.equal(x.value('ocrRawText'), 'FULL SYNTHETIC RAW'); assert.match(x.status(), /人工核对/);
+  x.b.ctx.applyOcrToForm();
+  assert.equal(x.b.ctx.saveRecord(), false); assert.deepEqual(x.b.json('state.records'), []);
+  x.b.elements.get('f_qty').value = '12';
+  assert.equal(x.b.ctx.saveRecord(), true);
+  assert.deepEqual(x.b.json('state.records.map(r=>[r.productName,r.qty,r.status])'), [['待核对原行：Synthetic',12,'pending']]);
+});
+
+test('normal recognized rows still replace missing metadata and persist all queue items once', async () => {
+  const x = fixture(); x.upload();
+  for (const id of ['ocrDate','ocrOrderNo','ocrDeliveryNo']) x.b.elements.get(id).value = 'STALE';
+  x.responses.push({ok:true,fields:{supplier:'Test Supplier',items:[
+    {productNo:'0012',productName:'',qty:'20',orderNo:'PO-A'},
+    {productNo:'0013',productName:'Synthetic B',qty:'30',orderNo:'PO-B'},
+  ]}});
+  x.b.ctx.openAddModal(); await x.b.ctx.startOcr();
+  for (const id of ['ocrDate','ocrOrderNo','ocrDeliveryNo']) assert.equal(x.value(id),'');
+  x.b.ctx.applyOcrToForm();
+  assert.equal(x.b.ctx.saveRecord(),true); assert.equal(x.b.ctx.saveRecord(),true);
+  assert.deepEqual(x.b.json('state.records.map(r=>[r.productNo,r.productName,r.qty,r.orderNo,r.date])'),
+    [['0012','',20,'PO-A','2026-10-21'],['0013','Synthetic B',30,'PO-B','2026-10-21']]);
+  assert.equal(x.b.ctx.__qcQueue,null);
+});
+
+test('rotation failure never changes the image, fields or success status', async () => {
+  for (const config of [{failDecode:true},{width:0},{height:NaN},{noContext:true},{invalidOutput:'data:,'},{encodeThrows:true}]) {
+    const x = fixture(config); const original = x.upload();
+    x.b.elements.get('ocrProductNo').value = 'KEEP';
+    await x.rotate();
+    assert.equal(x.preview(), original.dataUrl); assert.equal(x.value('ocrProductNo'),'KEEP');
+    assert.match(x.status(), /旋转失败/); assert.ok(!/已旋转/.test(x.status()));
+    assert.equal(x.b.ctx.__QC_OCR_IMAGE.snapshot().angle,0); assert.deepEqual(x.controls(),[false,false,false]);
+  }
+});
+
+test('rapid rotation clicks are serialized; upload and clear invalidate pending image completions', async () => {
+  const x = fixture({deferImages:true}); x.upload();
+  const old = x.rotate(); await x.rotate();
+  assert.equal(x.pendingImages.length,1); assert.deepEqual(x.controls(),[true,true,true]);
+  const fresh = x.upload('fresh');
+  const newer = x.rotate(); assert.equal(x.pendingImages.length,2);
+  x.pendingImages.shift()(); await old;
+  assert.equal(x.preview(),fresh.dataUrl); assert.deepEqual(x.controls(),[true,true,true]);
+  x.b.ctx.clearOcr(); x.pendingImages.shift()(); await newer;
+  assert.equal(x.preview(),''); assert.deepEqual(x.controls(),[false,false,false]);
+  assert.equal(x.canvasCalls.length,0);
+});
+
+test('out-of-order upload readers cannot overwrite the accepted new image or cross login/company', () => {
+  const x = fixture({deferReaders:true}); x.upload('old'); const fresh = x.upload('fresh');
+  x.pendingReaders[1](); x.pendingReaders[0](); assert.equal(x.preview(),fresh.dataUrl);
+  x.upload('other-user'); x.b.ctx.__QC_AUTH = {user:{username:'another-user'}}; x.pendingReaders[2]();
+  assert.equal(x.preview(),''); assert.equal(x.b.ctx.__QC_OCR_IMAGE.snapshot(),null);
+  x.upload('other-company'); x.b.ctx.__QC_COMPANY = 'other-company'; x.pendingReaders[3]();
+  assert.equal(x.preview(),''); assert.equal(x.b.ctx.__QC_OCR_IMAGE.snapshot(),null);
+});
+
+test('closed modal, changed login and changed company reject delayed manual rotation', async () => {
+  for (const change of [x=>x.b.ctx.closeModalDirect(), x=>{x.b.ctx.__QC_AUTH={user:{username:'other'}};}, x=>{x.b.ctx.__QC_COMPANY='other';}]) {
+    const x = fixture({deferImages:true}); const original = x.upload();
+    const op = x.rotate(); change(x); x.pendingImages.shift()(); await op;
+    assert.equal(x.preview(),original.dataUrl); assert.equal(x.canvasCalls.length,0);
+    assert.ok(!/已旋转/.test(x.status())); assert.deepEqual(x.controls(),[false,false,false]);
+  }
+});
+
+test('obsolete status and POST completions never publish old fields or enable a newer operation', async () => {
+  const x = fixture(); x.upload('old'); let finishOld;
+  x.config.post = () => new Promise(resolve => {finishOld=resolve;});
+  const old = x.b.ctx.startOcr(); await tick();
+  assert.equal(x.requests.length,1);
+  const oldSignal=x.requests[0].signal;
+  const fresh = x.upload('fresh'); x.config.deferImages=true;
+  assert.equal(oldSignal.aborted,true);
+  const newer = x.rotate();
+  finishOld({ok:true,status:200,json:async()=>valid('OLD-USER-SKU')}); await old;
+  assert.equal(x.value('ocrProductNo'),''); assert.equal(x.preview(),fresh.dataUrl);
+  assert.deepEqual(x.controls(),[true,true,true]);
+  x.pendingImages.shift()(); await newer;
+  assert.deepEqual(x.controls(),[false,false,false]);
+});
+
+test('POST failure and pure empty response preserve the same-image manual correction', async () => {
+  for (const failure of ['http','empty','invalid-angle']) {
+    const x = fixture(); x.upload(); x.b.elements.get('ocrProductNo').value='MANUAL';
+    if (failure === 'http') x.config.post=async()=>({ok:false,status:503,json:async()=>({error:'Synthetic unavailable'})});
+    else x.responses.push(empty(failure==='invalid-angle'?45:0));
+    await x.b.ctx.startOcr();
+    assert.equal(x.value('ocrProductNo'),'MANUAL'); assert.equal(x.requests.length,1);
+    assert.match(x.status(), /识别失败/); assert.deepEqual(x.controls(),[false,false,false]);
+  }
+});
+
+test('local fallback reads the committed rotated source; obsolete local completion cannot repopulate a new upload', async () => {
+  const x = fixture({local:true,width:16000,height:12000}); x.upload(); await x.rotate();
+  const rotated=x.preview(); let input,finish;
+  x.b.ctx.Tesseract={recognize:async value=>{input=value;return new Promise(resolve=>{finish=resolve;});}};
+  const op=x.b.ctx.startOcr(); await tick();
+  assert.equal(input.syntheticSource,rotated); assert.ok(input.width<=2000&&input.height<=2000);
+  const fresh=x.upload('fresh'); finish({data:{text:'货号：OLD-SKU\n数量：55'}}); await op;
+  assert.equal(x.preview(),fresh.dataUrl); assert.equal(x.value('ocrProductNo'),'');
+  assert.equal(x.value('ocrRawText'),'');
+});
+
+test('local fallback success and result application stay within the recognizing login', async () => {
+  const x=fixture({local:true}); x.upload(); await x.rotate();
+  x.b.ctx.Tesseract={recognize:async()=>({data:{text:'供应商：Test Supplier\n货号：SYNTHETIC-01\n数量：12'}})};
+  await x.b.ctx.startOcr();
+  assert.match(x.value('ocrRawText'),/SYNTHETIC-01/); assert.match(x.status(),/识别完成/);
+  x.b.ctx.__QC_AUTH={user:{username:'other'}};
+  const before=x.value('f_productNo'); assert.equal(x.b.ctx.applyOcrToForm(),false); assert.equal(x.value('f_productNo'),before);
+  assert.match(x.b.messages.at(-1).message,/登录已改变/);
+});
+
+test('delayed AI availability check is discarded before sending an obsolete image', async () => {
+  const x=fixture(); x.upload('old'); let statusResponse;
+  const original=x.b.ctx.__QC_REQUEST;
+  x.b.ctx.__QC_REQUEST=route=>route==='/api/ai/status'
+    ? new Promise(resolve=>{statusResponse=resolve;}) : original(route);
+  const op=x.b.ctx.startOcr();
+  const fresh=x.upload('fresh');
+  statusResponse({ok:true,status:200,json:async()=>({ready:true})}); await op;
+  assert.equal(x.requests.length,0); assert.equal(x.preview(),fresh.dataUrl);
+  assert.equal(x.value('ocrProductNo'),''); assert.deepEqual(x.controls(),[false,false,false]);
+});
+
+test('late POST or JSON parsing across logout/company/close cannot mutate fields or queue', async () => {
+  for (const change of [x=>{x.b.ctx.__QC_AUTH=null;},x=>{x.b.ctx.__QC_COMPANY='other';},x=>x.b.ctx.closeModalDirect()]) {
+    const x=fixture(); x.upload(); let complete;
+    x.config.post=async()=>({ok:true,status:200,json:()=>new Promise(resolve=>{complete=resolve;})});
+    x.b.elements.get('ocrProductNo').value='MANUAL';
+    const queue={items:[{productNo:'Q'}],idx:0}; x.b.ctx.__qcQueue=queue;
+    const op=x.b.ctx.startOcr(); await tick(); change(x);
+    const expectedQueue=x.b.ctx.__qcQueue;
+    complete(valid('SHOULD-NOT-APPLY')); await op;
+    assert.equal(x.value('ocrProductNo'),'MANUAL'); assert.equal(x.b.ctx.__qcQueue,expectedQueue);
+    assert.equal(queue.idx,0); assert.deepEqual(x.controls(),[false,false,false]);
+  }
+});
+
+test('apply during processing or after an empty new upload cannot clear the existing quantity review guard', async () => {
+  const x=fixture({deferImages:true}); x.upload();
+  x.b.elements.get('f_qty').value=''; x.b.ctx._markOcrQuantity('待核对');
+  const op=x.rotate();
+  assert.equal(x.b.ctx.applyOcrToForm(),false);
+  assert.equal(x.b.elements.get('f_qty').dataset.ocrNeedsReview,'1');
+  x.b.ctx.clearOcr(); x.pendingImages.shift()(); await op;
+  assert.equal(x.b.ctx.applyOcrToForm(),false);
+  assert.equal(x.b.elements.get('f_qty').dataset.ocrNeedsReview,'1');
+});
+
+test('a pending local worker is never duplicated after a new upload and cannot clear a newer result', async () => {
+  const x=fixture({local:true}); x.upload('old'); let finish,calls=0;
+  x.b.ctx.Tesseract={recognize:async()=>{calls++;return new Promise(resolve=>{finish=resolve;});}};
+  const old=x.b.ctx.startOcr(); await tick(); x.upload('new');
+  await x.b.ctx.startOcr(); assert.equal(calls,1); assert.match(x.status(),/尚未结束/);
+  finish({data:{text:'OLD TEXT'}}); await old;
+  assert.equal(x.value('ocrRawText'),'');
+  x.b.ctx.Tesseract={recognize:async()=>({data:{text:'数量：12'}})};
+  await x.b.ctx.startOcr(); assert.match(x.status(),/识别完成/);
+});
+
+test('unusable mixed/empty payloads do not silently drop rows or apply partial fields', async () => {
+  for (const items of [[{}],[{productNo:'GOOD',qty:'12'},null]]) {
+    const x=fixture(); x.upload(); x.b.elements.get('ocrProductNo').value='KEEP';
+    x.responses.push({ok:true,fields:{items}}); await x.b.ctx.startOcr();
+    assert.equal(x.value('ocrProductNo'),'KEEP'); assert.match(x.status(),/识别失败/);
+    assert.equal(x.b.ctx.__qcAiResult,null);
+  }
+});
+
+
+test('decode timeout releases controls and an eventual onload cannot commit a failed rotation', async () => {
+  const x=fixture({deferImages:true}); const original=x.upload(); let timeout;
+  x.b.ctx.setTimeout=(fn,delay)=>{if(delay===15000)timeout=fn;};
+  const op=x.rotate(); assert.equal(typeof timeout,'function'); timeout(); await op;
+  assert.match(x.status(),/解码超时/); assert.equal(x.preview(),original.dataUrl);
+  assert.deepEqual(x.controls(),[false,false,false]);
+  x.pendingImages.shift()(); await tick();
+  assert.equal(x.preview(),original.dataUrl); assert.equal(x.canvasCalls.length,0);
+});
+
+test('applying a new image replaces all OCR-source fields and saves none of the previous document identity', async () => {
+  const x=fixture(); x.b.ctx.openAddModal(); x.upload('A');
+  x.responses.push({ok:true,fields:{supplier:'Test Supplier',date:'2026-11-01',orderNo:'PO-OLD',deliveryNo:'DN-OLD',
+    items:[{productNo:'OLD',productName:'OLD NAME',qty:'12'}]}});
+  await x.b.ctx.startOcr(); x.b.elements.get('ocrRemark').value='OLD REMARK'; x.b.ctx.applyOcrToForm();
+  x.b.elements.get('f_inspDate').value='2026-10-31';
+  x.b.elements.get('f_client').value='MANUAL-CLIENT'; x.b.run("getCustomerOptions=()=>['MANUAL-CLIENT'];");
+  x.upload('B'); x.responses.push({ok:true,fields:{supplier:'Test Supplier',items:[{productNo:'NEW',productName:'',qty:'34'}]}});
+  await x.b.ctx.startOcr(); x.b.ctx.applyOcrToForm();
+  assert.equal(x.b.ctx.saveRecord(),true);
+  assert.deepEqual(x.b.json('state.records.map(r=>[r.productNo,r.productName,r.orderNo,r.deliveryNo,r.qty,r.date,r.remark,r.client,r.inspDate])'),
+    [['NEW','','','',34,x.b.run('todayStr()'),'','MANUAL-CLIENT','2026-10-31']]);
+});
+
+async function appliedQueue(x) {
+  x.upload('queue');
+  x.responses.push({ok:true,fields:{supplier:'Test Supplier',date:'2026-11-03',items:[
+    {productNo:'A-1',productName:'A one',qty:'12'}, {productNo:'A-2',productName:'A two',qty:'34'},
+  ]}});
+  await x.b.ctx.startOcr(); x.b.ctx.applyOcrToForm(); return x.b.ctx.__qcQueue;
+}
+
+test('an applied multi-item OCR queue cannot write or advance after logout, identity or company changes', async () => {
+  for (const change of [x=>{x.b.ctx.__QC_AUTH=null;},x=>{x.b.ctx.__QC_AUTH={user:{username:'user-B'},company:'synthetic-company'};},
+    x=>{x.b.ctx.__QC_COMPANY='other-company';}]) {
+    const x=fixture(),q=await appliedQueue(x),before=x.b.store.get('xingxin_qms_test_records');
+    change(x);
+    assert.equal(x.b.ctx.saveRecord(),false); assert.equal(x.b.ctx.saveRecord({continueEntry:true}),false);
+    assert.equal(q.idx,0); assert.equal(x.b.ctx.__qcQueue,q); assert.equal(x.value('f_productNo'),'A-1');
+    assert.deepEqual(x.b.json('state.records'),[]); assert.equal(x.b.store.get('xingxin_qms_test_records'),before);
+  }
+});
+
+test('an applied single OCR record cannot be saved under a later login or company', async () => {
+  for (const change of [x=>{x.b.ctx.__QC_AUTH={user:{username:'user-B'}};},x=>{x.b.ctx.__QC_COMPANY='other-company';}]) {
+    const x=fixture(); x.b.ctx.openAddModal(); x.upload(); await x.b.ctx.startOcr(); x.b.ctx.applyOcrToForm();
+    change(x); assert.equal(x.b.ctx.saveRecord(),false); assert.deepEqual(x.b.json('state.records'),[]);
+    assert.equal(x.value('f_productNo'),'SYNTHETIC-01');
+  }
+});
+
+test('same-identity ordinary save advances an OCR queue despite close cleanup, then continuation finishes it exactly once', async () => {
+  const x=fixture(),q=await appliedQueue(x),owner=q.context;
+  assert.equal(x.b.ctx.saveRecord(),true); assert.equal(q.idx,1); assert.equal(x.b.ctx.__qcQueue,q);
+  assert.equal(x.b.ctx.__qcOcrFormContext,owner); assert.equal(x.value('f_productNo'),'A-2');
+  assert.equal(x.b.ctx.saveRecord({continueEntry:true}),true); assert.equal(x.b.ctx.__qcQueue,null);
+  assert.deepEqual(x.b.json('state.records.map(r=>[r.productNo,r.qty])'),[['A-1',12],['A-2',34]]);
+  assert.ok(x.b.json('state.records.every(r=>!("context" in r)&&!("auth" in r))'));
+});
+
+test('identity change during a user confirmation is rechecked before actual record persistence', async () => {
+  const x=fixture(),q=await appliedQueue(x);
+  x.b.elements.get('f_sampleQty').value='999'; x.b.elements.get('f_sampleQty').dataset.manualEdit='1';
+  x.b.ctx.confirm=()=>{x.b.ctx.__QC_AUTH={user:{username:'user-B'}};return true;};
+  assert.equal(x.b.ctx.saveRecord(),false); assert.deepEqual(x.b.json('state.records'),[]);
+  assert.equal(q.idx,0); assert.equal(x.b.ctx.__qcQueue,q); assert.equal(x.value('f_productNo'),'A-1');
+});
+
+test('closing a suspended OCR form and starting a deliberate manual record clears only the old OCR owner guard', async () => {
+  const x=fixture(); await appliedQueue(x); x.b.ctx.__QC_AUTH={user:{username:'user-B'}};
+  x.b.ctx.closeModalDirect(); x.b.ctx.openAddModal();
+  x.b.elements.get('f_supplier').value='Test Supplier'; x.b.elements.get('f_productNo').value='MANUAL-NEW';
+  x.b.elements.get('f_qty').value='12';
+  assert.equal(x.b.ctx.saveRecord(),true);
+  assert.deepEqual(x.b.json('state.records.map(r=>r.productNo)'),['MANUAL-NEW']);
+});
+
+
+test('a real same-session refresh preserves the applied queue after synchronization, while a new CSRF session is rejected', async () => {
+  const x=fixture({backend:true,company:'dg-xingxin'}),q=await appliedQueue(x);
+  assert.equal(x.b.ctx.saveRecord(),true); assert.equal(q.idx,1);
+  await x.b.ctx.__QC_SYNC_NOW();
+  const previous=x.b.ctx.__QC_AUTH;
+  await x.b.ctx.__QC_REFRESH_SESSION();
+  assert.notEqual(x.b.ctx.__QC_AUTH,previous); assert.equal(x.b.ctx.__QC_AUTH.csrfToken,previous.csrfToken);
+  assert.equal(x.b.ctx.saveRecord(),true); assert.equal(q.idx,2); assert.equal(x.b.ctx.__qcQueue,null);
+  await x.b.ctx.__QC_SYNC_NOW();
+  assert.deepEqual(x.b.json('state.records.map(r=>r.productNo)'),['A-1','A-2']);
+  assert.ok(x.b.requests.some(r=>r.body.records.some(row=>row.productNo==='A-2')));
+  const second=fixture({backend:true,company:'dg-xingxin'}),oldQueue=await appliedQueue(second);
+  second.b.ctx.__QC_AUTH={...second.b.ctx.__QC_AUTH,csrfToken:'new-login-csrf'};
+  assert.equal(second.b.ctx.saveRecord(),false);assert.equal(oldQueue.idx,0);assert.deepEqual(second.b.json('state.records'),[]);
+});
+
+test('same-session refresh during rotation/recognition is accepted, but same username with a new CSRF token is obsolete', async () => {
+  const x=fixture({backend:true,company:'dg-xingxin',deferImages:true}); x.upload();
+  const rotating=x.rotate(); await x.b.ctx.__QC_REFRESH_SESSION();
+  x.pendingImages.shift()(); await rotating; assert.match(x.status(),/已旋转/);
+  x.config.deferImages=false; let complete;
+  x.config.post=async()=>({ok:true,status:200,json:()=>new Promise(resolve=>{complete=resolve;})});
+  const recognizing=x.b.ctx.startOcr(); await tick(); await x.b.ctx.__QC_REFRESH_SESSION();
+  complete(valid('AFTER-REFRESH')); await recognizing; assert.equal(x.value('ocrProductNo'),'AFTER-REFRESH');
+  x.upload('second');const obsolete=x.b.ctx.startOcr();await tick();
+  x.b.ctx.__QC_AUTH={...x.b.ctx.__QC_AUTH,csrfToken:'different-login'};
+  complete(valid('SHOULD-NOT-APPLY'));await obsolete;assert.equal(x.value('ocrProductNo'),'');
+});

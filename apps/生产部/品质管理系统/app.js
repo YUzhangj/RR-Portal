@@ -2755,6 +2755,59 @@ function recheckNameWhitelist() {
 
 let _ocrImageFile = null;
 let _ocrWorkerBusy = false;
+let _ocrImageRevision = 0;
+let _ocrOriginalImage = '';
+let _ocrImageAngle = 0;
+
+function _ocrActorSnapshot() {
+  const auth = window.__QC_AUTH;
+  return { authenticated: !!auth, username: auth?.user?.username, csrfToken: auth?.csrfToken,
+    authCompany: auth?.company, company: window.__QC_COMPANY };
+}
+function _sameOcrActor(before, after = _ocrActorSnapshot()) {
+  return !!(before && after && ['authenticated','username','csrfToken','authCompany','company'].every(key => before[key] === after[key]));
+}
+
+/* 图片与登录上下文一起核对。上传/清空/关窗会使旧异步回调失效。 */
+function _cancelOcrWork() {
+  _ocrImageRevision++;
+  if (typeof window.__QC_OCR_CANCEL === 'function') window.__QC_OCR_CANCEL();
+}
+function _ocrImageSnapshot() {
+  const src = document.getElementById('ocrPreview')?.src || '';
+  if (!_ocrImageFile || !_ocrOriginalImage || !src.startsWith('data:image/')) return null;
+  return { revision: _ocrImageRevision, original: _ocrOriginalImage, dataUrl: src,
+    angle: _ocrImageAngle, input: _ocrImageFile, actor: _ocrActorSnapshot() };
+}
+function _sameOcrImage(snapshot) {
+  const current = _ocrImageSnapshot();
+  return !!(snapshot && current && snapshot.revision === current.revision &&
+    snapshot.dataUrl === current.dataUrl && snapshot.original === current.original &&
+    snapshot.input === current.input && _sameOcrActor(snapshot.actor, current.actor));
+}
+function _clearOcrPreviewFields() {
+  window.__qcAiResult = null;
+  window.__qcOcrResultContext = null;
+  const applyButton = document.getElementById('btnApplyOcrToForm');
+  if (applyButton) applyButton.textContent = '应用到单条录入';
+  setVal('ocrRawText', '');
+  ['ocrDate','ocrInspDate','ocrSupplier','ocrClient','ocrProductNo',
+   'ocrProductName','ocrDeliveryNo','ocrOrderNo','ocrQty','ocrType','ocrRemark']
+    .forEach(id => setVal(id, ''));
+}
+window.__QC_OCR_IMAGE = {
+  snapshot: _ocrImageSnapshot,
+  current: _sameOcrImage,
+  cancel: _cancelOcrWork,
+  commit(snapshot, dataUrl, angle) {
+    if (!_sameOcrImage(snapshot)) return null;
+    _ocrImageRevision++;
+    _ocrImageAngle = angle;
+    _ocrImageFile = dataUrl; // Tesseract 和 AI 均读取已经提交到预览的同一图片。
+    document.getElementById('ocrPreview').src = dataUrl;
+    return _ocrImageSnapshot();
+  },
+};
 
 /* 初始化上传区域：点击/拖拽绑定 */
 function initOcrUpload() {
@@ -2793,47 +2846,72 @@ function handleOcrFile(file) {
     showToast('图片过大，请上传小于 10MB 的图片', 'error');
     return;
   }
-  _ocrImageFile = file;
+  _cancelOcrWork();
+  const revision = _ocrImageRevision;
+  const actor = _ocrActorSnapshot();
+  _ocrImageFile = null;
+  _ocrOriginalImage = '';
+  _ocrImageAngle = 0;
+  _clearOcrPreviewFields();
+  const preview = document.getElementById('ocrPreview');
+  if (preview) { preview.src = ''; preview.style.display = 'none'; }
   const reader = new FileReader();
   reader.onload = e => {
+    if (revision !== _ocrImageRevision || !_sameOcrActor(actor)) return;
+    if (typeof e.target.result !== 'string' || !e.target.result.startsWith('data:image/')) {
+      setText('ocrStatus', '图片读取失败，请重新上传');
+      return;
+    }
+    _ocrImageFile = file;
+    _ocrOriginalImage = e.target.result;
     const img = document.getElementById('ocrPreview');
     const hint = document.querySelector('#ocrDropZone .ocr-drop-hint');
     if (img) { img.src = e.target.result; img.style.display = ''; }
     if (hint) hint.style.display = 'none';
+    setText('ocrStatus', '图片已上传，点击"开始识别"');
   };
+  reader.onerror = () => {
+    if (revision === _ocrImageRevision && _sameOcrActor(actor))
+      setText('ocrStatus', '图片读取失败，请重新上传');
+  };
+  setText('ocrStatus', '正在读取图片...');
   reader.readAsDataURL(file);
-  setText('ocrStatus', '图片已上传，点击"开始识别"');
 }
 
 /* 清空图片和识别结果 */
 function clearOcr() {
+  _cancelOcrWork();
   _ocrImageFile = null;
+  _ocrOriginalImage = '';
+  _ocrImageAngle = 0;
   const img   = document.getElementById('ocrPreview');
   const hint  = document.querySelector('#ocrDropZone .ocr-drop-hint');
   const input = document.getElementById('ocrImageInput');
   if (img)   { img.src = ''; img.style.display = 'none'; }
   if (hint)  hint.style.display = '';
   if (input) input.value = '';
-  setVal('ocrRawText', '');
-  ['ocrDate','ocrInspDate','ocrSupplier','ocrClient','ocrProductNo',
-   'ocrProductName','ocrDeliveryNo','ocrOrderNo','ocrQty','ocrType','ocrRemark']
-    .forEach(id => setVal(id, ''));
+  _clearOcrPreviewFields();
   setText('ocrStatus', '未上传图片');
 }
 
 
-/* ── 图片预处理：放大2倍+灰度+对比度增强，提高OCR准确率 ── */
+/* 小图放大，大图限定 2000px；旋转后直接使用已提交的 data URL。 */
 function preprocessImageForOcr(file) {
   return new Promise((resolve) => {
     try {
       const img = new Image();
-      const url = URL.createObjectURL(file);
+      const isDataUrl = typeof file === 'string';
+      const url = isDataUrl ? file : URL.createObjectURL(file);
+      const release = () => { if (!isDataUrl) URL.revokeObjectURL(url); };
       img.onload = () => {
         try {
-          const scale = 2;
+          const width = img.naturalWidth === undefined ? img.width : img.naturalWidth;
+          const height = img.naturalHeight === undefined ? img.height : img.naturalHeight;
+          if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new Error('图片尺寸无效');
+          const scale = Math.min(2, 2000 / Math.max(width, height));
           const canvas = document.createElement('canvas');
-          canvas.width  = img.width  * scale;
-          canvas.height = img.height * scale;
+          canvas.width  = Math.max(1, Math.round(width * scale));
+          canvas.height = Math.max(1, Math.round(height * scale));
           const ctx = canvas.getContext('2d');
           ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
@@ -2849,14 +2927,14 @@ function preprocessImageForOcr(file) {
             d[i] = d[i+1] = d[i+2] = v;
           }
           ctx.putImageData(imgData, 0, 0);
-          URL.revokeObjectURL(url);
+          release();
           canvasToBlob(canvas).then(blob => resolve(blob || file)).catch(() => resolve(file));
         } catch (e) {
-          URL.revokeObjectURL(url);
+          release();
           resolve(file); /* 预处理失败回退原图 */
         }
       };
-      img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+      img.onerror = () => { release(); resolve(file); };
       img.src = url;
     } catch (e) {
       resolve(file);
@@ -2885,15 +2963,21 @@ async function startOcr() {
     showToast('OCR 引擎未加载成功，请检查网络后重试', 'error');
     return;
   }
-  if (_ocrWorkerBusy) return;
+  if (_ocrWorkerBusy) {
+    setText('ocrStatus', '上一张图片的本地识别尚未结束，请稍后重试');
+    showToast('本地识别仍在处理上一张图片，请稍后重试', 'info');
+    return;
+  }
+  const snapshot = _ocrImageSnapshot();
   _ocrWorkerBusy = true;
   setText('ocrStatus', '正在识别，请稍候...');
   const btn = document.getElementById('btnStartOcr');
   if (btn) btn.disabled = true;
 
   try {
-    /* 图片预处理：放大2倍+灰度+对比度增强，提高识别准确率（不改变预览，只改变OCR输入）*/
+    /* 有界灰度/对比度预处理，保持已提交图片的方向。 */
     const ocrInput = await preprocessImageForOcr(_ocrImageFile);
+    if (!_sameOcrImage(snapshot)) return;
     /* Worker 内 importScripts 不识别相对路径，必须给绝对 URL */
     const _ocrBase = location.href.replace(/[^/]*$/, '');
     const result = await Tesseract.recognize(ocrInput, 'chi_sim+eng', {
@@ -2903,22 +2987,26 @@ async function startOcr() {
       logger: () => {} /* 静默，不输出进度日志 */
     });
     const text = (result?.data?.text || '').trim();
+    if (!_sameOcrImage(snapshot)) return;
     if (!text) {
       setText('ocrStatus', '识别失败，请重新上传清晰图片');
       showToast('未识别到文字，请上传更清晰的图片', 'error');
     } else {
+      window.__qcAiResult = null;
+      window.__qcOcrResultContext = snapshot;
       setVal('ocrRawText', text);
       extractFieldsFromOcrText(text);
       setText('ocrStatus', '识别完成');
       showToast('✓ 识别完成，请核对字段', 'success');
     }
   } catch (err) {
+    if (!_sameOcrImage(snapshot)) return;
     console.error('[OCR]', err);
     setText('ocrStatus', '识别失败，请重新上传清晰图片');
     showToast('识别失败：' + (err.message || '未知错误'), 'error');
   } finally {
     _ocrWorkerBusy = false;
-    if (btn) btn.disabled = false;
+    if (btn && _sameOcrImage(snapshot)) btn.disabled = false;
   }
 }
 
@@ -3169,6 +3257,7 @@ function _markOcrQuantity(raw) {
   }
 }
 function _clearOcrQuantityReview() {
+  window.__qcOcrFormContext = null;
   const el = document.getElementById('f_qty');
   if (el) { delete el.dataset.ocrApplied; delete el.dataset.ocrNeedsReview; }
 }
@@ -3186,17 +3275,18 @@ function applyOcrToForm() {
   const ocrRemark      = document.getElementById('ocrRemark')?.value || '';
   /* f_client、f_inspDate 不写入，由用户手动填写 */
 
-  if (ocrDate)        setVal('f_date', ocrDate);
-  if (ocrSupplier)    setVal('f_supplier', matchManagedName('supplier', ocrSupplier));
-  if (ocrProductNo)   setVal('f_productNo', ocrProductNo);
-  if (ocrProductName) setVal('f_productName', ocrProductName);
-  if (ocrDeliveryNo)  setVal('f_deliveryNo', ocrDeliveryNo);
-  if (ocrOrderNo)     setVal('f_orderNo', ocrOrderNo);
+  /* 显式应用当前来源整组字段；空值不能沿用上一张图片已经带入的单据身份。 */
+  setVal('f_date', ocrDate || todayStr());
+  setVal('f_supplier', ocrSupplier ? matchManagedName('supplier', ocrSupplier) : '');
+  setVal('f_productNo', ocrProductNo);
+  setVal('f_productName', ocrProductName);
+  setVal('f_deliveryNo', ocrDeliveryNo);
+  setVal('f_orderNo', ocrOrderNo);
   _syncOrderNoNA();
-  if (ocrQty)         setVal('f_qty', ocrQty);
+  setVal('f_qty', ocrQty);
   _markOcrQuantity(ocrQty);
-  if (ocrType)        setVal('f_type', ocrType);
-  if (ocrRemark)      setVal('f_remark', ocrRemark);
+  setVal('f_type', ocrType || '来料');
+  setVal('f_remark', ocrRemark);
 
   /* 切换到单条录入 */
   switchModalMode('single');
@@ -4682,6 +4772,7 @@ function calcRate() {
 
 function closeModal(e) { if (e.target === document.getElementById('modalOverlay')) closeModalDirect(); }
 function closeModalDirect() {
+  _cancelOcrWork();
   document.getElementById('modalOverlay').classList.remove('show');
   editingId = null;
 }
@@ -4827,6 +4918,8 @@ function _syncFormResult() {
 }
 
 function saveRecord(options = {}) {
+  const ocrSaveContext = window.__qcOcrFormContext || window.__qcQueue?.context;
+  if (typeof window.__QC_OCR_CAN_SAVE === 'function' && !window.__QC_OCR_CAN_SAVE(ocrSaveContext)) return false;
   const editingRecord = editingId !== null ? state.records.find(r => r.id === editingId) : null;
   const approved = editingRecord && recStatus(editingRecord) === 'approved';
   if (!can(approved ? 'reviewRecord' : 'createRecord')) {
@@ -4977,6 +5070,8 @@ function saveRecord(options = {}) {
     measurements: measArr || [],
   };
 
+  /* 用户确认框返回后、任何记录写入前再次核对原 OCR 身份。 */
+  if (typeof window.__QC_OCR_CAN_SAVE === 'function' && !window.__QC_OCR_CAN_SAVE(ocrSaveContext)) return false;
   const previousRecords = state.records.slice();
   const previousNextId = state.nextId;
   if (editingId !== null) {
