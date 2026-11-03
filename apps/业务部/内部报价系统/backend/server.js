@@ -51,7 +51,10 @@ app.use('/api/verifications', require('./routes/verifications'));
 
 // nosniff：即使有人上传内容为 HTML/SVG 但扩展名被强制成图片，浏览器也不会嗅探成可执行类型
 app.use('/uploads', require('./middleware/auth').requireAuth, express.static(path.join(__dirname, 'uploads'), {
-  setHeaders: (res) => res.setHeader('X-Content-Type-Options', 'nosniff'),
+  setHeaders: (res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, no-store');
+  },
 }));
 app.use(express.static(path.join(__dirname, '..', 'frontend')));
 
@@ -61,10 +64,13 @@ app.use((err, req, res, next) => {
   console.error('[error]', req.method, req.originalUrl, err);
   if (res.headersSent) return;
   const msg = String(err.message || '');
+  if (err && err.code === 'LEGACY_WORKBOOK_TYPE') return res.status(400).json({ error: msg });
   if (err && err.code === 'LIMIT_FILE_SIZE') {
-    const isSpreadsheet = /-sheet(?:\?|$)/.test(req.originalUrl);
+    const isLegacyVerification = /legacy-sky-castle-verification(?:\?|$)/.test(req.originalUrl);
+    const isSpreadsheet = /-sheet(?:\?|$)/.test(req.originalUrl) || isLegacyVerification;
     return res.status(413).json({
-      error: isSpreadsheet ? 'Excel 文件过大，最大支持 50 MB' : '上传文件超过大小限制',
+      error: isLegacyVerification ? 'Sky Castle 核价总表过大，最大支持 160 MB'
+        : isSpreadsheet ? 'Excel 文件过大，最大支持 50 MB' : '上传文件超过大小限制',
     });
   }
   if (err?.code === '23505' || msg.includes('UNIQUE')) return res.status(409).json({ error: '数据已存在（唯一约束冲突）' });

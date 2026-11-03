@@ -46,5 +46,9 @@ test('旧核价表已知纸箱旧减税时，合计退税和成本也随统一�
  const row=buildVerificationRow(quote,{id:1,label:'V1',status:'drafting'},sections({sales:{legacy_import:{excel_model:model}}}),[{customer:'TOMY',sku:'CARTON-RULE',qty:100,source:'test'}]);
  near(row.values.AO,9.85);near(row.values.CY,1.15);near(row.values.CZ,9.85);
  const saved=new(require('exceljs').Workbook)();await saved.xlsx.load(await buildVerificationWorkbook([row]).xlsx.writeBuffer());
- const ws=saved.getWorksheet('TOMY');near(ws.getCell('CY5').result,1.15);near(ws.getCell('CZ5').result,9.85);assert.match(ws.getCell('CY5').formula,/AN5\/1\.1\*11.5%/);
+ const ws=saved.getWorksheet('TOMY'),matches=[];
+ ws.eachRow(r=>{if(r.getCell('B').value===quote.quote_no&&r.getCell('C').value===quote.product_name)matches.push(r.number);});
+ assert.equal(matches.length,1);const n=matches[0];
+ near(ws.getCell(`CY${n}`).result,1.15);near(ws.getCell(`CZ${n}`).result,9.85);
+ assert.ok(ws.getCell(`CY${n}`).formula.includes(`AN${n}/1.1*11.5%`));
 });

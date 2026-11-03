@@ -10,6 +10,10 @@ const group=(price,tax_label,category='车衣',qty=1)=>({category,tax_label,prod
 const payload=sewing=>({sales:{header:{fx_rmb_hkd:1,fx_hkd_usd:7.8},shipping:{markup_x:1.2,divisor:.98,scenarios:[{name:'出厂价',is_factory:true}]}},sewing});
 const near=(a,b)=>assert.ok(Math.abs(a-b)<1e-8,`${a} != ${b}`);
 function taxCells(ws){let row;ws.eachRow(r=>{if(r.getCell(1).value==='四、减税明细')row=r.number+2;});assert.ok(row);return {amount:ws.getCell(row,6),deduction:ws.getCell(row+2,6)};}
+function detailRow(ws){
+ const matches=[];ws.eachRow(row=>{if(row.getCell('B').value===quote.quote_no&&row.getCell('C').value===quote.product_name)matches.push(row.number);});
+ assert.equal(matches.length,1,`${ws.name}: 唯一货号明细`);return matches[0];
+}
 
 test('不含税车缝成本保留且没有退税，含税状态切回后恢复退税',async()=>{
  for(const label of ['不含税','含税']){
@@ -98,8 +102,8 @@ test('核价汇总及客户Excel按显式不含税设置移除原表车缝退税
  const r=buildVerificationRow(quote,{id:1,label:'V1',status:'drafting'},s,[{customer:'TOMY',sku:'SEW',qty:100,source:'test'}]);
  assert.equal(r.values.BM,10);assert.equal(r.values.BN,10);near(r.values.CY,0);near(r.values.CZ,10);assert.equal(r.values.CW,0);
  const wb=buildVerificationWorkbook([r]),saved=new(require('exceljs').Workbook)();await saved.xlsx.load(await wb.xlsx.writeBuffer());
- const ws=saved.getWorksheet('TOMY');assert.equal(ws.getCell('BN5').result,10);assert.equal(ws.getCell('CW5').result,0);
- assert.match(ws.getCell('BN5').formula,/BM5-CW5\*11.5%/);
+ const ws=saved.getWorksheet('TOMY'),n=detailRow(ws);assert.equal(ws.getCell(`BN${n}`).result,10);assert.equal(ws.getCell(`CW${n}`).result,0);
+ assert.ok(ws.getCell(`BN${n}`).formula.includes(`BM${n}-CW${n}*11.5%`));
 });
 
 test('车缝编辑器可以保存整单及分组的不含税选择',()=>{
@@ -127,8 +131,8 @@ test('旧表只有车衣时，未税设置同步移除合计退税和Excel税后
  assert.equal(r.values.BI,null);assert.equal(r.values.BJ,null);assert.equal(r.values.CV,null);
  assert.equal(r.values.BN,10);assert.equal(r.values.CW,0);near(r.values.CY,0);near(r.values.CZ,10);
  const saved=new(require('exceljs').Workbook)();await saved.xlsx.load(await buildVerificationWorkbook([r]).xlsx.writeBuffer());
- const ws=saved.getWorksheet('TOMY');near(ws.getCell('CY5').result,0);near(ws.getCell('CZ5').result,10);
- assert.match(ws.getCell('CY5').formula,/CW5\*11.5%/);assert.doesNotMatch(ws.getCell('CY5').formula,/CV5/);
+ const ws=saved.getWorksheet('TOMY'),n=detailRow(ws);near(ws.getCell(`CY${n}`).result,0);near(ws.getCell(`CZ${n}`).result,10);
+ assert.ok(ws.getCell(`CY${n}`).formula.includes(`CW${n}*11.5%`));assert.ok(!ws.getCell(`CY${n}`).formula.includes(`CV${n}`));
 });
 
 test('SPIN四种工艺及单列人工保留成本，仅布料参与退税；其他客户保持原口径', async()=>{

@@ -36,7 +36,7 @@ test('unified basis updates calculation payloads used by open quotes', () => {
   assert.equal(sales.payload.header.fx_hkd_usd, 7.8);
 
   const molding = applyCostingBasisPayload('molding', {
-    injection: [{ material: 'ABS', material_grade: '750SW', machine_model: '10A', target: 1000, sets: 1 }],
+    injection: [{ material: 'ABS', material_grade: '750SW', machine_model: '10A', target: 1000, sets: 1, shot_price_mode: 'auto' }],
   }, DEFAULT_COSTING_BASIS);
   assert.equal(molding.payload.injection[0].material_unit_price, +(6.5 / 454).toFixed(5));
   assert.equal(molding.payload.injection[0].shot_price, 1.16);

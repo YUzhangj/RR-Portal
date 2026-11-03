@@ -307,8 +307,8 @@ function customerTotals(rows) {
   });
 }
 
-function buildVerificationWorkbook(rows) {
-  const wb=require('./verificationWorkshopExport').buildWorkbook(rows,columns);
+function buildVerificationWorkbook(rows,options={}) {
+  const wb=require('./verificationWorkshopExport').buildWorkbook(rows,columns,options);
   if(!rows.some(r=>r.native))return wb;
   const blue='FFD9E2F3',border={style:'thin',color:{argb:'FF8091A5'}};
   function style(ws,count) {
@@ -316,7 +316,7 @@ function buildVerificationWorkbook(rows) {
     ws.getRow(1).height=30;ws.getRow(2).height=38;ws.getRow(3).height=64;
     ws.autoFilter={from:{row:3,column:1},to:{row:Math.max(3,ws.rowCount),column:count}};
     ws.eachRow((row,n)=>row.eachCell({includeEmpty:true},(cell,c)=>{
-      cell.font={name:'Arial',size:10,bold:n===1||n===3,color:{argb:n===3?'FF143455':'FF1F2937'}};
+      cell.font={name:'Arial',size:16,bold:n===1||n===3,color:{argb:n===3?'FF143455':'FF1F2937'}};
       cell.alignment={vertical:'middle',wrapText:n<=3||c<=3};
       if(n>=3)cell.border={top:border,bottom:border,left:border,right:border};
       if(n===3)cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:blue}};
@@ -351,11 +351,11 @@ function buildVerificationWorkbook(rows) {
   }
   audit.views=[{state:'frozen',xSplit:2,ySplit:1}];audit.autoFilter=`A1:J${Math.max(audit.rowCount,1)}`;
   [20,25,55,26,26,20,20,20,36,60].forEach((w,i)=>audit.getColumn(i+1).width=w);
-  audit.getRow(1).font={bold:true};
+  audit.eachRow((row,n)=>row.eachCell(cell=>{cell.font={name:'Arial',size:16,bold:n===1};}));
   const exceptions=wb.addWorksheet('差异与错误');exceptions.addRow(audit.getRow(1).values.slice(1));
   audit.eachRow((row,i)=>{if(i>1&&!['公式重算一致','原总表输入，未独立验证','依赖外部缓存，未独立验证'].includes(row.getCell(9).value))exceptions.addRow(row.values.slice(1));});
   [20,25,55,26,26,20,20,20,36,60].forEach((w,i)=>exceptions.getColumn(i+1).width=w);
-  exceptions.views=[{state:'frozen',xSplit:2,ySplit:1}];exceptions.autoFilter=`A1:J${exceptions.rowCount}`;exceptions.getRow(1).font={bold:true};
+  exceptions.views=[{state:'frozen',xSplit:2,ySplit:1}];exceptions.autoFilter=`A1:J${exceptions.rowCount}`;exceptions.eachRow((row,n)=>row.eachCell(cell=>{cell.font={name:'Arial',size:16,bold:n===1};}));
   return wb;
 }
 

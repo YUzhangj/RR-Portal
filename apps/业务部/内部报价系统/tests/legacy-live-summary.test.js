@@ -10,6 +10,10 @@ const {buildVerificationRow, buildVerificationWorkbook} = require('../backend/se
 const near = (a,b) => assert.ok(Math.abs(a-b)<1e-9, `${a} != ${b}`);
 const quote = {id:1,quote_no:'LIVE',customer:'TOMY',qty:100,factory_code:'qingxi'};
 const sectionsOf = p => Object.entries(p).map(([dept,payload])=>({dept,payload_json:JSON.stringify(payload)}));
+function detailRow(ws) {
+  const matches=[]; ws.eachRow(row=>{if(row.getCell('B').value===quote.quote_no)matches.push(row.number);});
+  assert.equal(matches.length,1,`${ws.name}: unique saved SKU detail`);return matches[0];
+}
 
 function pageComponents(payloads) {
   const source = fs.readFileSync(path.join(__dirname,'../frontend/workbench.js'),'utf8');
@@ -32,9 +36,9 @@ test('edited historical itemized formulas drive report components, price and sav
   const row=buildVerificationRow(quote,{id:1,status:'drafting'},sections,[]);
   near(row.values.BU,8);near(row.values.E,16);near(row.values.F,8);
   const workbook=buildVerificationWorkbook([row]);
-  const customer=workbook.getWorksheet('TOMY');near(customer.getCell('BU5').value,8);near(customer.getCell('E5').value,16);
+  const customer=workbook.getWorksheet('TOMY'),n=detailRow(customer);near(customer.getCell(`BU${n}`).value,8);near(customer.getCell(`E${n}`).value,16);
   const loaded=new(require('exceljs').Workbook)();await loaded.xlsx.load(await workbook.xlsx.writeBuffer());
-  near(loaded.getWorksheet('TOMY').getCell('BU5').value,8);
+  const reopened=loaded.getWorksheet('TOMY');near(reopened.getCell(`BU${detailRow(reopened)}`).value,8);
   assert.equal(JSON.stringify(payloads),before,'calculating never rewrites legacy source values or offsets');
 });
 

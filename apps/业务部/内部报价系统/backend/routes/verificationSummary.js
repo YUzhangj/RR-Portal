@@ -35,28 +35,42 @@ router.put('/quantity',async(req,res)=>{
   }catch(e){if(e.status)return res.status(e.status).json({error:e.message});throw e;}
 });
 
-async function loadRows(user,filters={}) {
-  const admin=user.role==='admin'||Boolean(user.perms?.['账号管理']?.can_admin);
+async function loadRows(user,filters={},readScope=null) {
+  const admin=readScope?readScope.admin:(user.role==='admin'||Boolean(user.perms?.['账号管理']?.can_admin));
   const params=[user.active_factory_code];
   let scope='';
-  if(!admin){scope=' AND q.customer IN (SELECT customer FROM user_customers WHERE user_id=?)';params.push(user.id);}
+  if(!admin){
+    if(readScope){
+      if(!readScope.customers.length)return [];
+      scope=` AND q.customer IN (${readScope.customers.map(()=>'?').join(',')})`;params.push(...readScope.customers);
+    }else{scope=' AND q.customer IN (SELECT customer FROM user_customers WHERE user_id=?)';params.push(user.id);}
+  }
   const rows=await db.prepare(`SELECT q.*,v.id AS verification_version_id,v.label AS verification_label,v.status AS verification_status,v.version_no AS verification_version_no
     FROM quotes q JOIN quote_verification_versions v ON v.id=(SELECT vx.id FROM quote_verification_versions vx
     WHERE vx.quote_id=q.id AND vx.status<>'cancelled' ORDER BY vx.version_no DESC,vx.id DESC LIMIT 1)
     WHERE q.deleted_at IS NULL AND q.factory_code=?${scope} ORDER BY q.customer,q.quote_no,q.id`).all(...params);
+  const selected=rows.filter(q=>(!filters.customer||verificationCustomers.display(q.customer)===verificationCustomers.display(filters.customer))
+    &&(!filters.status||q.verification_status===filters.status)
+    &&(!filters.search||`${verificationCustomers.display(q.customer)} ${q.customer} ${q.quote_no} ${q.product_name}`.toLowerCase().includes(String(filters.search).toLowerCase())));
   const result=[];
-  for(const q of rows){
-    if(filters.customer&&verificationCustomers.display(q.customer)!==verificationCustomers.display(filters.customer))continue;
-    if(filters.status&&q.verification_status!==filters.status)continue;
-    if(filters.search&&!`${verificationCustomers.display(q.customer)} ${q.customer} ${q.quote_no} ${q.product_name}`.toLowerCase().includes(String(filters.search).toLowerCase()))continue;
-    const sections=await db.prepare('SELECT dept,payload_json FROM quote_verification_sections WHERE version_id=?').all(q.verification_version_id);
-    // Every cost comes from the current verification detail. The original
-    // summary supplies order quantity only, never cost overrides or comparisons.
-    const report=buildVerificationRow(q,{id:q.verification_version_id,label:q.verification_label,status:q.verification_status,version_no:q.verification_version_no},sections,sourceQuantity(q,sections)??undefined);
-    const sales=sections.find(s=>s.dept==='sales');
-    report.quantity_revision=sales?payloadRevision(sales):null;
-    if(filters.workshop&&report.workshop!==filters.workshop)continue;
-    result.push(report);
+  // Bound model payload memory and replace one database round trip per quote.
+  for(let offset=0;offset<selected.length;offset+=25){
+    const batch=selected.slice(offset,offset+25),ids=batch.map(q=>q.verification_version_id);
+    const records=await db.prepare(`SELECT version_id,dept,payload_json FROM quote_verification_sections WHERE version_id IN (${ids.map(()=>'?').join(',')})`).all(...ids);
+    const byVersion=new Map(ids.map(id=>[id,[]]));
+    for(const section of records)byVersion.get(section.version_id)?.push(section);
+    for(const q of batch){
+      const sections=byVersion.get(q.verification_version_id);
+      // Every cost comes from the current verification detail. The original
+      // summary supplies order quantity only, never cost overrides or comparisons.
+      const report=buildVerificationRow(q,{id:q.verification_version_id,label:q.verification_label,status:q.verification_status,version_no:q.verification_version_no},sections,sourceQuantity(q,sections)??undefined);
+      const sales=sections.find(s=>s.dept==='sales');
+      report.quantity_revision=sales?payloadRevision(sales):null;
+      if(filters.workshop&&report.workshop!==filters.workshop)continue;
+      result.push(report);
+    }
+    // Let status polling and other requests run between calculation batches.
+    if(offset+25<selected.length)await new Promise(resolve=>setImmediate(resolve));
   }
   return result;
 }
@@ -64,11 +78,49 @@ router.get('/',async(req,res)=>{
   const rows=await loadRows(req.user,req.query);
   res.json({columns,rows,customers:customerTotals(rows),can_edit_quantity:canEditQuantity(req.user),quantity_period:'手填数量优先；未手填时沿用原文件数量'});
 });
+const runningExports=new Map(),exportStatus=new Map();
+function pruneExportStatus(){
+  const now=Date.now();
+  for(const [id,status] of exportStatus)if(status.expires<now)exportStatus.delete(id);
+}
+async function exportBuffer(user,filters){
+  // Coalesce only requests with the same effective current read scope. A role
+  // or customer-assignment change must not reuse an older wider export.
+  const admin=user.role==='admin'||Boolean(user.perms?.['账号管理']?.can_admin);
+  const customers=admin?null:(await db.prepare('SELECT customer FROM user_customers WHERE user_id=? ORDER BY customer').all(user.id)).map(row=>row.customer);
+  // The data boundary must be the same immutable snapshot as the cache key,
+  // rather than a later live subquery after an administrator changes grants.
+  const readScope=Object.freeze({admin,customers:customers===null?null:Object.freeze(customers)});
+  const key=JSON.stringify([user.id,user.active_factory_code,readScope.admin,readScope.customers,...['customer','status','search','workshop'].map(k=>String(filters[k]||''))]);
+  if(runningExports.has(key))return runningExports.get(key);
+  const pending=(async()=>{
+    const rows=await loadRows(user,filters,readScope),wb=buildVerificationWorkbook(rows,{factoryName:user.active_factory_name});
+    return Buffer.from(await wb.xlsx.writeBuffer());
+  })();
+  runningExports.set(key,pending);
+  const done=()=>runningExports.delete(key);
+  pending.then(done,done);
+  return pending;
+}
+router.get('/export-status/:id',(req,res)=>{
+  pruneExportStatus();res.setHeader('Cache-Control','no-store');
+  const status=exportStatus.get(req.params.id);
+  if(!status||status.userId!==req.user.id||status.factory!==req.user.active_factory_code)return res.status(404).json({error:'导出任务不存在'});
+  res.json({state:status.state});
+});
 router.get('/export',async(req,res)=>{
-  const rows=await loadRows(req.user,req.query),wb=buildVerificationWorkbook(rows);
-  res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition',`attachment; filename*=UTF-8''${encodeURIComponent('各客核价汇总.xlsx')}`);
-  res.send(Buffer.from(await wb.xlsx.writeBuffer()));
+  pruneExportStatus();
+  const id=String(req.query.export_id||''),tracked=/^[a-zA-Z0-9-]{12,80}$/.test(id);
+  const status={userId:req.user.id,factory:req.user.active_factory_code,state:'generating',expires:Date.now()+300000};
+  if(tracked)exportStatus.set(id,status);
+  res.setHeader('Cache-Control','no-store');
+  try{
+    const buffer=await exportBuffer(req.user,req.query);
+    res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition',`attachment; filename*=UTF-8''${encodeURIComponent('各客核价汇总.xlsx')}`);
+    res.send(buffer);
+    status.state='ready';status.expires=Date.now()+120000;
+  }catch(error){status.state='error';status.expires=Date.now()+120000;throw error;}
 });
 module.exports=router;
 module.exports.loadRows=loadRows;

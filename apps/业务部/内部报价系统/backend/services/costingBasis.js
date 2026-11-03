@@ -1,6 +1,7 @@
 'use strict';
 
 const {nextSectionTime} = require('./verificationSectionSave');
+const InjectionPricing = require('../../frontend/injection-pricing');
 const conflict = () => { throw Object.assign(new Error('资料在同步期间已更新，请刷新后重新发布基准'), {status:409}); };
 
 const DEFAULT_COSTING_BASIS = {
@@ -138,16 +139,7 @@ function cartonRate(basis, label) {
 const normalized = value => text(value).replace(/\s+/g, '').toUpperCase();
 
 function machineMatch(model, machines) {
-  const target = normalized(model);
-  const targetNumber = Number.parseFloat(target);
-  for (const row of machines || []) {
-    const candidate = normalized(row.model);
-    const range = candidate.match(/^([\d.]+)A?-([\d.]+)A?$/);
-    if (range && Number.isFinite(targetNumber)
-      && targetNumber >= Number(range[1]) && targetNumber <= Number(range[2])) return row;
-    if (candidate === target) return row;
-  }
-  return (machines || []).find(row => target.includes(normalized(row.model))) || null;
+  return InjectionPricing.lookupMachinePrice(model, machines);
 }
 
 function applyCostingBasisPayload(dept, rawPayload, rawBasis) {
@@ -168,17 +160,17 @@ function applyCostingBasisPayload(dept, rawPayload, rawBasis) {
     payload.material_prices = clone(basis.materials);
     payload.machine_prices = clone(basis.machines);
     for (const row of Array.isArray(payload.injection) ? payload.injection : []) {
+      // A shared-mold row owns an independently frozen allocation, including
+      // its material and labor prices. Generic machine rates cannot replace it.
+      if (row.catalog_raw_weight != null) continue;
       const grade = normalized(row.material_grade);
       const material = basis.materials.find(item => normalized(item.model) === grade);
       if (material) row.material_unit_price = +(material.price / 454).toFixed(5);
       const machine = machineMatch(row.machine_model, basis.machines);
-      const target = number(row.target, 0);
-      const sets = number(row.sets, 1) || 1;
-      if (machine && target > 0) {
-        row.shot_price = number(row.mold_part_index, 0) > 0
-          ? 0
-          : +(machine.price / sets / target).toFixed(4);
-      }
+      // Numeric equality with a formula is not provenance. Only an explicitly
+      // automatic row follows new fees; manual and unmarked historical values
+      // (including blank and zero) remain fixed until an explicit input action.
+      if (row.shot_price_mode === 'auto') row.shot_price = InjectionPricing.calculate(row, basis.machines);
       if (machine?.normal) row.machine = machine.normal;
     }
   }

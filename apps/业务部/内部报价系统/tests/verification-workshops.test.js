@@ -17,6 +17,16 @@ test('new explicit assignment wins; conflicting source mappings are not guessed'
   assert.equal(resolveWorkshop(q,[],[{customer:'ZURU',sku:'92125',workshop:'兴信A'},{customer:'ZURU',sku:'92125',workshop:'兴信B'}]).workshop,G.pending);
 });
 function row(id,customer,workshop,qty,price,amount){return {id,workshop,values:{A:customer,B:'sku'+id,C:'product',D:qty,E:price,F:price/2,DI:amount,DX:amount/4,DZ:amount/10,J:amount/5},sources:{},formulas:{DI:'D1*E1'},issues:[],missing:[]};}
+function findRow(ws,predicate,label){
+  const matches=[];ws.eachRow(r=>{if(predicate(r))matches.push(r.number);});
+  assert.equal(matches.length,1,`${ws.name}: ${label}`);return matches[0];
+}
+const detailRow=(ws,source)=>findRow(ws,r=>r.getCell('B').value===source.values.B&&r.getCell('C').value===source.values.C,source.values.B);
+const grandRow=ws=>findRow(ws,r=>r.getCell('C').value==='总合计','总合计');
+function subtotalAfter(ws,detail){
+  let number;ws.eachRow(r=>{if(!number&&r.number>detail&&r.getCell('C').value==='合计')number=r.number;});
+  assert.ok(number,`${ws.name}: detail ${detail} has a local workshop subtotal`);return number;
+}
 test('one detail row per quote; subtotals and ratios reflect underlying amounts',()=>{
   const rs=[row(1,'A','兴信A',10,20,200),row(2,'A','兴信B',1,100,100),row(3,'B',null,2,50,100)];
   const detail=G.reportRows(rs,'customer-detail');assert.equal(detail.filter(r=>!r.kind).length,3);
@@ -28,10 +38,15 @@ test('one detail row per quote; subtotals and ratios reflect underlying amounts'
 test('export links customer subtotals and includes pending groups without duplicates',async()=>{
   const rs=[row(1,'A','兴信A',10,20,200),row(2,'A',null,1,100,100)];
   const wb=buildWorkbook(rs,columns),summary=wb.getWorksheet('总表不分车间');
-  assert.match(summary.getCell('DG4').formula,/'A'!DI/);assert.equal(summary.getCell('DG4').result,.03);
-  const detail=wb.getWorksheet('不分车间核价明细');assert.equal(detail.getCell('DI5').formula,`IF(ISNUMBER('A'!DI5),'A'!DI5,"")`);
-  const customer=wb.getWorksheet('A');assert.ok(customer.getColumn(1).values.some(v=>typeof v==='string'&&v.includes(G.pending)));
-  const sums=wb.getWorksheet('总表分车间');assert.equal(sums.getCell(`DG${sums.rowCount}`).result,.03);
+  const summaryCustomer=findRow(summary,r=>r.getCell('A').value==='A'&&r.getCell('C').value==='客户合计','A客户合计');
+  assert.match(summary.getCell(`DG${summaryCustomer}`).formula,/'A'!DI/);assert.equal(summary.getCell(`DG${summaryCustomer}`).result,.03);
+  const detail=wb.getWorksheet('不分车间核价明细'),customer=wb.getWorksheet('A');
+  for(const source of rs){
+    const n=detailRow(detail,source),target=detailRow(customer,source);
+    assert.equal(detail.getCell(`DI${n}`).formula,`IF(ISNUMBER('A'!DI${target}),'A'!DI${target},"")`);
+  }
+  assert.ok(customer.getColumn(1).values.some(v=>typeof v==='string'&&v.includes(G.pending)));
+  const sums=wb.getWorksheet('总表分车间');assert.equal(sums.getCell(`DG${grandRow(sums)}`).result,.03);
   assert.ok((await wb.xlsx.writeBuffer()).length>1000);
 });
 test('customer export calculations use local rows and local detail subtotals',async()=>{
@@ -41,28 +56,33 @@ test('customer export calculations use local rows and local detail subtotals',as
     Object.assign(r.formulas,{I:'H1',J:'I1*D1',K:'IF(DI1=0,"",J1/DI1)',M:'L1',N:'M1*D1',O:'IF(DI1=0,"",N1/DI1)',Q:'P1',R:'Q1*D1',S:'IF(DI1=0,"",R1/DI1)',AO:'AN1-AN1/1.1*11.5%',AP:'AO1*D1',AQ:'IF(DI1=0,"",AP1/DI1)'});
   }
   const wb=buildWorkbook(rs,columns),ws=wb.getWorksheet('Sky Castle');
-  for(const n of [5,8]){
-    for(const [c,f] of Object.entries(rs[0].formulas))assert.equal(ws.getCell(`${c}${n}`).formula,localFormula(f,n));
+  const [first,second]=rs.map(source=>detailRow(ws,source)),subtotals=[first,second].map(n=>subtotalAfter(ws,n));
+  for(const source of rs){
+    const n=detailRow(ws,source);
+    for(const [c,f] of Object.entries(source.formulas))assert.equal(ws.getCell(`${c}${n}`).formula,localFormula(f,n));
   }
-  assert.equal(ws.getCell('J6').formula,'IF(COUNT(J5)=1,SUM(J5),"")');
-  assert.equal(ws.getCell('J10').formula,'IF(COUNT(J5,J8)=2,SUM(J5,J8),"")');
-  assert.equal(ws.getCell('J5').formula,'IF(COUNT(I5,D5)=2,I5*D5,"")');
-  assert.equal(ws.getCell('K5').formula,'IF(COUNT(DI5,J5)=2,IF(DI5=0,"",J5/DI5),"")');
+  assert.equal(ws.getCell(`J${subtotals[0]}`).formula,`IF(COUNT(J${first})=1,SUM(J${first}),"")`);
+  assert.equal(ws.getCell(`J${grandRow(ws)}`).formula,`IF(COUNT(J${first},J${second})=2,SUM(J${first},J${second}),"")`);
+  assert.equal(ws.getCell(`J${first}`).formula,`IF(COUNT(I${first},D${first})=2,I${first}*D${first},"")`);
+  assert.equal(ws.getCell(`K${first}`).formula,`IF(COUNT(DI${first},J${first})=2,IF(DI${first}=0,"",J${first}/DI${first}),"")`);
   const summary=wb.getWorksheet('总表分车间');
-  assert.match(summary.getCell(`J${summary.rowCount}`).formula,/'Sky Castle'!J6.*'Sky Castle'!J9/);
+  const formula=summary.getCell(`J${grandRow(summary)}`).formula;
+  assert.ok(formula.includes(`'Sky Castle'!J${subtotals[0]}`));assert.ok(formula.includes(`'Sky Castle'!J${subtotals[1]}`));
   const saved=new (require('exceljs').Workbook)();await saved.xlsx.load(await wb.xlsx.writeBuffer());
-  assert.equal(saved.getWorksheet('Sky Castle').getCell('J5').formula,localFormula('I1*D1',5));
-  assert.equal(saved.getWorksheet('Sky Castle').getCell('D5').value,100);
-  // Source row 8 is not green detail row 6 (customer workshop headings differ).
-  assert.equal(saved.getWorksheet('不分车间核价明细').getCell('J6').formula,`IF(ISNUMBER('Sky Castle'!J8),'Sky Castle'!J8,"")`);
+  const reopened=saved.getWorksheet('Sky Castle'),n=detailRow(reopened,rs[0]);
+  assert.equal(reopened.getCell(`J${n}`).formula,localFormula('I1*D1',n));
+  assert.equal(reopened.getCell(`D${n}`).value,100);
+  // Repeated workshop headers differ from consolidated detail rows. Link by the exact SKU.
+  const detail=saved.getWorksheet('不分车间核价明细'),m=detailRow(detail,rs[1]),target=detailRow(reopened,rs[1]);
+  assert.equal(detail.getCell(`J${m}`).formula,`IF(ISNUMBER('Sky Castle'!J${target}),'Sky Castle'!J${target},"")`);
   saved.getWorksheet('Sky Castle').eachRow(r=>r.eachCell(c=>{if(c.formula)assert.ok(!c.formula.includes('!'),c.formula);}));
 });
 test('missing and zero results retain formulas for later input edits',()=>{
   const r=row(1,'A','华登',null,10,null);
   r.values.J=null;r.values.K=null;
   r.formulas.J='I1*D1';r.formulas.K='IF(DI1=0,"",J1/DI1)';
-  const ws=buildWorkbook([r],columns).getWorksheet('A');
-  assert.equal(ws.getCell('J5').formula,localFormula('I1*D1',5));
-  assert.equal(ws.getCell('J6').formula,'IF(COUNT(J5)=1,SUM(J5),"")');
-  assert.equal(ws.getCell('K5').formula,localFormula(r.formulas.K,5));
+  const ws=buildWorkbook([r],columns).getWorksheet('A'),n=detailRow(ws,r);
+  assert.equal(ws.getCell(`J${n}`).formula,localFormula('I1*D1',n));
+  assert.equal(ws.getCell(`J${subtotalAfter(ws,n)}`).formula,`IF(COUNT(J${n})=1,SUM(J${n}),"")`);
+  assert.equal(ws.getCell(`K${n}`).formula,localFormula(r.formulas.K,n));
 });

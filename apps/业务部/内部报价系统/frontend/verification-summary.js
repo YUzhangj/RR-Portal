@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const $=id=>document.getElementById(id), esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  let data={rows:[],columns:[],customers:[]},customer='',loading=null;
+  let data={rows:[],columns:[],customers:[]},customer='',loading=null,exporting=false,exportReady=false;
   const format=(v,percent=false)=>typeof v==='number'&&Number.isFinite(v)?(percent?(v*100).toFixed(2)+'%':v.toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})):v==null?'—':esc(v);
   const filters=()=>({customer,status:$('vs-status').value,search:$('vs-search').value.trim(),workshop:$('vs-workshop').value});
   function selectedRows(){const f=filters();return data.rows.filter(r=>(!f.customer||r.values.A===f.customer)&&(!f.status||r.status===f.status)&&(!f.workshop||G.workshop(r)===f.workshop)&&(!f.search||`${r.values.A} ${r.values.B} ${r.values.C}`.toLowerCase().includes(f.search.toLowerCase())));}
@@ -70,7 +70,7 @@
       if(!body||!Array.isArray(body.rows)||!Array.isArray(body.columns)||!Array.isArray(body.customers))throw new Error('汇总数据格式不完整，请刷新后重试。');
       data=body;const selected=$('vs-workshop').value;$('vs-workshop').innerHTML='<option value="">全部车间</option>'+[...new Set(data.rows.map(G.workshop))].map(w=>`<option value="${esc(w)}">${esc(w)}</option>`).join('');$('vs-workshop').value=selected;render();loaded=true;
     }catch(e){$('vs-message').textContent=e.message;$('vs-message').classList.add('vs-error');}
-    finally{$('vs-export').disabled=!loaded;}
+    finally{exportReady=loaded;$('vs-export').disabled=exporting||!loaded;}
     return loaded;
     })();
     loading=request;
@@ -120,12 +120,33 @@
     event.preventDefault();event.returnValue='';
   });
   $('vs-refresh').addEventListener('click',load);
-  $('vs-export').addEventListener('click',()=>{
-    // A normal attachment URL also works in embedded browsers that do not
-    // support downloading a renderer-created blob URL.
-    const base=location.pathname.replace(/\/[^/]*$/,''),a=document.createElement('a');
-    a.href=`${base}/api/verification-summary/export?${new URLSearchParams(filters())}`;
-    a.download='各客核价汇总.xlsx';document.body.appendChild(a);a.click();a.remove();
+  $('vs-export').addEventListener('click',async()=>{
+    const button=$('vs-export'),message=$('vs-export-message');
+    if(exporting||loading||button.disabled)return;
+    exporting=true;
+    button.disabled=true;button.textContent='生成中…';button.setAttribute('aria-busy','true');
+    message.textContent=`正在生成 ${selectedRows().length} 款核价，请稍候…`;
+    const id=typeof crypto!=='undefined'&&crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const requestedFilters=filters();
+    try{
+      // Preserve a normal attachment download for embedded browsers. Status
+      // polling never requests a second workbook or discards quantity drafts.
+      const base=location.pathname.replace(/\/[^/]*$/,''),a=document.createElement('a');
+      a.href=`${base}/api/verification-summary/export?${new URLSearchParams({...requestedFilters,export_id:id})}`;
+      a.download='各客核价汇总.xlsx';document.body.appendChild(a);a.click();a.remove();
+      for(let attempt=0;attempt<180;attempt++){
+        await new Promise(resolve=>setTimeout(resolve,1000));
+        const response=await fetch(`/api/verification-summary/export-status/${id}`,{cache:'no-store'});
+        if(response.status===401)throw new Error('登录已过期，请重新登录后导出。数量草稿仍保留在当前页面。');
+        if(response.status===404)continue;
+        if(!response.ok)throw new Error('无法查询导出进度，请查看浏览器下载记录。');
+        let status;try{status=await response.json();}catch{throw new Error('导出进度返回异常，请查看浏览器下载记录。');}
+        if(status.state==='error')throw new Error('导出失败，请重试。');
+        if(status.state==='ready'){message.textContent='文件已生成，请在浏览器下载记录中查看。';return;}
+      }
+      message.textContent='尚未取得完成状态，请查看浏览器下载记录，稍后再试。';
+    }catch(error){message.textContent=error.message;}
+    finally{exporting=false;button.disabled=Boolean(loading)||!exportReady;button.textContent='导出 Excel';button.removeAttribute('aria-busy');}
   });
   load();
 })();
