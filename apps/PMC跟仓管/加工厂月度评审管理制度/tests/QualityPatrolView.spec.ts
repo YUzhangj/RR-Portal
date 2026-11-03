@@ -30,19 +30,19 @@ beforeEach(() => {
 describe('巡查现场', () => {
   it('loads live output with an inclusive inspection cutoff and refreshes changed amounts', async () => {
     mocks.orders.mockResolvedValue([
-      {factory:'hn',order_date:'2026-01-01',amount:100},
-      {factory:'hn',order_date:'2026-10-16 23:59:59Z',amount:25.5},
+      {factory:'hn',order_date:'2026-01-01',amount:1570000},
+      {factory:'hn',order_date:'2026-10-16 23:59:59Z',amount:279306.79},
       {factory:'hn',order_date:'2026-10-17',amount:900},
       {factory:'hn',order_date:'2025-12-31',amount:800},
       {factory:'dg',order_date:'2026-10-01',amount:700},
     ])
     const w=mountView();await flushPromises()
-    expect(w.find('td.actual-output').text()).toBe('125.50')
+    expect(w.find('td.actual-output').text()).toBe('185')
     await w.findAll('.filters select')[1]!.setValue('2026-09-18')
-    expect(w.find('td.actual-output').text()).toBe('100.00')
-    mocks.orders.mockResolvedValue([{factory:'hn',order_date:'2026-01-01',amount:200}])
+    expect(w.find('td.actual-output').text()).toBe('157')
+    mocks.orders.mockResolvedValue([{factory:'hn',order_date:'2026-01-01',amount:176888.40}])
     await w.find('.filters button').trigger('click');await flushPromises()
-    expect(w.find('td.actual-output').text()).toBe('200.00')
+    expect(w.find('td.actual-output').text()).toBe('18')
   })
   it('does not fetch output for accounts without output permission', async () => {
     mocks.auth.role='sc_clerk'
@@ -65,14 +65,14 @@ describe('巡查现场', () => {
     expect(w.find('td.actual-output').text()).toBe('产值加载失败')
     const retry=w.findAll('button').find(b=>b.text()==='重试产值')!
     await retry.trigger('click');await flushPromises()
-    expect(w.find('td.actual-output').text()).toBe('0.00')
+    expect(w.find('td.actual-output').text()).toBe('0')
   })
 
   it('uses template 02 column order, period labels and completion prose while preserving legacy fields on edit', async () => {
     mocks.list.mockResolvedValue([{ id:'1', factory:'hn', check_date:'2026-10-16', responsibility_scope:'责任人甲', responsible_supervisor:'主管乙', processing_fee_period:'1月-9月份', processing_fee:12.75, completion_details:'1:10/21完成\n2:10/26完成', planned_date:'2026-10-25' }])
     const w = mountView(); await flushPromises()
     const headers = w.findAll('.patrol-table thead th').map(h => h.text())
-    expect(headers.slice(2, 10)).toEqual(['员工人数','拉线','场地面积（平方）','责任范围','责任主管','1月-9月份\n加工费（万）','实际总产值（元）当年1月1日至检查当日','本次评级'])
+    expect(headers.slice(2, 10)).toEqual(['员工人数','拉线','场地面积（平方）','责任范围','责任主管','1月-9月份\n加工费（万）','实际总产值（万）当年1月1日至检查当日','本次评级'])
     expect(headers).not.toContain('计划完成时间')
     expect(w.find('.sheet-heading').text()).toContain('2026-10-16')
     expect(w.find('td.field-completed_date').text()).toBe('1:10/21完成\n2:10/26完成')

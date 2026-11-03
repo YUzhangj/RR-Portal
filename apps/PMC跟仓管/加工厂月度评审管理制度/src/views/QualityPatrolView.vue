@@ -48,7 +48,7 @@ function actualOutput(row: RecordModel) {
   if (outputState.value) return outputState.value
   const amounts = actualAmounts.value[String(row.check_date).slice(0, 10)]
   if (!amounts) return '检查日期无效'
-  return (amounts[row.factory] || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return Math.round((amounts[row.factory] || 0) / 10000).toLocaleString('zh-CN')
 }
 async function refreshOutput() {
   const current = ++outputRequest
@@ -282,7 +282,7 @@ async function remove(r: RecordModel) {
         <div class="sheet-heading">{{ date || '各期' }} {{ region ? REGION_LABELS[region] : '' }}加工厂检查总结</div>
         <div class="sheet-scroll">
           <table class="patrol-table">
-            <thead><tr><th scope="col">序号</th><th scope="col">厂名</th><template v-for="f in tableFields" :key="f.key"><th scope="col" :class="['field-' + f.key, { narrative: f.type === 'text' }]">{{ headerLabel(f) }}</th><th v-if="f.key === 'processing_fee'" scope="col" class="actual-output">实际总产值（元）<small>当年1月1日至检查当日</small></th></template><th scope="col">现场照片</th><th scope="col">备注</th><th v-if="editable" scope="col">操作</th></tr></thead>
+            <thead><tr><th scope="col">序号</th><th scope="col">厂名</th><template v-for="f in tableFields" :key="f.key"><th scope="col" :class="['field-' + f.key, { narrative: f.type === 'text' }]">{{ headerLabel(f) }}</th><th v-if="f.key === 'processing_fee'" scope="col" class="actual-output">实际总产值（万）<small>当年1月1日至检查当日</small></th></template><th scope="col">现场照片</th><th scope="col">备注</th><th v-if="editable" scope="col">操作</th></tr></thead>
             <tbody>
               <tr v-for="(r, i) in rows" :key="r.id">
                 <td>{{ i + 1 }}</td><td class="factory-cell" :class="{ visitor: r.visitor_ready }"><strong>{{ factoryName(r.factory) }}</strong><small>{{ r.check_date.slice(0, 10) }}</small></td>

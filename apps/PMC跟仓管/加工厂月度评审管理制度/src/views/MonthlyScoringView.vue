@@ -7,10 +7,13 @@ import { useScoresStore } from '../stores/scores'
 import { useScoreTemplatesStore } from '../stores/scoreTemplates'
 import { useAuthStore } from '../stores/auth'
 import { pb } from '../pb'
+import { computeFactoryStats } from '../utils/factoryStats'
 import {
   factoryIdsWithOrdersInRange,
   filterMonthlyScoringData,
   mergeAutomaticScores,
+  orderMonth,
+  recordMonth,
 } from '../utils/monthlyAutoScoring'
 import {
   monthsInScoringRange,
@@ -43,12 +46,12 @@ const loadingScores = ref(false)
 const autoScoring = ref(false)
 const autoProgress = ref('')
 const scoringOrders = ref<Order[]>([])
+const scoringInspections = ref<QualityInspection[]>([])
 const myRegions = computed(() => (auth.role ? allowedRegions(auth.role) : REGIONS))
 
 const gradeCls: Record<string, string> = { A: 'badge-A', B: 'badge-B', C: 'badge-C', D: 'badge-D' }
 const statusLabel: Record<string, string> = { draft: '草稿', submitted: '已提交', approved: '已审批' }
-const flagLabel: Record<string, string> = { yellow: '黄牌', red: '红牌' }
-const formatScore = (value: number) => String(Math.round(value))
+const formatAmount = (value: number | undefined) => value == null ? '—' : value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
 const selectedRange = computed(() => resolveScoringRange(rangeMode.value, month.value, customStart.value, customEnd.value))
 const rangeMonthCount = computed(() => monthsInScoringRange(selectedRange.value))
@@ -74,6 +77,45 @@ const scoreByFactory = computed(() => {
   return Object.fromEntries(Object.entries(grouped).map(([factoryId, values]) => [factoryId, summarizeFactoryScores(values)]))
 })
 
+// 产值与产值管理一致，按下单月份；货期与自动评分一致，按交货月份。
+const metricsByFactory = computed(() => {
+  const grouped: Record<string, { output?: number; cost?: number; orderCount: number; delayed: boolean }> = {}
+  const metric = (id: string) => grouped[id] ??= { orderCount: 0, delayed: false }
+  const inRange = (month: string) => !!month && month >= selectedRange.value.start && month <= selectedRange.value.end
+  for (const order of scoringOrders.value) {
+    const row = metric(order.factory)
+    if (inRange(recordMonth(order.order_date))) {
+      if (order.amount != null) row.output = (row.output ?? 0) + (Number(order.amount) || 0)
+      if (order.quote_labor_price != null && order.quantity != null) {
+        row.cost = (row.cost ?? 0) + (Number(order.quote_labor_price) || 0) * (Number(order.quantity) || 0)
+      }
+    }
+    if (inRange(orderMonth(order)) && order.status !== 'cancelled') {
+      row.orderCount += 1
+      row.delayed ||= !!order.is_delayed || Number(order.delay_days) > 0
+    }
+  }
+  return grouped
+})
+// 直接使用品质检验明细，与工厂品质统计的合格率保持相同口径。
+const qualityByFactory = computed(() => {
+  const grouped: Record<string, QualityInspection[]> = {}
+  for (const inspection of scoringInspections.value) {
+    const month = recordMonth(inspection.inspect_date)
+    if (!inspection.factory || !month || month < selectedRange.value.start || month > selectedRange.value.end) continue
+    ;(grouped[inspection.factory] ??= []).push(inspection)
+  }
+  return Object.fromEntries(Object.entries(grouped).map(([id, records]) => [id, computeFactoryStats([], records)]))
+})
+const passRate = (id: string) => {
+  if (loadingScores.value) return '加载中…'
+  return qualityByFactory.value[id]?.intRate.replace('-', '—') ?? '—'
+}
+const qualityTitle = (id: string) => {
+  const stats = qualityByFactory.value[id]
+  return stats ? `品质检验明细：合格 ${stats.intPass} / 验货 ${stats.intInspect} 条` : '品质检验明细暂无数据'
+}
+
 const rows = computed(() => {
   let list = filterByCraft(factories.items, null).filter((f) => allowedCrafts().includes(f.craft))
   list = list.filter((f) => factoryIdsWithOrders.value.has(f.id))
@@ -94,22 +136,24 @@ const rows = computed(() => {
 
 async function load(force = false) {
   const range = selectedRange.value
-  if (!force) {
-    const cachedOrders = scores.restoreScoringList(range.start, range.end)
-    if (cachedOrders) {
-      scoringOrders.value = cachedOrders
-      return
-    }
-  }
+  const cachedOrders = force ? null : scores.restoreScoringList(range.start, range.end)
   loadingScores.value = true
   try {
-    const [, , , orders] = await Promise.all([
+    if (cachedOrders) {
+      const inspections = await pb.collection('quality_inspections').getFullList<QualityInspection>()
+      scoringOrders.value = cachedOrders
+      scoringInspections.value = inspections
+      return
+    }
+    const [, , , orders, inspections] = await Promise.all([
       factories.fetchAll(),
       range.start === range.end ? scores.fetchByMonth(range.start) : scores.fetchByRange(range.start, range.end),
       templates.fetchAll(),
       pb.collection('orders').getFullList<Order>(),
+      pb.collection('quality_inspections').getFullList<QualityInspection>(),
     ])
     scoringOrders.value = orders
+    scoringInspections.value = inspections
     scores.rememberScoringList(range.start, range.end, orders)
   } finally {
     loadingScores.value = false
@@ -140,6 +184,7 @@ async function calculateMonthScores() {
       pb.collection('quality_5s_checks').getFullList<Quality5sCheck>(),
     ])
     scoringOrders.value = orders
+    scoringInspections.value = inspections
     const existing = monthlyScoreByFactory.value
     // 保存会更新缓存并触发分数排序；本次计算始终遍历固定的工厂列表。
     const factoriesToScore = [...rows.value]
@@ -212,8 +257,10 @@ load()
         </button>
       </div>
       <p v-if="autoProgress" class="auto-progress">{{ autoProgress }}</p>
+      <p class="metrics-hint">加工值按下单月份汇总产值；成本按下单月份汇总核价工价 × 数量；货期按交货月份判断是否有延期订单；合格率直接采用品质检验明细，按所选月份的合格单数 ÷ 验货总单数统计；IP管控与加工类型取工厂资料。缺少数据时显示“—”。</p>
+      <div class="table-scroll" tabindex="0" aria-label="工厂月度评分表格">
       <table>
-        <thead><tr><th>工厂</th><th>部门</th><th>{{ isRange ? '平均分' : '总分' }}</th><th>{{ isRange ? '综合等级' : '等级' }}</th><th>{{ isRange ? '最高牌级' : '红黄牌' }}</th><th>{{ isRange ? '评分月份' : '状态' }}</th><th>操作</th></tr></thead>
+        <thead><tr><th>工厂</th><th>部门</th><th>综合评级</th><th>加工值</th><th>成本</th><th>货期</th><th>合格率</th><th>IP管控</th><th>加工类型</th><th>{{ isRange ? '评分月份' : '状态' }}</th><th>操作</th></tr></thead>
         <tbody>
           <tr v-for="f in rows" :key="f.id">
             <td>
@@ -224,15 +271,16 @@ load()
               >{{ f.name }}</RouterLink>
             </td>
             <td class="muted">{{ CRAFT_LABELS[f.craft] }}</td>
-            <td><strong v-if="scoreByFactory[f.id]?.totalScore != null">{{ formatScore(scoreByFactory[f.id].totalScore!) }}</strong><span v-else class="muted">—</span></td>
             <td>
               <span v-if="scoreByFactory[f.id]?.grade" class="badge" :class="gradeCls[scoreByFactory[f.id].grade!]">{{ scoreByFactory[f.id].grade }}</span>
               <span v-else class="muted">—</span>
             </td>
-            <td>
-              <span v-if="scoreByFactory[f.id] && scoreByFactory[f.id].flag !== 'none'" class="badge" :class="'flag-' + scoreByFactory[f.id].flag">{{ flagLabel[scoreByFactory[f.id].flag] }}</span>
-              <span v-else class="muted">—</span>
-            </td>
+            <td>{{ formatAmount(metricsByFactory[f.id]?.output) }}</td>
+            <td>{{ formatAmount(metricsByFactory[f.id]?.cost) }}</td>
+            <td>{{ !metricsByFactory[f.id]?.orderCount ? '—' : metricsByFactory[f.id]?.delayed ? '有延期订单' : '无延期订单' }}</td>
+            <td :title="qualityTitle(f.id)">{{ passRate(f.id) }}</td>
+            <td>{{ f.ip_control?.trim() || '—' }}</td>
+            <td>{{ f.processable_types?.trim() || '—' }}</td>
             <td>
               <span v-if="isRange" class="badge range-coverage" :title="`${rangeLabel} 共 ${rangeMonthCount} 个月`">
                 {{ scoreByFactory[f.id]?.monthsScored ?? 0 }}/{{ rangeMonthCount }}个月
@@ -244,16 +292,21 @@ load()
             <td><RouterLink :to="`/factories/${f.id}/score/${selectedRange.end}`"><button class="ghost mini">{{ isRange ? '末月评分' : '评分' }} →</button></RouterLink></td>
           </tr>
           <tr v-if="!rows.length">
-            <td colspan="7" class="hint" style="text-align:center">
+            <td colspan="11" class="hint" style="text-align:center">
               {{ loadingScores ? '正在加载...' : '当前评分范围内暂无订单工厂' }}
             </td>
           </tr>
         </tbody>
       </table>
+      </div>
     </div>
   </AppLayout>
 </template>
 <style scoped>
+.metrics-hint { color: var(--text-soft); font-size: .82rem; line-height: 1.6; }
+.table-scroll { overflow-x: auto; }
+.table-scroll table { min-width: 1400px; }
+.table-scroll th, .table-scroll td { white-space: nowrap; }
 .mini { padding: .25rem .6rem; font-size: .8rem; }
 .auto-progress { margin: .6rem 0; color: var(--text-soft); font-size: .88rem; }
 .factory-search { width: 190px; min-width: 150px; }

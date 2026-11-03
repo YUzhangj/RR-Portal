@@ -4,7 +4,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 
 const state = vi.hoisted(() => ({ update: vi.fn() }))
 const factoryItems = [
-  { id: 'factory-1', name: '工厂甲', craft: 'injection', region: 'dongguan' },
+  { id: 'factory-1', name: '工厂甲', craft: 'injection', region: 'dongguan', ip_control: '已受控', processable_types: '塑胶注塑' },
   { id: 'factory-2', name: '工厂乙', craft: 'injection', region: 'dongguan' },
 ]
 const templates = [{
@@ -16,7 +16,7 @@ const records = factoryItems.map((factory, index) => ({
   score_items: [{ template_id: 'delivery', score: index === 0 ? 20 : 10 }],
 }))
 const orders = factoryItems.map((factory, index) => ({
-  id: 'order-' + index, factory: factory.id, delivery_date: '2026-08-10', is_delayed: index === 0,
+  id: 'order-' + index, factory: factory.id, delivery_date: '2026-08-10', is_delayed: index === 0, order_date: '2026-08-01', amount: index === 0 ? 1200 : undefined, quote_labor_price: index === 0 ? 2 : undefined, quantity: 100,
 }))
 
 vi.mock('../src/components/AppLayout.vue', () => ({ default: { template: '<main><slot /></main>' } }))
@@ -38,7 +38,15 @@ vi.mock('../src/stores/scoreTemplates', () => ({
 }))
 vi.mock('../src/pb', () => ({ pb: { collection: (name: string) => ({
   getFullList: async (options?: { filter?: string }) => {
-    if (name === 'orders') return orders
+    if (name === 'orders') return [...orders,
+      { id: 'old-order', factory: 'factory-1', order_date: '2026-07-01', delivery_date: '2026-07-10', amount: 300, quote_labor_price: 1, quantity: 100 },
+    ]
+    if (name === 'quality_inspections') return [
+      { factory: 'factory-1', inspect_date: '2026-08-10', internal_result: 'PASS' },
+      { factory: 'factory-1', inspect_date: '2026-08-11', internal_result: 'FAIL' },
+      { factory: 'factory-1', inspect_date: '2026-08-12', internal_result: '' },
+      { factory: 'factory-1', inspect_date: '2026-07-10', internal_result: 'PASS' },
+    ]
     if (name !== 'monthly_scores') return []
     return options?.filter?.startsWith('factory =')
       ? records.filter((record) => options.filter!.includes(record.factory))
@@ -50,6 +58,25 @@ vi.mock('../src/pb', () => ({ pb: { collection: (name: string) => ({
 import MonthlyScoringView from '../src/views/MonthlyScoringView.vue'
 
 describe('批量自动评分', () => {
+  it('展示七项指标并随评分范围汇总，移除红黄牌', async () => {
+    setActivePinia(createPinia())
+    const wrapper = mount(MonthlyScoringView)
+    await flushPromises()
+    const headers = wrapper.findAll('th').map((cell) => cell.text())
+    expect(headers).toEqual(['工厂', '部门', '综合评级', '加工值', '成本', '货期', '合格率', 'IP管控', '加工类型', '状态', '操作'])
+    const cells = () => wrapper.findAll('tbody tr')[0].findAll('td').map((cell) => cell.text())
+    expect(cells().slice(3, 9)).toEqual(['1,200.00', '200.00', '有延期订单', '33.33%', '已受控', '塑胶注塑'])
+    expect(wrapper.findAll('tbody tr')[1].findAll('td').slice(3, 9).map((cell) => cell.text()))
+      .toEqual(['—', '—', '无延期订单', '—', '—', '—'])
+    expect(wrapper.text()).not.toContain('红黄牌')
+    expect(wrapper.findAll('tbody tr')[0].findAll('td')[6].attributes('title')).toContain('品质检验明细：合格 1 / 验货 3 条')
+    await wrapper.find('select[aria-label="评分时间范围"]').setValue('two_months')
+    await flushPromises()
+    expect(cells().slice(3, 7)).toEqual(['1,500.00', '300.00', '有延期订单', '50.00%'])
+    wrapper.unmount()
+  })
+
+
   it('保存后列表重新排序仍对每家工厂仅计算一次', async () => {
     setActivePinia(createPinia())
     state.update.mockImplementation(async (id, data) => ({ ...records.find((record) => record.id === id), ...data }))
