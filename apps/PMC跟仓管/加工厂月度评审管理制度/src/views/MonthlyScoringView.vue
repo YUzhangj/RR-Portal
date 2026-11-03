@@ -1,5 +1,10 @@
+<script lang="ts">
+// The existing range cache has no account key. Reuse only snapshots this
+// page has proved belong to the same account and permission scope.
+const scoringCacheOwners = new WeakMap<object, Map<string, string>>()
+</script>
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AppLayout from '../components/AppLayout.vue'
 import { useFactoriesStore, filterByCraft } from '../stores/factories'
@@ -21,9 +26,10 @@ import {
   summarizeFactoryScores,
   type ScoringRangeMode,
 } from '../utils/scoringDateRange'
-import { allowedCrafts, allowedRegions } from '../utils/permissions'
+import { allowedCrafts, allowedRegions, canViewCraft } from '../utils/permissions'
 import { CRAFT_LABELS, REGION_LABELS, regionOf, REGIONS, type Craft, type Region } from '../constants/roles'
-import type { MonthlyScore } from '../types/score'
+import type { MonthlyScore, ScoreTemplate } from '../types/score'
+import type { Factory } from '../types/factory'
 import type { Order } from '../types/order'
 import type { QualityInspection } from '../types/qualityInspection'
 import type { Quality5sCheck } from '../types/quality5s'
@@ -43,6 +49,9 @@ const rangeMode = ref<ScoringRangeMode>('month')
 const customStart = ref(month.value)
 const customEnd = ref(month.value)
 const loadingScores = ref(false)
+const loadError = ref('')
+const loadedContext = ref('')
+let loadRequest = 0
 const autoScoring = ref(false)
 const autoProgress = ref('')
 const scoringOrders = ref<Order[]>([])
@@ -54,6 +63,14 @@ const statusLabel: Record<string, string> = { draft: '草稿', submitted: '已�
 const formatAmount = (value: number | undefined) => value == null ? '—' : value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
 const selectedRange = computed(() => resolveScoringRange(rangeMode.value, month.value, customStart.value, customEnd.value))
+const identityKey = () => JSON.stringify([
+  auth.userId, auth.role,
+  allowedCrafts(), auth.role ? allowedRegions(auth.role) : [],
+  pb.authStore?.record?.id, pb.authStore?.record?.permissions,
+])
+const contextKey = () => JSON.stringify([selectedRange.value.start, selectedRange.value.end, identityKey()])
+const rangeKey = (start: string, end: string) => `${start}:${end}`
+const snapshotReady = computed(() => !!loadedContext.value && loadedContext.value === contextKey())
 const rangeMonthCount = computed(() => monthsInScoringRange(selectedRange.value))
 const isRange = computed(() => rangeMode.value !== 'month')
 const rangeLabel = computed(() => selectedRange.value.start === selectedRange.value.end
@@ -117,6 +134,7 @@ const qualityTitle = (id: string) => {
 }
 
 const rows = computed(() => {
+  if (!snapshotReady.value || loadingScores.value || loadError.value) return []
   let list = filterByCraft(factories.items, null).filter((f) => allowedCrafts().includes(f.craft))
   list = list.filter((f) => factoryIdsWithOrders.value.has(f.id))
   list = list.filter((f) => myRegions.value.includes(regionOf(f)))
@@ -135,30 +153,75 @@ const rows = computed(() => {
 })
 
 async function load(force = false) {
-  const range = selectedRange.value
-  const cachedOrders = force ? null : scores.restoreScoringList(range.start, range.end)
+  const request = ++loadRequest
+  const range = { ...selectedRange.value }
+  const context = contextKey()
+  const current = () => request === loadRequest && context === contextKey()
+  const cachedOrders = !force && scoringCacheOwners.get(scores)?.get(rangeKey(range.start, range.end)) === identityKey()
+    ? scores.restoreScoringList(range.start, range.end) : null
   loadingScores.value = true
+  loadError.value = ''
+  loadedContext.value = ''
+  scoringOrders.value = []
+  scoringInspections.value = []
   try {
     if (cachedOrders) {
       const inspections = await pb.collection('quality_inspections').getFullList<QualityInspection>()
+      if (!current()) return
       scoringOrders.value = cachedOrders
       scoringInspections.value = inspections
+      loadedContext.value = context
       return
     }
-    const [, , , orders, inspections] = await Promise.all([
-      factories.fetchAll(),
-      range.start === range.end ? scores.fetchByMonth(range.start) : scores.fetchByRange(range.start, range.end),
-      templates.fetchAll(),
+    // Read into temporary snapshots: the stores' fetch helpers write their
+    // shared state before returning, so checking only afterwards is too late.
+    const [factoryRecords, scoreRecords, templateRecords, orders, inspections] = await Promise.all([
+      pb.collection('factories').getFullList<Factory>({ sort: 'name' }),
+      pb.collection('monthly_scores').getFullList<MonthlyScore>({
+        filter: range.start === range.end ? `year_month = "${range.start}"` : `year_month >= "${range.start}" && year_month <= "${range.end}"`,
+        expand: 'factory', ...(range.start === range.end ? {} : { sort: 'year_month' }),
+      }),
+      pb.collection('score_templates').getFullList<ScoreTemplate>({ sort: 'sort_order' }),
       pb.collection('orders').getFullList<Order>(),
       pb.collection('quality_inspections').getFullList<QualityInspection>(),
     ])
+    if (!current()) return
+    factories.items = factoryRecords.filter(factory => canViewCraft(factory.craft))
+    scores.items = scoreRecords.filter(score => {
+      const craft = (score as MonthlyScore & { expand?: { factory?: { craft?: Craft } } }).expand?.factory?.craft
+      return !craft || canViewCraft(craft)
+    })
+    templates.items = templateRecords
     scoringOrders.value = orders
     scoringInspections.value = inspections
     scores.rememberScoringList(range.start, range.end, orders)
+    const owners = scoringCacheOwners.get(scores) ?? new Map<string, string>()
+    owners.set(rangeKey(range.start, range.end), identityKey())
+    scoringCacheOwners.set(scores, owners)
+    loadedContext.value = context
+  } catch {
+    if (current()) loadError.value = '评分指标加载失败，请重试。'
   } finally {
-    loadingScores.value = false
+    if (current()) loadingScores.value = false
   }
 }
+
+let identity = identityKey()
+function invalidateIdentity() {
+  const nextIdentity = identityKey()
+  if (nextIdentity === identity) return
+  identity = nextIdentity
+  loadRequest++
+  scoringCacheOwners.delete(scores)
+  loadedContext.value = ''
+  scoringOrders.value = []
+  scoringInspections.value = []
+  loadingScores.value = false
+  loadError.value = '账号或权限已变更，请重新加载评分指标。'
+}
+watch(() => [auth.userId, auth.role, auth.crafts], invalidateIdentity, { flush: 'sync' })
+const stopAuth = pb.authStore?.onChange(invalidateIdentity)
+onBeforeUnmount(() => { loadRequest++; stopAuth?.() })
 
 function changeRangeMode() {
   if (rangeMode.value === 'custom') {
@@ -252,11 +315,12 @@ load()
           <label class="range-month"><input v-model="customEnd" type="month" aria-label="结束月份" @change="load(true)" /></label>
         </template>
         <label v-else>{{ rangeMode === 'month' ? '月份' : '基准月份' }} <input v-model="month" type="month" @change="changeMonth" /></label>
-        <button v-if="!isRange" class="ghost" :disabled="autoScoring || loadingScores" @click="calculateMonthScores">
+        <button v-if="!isRange" class="ghost" :disabled="autoScoring || loadingScores || !snapshotReady || !!loadError" @click="calculateMonthScores">
           {{ autoScoring ? '自动评分中...' : '自动计算并提交本月评分' }}
         </button>
       </div>
       <p v-if="autoProgress" class="auto-progress">{{ autoProgress }}</p>
+      <p v-if="loadError" role="alert" class="load-error">{{ loadError }} <button class="ghost mini" :disabled="loadingScores || autoScoring" @click="load(true)">重新加载指标</button></p>
       <p class="metrics-hint">加工值按下单月份汇总产值；成本按下单月份汇总核价工价 × 数量；货期按交货月份判断是否有延期订单；合格率直接采用品质检验明细，按所选月份的合格单数 ÷ 验货总单数统计；IP管控与加工类型取工厂资料。缺少数据时显示“—”。</p>
       <div class="table-scroll" tabindex="0" aria-label="工厂月度评分表格">
       <table>
@@ -293,7 +357,7 @@ load()
           </tr>
           <tr v-if="!rows.length">
             <td colspan="11" class="hint" style="text-align:center">
-              {{ loadingScores ? '正在加载...' : '当前评分范围内暂无订单工厂' }}
+              {{ loadError ? '评分指标未加载，请重试。' : loadingScores || !snapshotReady ? '正在加载...' : '当前评分范围内暂无订单工厂' }}
             </td>
           </tr>
         </tbody>

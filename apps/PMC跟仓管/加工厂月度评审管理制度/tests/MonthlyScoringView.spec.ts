@@ -38,6 +38,8 @@ vi.mock('../src/stores/scoreTemplates', () => ({
 }))
 vi.mock('../src/pb', () => ({ pb: { collection: (name: string) => ({
   getFullList: async (options?: { filter?: string }) => {
+    if (name === 'factories') return factoryItems
+    if (name === 'score_templates') return templates
     if (name === 'orders') return [...orders,
       { id: 'old-order', factory: 'factory-1', order_date: '2026-07-01', delivery_date: '2026-07-10', amount: 300, quote_labor_price: 1, quantity: 100 },
     ]
