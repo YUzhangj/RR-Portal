@@ -7,6 +7,14 @@
   const compact = value => normalize(value).replace(/\s/g, '').replace(/[×＊*]/g, 'X');
   const supplierId = row => normalize(row.supplier_id || row.supplier_name);
   const supplierName = row => String(row.supplier_name || row.supplier_id || '').trim();
+  function setSupplier(row, value, knownRows = []) {
+    const name = String(value ?? '').trim();
+    const existing = knownRows.find(item => item !== row && normalize(supplierName(item)) === normalize(name));
+    const id = name ? (existing ? supplierId(existing) :
+      normalize(supplierName(row)) === normalize(name) ? supplierId(row) : normalize(name)) : '';
+    row.supplier_name = name;
+    row.supplier_id = id;
+  }
   const code = value => compact(value).replace(/^BEAUTYMINI[_-]S3-(\d+)$/, (_, n) => `BEAUTYM-S3-${String(Number(n)).padStart(3, '0')}`);
   const key = (row, byCode) => JSON.stringify([byCode ? code(row.product_code) : '',
     row.material_code ? ['code', compact(row.material_code)] : ['name', compact(row.name), compact(row.spec)]]);
@@ -79,5 +87,5 @@
     if ([...claims].some(token=>!validClaims.has(token))) throw Error('旧物料归属选择已失效，请重新核对');
     return {supplier:{id,name},batches:output,changes,counts};
   }
-  return {normalize,supplierId,supplierName,suppliers,key,legacyToken,isDetail,plan};
+  return {normalize,supplierId,supplierName,setSupplier,suppliers,key,legacyToken,isDetail,plan};
 });
