@@ -429,3 +429,73 @@ test('supplier fallback excludes addresses, department fields and arbitrary Engl
   assert.equal(parse('ACME CO LTD\n' + table([goodRow])).supplier, 'ACME CO LTD');
   assert.equal(parse('攀登\n' + table([goodRow])).supplier, '攀登');
 });
+
+test('numeric delivery labels retain the whole value including DN12 and parenthesized labels', () => {
+  for (const label of ['送货单号(DN#)', '送貨單號（DN#）', '发货单号(DN#)', 'NO.']) {
+    for (const value of ['DN12', '1ABC', 'A2026-07/09', '20261103001', 'DGHD.2673728']) {
+      assert.equal(parse(label + ': ' + value + '\n' + table([goodRow])).deliveryNo, value, label + ' / ' + value);
+    }
+  }
+  assert.equal(parse('送货单号(DN#): DELIVERY\n' + table([goodRow])).deliveryNo, '');
+});
+test('a labeled document PO precedes line tokens without treating name-cell PO text as header metadata', () => {
+  const fields = parse('订单号(PO#): DOC/123456\n品名 数量 单位\nP001 塑胶零件 100 个');
+  assert.equal(fields.orderNo, 'DOC/123456');
+  const rows = parse('| 订单号 | 货号 | 品名 | 数量 | 单位 |\n| PO-ACTUAL | P001 | PO:OTHER-100 | 100 | 个 |');
+  assert.equal(rows.orderNo, 'PO-ACTUAL');
+  assert.equal(rows.items[0].orderNo, 'PO-ACTUAL');
+  assert.equal(rows.items[0].productName, 'PO:OTHER-100');
+});
+test('explicit complex column positions keep PO, SKU, quantity and fractional trailing measurements distinct', () => {
+  const fields = parse('伟成合成测试制品厂\n订单号(PO#): DOC/123456\n' +
+    '序号 P/I NO. ITEM Description 数量 尺寸(mm) 重量(KG)\n' +
+    '1 PI/20261103-01 000123 合成零件 1000 12.5*20*3 0.650 KG\n' +
+    '2 PI/20261103-02 A031/2 S3 合成零件 20 300 10x20 3.75');
+  assert.equal(fields.orderNo, 'DOC/123456');
+  assert.deepEqual(fields.items, [
+    { ...item('000123', '合成零件', '1000', ''), orderNo: 'PI/20261103-01' },
+    { ...item('A031/2', 'S3 合成零件 20', '300', ''), orderNo: 'PI/20261103-02' },
+  ]);
+});
+test('unknown unitless layouts preserve the full row and require review rather than guessing price, PO or SKU', () => {
+  const examples = [
+    ['ITEM Description 数量', '1 PO100001 SKU001 合成零件 12345 20 1.50'],
+    ['序号 PO 货号 品名 数量 单价 尺寸 重量', '1 PO100001 SKU001 合成零件 1000 20 10*20 0.650'],
+    ['序号 PO 货号 品名 数量 重量', '1 PO100001 SKU001 合成零件 1000 0.650 KG'],
+    ['序号 PO 货号 品名 数量 尺寸 重量', '1 PO100001 SKU001 合成零件 1000 10*20'],
+    ['序号 PO 货号 品名 数量 单位', '1 PO100001 SKU001 合成零件 100 个'],
+  ];
+  for (const [header, raw] of examples) {
+    const fields = parse('其他合成供应商有限公司\n' + header + '\n' + raw);
+    assert.equal(fields.orderNo, '', raw);
+    assert.deepEqual(fields.items, [{ ...item('', '待核对原行：' + raw, '', ''), quantityNeedsReview: true }], raw);
+  }
+});
+test('an uncertain row remains beside a complete unit row without acquiring the preceding SKU', () => {
+  const raw = '1 PO100001 SKU001 合成零件 12345 20 1.50';
+  const fields = parse('品名 数量 单位\nP001 完整零件 100 个\n' + raw);
+  assert.deepEqual(fields.items, [item('P001', '完整零件', '100'),
+    { ...item('', '待核对原行：' + raw, '', ''), quantityNeedsReview: true }]);
+});
+test('ordinary sequence and quantity-unit headers retain the existing reliable unit parsing', () => {
+  for (const header of ['序号 货号 品名 数量 单位', 'NO. ITEM Description QTY 单位']) {
+    assert.deepEqual(parse(header + '\n1 P001 合成零件 100 个').items, [item('P001', '合成零件', '100')], header);
+  }
+});
+test('pipe document metadata remains ahead of the actual goods-table header for PO extraction', () => {
+  const fields = parse('| 订单号：PO-123456 |\n| 货号 | 品名 | 数量 |\n| P001 | 合成零件 | 100 |');
+  assert.equal(fields.orderNo, 'PO-123456');
+  assert.deepEqual(fields.items, [item('P001', '合成零件', '100', '')]);
+});
+test('a malformed or missing sequence under complex columns cannot fall back to interpreting weight as quantity', () => {
+  const header = '序号 PO 货号 品名 数量 尺寸 重量';
+  for (const raw of ['1.0 PO100001 SKU001 合成零件 1000 10*20 650 KG',
+    '① PO100001 SKU001 合成零件 1000 10*20 650 KG',
+    'PO100001 SKU001 合成零件 1000 10*20 650 KG']) {
+    const fields = parse('其他合成供应商有限公司\n' + header + '\n' + raw);
+    assert.deepEqual(fields.items, [{ ...item('', '待核对原行：' + raw, '', ''), quantityNeedsReview: true }], raw);
+    assert.equal(fields.orderNo, '', raw);
+  }
+  const valid = parse(header + '\n1 PO100001 SKU001 合成零件 1000 10*20 650 KG');
+  assert.deepEqual(valid.items, [{ ...item('SKU001', '合成零件', '1000', ''), orderNo:'PO100001' }]);
+});

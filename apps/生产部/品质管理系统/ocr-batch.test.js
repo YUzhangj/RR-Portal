@@ -176,6 +176,66 @@ test('integer, blank and zero OCR quantities keep their existing save behavior',
   for (let i = 0; i < 4; i++) assert.equal(b.ctx.saveRecord(), true);
   assert.deepEqual(b.json('state.records.map(r=>r.qty)'), [8760,0,0,8]);
 });
+test('flagged uncertain queue quantities cannot turn a blank into saved zero or persist parser-only flags', () => {
+  const b = browser();
+  b.ctx.__qcAiResult = { common: { date: '2026-11-03', supplier: 'Test Supplier' }, items: [
+    { productNo: '', productName: '待核对原行：1 PO100001 SKU001 合成零件 1000 20 1.50', qty: '', unit: '', quantityNeedsReview: true },
+    { productNo: 'P2', productName: 'Item 2', qty: '100' },
+  ] };
+  b.ctx.applyOcrToForm();
+  assert.equal(b.elements.get('f_qty').value, '');
+  assert.equal(b.messages.at(-1).type, 'error');
+  assert.equal(b.ctx.saveRecord(), false);
+  assert.equal(b.ctx.__qcQueue.idx, 0);
+  assert.deepEqual(b.json('state.records'), []);
+  b.elements.get('f_qty').value = '1000';
+  assert.equal(b.ctx.saveRecord(), true);
+  const record = b.json('state.records[0]');
+  assert.equal(record.qty, 1000);
+  assert.equal(record.productNo, '');
+  assert.equal('quantityNeedsReview' in record, false);
+  assert.equal('rawLine' in record, false);
+});
+test('flagged single-item OCR clears a stale form quantity and blocks saving until explicit correction', () => {
+  const b = browser(); b.ctx.openAddModal();
+  b.elements.get('f_qty').value = '777';
+  b.elements.get('ocrSupplier').value = 'Test Supplier';
+  b.elements.get('ocrProductName').value = '待核对原行：1 PO100001 SKU001 合成零件 1000 20 1.50';
+  b.ctx.__qcAiResult = { common: { supplier: 'Test Supplier' }, items: [
+    { productNo: '', productName: b.elements.get('ocrProductName').value, qty: '', unit: '', quantityNeedsReview: true },
+  ] };
+  b.ctx.applyOcrToForm();
+  assert.equal(b.elements.get('f_qty').value, '');
+  assert.equal(b.ctx.saveRecord(), false);
+  assert.deepEqual(b.json('state.records'), []);
+  b.elements.get('f_qty').value = '1000';
+  assert.equal(b.ctx.saveRecord(), true);
+  assert.equal(b.json('state.records[0]').qty, 1000);
+  assert.equal('quantityNeedsReview' in b.json('state.records[0]'), false);
+});
+test('a fresh uncertain recognition clears previous-image metadata through the actual start/apply path', async () => {
+  const b = browser(); b.ctx.openAddModal();
+  for (const [id,value] of [['ocrDate','2026-10-01'],['ocrProductNo','PREVIOUS-SKU'],['ocrOrderNo','PREVIOUS-PO'],['ocrDeliveryNo','PREVIOUS-DN'],['ocrQty','777']]) b.elements.get(id).value = value;
+  b.elements.get('f_productNo').value = 'STALE-FORM-SKU';
+  b.elements.get('f_orderNo').value = 'STALE-FORM-PO';
+  b.elements.get('f_qty').value = '777';
+  b.elements.set('ocrPreview', { src: 'data:image/png;base64,fixture' });
+  const fields = { date:'', supplier:'Test Supplier', deliveryNo:'', orderNo:'', type:'来料', items:[
+    { productNo:'', productName:'待核对原行：1 PO100001 SKU001 合成零件 1000 20 1.50', qty:'', unit:'', quantityNeedsReview:true },
+  ] };
+  b.ctx.__QC_AUTH = { user: { username:'fixture-admin' } };
+  b.ctx.__QC_REQUEST = async route => ({ok:true,status:200,json:async()=>route==='/api/ai/status'?{ready:true,ocrModel:'fixture-model'}:{ok:true,fields,rawText:'Synthetic raw transcript'}});
+  await b.ctx.startOcr();
+  for (const id of ['ocrDate','ocrProductNo','ocrOrderNo','ocrDeliveryNo','ocrQty']) assert.equal(b.elements.get(id).value,'',id);
+  b.ctx.applyOcrToForm();
+  for (const id of ['f_productNo','f_orderNo','f_qty']) assert.equal(b.elements.get(id).value,'',id);
+  assert.equal(b.ctx.saveRecord(),false);
+  assert.deepEqual(b.json('state.records'),[]);
+  b.elements.get('f_qty').value='1000';
+  assert.equal(b.ctx.saveRecord(),true);
+  assert.equal(b.json('state.records[0]').productNo,'');
+  assert.equal(b.json('state.records[0]').orderNo,'');
+});
 test('the real frontend writer never posts a truncated OCR quantity and posts the corrected count', async () => {
   const b = browser({ backend: true });
   b.ctx.__qcAiResult = { common: { date: '2026-10-20', supplier: 'Test Supplier' },

@@ -110,14 +110,15 @@
     var items = Array.isArray(fields.items) ? fields.items : [];
     var first = items[0] || {};
 
-    if (fields.date) setV('ocrDate', fields.date);
-    if (fields.supplier) setV('ocrSupplier', fields.supplier);
-    if (fields.deliveryNo) setV('ocrDeliveryNo', fields.deliveryNo);
-    if (fields.orderNo) setV('ocrOrderNo', fields.orderNo);
-    if (fields.type) setV('ocrType', fields.type || '来料');
-    if (first.productNo) setV('ocrProductNo', first.productNo);
-    if (first.productName) setV('ocrProductName', first.productName);
-    if (first.qty) setV('ocrQty', String(first.qty).replace(/[^\d.]/g, ''));
+    /* 每次识别整组替换；缺失字段不能继承上一张图片的日期、货号或PO。 */
+    setV('ocrDate', fields.date || '');
+    setV('ocrSupplier', fields.supplier || '');
+    setV('ocrDeliveryNo', fields.deliveryNo || '');
+    setV('ocrOrderNo', fields.orderNo || '');
+    setV('ocrType', fields.type || '来料');
+    setV('ocrProductNo', first.productNo || '');
+    setV('ocrProductName', first.productName || '');
+    setV('ocrQty', String(first.qty == null ? '' : first.qty).replace(/[^\d.]/g, ''));
 
     var lines = [];
     if (fields.supplier) lines.push('供应商：' + fields.supplier);
@@ -213,7 +214,7 @@
     setV('f_productNo', it.productNo || '');
     setV('f_productName', it.productName || '');
     setV('f_qty', String(it.qty == null ? '' : it.qty).replace(/[^\d.]/g, ''));
-    if (typeof window._markOcrQuantity === 'function') window._markOcrQuantity(it.qty);
+    if (typeof window._markOcrQuantity === 'function') window._markOcrQuantity(it.quantityNeedsReview ? '待核对' : it.qty);
     if (typeof window.onQtyChange === 'function') window.onQtyChange();
     if (typeof window.onProductNoChange === 'function') window.onProductNoChange();
     setT('modalTitle', '新增验货记录（第 ' + (q.idx + 1) + '/' + q.items.length + ' 条）');
@@ -262,7 +263,19 @@
         if (r && r.items && r.items.length > 1) return startQueue(r.common, r.items);
         var ret = origApply.apply(this, arguments);
         /* number 输入可能把多点原文清空，仍以原识别值标记待人工核对。 */
-        if (r && r.items && r.items.length === 1 && typeof window._markOcrQuantity === 'function') window._markOcrQuantity(r.items[0].qty);
+        if (r && r.items && r.items.length === 1 && typeof window._markOcrQuantity === 'function') {
+          var quantity = r.items[0].quantityNeedsReview ? '待核对' : r.items[0].qty;
+          var previewQty = document.getElementById('ocrQty');
+          if (r.items[0].quantityNeedsReview) {
+            var previewNo = document.getElementById('ocrProductNo');
+            var previewOrder = document.getElementById('ocrOrderNo');
+            setV('f_productNo', previewNo ? previewNo.value : '');
+            setV('f_orderNo', previewOrder ? previewOrder.value : '');
+            if (typeof window._syncOrderNoNA === 'function') window._syncOrderNoNA();
+          }
+          if (quantity && typeof window._isIntegerCountText === 'function' && !window._isIntegerCountText(String(quantity)) && !(previewQty && previewQty.value.trim())) setV('f_qty', '');
+          window._markOcrQuantity(quantity);
+        }
         return ret;
       };
       window.applyOcrToForm.__qcWrapped = true;
