@@ -982,3 +982,10 @@ html[data-verification-ui="precision"] #verification-list .verification-list-tab
   padding: 4px 6px;
   background: #e8f0ff !important;
 }
+
+/* Preserve the desktop workspace while making its edges reachable on tablets. */
+@media (min-width: 901px) and (max-width: 1079px) {
+  html[data-verification-ui="precision"] body:has(#verification-list:not(.hidden)) {
+    overflow: auto;
+  }
+}

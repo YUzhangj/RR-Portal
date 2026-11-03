@@ -15,14 +15,18 @@ async function api(path, options = {}) {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   });
-  if (response.status === 401) {
+  const errorBody = response.ok ? null : await response.json().catch(() => ({}));
+  // An incorrect current password is a validation failure, not an expired session.
+  const incorrectCurrentPassword = path === '/auth/change-password'
+    && errorBody?.error === '当前密码错误';
+  if (response.status === 401 && !incorrectCurrentPassword) {
     if (!authRedirectStarted) {
       authRedirectStarted = true;
       window.location.replace('./index.html?next=verification');
     }
     throw new Error('登录状态已失效，正在返回登录页…');
   }
-  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || response.statusText);
+  if (!response.ok) throw new Error(errorBody.error || response.statusText);
   return response.json();
 }
 
@@ -267,6 +271,7 @@ let activeDepartment = null;
 let sectionDirty = false;
 let sectionSavePending = false;
 let versionLoadPending = false;
+let factorySwitchPending = false;
 let taskRequestSequence = 0;
 let comparisonState = { quoteId: null, baseline: 'quote', targets: null, dept: 'all', changedOnly: true, query: '' };
 let comparisonRefreshToken = 0;
@@ -289,6 +294,49 @@ function hasPermission(user, menu, action) {
   return Boolean(user?.perms?.[menu]?.[`can_${action}`]);
 }
 
+async function switchFactory(factoryCode) {
+  if (factoryCode === me.active_factory_code || factorySwitchPending
+    || sectionSavePending || versionLoadPending || workshopSavePending) return;
+  if (sectionDirty && !confirm('当前部门有未保存修改，切换厂区会放弃这些修改。确认继续？')) return;
+  const previousFactory = me.active_factory_code;
+  factorySwitchPending = true;
+  versionLoadPending = true;
+  const content = document.querySelector('main.verification-page');
+  const wasInert = content?.inert;
+  if (content) content.inert = true;
+  $('factory-switch').querySelectorAll('button').forEach(button => { button.disabled = true; });
+  try {
+    await api('/auth/factory', { method: 'POST', body: JSON.stringify({ factory_code: factoryCode }) });
+    // Recreate the entire workspace in the new factory. Old detail callbacks,
+    // drafts and pending reads must not be reused with the changed session.
+    sectionDirty = false;
+    window.location.href = './verification.html';
+  } catch (error) {
+    // The session cookie may already have changed even when the response was
+    // interrupted or its JSON could not be read. Never unlock an old factory's
+    // editors until the server has confirmed the effective session factory.
+    let currentUser;
+    try {
+      currentUser = await api('/auth/me');
+      if (!currentUser?.active_factory_code) throw new Error('无法确认当前厂区');
+    } catch {
+      alert('未能确认当前厂区，已暂停编辑以防保存到错误厂区。请用浏览器刷新页面后再继续。');
+      return;
+    }
+    if (currentUser.active_factory_code !== previousFactory) {
+      sectionDirty = false;
+      window.location.href = './verification.html';
+      return;
+    }
+    me = currentUser;
+    factorySwitchPending = false;
+    versionLoadPending = false;
+    if (content) content.inert = wasInert;
+    alert(error.message);
+    renderUserHeader();
+  }
+}
+
 function renderUserHeader() {
   if (!me) return;
   const roleZh = { admin: '管理员', supervisor: '主管', staff: '员工' }[me.role] || me.role;
@@ -303,17 +351,7 @@ function renderUserHeader() {
     factoryChip.classList.add('hidden');
     factorySwitch.classList.remove('hidden');
     factorySwitch.querySelectorAll('.top-factory-btn').forEach(button => {
-      button.onclick = async () => {
-        if (button.classList.contains('active')) return;
-        factorySwitch.querySelectorAll('button').forEach(item => { item.disabled = true; });
-        try {
-          await api('/auth/factory', { method: 'POST', body: JSON.stringify({ factory_code: button.dataset.code }) });
-          versionCache.clear(); selectedQuoteId = null; taskState = null;
-          await loadList();
-        } catch (error) {
-          alert(error.message); renderUserHeader();
-        }
-      };
+      button.onclick = () => switchFactory(button.dataset.code);
     });
   } else {
     factorySwitch.classList.add('hidden');
