@@ -3875,15 +3875,17 @@ function _combineMeasStandard(row) {
 }
 
 /* ── 判断单值是否在 标准±公差 内 ── */
-function _inTol(valStr, stdStr, tolStr) {
+function _inTol(valStr, stdStr, tolStr, dir) {
   const v=parseFloat(valStr), std=parseFloat(stdStr), tol=parseFloat(tolStr);
   if (!Number.isFinite(v)||!Number.isFinite(std)||!Number.isFinite(tol)||!tolStr) return null;
   if (tol < 0) return false;
-  if (tol === 0) return v === std;
   /* 只容纳二进制浮点在当前数量级的舍入误差，不额外放宽实际公差。
      例如 2.3 + 0.05 的浮点边界略低于 2.35；1e-9 固定余量会放行真实超差。 */
   const eps = Number.EPSILON * Math.max(Math.abs(v), Math.abs(std), Math.abs(tol));
-  return v >= std - tol - eps && v <= std + tol + eps;
+  /* dir：'+' 只正差（标准值~标准+公差）；'-' 只负差（标准-公差~标准值）；默认正负差 */
+  const lo = dir === '+' ? std : std - tol;
+  const hi = dir === '-' ? std : std + tol;
+  return v >= lo - eps && v <= hi + eps;
 }
 
 /* ── 自动判定 PASS / FAIL ── */
@@ -3897,7 +3899,7 @@ function _autoJudgeMeas(row) {
   if (mt === 'single') {
     const filled=(row.values||[]).filter(v=>v!=='');
     if (!filled.length || !row.tolerance) return null;
-    const res=filled.map(v=>_inTol(v,row.standard,row.tolerance));
+    const res=filled.map(v=>_inTol(v,row.standard,row.tolerance,row.tolDir));
     if (res.some(r=>r===null)) return null;
     return res.every(r=>r===true)?'PASS':'FAIL';
   }
@@ -3907,8 +3909,8 @@ function _autoJudgeMeas(row) {
     for (let j=0;j<8;j++) {
       const l=row.lValues?.[j]||'',w=row.wValues?.[j]||'';
       if (!l&&!w) continue; hasAny=true;
-      const rl=_inTol(l,row.standardL,row.toleranceL);
-      const rw=_inTol(w,row.standardW,row.toleranceW);
+      const rl=_inTol(l,row.standardL,row.toleranceL,row.tolDir);
+      const rw=_inTol(w,row.standardW,row.toleranceW,row.tolDir);
       if ((rl!==null&&!rl)||(rw!==null&&!rw)){allPass=false;break;}
     }
     return hasAny?(allPass?'PASS':'FAIL'):null;
@@ -3919,9 +3921,9 @@ function _autoJudgeMeas(row) {
     for (let j=0;j<8;j++) {
       const l=row.lValues?.[j]||'',w=row.wValues?.[j]||'',h=row.hValues?.[j]||'';
       if (!l&&!w&&!h) continue; hasAny=true;
-      const rl=_inTol(l,row.standardL,row.toleranceL);
-      const rw=_inTol(w,row.standardW,row.toleranceW);
-      const rh=_inTol(h,row.standardH,row.toleranceH);
+      const rl=_inTol(l,row.standardL,row.toleranceL,row.tolDir);
+      const rw=_inTol(w,row.standardW,row.toleranceW,row.tolDir);
+      const rh=_inTol(h,row.standardH,row.toleranceH,row.tolDir);
       if ((rl!==null&&!rl)||(rw!==null&&!rw)||(rh!==null&&!rh)){allPass=false;break;}
     }
     return hasAny?(allPass?'PASS':'FAIL'):null;
@@ -4030,7 +4032,7 @@ function _measValGrid(rowIdx, label, field, values) {
       <span style="font-size:9.5px;color:var(--text-muted);text-align:right">${label}</span>
       ${Array.from({length:8},(_,j)=>`<input type="text" value="${values[j]||''}"
         style="${inStyle}"
-        oninput="updateMeasCell(${rowIdx},'${field}',${j},this.value)"/>`
+        oninput="updateMeasCell(${rowIdx},'${field}',${j},this.value);this.value=this.value.replace(/[^\d.]/g,'')"/>`
       ).join('')}
     </div>`;
 }
@@ -4104,46 +4106,57 @@ function _renderMeasRows() {
       stdRow = `<div style="display:flex;gap:5px;margin-bottom:4px;align-items:center;flex-wrap:wrap">
         <span style="font-size:10px;color:var(--text-dim)">标准值</span>
         <input type="text" value="${row.standard||''}" placeholder="如：10.0"
-          style="${inSm};max-width:100px" oninput="updateMeasField(${i},'standard',this.value)"/>
-        <span style="font-size:10px;color:var(--text-dim)">公差±</span>
+          style="${inSm};max-width:100px" oninput="updateMeasField(${i},'standard',this.value);this.value=this.value.replace(/[^\d.]/g,'')"/>
+        <span style="font-size:10px;color:var(--text-dim)">公差</span>
+        <select style="${inSm};max-width:58px;padding:2px" onchange="updateMeasField(${i},'tolDir',this.value)">
+          ${['±','+','-'].map(d=>`<option value="${d}" ${((row.tolDir||'±')===d)?'selected':''}>${d==='±'?'正负':(d==='+'?'正':'负')}</option>`).join('')}
+        </select>
         <input type="text" value="${row.tolerance||''}" placeholder="如：0.5"
-          style="${inSm}" oninput="updateMeasField(${i},'tolerance',this.value)"/>
+          style="${inSm}" oninput="updateMeasField(${i},'tolerance',this.value);this.value=this.value.replace(/[^\d.]/g,'')"/>
       </div>`;
     } else if (mt === 'LW') {
-      stdRow = `<div style="display:grid;grid-template-columns:repeat(4,auto);gap:4px;margin-bottom:4px;align-items:center">
+      stdRow = `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;align-items:center">
         <span style="font-size:10px;color:var(--text-dim)">L</span>
         <input type="text" value="${row.standardL||''}" placeholder="L标准"
-          style="${inSm}" oninput="updateMeasField(${i},'standardL',this.value)"/>
+          style="${inSm}" oninput="updateMeasField(${i},'standardL',this.value);this.value=this.value.replace(/[^\d.]/g,'')"/>
         <span style="font-size:10px;color:var(--text-dim)">±</span>
         <input type="text" value="${row.toleranceL||''}" placeholder="公差"
-          style="${inSm}" oninput="updateMeasField(${i},'toleranceL',this.value)"/>
+          style="${inSm}" oninput="updateMeasField(${i},'toleranceL',this.value);this.value=this.value.replace(/[^\d.]/g,'')"/>
         <span style="font-size:10px;color:var(--text-dim)">W</span>
         <input type="text" value="${row.standardW||''}" placeholder="W标准"
-          style="${inSm}" oninput="updateMeasField(${i},'standardW',this.value)"/>
+          style="${inSm}" oninput="updateMeasField(${i},'standardW',this.value);this.value=this.value.replace(/[^\d.]/g,'')"/>
         <span style="font-size:10px;color:var(--text-dim)">±</span>
         <input type="text" value="${row.toleranceW||''}" placeholder="公差"
-          style="${inSm}" oninput="updateMeasField(${i},'toleranceW',this.value)"/>
+          style="${inSm}" oninput="updateMeasField(${i},'toleranceW',this.value);this.value=this.value.replace(/[^\d.]/g,'')"/>
+        <span style="font-size:10px;color:var(--text-dim)">方向</span>
+        <select style="${inSm};max-width:58px;padding:2px" onchange="updateMeasField(${i},'tolDir',this.value)">
+          ${['±','+','-'].map(d=>`<option value="${d}" ${((row.tolDir||'±')===d)?'selected':''}>${d==='±'?'正负':(d==='+'?'正':'负')}</option>`).join('')}
+        </select>
       </div>`;
     } else if (mt === 'LWH') {
-      stdRow = `<div style="display:grid;grid-template-columns:repeat(6,auto);gap:4px;margin-bottom:4px;align-items:center">
+      stdRow = `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;align-items:center">
         <span style="font-size:10px;color:var(--text-dim)">L</span>
         <input type="text" value="${row.standardL||''}" placeholder="L标准"
-          style="${inSm}" oninput="updateMeasField(${i},'standardL',this.value)"/>
+          style="${inSm}" oninput="updateMeasField(${i},'standardL',this.value);this.value=this.value.replace(/[^\d.]/g,'')"/>
         <span style="font-size:10px;color:var(--text-dim)">W</span>
         <input type="text" value="${row.standardW||''}" placeholder="W标准"
-          style="${inSm}" oninput="updateMeasField(${i},'standardW',this.value)"/>
+          style="${inSm}" oninput="updateMeasField(${i},'standardW',this.value);this.value=this.value.replace(/[^\d.]/g,'')"/>
         <span style="font-size:10px;color:var(--text-dim)">H</span>
         <input type="text" value="${row.standardH||''}" placeholder="H标准"
-          style="${inSm}" oninput="updateMeasField(${i},'standardH',this.value)"/>
+          style="${inSm}" oninput="updateMeasField(${i},'standardH',this.value);this.value=this.value.replace(/[^\d.]/g,'')"/>
         <span style="font-size:10px;color:var(--text-dim)">±L</span>
         <input type="text" value="${row.toleranceL||''}" placeholder="公差"
-          style="${inSm}" oninput="updateMeasField(${i},'toleranceL',this.value)"/>
+          style="${inSm}" oninput="updateMeasField(${i},'toleranceL',this.value);this.value=this.value.replace(/[^\d.]/g,'')"/>
         <span style="font-size:10px;color:var(--text-dim)">±W</span>
         <input type="text" value="${row.toleranceW||''}" placeholder="公差"
-          style="${inSm}" oninput="updateMeasField(${i},'toleranceW',this.value)"/>
+          style="${inSm}" oninput="updateMeasField(${i},'toleranceW',this.value);this.value=this.value.replace(/[^\d.]/g,'')"/>
         <span style="font-size:10px;color:var(--text-dim)">±H</span>
         <input type="text" value="${row.toleranceH||''}" placeholder="公差"
-          style="${inSm}" oninput="updateMeasField(${i},'toleranceH',this.value)"/>
+          style="${inSm}" oninput="updateMeasField(${i},'toleranceH',this.value);this.value=this.value.replace(/[^\d.]/g,'')"/>
+        <span style="font-size:10px;color:var(--text-dim)">方向</span>
+        <select style="${inSm};max-width:58px;padding:2px" onchange="updateMeasField(${i},'tolDir',this.value)">
+          ${['±','+','-'].map(d=>`<option value="${d}" ${((row.tolDir||'±')===d)?'selected':''}>${d==='±'?'正负':(d==='+'?'正':'负')}</option>`).join('')}
+        </select>
       </div>`;
     } else if (mt === 'PF') {
       stdRow = `<div style="display:flex;gap:5px;margin-bottom:4px;align-items:center">

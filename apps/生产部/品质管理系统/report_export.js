@@ -1943,9 +1943,10 @@ function _buildIQCCanvas(r) {
           return (n.length>0&&n.length===f.length)
             ?(n.reduce((a,b)=>a+b,0)/n.length).toFixed(2):null;   /* 平均值保留两位小数 */
         }
-        function _stdTol(std,tol) {
+        function _stdTol(std,tol,dir) {
           const s=String(std??'').trim(),t=String(tol??'').trim();
-          return s&&t?`${_fmt(s)}±${_fmt(t)}`:_fmt(s)||'';
+          const sym = dir==='+'?'+':(dir==='-'?'-':'±');
+          return s&&t?`${_fmt(s)}${sym}${_fmt(t)}`:_fmt(s)||'';
         }
         /* 竖排多行 div 显示 */
         function _lines(...vals) {
@@ -1982,7 +1983,7 @@ function _buildIQCCanvas(r) {
           if (mt==='LW') {
             const L=m.lValues||[],W=m.wValues||[];
             return {
-              stdLines: _star(_stdTol(m.standardL,m.toleranceL),_stdTol(m.standardW,m.toleranceW)),
+              stdLines: _star(_stdTol(m.standardL,m.toleranceL,m.tolDir),_stdTol(m.standardW,m.toleranceW,m.tolDir)),
               valLines: Array.from({length:8},(_,j)=>_star(_fmt(L[j]??''),_fmt(W[j]??''))),
               avgLines: _star(_ra(L)||'', _ra(W)||''),
             };
@@ -1990,7 +1991,7 @@ function _buildIQCCanvas(r) {
           if (mt==='LWH') {
             const L=m.lValues||[],W=m.wValues||[],H=m.hValues||[];
             return {
-              stdLines: _star(_stdTol(m.standardL,m.toleranceL),_stdTol(m.standardW,m.toleranceW),_stdTol(m.standardH,m.toleranceH)),
+              stdLines: _star(_stdTol(m.standardL,m.toleranceL,m.tolDir),_stdTol(m.standardW,m.toleranceW,m.tolDir),_stdTol(m.standardH,m.toleranceH,m.tolDir)),
               valLines: Array.from({length:8},(_,j)=>_star(_fmt(L[j]??''),_fmt(W[j]??''),_fmt(H[j]??''))),
               avgLines: _star(_ra(L)||'', _ra(W)||'', _ra(H)||''),
             };
@@ -1999,7 +2000,7 @@ function _buildIQCCanvas(r) {
           const vs=[...(m.values||[]),...Array(8).fill('')].slice(0,8).map(_fmt);
           const rawAvg=_ra(m.values||[])||m.avg||'—';
           return {
-            stdLines: _lines(_stdTol(m.standard,m.tolerance)||m.standard||''),
+            stdLines: _lines(_stdTol(m.standard,m.tolerance,m.tolDir)||m.standard||''),
             valLines: vs.map(v=>v?`<div style="line-height:11px;font-size:9px">${v}</div>`:'&nbsp;'),
             avgLines: _lines(rawAvg==='—'?'—':Number.isFinite(Number(rawAvg))?Number(rawAvg).toFixed(2):rawAvg),
           };
