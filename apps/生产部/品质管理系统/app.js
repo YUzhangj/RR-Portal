@@ -4694,6 +4694,7 @@ function resetSingleEntryFormForNext() {
     client:      getVal('f_client'),
     processType: getVal('f_processType'),
     productNo:   getVal('f_productNo'),
+    deliveryNo:  getVal('f_deliveryNo'),
     type:        document.getElementById('f_type')?.value || '成品',
     aqlLevel:    getVal('f_aqlLevel'),
   };
@@ -4702,6 +4703,7 @@ function resetSingleEntryFormForNext() {
   setVal('f_client',      _keep.client);
   setVal('f_processType', _keep.processType);   /* 连续录入同加工类型居多，保留 */
   setVal('f_productNo',   _keep.productNo);     /* 连续录入同货号居多，保留 */
+  setVal('f_deliveryNo',  _keep.deliveryNo);    /* 连续录入常是同一张送货单，保留 */
   setVal('f_type',        _keep.type);
   setVal('f_aqlLevel',    _keep.aqlLevel || 'MAJ 1.0,MIN 2.5');
   syncAqlLevelPills();
