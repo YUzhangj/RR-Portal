@@ -88,7 +88,7 @@ test('AI OCR carries the PO number through single and queued entry', () => {
   assert.equal(aiWindow.__qcAiResult.common.orderNo, 'PO-AI-001');
 
   const formValues = {};
-  const loadQueueItem = loadFunction(aiOcrSource, 'loadQueueItem', {
+  const queueContext = {
     setV: (id, value) => { formValues[id] = value; },
     setT: () => {},
     window: {
@@ -96,7 +96,11 @@ test('AI OCR carries the PO number through single and queued entry', () => {
       onQtyChange: () => {},
       onProductNoChange: () => {},
     },
-  });
+  };
+  queueContext.actorContext = loadFunction(aiOcrSource, 'actorContext', queueContext);
+  queueContext.sameActor = loadFunction(aiOcrSource, 'sameActor', queueContext);
+  queueContext.canSaveOcr = loadFunction(aiOcrSource, 'canSaveOcr', queueContext);
+  const loadQueueItem = loadFunction(aiOcrSource, 'loadQueueItem', queueContext);
 
   loadQueueItem({
     idx: 0,
@@ -109,19 +113,32 @@ test('AI OCR carries the PO number through single and queued entry', () => {
 
 test('clearing OCR also clears the PO number', () => {
   const cleared = [];
-  const clearOcr = loadFunction(appSource, 'clearOcr', {
+  let canceled = 0;
+  const context = {
     _ocrImageFile: null,
+    _ocrImageRevision: 0,
+    _ocrOriginalImage: 'synthetic-original',
+    _ocrImageAngle: 90,
+    window: { __QC_OCR_CANCEL: () => { canceled++; }, __qcAiResult: { items: [] } },
     document: {
       getElementById: id => id === 'ocrPreview' ? { src: 'data:image/png', style: {} } : { value: 'set' },
       querySelector: () => ({ style: {} }),
     },
     setVal: (id, value) => { if (value === '') cleared.push(id); },
     setText: () => {},
-  });
+  };
+  context._cancelOcrWork = loadFunction(appSource, '_cancelOcrWork', context);
+  context._clearOcrPreviewFields = loadFunction(appSource, '_clearOcrPreviewFields', context);
+  const clearOcr = loadFunction(appSource, 'clearOcr', context);
 
   clearOcr();
 
   assert.ok(cleared.includes('ocrOrderNo'));
+  assert.equal(canceled, 1);
+  assert.equal(context._ocrImageRevision, 1);
+  assert.equal(context._ocrOriginalImage, '');
+  assert.equal(context._ocrImageAngle, 0);
+  assert.equal(context.window.__qcAiResult, null);
 });
 
 test('import mapping keeps customer order numbers separate from delivery numbers', () => {

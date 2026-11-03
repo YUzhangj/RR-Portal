@@ -104,31 +104,67 @@ const OCR_ITEMS_PROMPT = 'This is a delivery note photo. Output ONLY a markdown 
    还原其中的文本碎片，并统计主导旋转角度（≥70% 碎片同向才算数，防止直立图误判）。 */
 function _parseGrounding(content) {
   const s = String(content || '');
-  if (!s.includes('rotate_rect')) return null;
+  if (!s.includes('rotate_rect') || (!/^[\s`]*[\[{]/.test(s) && !/"rotate_rect"\s*:/.test(s))) return null;
+  let json = s.trim();
+  const fence = /^```(?:json)?\s*\n([\s\S]*?)\n```$/i.exec(json);
+  if (fence) json = fence[1];
+  const invalid = () => ({ text: s, angle: 0, invalid: true });
+  let value;
+  try { value = JSON.parse(json); } catch { return invalid(); }
   const texts = [], angles = [];
-  const unesc = v => v.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-  const reFull = /"rotate_rect"\s*:\s*\[\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*([\d.]+)\s*\][^{}]*?"text"\s*:\s*"((?:\\.|[^"\\])*)"/g;
-  let m;
-  while ((m = reFull.exec(s))) { angles.push(Number(m[1])); texts.push(unesc(m[2])); }
-  if (!texts.length) {   /* 残缺定位 JSON：rotate_rect 后面直接跟字符串 */
-    const reBare = /"rotate_rect"\s*:\s*"((?:\\.|[^"\\])*)"/g;
-    while ((m = reBare.exec(s))) texts.push(unesc(m[1]));
-  }
-  if (!texts.length) return null;
+  let rectangles = 0, malformed = false;
+  const visit = (node, depth = 0) => {
+    if (depth > 64) { malformed = true; return; }
+    if (Array.isArray(node)) { node.forEach(child => visit(child, depth + 1)); return; }
+    if (!node || typeof node !== 'object') return;
+    const hasRect = Object.hasOwn(node, 'rotate_rect');
+    const hasText = Object.hasOwn(node, 'text');
+    if (hasRect) {
+      rectangles++;
+      const rect = node.rotate_rect;
+      if (!Array.isArray(rect) || rect.length !== 5 || rect.some(n => typeof n !== 'number' || !Number.isFinite(n)) || typeof node.text !== 'string') malformed = true;
+      else if (node.text.trim()) { texts.push(node.text); angles.push(((rect[4] % 360) + 360) % 360); }
+    } else if (hasText) {
+      if (typeof node.text !== 'string') malformed = true;
+      else if (node.text.trim()) { texts.push(node.text); angles.push(null); }
+    }
+    for (const [key, child] of Object.entries(node)) if (key !== 'text' && key !== 'rotate_rect') visit(child, depth + 1);
+  };
+  visit(value);
+  if (!rectangles) return null;
+  if (malformed) return invalid();
   const bins = { 0: 0, 90: 0, 180: 0, 270: 0 };
-  angles.forEach(a => { bins[Math.round(a / 90) * 90 % 360]++; });
-  const total = angles.length || 1;
+  angles.forEach(a => {
+    if (a === null) return;
+    const quadrant = Math.round(a / 90) * 90 % 360;
+    const distance = Math.abs(((a - quadrant + 540) % 360) - 180);
+    if (distance <= 5) bins[quadrant]++;   /* 斜字不强猜为整张图片横拍。 */
+  });
+  const total = texts.length || 1;   /* 无角度文本也计入分母，不能只统计匹配的子集。 */
   let angle = 0;
   for (const k of [90, 180, 270]) if (bins[k] / total >= 0.7 && bins[k] > (bins[angle] || 0)) angle = Number(k);
-  return { text: texts.join('\n'), angle };
+  return { text: texts.join('\n'), angle, invalid: false };
+}
+
+function _pendingOcrItem(text) {
+  return { productNo: '', productName: '待核对原文：' + text, qty: '', unit: '', quantityNeedsReview: true };
 }
 
 /* ── 送货单 OCR 文本 → 结构化字段（确定性解析，不依赖模型指令遵循）── */
-function parseDeliveryNote(text) {
+function parseDeliveryNote(text, options = {}) {
   const fields = { date: '', supplier: '', deliveryNo: '', orderNo: '', type: '来料', items: [] };
   let rawText = String(text || '');
+  if (options.truncated) {
+    fields.manualReviewRequired = true;
+    if (rawText.trim()) fields.items.push(_pendingOcrItem(rawText));
+    return fields;
+  }
   /* 定位 JSON 输出先还原成纯文本，避免 JSON 行被误判成表格/明细产生垃圾行 */
   const grounding = _parseGrounding(rawText);
+  if (grounding && grounding.invalid) {
+    fields.items.push(_pendingOcrItem(rawText));
+    return fields;
+  }
   if (grounding) rawText = grounding.text;
   const decodeHtml = value => value.replace(/&(#x[\da-f]+|#\d+|nbsp|amp|lt|gt|quot|apos);/gi, (entity, code) => {
     if (code[0] !== '#') return { nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[code.toLowerCase()];
@@ -507,64 +543,13 @@ function parseDeliveryNote(text) {
     }
   }
 
-  /* 分栏输出兜底（显达硅胶这类嵌套/合并单元格表格，横拍照片也常触发）：模型按列读出——
-     Description 下方连续 N 行品名，Qty 下方连续 N 行数量，行关系丢失。
-     品名行数与数量行数一致时按顺序配对；不一致就放弃，宁可手工也不错配。 */
-  if (!fields.items.length) {
-    const UNIT_RE = '(?:PCS|pcs|个|件|套|卷|张|張|桶|KG|kg|米|箱|包|条|條|颗|顆)';
-    const isQtyLine = l => {
-      const t = l.trim();
-      return new RegExp('^\\d{1,3}(?:[,\\.]\\d{3})+\\s*' + UNIT_RE + '?$').test(t)
-          || new RegExp('^\\d{2,}\\s+' + UNIT_RE + '$').test(t);
-    };
-    const hiD = lines.findIndex(l => /^\s*(Description|DESCRIPTION|品名|名称|名稱|货名|貨名|ITEM)\s*$/i.test(l));
-    let hiQ = hiD === -1 ? -1 : lines.findIndex((l, idx) => idx > hiD && /^\s*(Qty|QTY|Quantity|数量|數量)\s*[.:：]?\s*$/i.test(l));
-    let qtyFrom = -1;
-    if (hiQ !== -1) {
-      qtyFrom = hiQ + 1;
-    } else if (hiD !== -1) {
-      /* 横拍/旋转图：模型常把 Qty 表头丢掉，数量块裸奔在品名块后面——找第一段连续数量行 */
-      for (let i = hiD + 1; i < lines.length; i++) {
-        if (isQtyLine(lines[i])) { qtyFrom = i; break; }
-      }
-    }
-    if (hiD !== -1 && qtyFrom !== -1) {
-      const qtys = [];
-      for (const ln of lines.slice(qtyFrom)) {
-        if (isQtyLine(ln)) qtys.push(ln.trim());
-        else if (qtys.length || ln.trim()) break;   /* 数量块必须连续 */
-      }
-      /* 品名块：跳过 PO 行（顺便抓订单号）和 #编号/纯编码行 */
-      const block = lines.slice(hiD + 1, qtyFrom);
-      for (const ln of block) {
-        const po = ln.match(/P\s*\/?\s*O\s*(?:NO|No|no)\.?\s*[:#]?\s*([A-Za-z]{1,4}[A-Za-z0-9\-]{4,})/);
-        if (po && !fields.orderNo) fields.orderNo = po[1];
-      }
-      const cjkCount = s => (s.match(/[一-鿿]/g) || []).length;
-      let names = block.map(l => l.trim())
-        .filter(t => t && !/P\s*\/?\s*O/i.test(t) && !/^[#＃]?[A-Za-z0-9][A-Za-z0-9\-]*$/.test(t) && cjkCount(t) >= 2);
-      if (names.length !== qtys.length) {
-        const stricter = names.filter(t => cjkCount(t) >= 3);   /* 合并单元格碎片（如「鸭子」）再过滤一轮 */
-        if (stricter.length === qtys.length) names = stricter;
-      }
-      if (qtys.length && names.length === qtys.length) {
-        names.forEach((name, i) => {
-          const qm = qtys[i].match(/^(\d{1,3}(?:[,\.]\d{3})+|\d+)\s*(.*)$/);
-          fields.items.push({ productNo: '', productName: name, qty: quantityText(qm ? qm[1] : '', (qm && qm[2]) || ''), unit: (qm && qm[2]) || '' });
-        });
-      }
+  /* 分栏缺少逐行来源关联时不按数量/品名字数猜配对。保留完整原文供人工核对。 */
+  if (!fields.items.length && (grounding || lines.some(line => /^(Description|品名|名称|名稱|货名|貨名|ITEM)\s*$/i.test(line.trim())))) {
+    if (rawText.trim()) {
+      fields.items.push(_pendingOcrItem(rawText));
+      fields.orderNo = '';   /* 未建立逐行关联，不能让首个 PO 成为整块原文的采购来源。 */
     }
   }
-
-  /* 页眉公司名/单据标题/表尾 END 标记被误当货品行（特征：无数量）时剔除，避免垃圾行进表单 */
-  fields.items = fields.items.filter(it => {
-    if (it.qty) return true;
-    const n = String(it.productName || '');
-    if (!/[一-鿿]/.test(n)) return false;   /* END 等纯英文碎片 */
-    if (/公司|有限|DELIVERY|送货单|送貨單|NOTE/i.test(n)) return false;
-    return true;
-  });
-
 
   /* 模型偶发「复读」：把同一行明细输出多次，甚至整份单据重复 N 遍。
      两级去重：完全相同的行只留一条；品名+数量+单位仍重复的行只保留第一次出现
@@ -648,72 +633,40 @@ async function aiVisionExtract(dataUrl) {
   const raw = r.raw;
   if (r.status >= 400) { const err = new Error('百炼返回 HTTP ' + r.status + '：' + raw.slice(0, 600)); err.code = 'UPSTREAM'; throw err; }
   let data; try { data = JSON.parse(raw); } catch (e) { throw new Error('百炼响应非 JSON：' + raw.slice(0, 300)); }
-  let content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || '';
-  if (Array.isArray(content)) content = content.map(c => (typeof c === 'string' ? c : (c && c.text) || '')).join('');
-  content = String(content).trim();
-  /* 模型输出定位 JSON 且碎片角度明显偏向 90/180/270：图片拍横/拍倒了。
-     这种输出还原的文本行序错乱、极易解析出垃圾行，直接丢弃本次结果，
-     告诉客户端旋转后重传，也不再换提示词重试同一张图。 */
-  let needRotate = 0;
-  const g1 = _parseGrounding(content);
-  if (g1 && g1.angle) needRotate = g1.angle;
-  let fields = needRotate
-    ? { date: '', supplier: '', deliveryNo: '', orderNo: '', type: '来料', items: [] }
-    : parseDeliveryNote(content);
-  /* 「可用」标准：至少一条明细带数量。全是无数量碎片行（旋转图乱序/表尾垃圾行）视为失败继续重试 */
-  const usable = f => f.items.some(it => it.qty);
-  /* 表格密集型单据（如台聚）全文 OCR 易乱行/复读导致解析不出明细：
-     换「输出 markdown 表格」提示词再识别一次，解析出明细才采用 */
-  if (!usable(fields) && !needRotate) {
-    console.warn('[AI] 首次 OCR 未解析出明细，换表格提示词重试');
-    payload.messages[0].content[0].text = OCR_TABLE_PROMPT;
-    let r2 = await callModel(payload.model);
-    for (let i = 0; i < 3 && isDenied(r2); i++) { await sleep(1500); r2 = await callModel(payload.model); }
-    if (r2.status < 400) {
-      try {
-        const data2 = JSON.parse(r2.raw);
-        let content2 = data2 && data2.choices && data2.choices[0] && data2.choices[0].message && data2.choices[0].message.content || '';
-        if (Array.isArray(content2)) content2 = content2.map(c => (typeof c === 'string' ? c : (c && c.text) || '')).join('');
-        content2 = String(content2).trim();
-        const g2 = _parseGrounding(content2);
-        if (g2 && g2.angle) needRotate = g2.angle;
-        const fields2 = needRotate ? null : parseDeliveryNote(content2);
-        if (fields2 && usable(fields2)) {
-          if (!fields2.date && fields.date) fields2.date = fields.date;
-          if (!fields2.supplier && fields.supplier) fields2.supplier = fields.supplier;
-          if (!fields2.deliveryNo && fields.deliveryNo) fields2.deliveryNo = fields.deliveryNo;
-          if (!fields2.orderNo && fields.orderNo) fields2.orderNo = fields.orderNo;
-          fields = fields2; content = content2; data = data2;
-        }
-      } catch (e) { console.warn('[AI] 表格提示词重试响应异常：', e.message); }
-    }
-    /* 仍无明细：第三次，只让模型输出货品明细表（列名固定） */
-    if (!usable(fields) && !needRotate) {
-      console.warn('[AI] 二次重试仍无明细，换明细表提示词再试');
-      payload.messages[0].content[0].text = OCR_ITEMS_PROMPT;
-      let r3 = await callModel(payload.model);
-      for (let i = 0; i < 3 && isDenied(r3); i++) { await sleep(1500); r3 = await callModel(payload.model); }
-      if (r3.status < 400) {
-        try {
-          const data3 = JSON.parse(r3.raw);
-          let content3 = data3 && data3.choices && data3.choices[0] && data3.choices[0].message && data3.choices[0].message.content || '';
-          if (Array.isArray(content3)) content3 = content3.map(c => (typeof c === 'string' ? c : (c && c.text) || '')).join('');
-          content3 = String(content3).trim();
-          const g3 = _parseGrounding(content3);
-          if (g3 && g3.angle) needRotate = g3.angle;
-          const fields3 = needRotate ? null : parseDeliveryNote(content3);
-          if (fields3 && usable(fields3)) {
-            if (!fields3.date && fields.date) fields3.date = fields.date;
-            if (!fields3.supplier && fields.supplier) fields3.supplier = fields.supplier;
-            if (!fields3.deliveryNo && fields.deliveryNo) fields3.deliveryNo = fields.deliveryNo;
-            if (!fields3.orderNo && fields.orderNo) fields3.orderNo = fields.orderNo;
-            fields = fields3; content = content3; data = data3;
-          }
-        } catch (e) { console.warn('[AI] 明细表提示词重试响应异常：', e.message); }
+  const decode = response => {
+    const choice = response && response.choices && response.choices[0];
+    let content = choice && choice.message && choice.message.content || '';
+    if (Array.isArray(content)) content = content.map(c => (typeof c === 'string' ? c : (c && c.text) || '')).join('');
+    content = String(content);   /* rawText 保留完整提供器原文；解析函数自行处理空白。 */
+    const truncated = choice && choice.finish_reason === 'length';
+    const grounding = truncated ? null : _parseGrounding(content);
+    const needRotate = grounding && !grounding.invalid ? grounding.angle : 0;
+    const fields = needRotate
+      ? { date: '', supplier: '', deliveryNo: '', orderNo: '', type: '来料', items: [] }
+      : parseDeliveryNote(content, { truncated });
+    return { content, fields, needRotate };
+  };
+  let { content, fields, needRotate } = decode(data);
+  /* 已有条目（含待核对原行）必须保留，不能以 qty 为空为由让重试覆盖原文。 */
+  for (const prompt of [OCR_TABLE_PROMPT, OCR_ITEMS_PROMPT]) {
+    if (fields.items.length || fields.manualReviewRequired || needRotate) break;
+    payload.messages[0].content[0].text = prompt;
+    let retry = await callModel(payload.model);
+    for (let i = 0; i < 3 && isDenied(retry); i++) { await sleep(1500); retry = await callModel(payload.model); }
+    if (retry.status >= 400) continue;
+    try {
+      const nextData = JSON.parse(retry.raw), next = decode(nextData);
+      if (next.fields.items.length || next.fields.manualReviewRequired || next.needRotate) {
+        const manual = next.fields.manualReviewRequired === true || next.fields.items.some(item => item.quantityNeedsReview === true);
+        // A pending whole-source row has no confirmed business identity. Do not
+        // refill a cleared PO/supplier/date from a different model response.
+        if (!manual) for (const key of ['date','supplier','deliveryNo','orderNo']) if (!next.fields[key] && fields[key]) next.fields[key] = fields[key];
+        fields = next.fields; content = next.content; needRotate = next.needRotate; data = nextData;
       }
-    }
+    } catch (error) { console.warn('[AI] 重试响应异常：', error.name); }
   }
-  return { fields, usage: data.usage || null, rawText: content, needRotate };
+  const needsManualReview = fields.manualReviewRequired === true || fields.items.some(item => item.quantityNeedsReview === true);
+  return { fields, usage: data.usage || null, rawText: content, needRotate, needsManualReview };
 }
 
 /* ── 记录表列顺序（写入/读取都按这个顺序）── */
@@ -1525,7 +1478,7 @@ const server = http.createServer(async (req, res) => {
       if (!body || !body.image) return sendJson(res, 400, { ok: false, error: '缺少 image 字段（base64 dataURL）' });
       try {
         const r = await aiVisionExtract(body.image);
-        return sendJson(res, 200, { ok: true, fields: r.fields, usage: r.usage, rawText: r.rawText, needRotate: r.needRotate || 0 });
+        return sendJson(res, 200, { ok: true, fields: r.fields, usage: r.usage, rawText: r.rawText, needRotate: r.needRotate || 0, needsManualReview: r.needsManualReview === true });
       } catch (e) {
         const code = e.code === 'NO_AI' ? 503 : 502;
         return sendJson(res, code, { ok: false, error: String(e && e.message || e), code: e.code || 'ERR' });
