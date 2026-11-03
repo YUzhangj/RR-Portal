@@ -1,6 +1,7 @@
 'use strict';
 
 const { parseSheets } = require('./parseHardwareSheet');
+const { supplierMetadata } = require('./supplierMetadata');
 
 const normalize = value => String(value || '').replace(/\s+/g, '').toUpperCase();
 
@@ -107,14 +108,29 @@ async function extractPages(buffer) {
 async function parsePdf(buffer, options = {}) {
   try {
     const pages = await extractPages(buffer);
-    const sheets = pages.map((items, index) => ({ name: `PDF 第 ${index + 1} 页`, rows: rowsFromPage(items) }))
-      .filter(sheet => sheet.rows.length);
+    const pageSheets = pages.map((items, index) => ({ name: `PDF 第 ${index + 1} 页`, rows: rowsFromPage(items) }));
+    // Partial extraction remains useful for ordinary imports, but must never
+    // authorize deleting supplier rows that may be on an unreadable page.
+    if (options.allSheets) {
+      const unreadable = pageSheets.find(sheet => !sheet.rows.length);
+      if (unreadable) return { error: `${unreadable.name}未能完整识别，不能作为供应商完整清单同步；请提供完整 Excel，或移除空白、说明及无法识别的页面后重新上传。` };
+    }
+    const sheets = pageSheets.filter(sheet => sheet.rows.length);
     if (!sheets.length) {
       return { error: '未识别到可读取的供应商报价表格。请上传由 Excel 导出的文字型 PDF；扫描图片型 PDF 请先转为可搜索 PDF 或 Excel。' };
     }
     const result = await parseSheets(sheets, options);
     if (result.error) return result;
-    return { ...result, source_format: 'pdf' };
+    // rowsFromPage deliberately projects just the quotation table. Read explicit
+    // supplier labels from the original text too, before that projection drops
+    // upper-margin headers or later supplier section captions.
+    const supplierRows = pages.flatMap(items => {
+      const lines = groupByY(items);
+      if (options.allSheets) return lines.map(line => line.items.map(item => item.text));
+      const header = lines.findIndex(line => line.items.some(item => /MOQ/.test(normalize(item.text))));
+      return lines.slice(0, header < 0 ? 30 : header).map(line => line.items.map(item => item.text));
+    });
+    return { ...result, ...supplierMetadata(supplierRows, { joinFragments: true }), source_format: 'pdf' };
   } catch (error) {
     return { error: `PDF 解析失败：${error.message}` };
   }

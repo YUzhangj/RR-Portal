@@ -23,6 +23,11 @@ function hasPerm(me, menu, action) {
   return !!(p && p['can_' + action]);
 }
 
+function requestedPageAfterLogin() {
+  const next = new URLSearchParams(window.location.search).get('next');
+  return next === 'verification' ? './verification.html' : '';
+}
+
 async function refreshMe() {
   try {
     const me = await api('/auth/me');
@@ -35,9 +40,8 @@ async function refreshMe() {
     factoryChip.textContent = me.active_factory_name || me.active_factory_code;
     $('factory-list-name').textContent = me.active_factory_name || me.active_factory_code;
     const factorySwitch = $('factory-switch');
-    const availableFactories = me.factories || [];
-    if (me.can_switch_factory && availableFactories.length > 1) {
-      factorySwitch.innerHTML = availableFactories.map(f =>
+    if (me.can_switch_factory) {
+      factorySwitch.innerHTML = (me.factories || []).map(f =>
         `<button type="button" class="top-factory-btn ${f.code === me.active_factory_code ? 'active' : ''}" data-code="${esc(f.code)}" aria-pressed="${f.code === me.active_factory_code}"><span class="factory-dot dot-${esc(f.code)}"></span>${esc(f.name_cn)}</button>`
       ).join('');
       factoryChip.classList.add('hidden');
@@ -66,6 +70,8 @@ async function refreshMe() {
     const canManageTrash = me.dept === 'sales' || me.role === 'admin';
     $('btn-trash')?.classList.toggle('hidden', !canManageTrash);
     await loadQuotes();
+    const requestedPage = requestedPageAfterLogin();
+    if (requestedPage) window.location.replace(requestedPage);
   } catch {
     $('login-card').classList.remove('hidden');
     $('main-card').classList.add('hidden');
@@ -83,18 +89,34 @@ function fmtTime(s) {
 }
 
 window.__allQuotes = [];
-async function loadQuotes() {
+const confirmationPending = new Set();
+const confirmationNeedsRefresh = new Set();
+let quoteLoadGeneration = 0;
+
+function canConfirmQuotes() {
+  const me = window.__me;
+  return !!me && (me.dept === 'sales' || me.role === 'admin' || hasPerm(me, '账号管理', 'admin'));
+}
+
+async function loadQuotes({ preserveRows = false } = {}) {
+  const generation = ++quoteLoadGeneration;
   try {
-    window.__allQuotes = await api('/quotes');
+    const rows = await api('/quotes');
+    if (generation !== quoteLoadGeneration) return false;
+    window.__allQuotes = rows;
+    confirmationNeedsRefresh.clear();
   } catch (e) {
+    if (generation !== quoteLoadGeneration) return false;
+    if (preserveRows) throw e;
     window.__allQuotes = [];
     const tbody = $('quotes-table').querySelector('tbody');
-    tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:40px;color:#b91c1c">${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:40px;color:#b91c1c">${esc(e.message)}</td></tr>`;
     if ($('search-count')) $('search-count').textContent = '';
-    return;
+    return false;
   }
   refreshQuoteFilterOptions();
   renderQuotes();
+  return true;
 }
 
 function refreshQuoteFilterOptions() {
@@ -160,10 +182,10 @@ function renderQuotes() {
     const nVer = prodCount[String(q.product_name || '').trim()] || 1;
     const verCell = `${q.version ? `<span class="badge b-filled">${esc(q.version)}</span>` : '<span class="muted">—</span>'}`
       + (nVer > 1 ? ` <small class="muted" title="该产品共有 ${nVer} 个报价版本">·同产品${nVer}版</small>` : '');
-    const canConfirm = window.__me && (window.__me.dept === 'sales' || window.__me.role === 'admin');
+    const canConfirm = canConfirmQuotes();
     const confirmationStatus = q.customer_confirmation_status === 'confirmed' ? 'confirmed' : 'pending';
     const confirmationCell = canConfirm
-      ? `<select class="quote-confirm" data-id="${q.id}" data-current="${confirmationStatus}"><option value="pending" ${confirmationStatus === 'pending' ? 'selected' : ''}>待确认</option><option value="confirmed" ${confirmationStatus === 'confirmed' ? 'selected' : ''}>已确认</option></select>`
+      ? `<select class="quote-confirm" data-id="${q.id}" data-current="${confirmationStatus}" data-revision="${q.confirmation_revision == null ? '' : esc(q.confirmation_revision)}" ${confirmationPending.has(String(q.id)) || confirmationNeedsRefresh.has(String(q.id)) ? 'disabled' : ''} data-no="${esc(q.quote_no)}" aria-label="客价确认 ${esc(q.quote_no)}"><option value="pending" ${confirmationStatus === 'pending' ? 'selected' : ''}>待确认</option><option value="confirmed" ${confirmationStatus === 'confirmed' ? 'selected' : ''}>已确认</option></select>`
       : `<span class="badge ${confirmationStatus === 'confirmed' ? 'b-approved' : 'b-filled'}">${confirmationStatus === 'confirmed' ? '已确认' : '待确认'}</span>`;
     tr.innerHTML = `
       <td class="ro">${rowNo}</td>
@@ -188,20 +210,67 @@ function renderQuotes() {
   }
   document.querySelectorAll('.btn-clone').forEach(b => b.onclick = () => cloneQuote(b.dataset.id, b.dataset.no, b.dataset.name));
   document.querySelectorAll('.btn-del').forEach(b => b.onclick = () => deleteQuote(b.dataset.id, b.dataset.no));
-  document.querySelectorAll('.quote-confirm').forEach(select => select.onchange = async () => {
-    select.disabled = true;
-    try {
-      await api(`/quote-summary/${select.dataset.id}/confirmation`, {
-        method: 'PUT', body: JSON.stringify({ status: select.value }),
-      });
-      select.dataset.current = select.value;
-      await loadQuotes();
-    } catch (error) {
-      select.value = select.dataset.current;
-      select.disabled = false;
-      alert(error.message);
+  document.querySelectorAll('.quote-confirm').forEach(select => select.onchange = () => changeQuoteConfirmation(select));
+}
+
+async function changeQuoteConfirmation(select) {
+  const id = String(select.dataset.id);
+  const current = select.dataset.current;
+  const next = select.value;
+  if (!canConfirmQuotes() || confirmationPending.has(id) || confirmationNeedsRefresh.has(id) || current === next) {
+    select.value = current;
+    return;
+  }
+  const revoking = current === 'confirmed' && next === 'pending';
+  let reason;
+  if (revoking) {
+    reason = prompt(`撤销货号 ${select.dataset.no} 的客价确认，恢复为待确认。\n仅未开始核价的报价可撤销，原报价内容会保留。\n请输入撤销原因：`, '误点确认');
+    if (!reason?.trim()) { select.value = current; return; }
+    reason = reason.trim();
+    if (reason.length > 300) {
+      select.value = current;
+      alert('撤销原因最多300个字符。');
+      return;
     }
-  });
+    const revision = Number(select.dataset.revision);
+    if (!select.dataset.revision || !Number.isSafeInteger(revision) || revision < 0) {
+      select.value = current;
+      alert('报价版本信息缺失，请刷新页面后重试。');
+      return;
+    }
+  } else if (next !== 'confirmed' || !confirm(`确认货号 ${select.dataset.no} 的客价？\n确认后原报价将锁定，后续调整在核价中心进行。`)) {
+    select.value = current;
+    return;
+  }
+  confirmationPending.add(id);
+  ++quoteLoadGeneration;
+  select.disabled = true;
+  try {
+    if (revoking) await api(`/quote-summary/${id}/revoke-confirmation`, {
+      method: 'POST', body: JSON.stringify({ reason, base_confirmation_revision: Number(select.dataset.revision) }),
+    });
+    else await api(`/quote-summary/${select.dataset.id}/confirmation`, {
+      method: 'PUT', body: JSON.stringify({ status: next }),
+    });
+    // The write response has no new revision. Keep the acknowledged status, but require a fresh list before another change.
+    const quote = window.__allQuotes.find(row => String(row.id) === id);
+    if (quote) quote.customer_confirmation_status = next;
+    confirmationNeedsRefresh.add(id);
+    try {
+      await loadQuotes({ preserveRows: true });
+    } catch {
+      alert(`${revoking ? '已撤销客价确认' : '已确认客价'}，但列表刷新失败。请刷新页面后再操作。`);
+    }
+  } catch (error) {
+    select.value = current;
+    // A failed request may have reached the server. Read once to reconcile; never retry the write.
+    confirmationNeedsRefresh.add(id);
+    try { await loadQuotes({ preserveRows: true }); } catch { /* Keep changes disabled until a fresh read succeeds. */ }
+    alert(error.message);
+  } finally {
+    confirmationPending.delete(id);
+    renderQuotes();
+  }
 }
 
 async function deleteQuote(id, no) {

@@ -1,8 +1,10 @@
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { requireAuth } = require('../middleware/auth');
+const { VERIFICATION_UPLOAD_BYTES, handleVerificationUpload } = require('../services/verificationUpload');
 
 const router = express.Router();
 
@@ -65,10 +67,82 @@ const memUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 },
 });
+
+const legacyWorkbookUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, os.tmpdir()),
+    filename: (_req, _file, cb) => cb(null, `sky-castle-verification-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.xlsx`),
+  }),
+  limits: { fileSize: VERIFICATION_UPLOAD_BYTES, fieldSize: 1024, fields: 4, files: 1, parts: 6 },
+  fileFilter: (_req, file, cb) => {
+    const ok = /\.xlsx$/i.test(file.originalname);
+    const error = ok ? null : new Error('Sky Castle 核价基准同步只支持 .xlsx 文件');
+    if (error) error.code = 'LEGACY_WORKBOOK_TYPE';
+    cb(error, ok);
+  },
+});
+const {
+  parseLegacyVerificationWorkbook,
+  createLegacyVerificationBatchVersion,
+} = require('../services/legacyVerificationImport');
+
+// POST /api/uploads/legacy-sky-castle-verification
+// 上传更新后的核价总表，为表中所有 Sky Castle 货号原子化创建并锁定下一核价版本。
+const requireLegacySyncAccess = (req, res, next) => {
+  const canAdmin = Boolean(req.user.perms?.['账号管理']?.can_admin);
+  if (!canAdmin) {
+    return res.status(403).json({ error: '只有系统管理员可以同步 Sky Castle 核价基准' });
+  }
+  next();
+};
+router.post('/legacy-sky-castle-verification', requireAuth, requireLegacySyncAccess,
+  handleVerificationUpload(legacyWorkbookUpload.single('file')), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: '请选择更新后的 Sky Castle 核价总表' });
+  const sourceDate = String(req.body?.source_date || '').trim();
+  if (sourceDate && !/^\d{4}-\d{2}-\d{2}$/.test(sourceDate)) {
+    try { fs.unlinkSync(req.file.path); } catch {}
+    return res.status(400).json({ error: '核价基准日期格式应为 YYYY-MM-DD' });
+  }
+  try {
+    const head = fs.readFileSync(req.file.path).subarray(0, 4);
+    if (head[0] !== 0x50 || head[1] !== 0x4B) {
+      return res.status(400).json({ error: '文件不是有效的 .xlsx 工作簿' });
+    }
+    let parsed;
+    try {
+      parsed = parseLegacyVerificationWorkbook(req.file.path, {
+        sourceDate: sourceDate || new Date().toISOString().slice(0, 10),
+        sourceFile: path.basename(req.file.originalname),
+      });
+    } catch (error) {
+      const message = String(error.message || error);
+      const encrypted = /encrypt|password|CFB|Unsupported ZIP/i.test(message);
+      return res.status(422).json({
+        error: encrypted
+          ? '该工作簿仍有打开密码，请先在 WPS/Excel 另存为不加密的 .xlsx，再上传同步'
+          : `核价总表解析失败：${message}`,
+      });
+    }
+    const actor = req.user.display_name || req.user.username;
+    const result = await createLegacyVerificationBatchVersion(require('../db'), parsed, {
+      factoryCode: req.user.active_factory_code,
+      actor,
+    });
+    res.json(result);
+  } catch (error) {
+    if (error.code === 'LEGACY_BATCH_CONFLICT') return res.status(409).json({ error: error.message });
+    if (error.code === '23505' || String(error.message).includes('UNIQUE')) {
+      return res.status(409).json({ error: '核价版本已被其他人更新，请刷新后重新同步' });
+    }
+    throw error;
+  } finally {
+    try { fs.unlinkSync(req.file.path); } catch {}
+  }
+  });
 const { parseWorkbook } = require('../services/parseMoldSheet');
 const { extractImagesByRow } = require('../services/extractXlsxImages');
 router.post('/mold-sheet', requireAuth, memUpload.single('file'), async (req, res) => {
-  if (req.user.dept !== 'engineering' && req.user.role !== 'admin') return res.status(403).json({ error: '仅工程或超级管理员可上传' });
+  if (!['engineering', 'sales'].includes(req.user.dept) && req.user.role !== 'admin') return res.status(403).json({ error: '仅工程、业务或超级管理员可上传' });
   if (!req.file) return res.status(400).json({ error: '缺少文件' });
   if (!/\.(xls|xlsx)$/i.test(req.file.originalname)) {
     return res.status(400).json({ error: '当前只支持 .xls/.xlsx（PDF/图片待后续支持）' });
@@ -119,6 +193,7 @@ router.post('/mold-sheet', requireAuth, memUpload.single('file'), async (req, re
     } else {
       result.images_hint = '当前文件是 .xls 旧二进制格式，图片无法自动抽取。请在 WPS/Excel 里"另存为 → .xlsx"后重新上传即可自动识图。';
     }
+    result.product_groups = require('../services/mixedPartImport').summarize(result.molds);
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: '解析失败: ' + e.message });
@@ -141,8 +216,13 @@ router.post('/hardware-sheet', requireAuth, memUpload.single('file'), async (req
     const targetCurrency = ['RMB', 'USD'].includes(String(req.body?.target_currency || '').toUpperCase())
       ? String(req.body.target_currency).toUpperCase() : null;
     const isPdf = /\.pdf$/i.test(req.file.originalname);
-    const result = await (isPdf ? parseSupplierPdf : parseHardwareWorkbook)(req.file.buffer, { targetQty, targetCurrency });
+    const fullSupplierSnapshot = req.body?.full_supplier_snapshot === '1';
+    const result = await (isPdf ? parseSupplierPdf : parseHardwareWorkbook)(req.file.buffer, { targetQty, targetCurrency, allSheets:fullSupplierSnapshot });
     if (result.error) return res.status(422).json(result);
+    if (fullSupplierSnapshot) {
+      if (result.complete_sheet_scan !== true) return res.status(422).json({ error: '解析器未能完整核对全部报价页，不能用于供应商完整清单同步。' });
+      result.supplier_snapshot_version = 1;
+    }
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: '解析失败: ' + e.message });
@@ -215,7 +295,7 @@ router.post('/assembly-sheet', requireAuth, memUpload.single('file'), async (req
   if (!req.file) return res.status(400).json({ error: '缺少文件' });
   if (!/\.(xls|xlsx)$/i.test(req.file.originalname)) return res.status(400).json({ error: '只支持 .xls/.xlsx' });
   try {
-    const result = await parseAssemblyWorkbook(req.file.buffer);
+    const result = await parseAssemblyWorkbook(req.file.buffer, { mixed: req.query.mixed === '1' });
     if (result.error) return res.status(422).json(result);
     res.json(result);
   } catch (e) {
@@ -327,4 +407,10 @@ router.post('/slush-sheet', requireAuth, memUpload.single('file'), async (req, r
   }
 });
 
+router.post('/mixed-sku-sheet', requireAuth, memUpload.single('file'), async (req,res)=>{
+  if (!['sales','engineering'].includes(req.user.dept) && req.user.role!=='admin') return res.status(403).json({error:'无权导入产品资料'});
+  if(!req.file)return res.status(400).json({error:'请选择配比表'});
+  try{res.json(await require('../services/parseMixedSku').parseWorkbook(req.file.buffer));}
+  catch(e){res.status(400).json({error:e.message});}
+});
 module.exports = router;

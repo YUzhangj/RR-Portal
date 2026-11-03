@@ -1,5 +1,6 @@
 using Dapper;
 using IndoShipping.Api.Auditing;
+using IndoShipping.Api.Features.Purchasing;
 using IndoShipping.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Mvc;
 
@@ -36,12 +37,21 @@ public class ShipmentsController(ISqlConnectionFactory factory) : ControllerBase
         using var c = factory.Create();
         var sh = await c.QueryFirstOrDefaultAsync("SELECT * FROM shipments WHERE id=@id", new { id });
         if (sh == null) return NotFound(new { error = "not found" });
-        var items = (await c.QueryAsync(@"
+        var items = (await c.QueryAsync($@"
+            WITH receipt_basis AS ({ShipmentPurchaseBasis.ReceiptBasisSql})
             SELECT si.*,
-                   COALESCE(NULLIF(pi.purchase_unit, ''), NULLIF(si.purchase_unit, ''), '个') AS purchase_unit
+                   COALESCE(NULLIF(pi.purchase_unit, ''), NULLIF(si.purchase_unit, ''), '个') AS purchase_unit,
+                   COALESCE(rb.purchase_charge_ratio, 1) AS purchase_charge_ratio
             FROM shipment_items si
             LEFT JOIN outbound o ON o.id=si.outbound_id
-            LEFT JOIN po_items pi ON pi.id=o.po_item_id
+            LEFT JOIN LATERAL (
+                SELECT MIN(p.id) AS id FROM po_items p
+                JOIN purchase_orders po ON po.id=p.po_id
+                WHERE si.outbound_id IS NULL AND p.material_id=si.material_id AND po.po_no=si.po_no
+                HAVING COUNT(*)=1
+            ) matched ON TRUE
+            LEFT JOIN po_items pi ON pi.id=COALESCE(o.po_item_id, matched.id)
+            LEFT JOIN receipt_basis rb ON rb.po_item_id=pi.id
             WHERE si.shipment_id=@id
             ORDER BY si.seq, si.id", new { id })).ToList();
         var dict = (IDictionary<string, object?>)sh!;
@@ -68,7 +78,13 @@ public class ShipmentsController(ISqlConnectionFactory factory) : ControllerBase
         public decimal? kg { get; set; }
         public decimal? qty { get; set; }
         public int? cartons { get; set; }
+        [System.ComponentModel.DataAnnotations.StringLength(64)]
+        public string? carton_group { get; set; }
+        public System.Text.Json.JsonElement? material_snapshot { get; set; }
+        [System.ComponentModel.DataAnnotations.StringLength(256)]
+        public string? carton_no { get; set; }
         public string? qty_per_carton { get; set; }
+        public decimal? weighing_qty { get; set; }
         public string? purchase_unit { get; set; }
         public string? pallet { get; set; }
         public decimal? price { get; set; }
@@ -120,17 +136,19 @@ RETURNING id",
             {
                 var it = items[i];
                 await c.ExecuteAsync(@"
-INSERT INTO shipment_items(shipment_id, outbound_id, material_id, seq, kg, qty, cartons, qty_per_carton, purchase_unit, pallet, price, currency,
+INSERT INTO shipment_items(shipment_id, outbound_id, material_id, seq, kg, qty, cartons, qty_per_carton, weighing_qty, purchase_unit, pallet, price, currency,
     po_no, po_date, supplier, customs_company, bl_head, contract_no, contract_date,
-    invoice_no, invoice_date, invoice_price, product_use, formula_name)
-VALUES (@id, @outbound_id, @material_id, @seq, @kg, @qty, @cartons, @qty_per_carton, @purchase_unit, @pallet, @price, @currency,
+    invoice_no, invoice_date, invoice_price, product_use, formula_name, carton_group, material_snapshot, carton_no)
+VALUES (@id, @outbound_id, @material_id, @seq, @kg, @qty, @cartons, @qty_per_carton, @weighing_qty, @purchase_unit, @pallet, @price, @currency,
     @po_no, @po_date, @supplier, @customs_company, @bl_head, @contract_no, @contract_date,
-    @invoice_no, @invoice_date, @invoice_price, @product_use, @formula_name)",
+    @invoice_no, @invoice_date, @invoice_price, @product_use, @formula_name, @carton_group, CAST(@snapshot AS jsonb), @carton_no)",
                     new
                     {
                         id, it.outbound_id, it.material_id, seq = i + 1,
-                        kg = it.kg ?? 0, qty = it.qty ?? 0, cartons = it.cartons ?? 0,
+                        kg = it.kg ?? 0, qty = it.qty ?? 0, cartons = it.cartons ?? 0, it.carton_group,
+                        snapshot = it.material_snapshot?.GetRawText(), it.carton_no,
                         qty_per_carton = it.qty_per_carton ?? "",
+                        weighing_qty = it.weighing_qty ?? 0,
                         purchase_unit = it.purchase_unit ?? "个",
                         pallet = it.pallet ?? "",
                         price = it.price ?? 0,
@@ -188,17 +206,19 @@ VALUES (@id, @outbound_id, @material_id, @seq, @kg, @qty, @cartons, @qty_per_car
             {
                 var it = items[i];
                 await c.ExecuteAsync(@"
-INSERT INTO shipment_items(shipment_id, outbound_id, material_id, seq, kg, qty, cartons, qty_per_carton, purchase_unit, pallet, price, currency,
+INSERT INTO shipment_items(shipment_id, outbound_id, material_id, seq, kg, qty, cartons, qty_per_carton, weighing_qty, purchase_unit, pallet, price, currency,
     po_no, po_date, supplier, customs_company, bl_head, contract_no, contract_date,
-    invoice_no, invoice_date, invoice_price, product_use, formula_name)
-VALUES (@id, @outbound_id, @material_id, @seq, @kg, @qty, @cartons, @qty_per_carton, @purchase_unit, @pallet, @price, @currency,
+    invoice_no, invoice_date, invoice_price, product_use, formula_name, carton_group, material_snapshot, carton_no)
+VALUES (@id, @outbound_id, @material_id, @seq, @kg, @qty, @cartons, @qty_per_carton, @weighing_qty, @purchase_unit, @pallet, @price, @currency,
     @po_no, @po_date, @supplier, @customs_company, @bl_head, @contract_no, @contract_date,
-    @invoice_no, @invoice_date, @invoice_price, @product_use, @formula_name)",
+    @invoice_no, @invoice_date, @invoice_price, @product_use, @formula_name, @carton_group, CAST(@snapshot AS jsonb), @carton_no)",
                     new
                     {
                         id, it.outbound_id, it.material_id, seq = i + 1,
-                        kg = it.kg ?? 0, qty = it.qty ?? 0, cartons = it.cartons ?? 0,
+                        kg = it.kg ?? 0, qty = it.qty ?? 0, cartons = it.cartons ?? 0, it.carton_group,
+                        snapshot = it.material_snapshot?.GetRawText(), it.carton_no,
                         qty_per_carton = it.qty_per_carton ?? "",
+                        weighing_qty = it.weighing_qty ?? 0,
                         purchase_unit = it.purchase_unit ?? "个",
                         pallet = it.pallet ?? "",
                         price = it.price ?? 0,
@@ -253,6 +273,35 @@ VALUES (@id, @outbound_id, @material_id, @seq, @kg, @qty, @cartons, @qty_per_car
         int? shipmentId,
         IReadOnlyCollection<ShItem> items)
     {
+        foreach (var item in items.Where(x => x.material_snapshot.HasValue))
+        {
+            var snapshot = item.material_snapshot!.Value;
+            if (snapshot.ValueKind != System.Text.Json.JsonValueKind.Object || snapshot.GetRawText().Length > 8000000 ||
+                !snapshot.TryGetProperty("name_zh", out var name) || name.ValueKind != System.Text.Json.JsonValueKind.String ||
+                string.IsNullOrWhiteSpace(name.GetString()))
+                return "导入资料必须包含有效物料名称，且单行资料不能超过 8MB";
+            if (item.outbound_id.HasValue && (item.material_id is null or <= 0 ||
+                !snapshot.TryGetProperty("id", out var snapshotId) || snapshotId.ValueKind != System.Text.Json.JsonValueKind.Number ||
+                !snapshotId.TryGetInt32(out var confirmedId) || confirmedId != item.material_id))
+                return "导入资料关联出库前必须确认对应物料 ID";
+        }
+        foreach (var group in items.Where(x => !string.IsNullOrWhiteSpace(x.carton_group)).GroupBy(x => x.carton_group))
+        {
+            if (group.Any(x => x.cartons < 1 || x.cartons == null) || group.Select(x => x.cartons).Distinct().Count() != 1)
+                return "同箱合并的明细必须填写相同的正整数箱数";
+        }
+        // A shipment can reference a PO by number without an outbound FK. Share the
+        // header lock with purchase merging so a concurrent save either becomes
+        // visible to Merge's occupancy check, or sees the archived source here.
+        var poNos = items.Select(x => x.po_no).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToArray();
+        if (poNos.Length > 0)
+        {
+            var orders = await connection.QueryAsync(@"
+                SELECT id, merged_into_id FROM purchase_orders
+                WHERE po_no=ANY(@poNos) ORDER BY id FOR SHARE", new { poNos }, transaction);
+            if (orders.Any(po => po.merged_into_id != null))
+                return "采购单已合并，请刷新并使用合并后保留的采购单号";
+        }
         var requested = items
             .Where(x => x.outbound_id is not null)
             .GroupBy(x => x.outbound_id!.Value)
@@ -260,14 +309,17 @@ VALUES (@id, @outbound_id, @material_id, @seq, @kg, @qty, @cartons, @qty_per_car
 
         foreach (var (outboundId, qty) in requested.OrderBy(x => x.Key))
         {
-            if (qty <= 0)
+            var linkedItems = items.Where(x => x.outbound_id == outboundId).ToArray();
+            if (qty <= 0 || linkedItems.Any(x => x.qty is null or <= 0))
                 return $"出库记录 #{outboundId} 的装柜数量必须大于 0";
 
-            var outboundQty = await connection.ExecuteScalarAsync<decimal?>(@"
-                SELECT qty FROM outbound WHERE id=@outboundId FOR UPDATE",
+            var outbound = await connection.QuerySingleOrDefaultAsync<AllocationSource>(@"
+                SELECT qty AS Quantity, material_id AS MaterialId FROM outbound WHERE id=@outboundId FOR UPDATE",
                 new { outboundId }, transaction);
-            if (outboundQty is null)
+            if (outbound is null)
                 return $"出库记录 #{outboundId} 不存在";
+            if (outbound.MaterialId is null || linkedItems.Any(x => x.material_id != outbound.MaterialId))
+                return $"出库记录 #{outboundId} 与装柜明细的物料不一致，请重新确认关联";
 
             var allocatedOther = await connection.ExecuteScalarAsync<decimal>(@"
                 SELECT COALESCE(SUM(qty), 0)
@@ -275,11 +327,17 @@ VALUES (@id, @outbound_id, @material_id, @seq, @kg, @qty, @cartons, @qty_per_car
                 WHERE outbound_id=@outboundId
                   AND (@shipmentId IS NULL OR shipment_id<>@shipmentId)",
                 new { outboundId, shipmentId }, transaction);
-            var available = Math.Max(outboundQty.Value - allocatedOther, 0);
+            var available = Math.Max((outbound.Quantity ?? 0) - allocatedOther, 0);
             if (qty > available)
                 return $"出库记录 #{outboundId} 本柜分配 {qty:0.####}，超过可分配数量 {available:0.####}";
         }
 
         return null;
+    }
+
+    private sealed class AllocationSource
+    {
+        public decimal? Quantity { get; set; }
+        public int? MaterialId { get; set; }
     }
 }

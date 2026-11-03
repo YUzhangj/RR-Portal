@@ -10,6 +10,11 @@ on:
       - '.gitignore'
       - 'LICENSE'
   workflow_dispatch:
+    inputs:
+      force_full_rebuild:
+        description: '强制全量部署（FORCE_FULL_REBUILD=1，用于补救被跳过的构建）'
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-cloud
@@ -26,14 +31,26 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
+      - name: Validate optional Paiji ERP return secret
+        shell: bash
+        env:
+          PAIJI_ERP_RECEIPT_RETURN_TOKEN: ${{ secrets.PAIJI_ERP_RECEIPT_RETURN_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$PAIJI_ERP_RECEIPT_RETURN_TOKEN" && ! "$PAIJI_ERP_RECEIPT_RETURN_TOKEN" =~ ^[a-fA-F0-9]{64}$ ]]; then
+            echo 'PAIJI_ERP_RECEIPT_RETURN_TOKEN must be empty or a 64-character hex secret.' >&2
+            exit 1
+          fi
       - name: Deploy via SSH
+        env:
+          PAIJI_ERP_RECEIPT_RETURN_TOKEN: ${{ secrets.PAIJI_ERP_RECEIPT_RETURN_TOKEN }}
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
         with:
           host: ${{ secrets.CLOUD_HOST }}
           username: ${{ secrets.CLOUD_USER }}
           key: ${{ secrets.CLOUD_SSH_KEY }}
           command_timeout: 60m
-          envs: BEFORE_COMMIT,AFTER_COMMIT
+          envs: BEFORE_COMMIT,AFTER_COMMIT,FORCE_FULL_REBUILD,PAIJI_ERP_RECEIPT_RETURN_TOKEN
           # BEFORE_COMMIT / AFTER_COMMIT 传给 update-server.sh 用于算 diff
           # 脚本自己负责 git pull，不要在这里先 pull（否则 pull 后 HEAD 已经前进，脚本的 BEFORE==AFTER）
           script: |
@@ -44,7 +61,16 @@ jobs:
 
             export BEFORE_COMMIT="${{ github.event.before }}"
             export AFTER_COMMIT="${{ github.event.after }}"
+            # 手动触发且勾选 force_full_rebuild 时强制全量（push 触发时 inputs 为空 → 空字符串，不影响）
+            export FORCE_FULL_REBUILD="${{ inputs.force_full_rebuild && '1' || '' }}"
             cd /opt/rr-portal
+
+            # 手动触发（workflow_dispatch）的 event 没有 before/after，
+            # 取 origin/main 作为 AFTER_COMMIT，否则结尾的 ancestor 校验会把手动部署误判为失败
+            if [ -z "$AFTER_COMMIT" ]; then
+              export AFTER_COMMIT=$(git rev-parse origin/main)
+              echo "[INFO] workflow_dispatch: AFTER_COMMIT 缺省，取 origin/main = ${AFTER_COMMIT:0:7}"
+            fi
 
             # === peise Bailian env guard (2026-06-02) ===
             # 背景: 服务器 .env.cloud.production 缺 PEISE_BAILIAN_API_KEY → 容器里 key 为空 → OCR 不可用。
@@ -122,6 +148,113 @@ jobs:
             else
               echo "[GUARD][WARN] GitHub secret FACTORY_REVIEW_ADMIN_PASSWORD is empty, skipping"
             fi
+
+            echo "=== qc-plan secrets env guard ==="
+            # QC 验货计划系统：JWT 密钥 / 船务集成接口密钥 / 首个管理员密码。
+            # 缺 QC_PLAN_JWT_KEY 或 QC_PLAN_SHIPPING_API_KEY 时 compose 直接报错（:? 断言），
+            # 所以缺 secret 就跳过并告警，不要写入空值把部署打挂。
+            sync_qc_plan_secret() {
+              local name="$1" value="$2"
+              if [ -z "$value" ]; then
+                echo "[GUARD][WARN] GitHub secret $name 为空，跳过"
+                return
+              fi
+              if grep -q "^${name}=" .env.cloud.production; then
+                if [ "$(grep "^${name}=" .env.cloud.production | head -1 | cut -d= -f2-)" != "$value" ]; then
+                  sed -i "s|^${name}=.*|${name}=${value}|" .env.cloud.production
+                  echo "[GUARD] $name updated from GitHub secret"
+                else
+                  echo "[GUARD] $name already matches GitHub secret"
+                fi
+              else
+                echo "${name}=${value}" >> .env.cloud.production
+                echo "[GUARD] $name added from GitHub secret"
+              fi
+            }
+            sync_qc_plan_secret QC_PLAN_JWT_KEY '${{ secrets.QC_PLAN_JWT_KEY }}'
+            sync_qc_plan_secret QC_PLAN_SHIPPING_API_KEY '${{ secrets.QC_PLAN_SHIPPING_API_KEY }}'
+            sync_qc_plan_secret QC_PLAN_ADMIN_PASSWORD '${{ secrets.QC_PLAN_ADMIN_PASSWORD }}'
+
+            # VoyagePlex 邮箱自动收信：网易企业邮箱地址 + 客户端授权码。
+            # secret 为空则跳过（保持 .env 现状），绝不写入空值覆盖已有配置。
+            sync_qc_plan_secret VOYAGEPLEX_MAIL_ADDRESS '${{ secrets.VOYAGEPLEX_MAIL_ADDRESS }}'
+            sync_qc_plan_secret VOYAGEPLEX_MAIL_AUTH_CODE '${{ secrets.VOYAGEPLEX_MAIL_AUTH_CODE }}'
+            sync_qc_plan_secret VOYAGEPLEX_MAIL_FOLDER '${{ secrets.VOYAGEPLEX_MAIL_FOLDER }}'
+
+            # 门户 SSO 免登票据密钥（品质管理 qc / 玩具质量 toyqms / VoyagePlex voyageplex-api 共用）
+            sync_qc_plan_secret SSO_SECRET '${{ secrets.SSO_SECRET }}'
+
+            # PrintLink 3D 打印协同平台：首次启动的初始管理员密码（仅首次初始化生效）
+            sync_qc_plan_secret PRINTLINK_ADMIN_PASSWORD '${{ secrets.PRINTLINK_ADMIN_PASSWORD }}'
+
+            # ERP 生产管理系统：SQL Server sa 密码（仅首次初始化生效，之后改密码需在库内改）
+            # 与 JWT 签名密钥（改动后下次部署随镜像重建生效）
+            sync_qc_plan_secret ERP_SA_PASSWORD '${{ secrets.ERP_SA_PASSWORD }}'
+            sync_qc_plan_secret ERP_JWT_KEY '${{ secrets.ERP_JWT_KEY }}'
+
+            # 独立 ERP 退回密钥；空 Secret 保留现状，不触发任何服务重建。
+            if [ -n "${PAIJI_ERP_RECEIPT_RETURN_TOKEN:-}" ]; then
+              [[ "$PAIJI_ERP_RECEIPT_RETURN_TOKEN" =~ ^[a-fA-F0-9]{64}$ ]] || { echo '[FAIL] Paiji ERP return secret 格式无效' >&2; exit 1; }
+            fi
+            sync_qc_plan_secret PAIJI_ERP_RECEIPT_RETURN_TOKEN "${PAIJI_ERP_RECEIPT_RETURN_TOKEN:-}"
+
+            # PrintLink 采集站配置（清溪 Windows 桥接）：secret 为单行 stations.json 内容
+            # （含站点令牌，不进仓库、不回显）。start.mjs 检测到平台数据目录里的
+            # stations.json 即以其为采集站配置；secret 为空则跳过，保持服务器现状。
+            # Inline guard 来自本次 workflow 定义，首次部署也立即生效；
+            # subshell 独立清理 trap，不覆盖下方 deploy runner 的 EXIT trap。
+            sync_printlink_stations() (
+              set +x
+              if [ -z "${PRINTLINK_STATIONS:-}" ]; then
+                echo "[GUARD] PRINTLINK_STATIONS_JSON 为空，跳过 printlink 采集站同步"
+                return 0
+              fi
+              umask 077
+              local stations_tmp read_status compare_status
+              stations_tmp=$(mktemp -d "${TMPDIR:-/tmp}/printlink-stations.XXXXXX")
+              trap 'rm -rf "$stations_tmp"' EXIT
+              printf '%s' "$PRINTLINK_STATIONS" > "$stations_tmp/incoming"
+              echo "=== printlink stations.json guard ==="
+              # exit 3 仅表示首次配置文件不存在；cat/exec 读取失败必须报错。
+              # 内容只进入 600 临时文件；Docker 错误输出也可能含凭据，统一隐藏。
+              if docker compose -f docker-compose.cloud.yml --env-file .env.cloud.production exec -T printlink sh -c 'if [ -f /app/runtime/stations.json ]; then cat /app/runtime/stations.json; elif [ ! -e /app/runtime/stations.json ]; then exit 3; else exit 1; fi' > "$stations_tmp/current" 2>/dev/null; then
+                read_status=0
+              else
+                read_status=$?
+              fi
+              if [ "$read_status" -eq 0 ]; then
+                if cmp -s "$stations_tmp/incoming" "$stations_tmp/current" >/dev/null 2>&1; then
+                  echo "[GUARD] stations.json 内容一致，跳过写入和 recreate"
+                  return 0
+                else
+                  compare_status=$?
+                fi
+                if [ "$compare_status" -ne 1 ]; then
+                  echo "[GUARD][ERROR] stations.json 比较失败"
+                  return 1
+                fi
+              elif [ "$read_status" -ne 3 ]; then
+                echo "[GUARD][ERROR] 读取 stations.json 失败，未修改配置"
+                return 1
+              fi
+              if ! docker compose -f docker-compose.cloud.yml --env-file .env.cloud.production exec -T printlink sh -c 'cat > /app/runtime/stations.json && chmod 600 /app/runtime/stations.json' < "$stations_tmp/incoming" >/dev/null 2>&1; then
+                echo "[GUARD][ERROR] 写入 stations.json 失败（printlink 容器未在运行？）"
+                return 1
+              fi
+              echo "[GUARD] stations.json 已写入数据卷，force-recreate printlink"
+              if ! docker compose -f docker-compose.cloud.yml --env-file .env.cloud.production up -d --no-deps --force-recreate printlink >/dev/null 2>&1; then
+                echo "[GUARD][ERROR] recreate printlink 失败"
+                return 1
+              fi
+              sleep 8
+              if ! docker compose -f docker-compose.cloud.yml --env-file .env.cloud.production exec -T printlink sh -c 'test -s /app/runtime/stations.json' >/dev/null 2>&1; then
+                echo "[GUARD][ERROR] stations.json 未生效"
+                return 1
+              fi
+              echo "[GUARD] stations.json 已生效"
+            )
+            PRINTLINK_STATIONS='${{ secrets.PRINTLINK_STATIONS_JSON }}'
+            sync_printlink_stations
 
             echo "=== Script version check ==="
             git fetch origin main
@@ -233,7 +366,10 @@ jobs:
               /indo-shipping/health \
               /tomy-paiqi/health \
               /zuru-order-system/health \
-              /zuru-master/health; do
+              /zuru-master/health \
+              /voyageplex/api/health \
+              /erp/health \
+              /qc-plan/api/health; do
             check_endpoint "$ENDPOINT" || FAILED=$((FAILED + 1))
           done
           if [ "$FAILED" -gt 0 ]; then

@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -19,7 +20,7 @@ public record UrgentPreviewResult(int Need, bool CanDirect, List<OverloadDay> Ov
 
 public record UrgentCommitRequest(int UrgentOrderId, List<UrgentRow> Rows, List<int> PausedOrderIds);
 public record PostponedOrder(int OrderId, string ExternalOrderNo, int Days, string NewFinish);
-public record UrgentCommitResult(int CreatedRows, List<PostponedOrder> Postponed);
+public record UrgentCommitResult(int CreatedRows, List<PostponedOrder> Postponed, MaterialReflowResult? MaterialReflow = null);
 
 // 急单：preview（只算不落库：产能检测+暂停候选）/ commit（落库：写急单计划行+被停单整单顺延）。
 // 顺延用「日期往后挪 X 个可排日（跳节假日/周末）」，不依赖未完成的月排引擎。
@@ -57,7 +58,7 @@ public class UrgentController(AppDbContext db) : ControllerBase
 
     // POST /api/schedule/urgent/preview — 只算不落库
     [HttpPost("preview")]
-    [Authorize(Roles = "clerk,admin")]
+    [Authorize(Roles = "clerk,manager,admin")]
     public async Task<IActionResult> Preview([FromBody] UrgentPreviewRequest req)
     {
         if (req.Rows is null || req.Rows.Count == 0)
@@ -169,12 +170,13 @@ public class UrgentController(AppDbContext db) : ControllerBase
 
     // POST /api/schedule/urgent/commit — 落库：写急单计划行 + 被停单整单顺延
     [HttpPost("commit")]
-    [Authorize(Roles = "clerk,admin")]
+    [Authorize(Roles = "clerk,manager,admin")]
     public async Task<IActionResult> Commit([FromBody] UrgentCommitRequest req)
     {
         if (req.Rows is null || req.Rows.Count == 0)
             return BadRequest(new { error = "急单排期行为空" });
 
+        using var tx = await db.Database.BeginTransactionAsync();
         var now = DateTime.UtcNow;
         var user = CurrentUser();
         var parsedRows = req.Rows.Select(r => new { r, Date = DateUtil.ParseUtc(r.PlanDate).Date }).ToList();
@@ -207,12 +209,14 @@ public class UrgentController(AppDbContext db) : ControllerBase
                 return BadRequest(new { error = $"所选停单顺延 {days} 天后会超期或缺少交货日：{string.Join("、", unsafeOrders)}" });
         }
 
+        var productionCalendar = new ProductionCalendar(await db.Holidays.AsNoTracking().ToListAsync());
+        if (parsedRows.Any(x => !productionCalendar.IsWorkday(x.Date)))
+            return BadRequest(new { error = "急单计划包含休息日，请选择工作日" });
+
         // 节假日集合（覆盖一个足够宽的窗口：被停单计划最晚日 + X + 缓冲）
         var holidayRows = await db.Holidays.ToListAsync();
         var rest = holidayRows.Where(h => h.Type == "holiday").Select(h => h.Date.Date).ToHashSet();
         var workOverride = holidayRows.Where(h => h.Type == "workday").Select(h => h.Date.Date).ToHashSet();
-
-        using var tx = await db.Database.BeginTransactionAsync();
 
         // 1) 写急单计划行
         foreach (var x in parsedRows)
@@ -269,8 +273,15 @@ public class UrgentController(AppDbContext db) : ControllerBase
         }
 
         await db.SaveChangesAsync();
+        MaterialReflowResult? materialReflow;
+        try {
+            materialReflow = await MaterialReflow.ApplyCreatedParts(db, parsedRows.Select(row => (req.UrgentOrderId, row.r.PartName ?? "")), user);
+            if (materialReflow is not null) await db.SaveChangesAsync();
+        } catch (InvalidOperationException error) { return BadRequest(new { error = error.Message }); }
+        catch (JsonException) { return BadRequest(new { error = "来料配置或历史记录格式异常，本次排期未保存" }); }
+        catch (DbUpdateConcurrencyException) { return Conflict(new { error = "来料或排期已变化，请重新加载后再保存" }); }
         await tx.CommitAsync();
-        return Ok(new UrgentCommitResult(parsedRows.Count, postponed));
+        return Ok(new UrgentCommitResult(parsedRows.Count, postponed, materialReflow));
     }
 
     // 构造 [minDate, maxDate + days + 60] 范围内的不可排日集合：周末 ∪ 节假日休 − 调休补班
@@ -282,7 +293,7 @@ public class UrgentController(AppDbContext db) : ControllerBase
         var blocked = new HashSet<DateTime>();
         for (var d = from; d <= to; d = d.AddDays(1))
         {
-            bool weekend = d.DayOfWeek == DayOfWeek.Saturday || d.DayOfWeek == DayOfWeek.Sunday;
+            bool weekend = d.DayOfWeek == DayOfWeek.Sunday;
             bool isRest = (weekend || rest.Contains(d)) && !workOverride.Contains(d);
             if (isRest) blocked.Add(d);
         }

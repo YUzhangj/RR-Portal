@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 using SprayPlan.Api.Data;
 using SprayPlan.Api.Entities;
 using SprayPlan.Api.Services;
@@ -14,6 +15,15 @@ namespace SprayPlan.Api.Features.Schedule;
 [Authorize]
 public class ScheduleController(AppDbContext db) : ControllerBase
 {
+    private async Task<List<ProductPart>> SourcePartsFor(IEnumerable<Order> orders)
+    {
+        var ids = orders.SelectMany(order => order.PartQtys)
+            .Where(part => part.SourcePartId.HasValue).Select(part => part.SourcePartId!.Value).Distinct().ToList();
+        if (ids.Count == 0) return [];
+        var productIds = await db.ProductParts.AsNoTracking().Where(part => ids.Contains(part.Id))
+            .Select(part => part.ProductId).Distinct().ToListAsync();
+        return await db.ProductParts.AsNoTracking().Where(part => productIds.Contains(part.ProductId)).ToListAsync();
+    }
     // GET /api/schedule?today=YYYY-MM-DD
     [HttpGet]
     public async Task<IActionResult> Get([FromQuery] string? today)
@@ -30,6 +40,7 @@ public class ScheduleController(AppDbContext db) : ControllerBase
             .Include(o => o.PartQtys)
             .Include(o => o.Plans.Where(p => p.DeletedAt == null))
             .ToListAsync();
+        var allParts = await SourcePartsFor(orders);
 
         var result = orders.Select(o =>
         {
@@ -38,7 +49,7 @@ public class ScheduleController(AppDbContext db) : ControllerBase
             var firstPlanDate = ScheduleCalc.OrderFirstPlanDate(activePlans.Select(p => ScheduleCalc.Ymd(p.PlanDate)));
 
             // 展开可排部位清单（含总需求、产能属性）
-            var parts = ScheduleCalc.ExpandOrderParts(o);
+            var parts = ScheduleCalc.ExpandOrderParts(o, allParts);
 
             // 每部位投入资源：优先取对应计划行的资源配置；无计划时机喷用 stdMachineCount、人工喷 1 人
             var load = parts.Select(pt =>
@@ -82,10 +93,11 @@ public class ScheduleController(AppDbContext db) : ControllerBase
             .Include(o => o.PartQtys)
             .Include(o => o.Plans.Where(p => p.DeletedAt == null))
             .ToListAsync();
+        var allParts = await SourcePartsFor(orders);
 
         var result = orders.Select(o => new SchedulableOrder(
             o.Id, o.ExternalOrderNo, o.Product?.ProductNo ?? "待补产品", o.IsMA, o.IsUrgent, o.Plans.Count > 0,
-            ScheduleCalc.ExpandOrderParts(o))).ToList();
+            ScheduleCalc.ExpandOrderParts(o, allParts))).ToList();
 
         return Ok(result);
     }
@@ -122,9 +134,12 @@ public class ScheduleController(AppDbContext db) : ControllerBase
             p.Order?.Product?.ProductNo ?? "待补产品",
             p.ItemName, p.PartName, p.StepNo, p.Craft, p.PlannedQty,
             ScheduleCalc.SafeArr(p.MachineNos), p.WorkerCount, p.GoodQty, p.InboundQty, p.Remark,
-            p.Order?.ExternalOrderNo ?? "-")).ToList();
+            p.Order?.ExternalOrderNo ?? "-", PlanDateRules.CanReschedule(p))).ToList();
 
-        return Ok(new OverviewResult(lines, planDtos));
+        var notes = await db.DailyLineNotes.AsNoTracking()
+            .Where(n => n.NoteDate >= fromD && n.NoteDate <= toD).ToListAsync();
+        return Ok(new OverviewResult(lines, planDtos, notes.Select(n =>
+            new DailyLineNoteDto(n.LineId, ScheduleCalc.Ymd(n.NoteDate), n.Text, n.Version)).ToList()));
     }
 
     // 取当前登录用户（与 PlansController 对齐，用 username claim）
@@ -141,7 +156,7 @@ public class ScheduleController(AppDbContext db) : ControllerBase
             .Replace("\t", "")
             .ToLowerInvariant();
 
-    private static List<MonthlyScheduleCalc.PartInput> BuildMonthlyParts(Order o)
+    private static List<MonthlyScheduleCalc.PartInput> BuildMonthlyParts(Order o, IReadOnlyList<ProductPart> allParts)
     {
         var result = new List<MonthlyScheduleCalc.PartInput>();
         if (o.Product is null) return result;
@@ -152,7 +167,7 @@ public class ScheduleController(AppDbContext db) : ControllerBase
                 .Select(qty =>
                 {
                     var anchor = qty.SourcePartId is int sid
-                        ? o.Product.Parts.FirstOrDefault(p => p.Id == sid)
+                        ? allParts.FirstOrDefault(p => p.Id == sid)
                         : null;
                     var partName = (anchor?.PartName ?? qty.PartName ?? "").Trim();
                     var key = anchor?.PartGroupId > 0
@@ -172,7 +187,7 @@ public class ScheduleController(AppDbContext db) : ControllerBase
                 var partName = first.PartName;
 
                 var group = first.Anchor is not null
-                    ? PartProcessRules.SameLogicalPart(o.Product.Parts, first.Anchor)
+                    ? PartProcessRules.SameLogicalPart(allParts.Where(part => part.ProductId == first.Anchor.ProductId), first.Anchor)
                     : o.Product.Parts
                         .Where(p => MonthlyPartNameKey(p.PartName) == MonthlyPartNameKey(first.PartName))
                         .OrderBy(p => p.PartOrder)
@@ -214,7 +229,7 @@ public class ScheduleController(AppDbContext db) : ControllerBase
 
     // POST /api/schedule/auto —— 月排「生成预览」：读库 → 倒排算法 → 返回草稿 + 提示清单，不落库。
     [HttpPost("auto")]
-    [Authorize(Roles = "clerk,admin")]
+    [Authorize(Roles = "clerk,manager,admin")]
     public async Task<IActionResult> AutoGenerate([FromBody] AutoScheduleRequest req)
     {
         if (string.IsNullOrWhiteSpace(req.Month) || string.IsNullOrWhiteSpace(req.Today))
@@ -234,6 +249,7 @@ public class ScheduleController(AppDbContext db) : ControllerBase
             .Include(o => o.Product!).ThenInclude(p => p.Parts)
             .Include(o => o.PartQtys)
             .ToListAsync();
+        var allParts = await SourcePartsFor(orders);
 
         var skipped = new List<AutoHint>();
         var noCapacity = new List<AutoHint>();
@@ -245,7 +261,7 @@ public class ScheduleController(AppDbContext db) : ControllerBase
                 p.OrderId == o.Id && p.DeletedAt == null &&
                 p.PlanDate >= monthStart && p.PlanDate < monthEnd);
             if (mode == "incremental" && hasPlansInMonth) { skipped.Add(new AutoHint(o.Id, o.ExternalOrderNo, "existing_skipped")); continue; }
-            var parts = BuildMonthlyParts(o);
+            var parts = BuildMonthlyParts(o, allParts);
             // Never silently create a partial order schedule. If any required child part
             // has no usable capacity, show a clear warning and leave the whole order for correction.
             if (parts.Any(p => p.TotalDemand > 0 && ScheduleCalc.PartDailyOutput(p.StdMachineCount, p.DailyCapacity) <= 0))
@@ -293,7 +309,7 @@ public class ScheduleController(AppDbContext db) : ControllerBase
     // POST /api/schedule/auto/commit —— 月排「保存/重排」：把草稿写入 production_plans。
     // rebuild 模式先软删本月未录实绩(status=planned)计划行；草稿含真实拉别(由算法分配)，按行写 LineId。
     [HttpPost("auto/commit")]
-    [Authorize(Roles = "clerk,admin")]
+    [Authorize(Roles = "clerk,manager,admin")]
     public async Task<IActionResult> AutoCommit([FromBody] CommitAutoRequest req)
     {
         if (string.IsNullOrWhiteSpace(req.Month) || req.Draft is null || req.Draft.Count == 0)
@@ -303,9 +319,14 @@ public class ScheduleController(AppDbContext db) : ControllerBase
         if (req.Draft.Any(d => d.LineId <= 0))
             return BadRequest(new { error = "草稿缺拉别，请重新生成" });
 
+        await using var transaction = await db.Database.BeginTransactionAsync();
         var draftRows = req.Draft
             .Select(d => new { Row = d, PlanDate = DateUtil.ParseUtc(d.PlanDate) })
             .ToList();
+        // 预览可能早于最近一次日历调整；保存前重验，且必须先于 rebuild 的软删。
+        var calendar = new ProductionCalendar(await db.Holidays.AsNoTracking().ToListAsync());
+        if (draftRows.Any(x => !calendar.IsWorkday(x.PlanDate)))
+            return BadRequest(new { error = "草稿包含周日或休假日，请按最新工作日历重新生成" });
         if (draftRows.Any(x =>
             x.Row.OrderId <= 0 ||
             x.Row.LineId <= 0 ||
@@ -373,14 +394,22 @@ public class ScheduleController(AppDbContext db) : ControllerBase
         foreach (var o in toUp) { o.Status = "scheduled"; o.LastUpdatedBy = by; }
 
         await db.SaveChangesAsync();
-        return Ok(new CommitAutoResult(req.Draft.Count, cleared));
+        MaterialReflowResult? materialReflow;
+        try {
+            materialReflow = await MaterialReflow.ApplyCreatedParts(db, draftRows.Select(row => (row.Row.OrderId, row.Row.PartName)), by);
+            if (materialReflow is not null) await db.SaveChangesAsync();
+        } catch (InvalidOperationException error) { return BadRequest(new { error = error.Message }); }
+        catch (JsonException) { return BadRequest(new { error = "来料配置或历史记录格式异常，本次排期未保存" }); }
+        catch (DbUpdateConcurrencyException) { return Conflict(new { error = "来料或排期已变化，请重新加载后再保存" }); }
+        await transaction.CommitAsync();
+        return Ok(new CommitAutoResult(req.Draft.Count, cleared, materialReflow));
     }
 
     // POST /api/schedule/orders/{orderId}/unschedule —— 按订单整体撤销排期。
     // 软删该订单全部未删计划行，订单状态退回 received（不删订单）。
     // 已录实绩(recorded)的订单禁止撤销，避免丢实绩数据。
     [HttpPost("orders/{orderId:int}/unschedule")]
-    [Authorize(Roles = "clerk,admin")]
+    [Authorize(Roles = "clerk,manager,admin")]
     public async Task<IActionResult> Unschedule(int orderId)
     {
         var order = await db.Orders.FindAsync(orderId);
@@ -397,6 +426,7 @@ public class ScheduleController(AppDbContext db) : ControllerBase
         var by = CurrentUser();
         var now = DateTime.UtcNow;
         foreach (var p in plans) { p.DeletedAt = now; p.DeletedBy = by; }
+        await MaterialReflow.Pause(db, plans, by);
 
         // 订单退回已接单（仅当当前是已排期/在产；完工/作废不动）
         if (order.Status is "scheduled" or "in_production")

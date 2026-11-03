@@ -33,12 +33,30 @@ export function isAutoScoreModule(module: ScoreModule): boolean {
   return AUTO_MODULES.has(module)
 }
 
+export function defaultScoreItem(template: ScoreTemplate): ScoreItem {
+  return { template_id: template.id, score: template.module === 'cooperation' ? 10 : 0, notes: '' }
+}
+
 export function recordMonth(value?: string): string {
   return text(value).slice(0, 7)
 }
 
 export function orderMonth(order: Order): string {
   return recordMonth(order.delivery_date || order.actual_delivery_date || order.order_date)
+}
+
+export function factoryIdsWithOrdersInRange(orders: Order[], startMonth: string, endMonth: string): Set<string> {
+  const start = startMonth <= endMonth ? startMonth : endMonth
+  const end = startMonth <= endMonth ? endMonth : startMonth
+  return new Set(
+    orders
+      .filter((order) => {
+        const month = orderMonth(order)
+        return month >= start && month <= end
+      })
+      .map((order) => order.factory)
+      .filter(Boolean),
+  )
 }
 
 export function filterMonthlyScoringData(data: MonthlyScoringData, month: string): MonthlyScoringData {
@@ -172,7 +190,7 @@ export function mergeAutomaticScores(
 ): ScoreItem[] {
   const existing = new Map(existingItems.map((item) => [item.template_id, item]))
   return templates.map((template) => {
-    const current = existing.get(template.id) ?? { template_id: template.id, score: 0, notes: '' }
+    const current = existing.get(template.id) ?? defaultScoreItem(template)
     const automatic = calculateAutoScore(template.module, template.max_score, factory, data)
     return automatic ? { template_id: template.id, ...automatic } : current
   })

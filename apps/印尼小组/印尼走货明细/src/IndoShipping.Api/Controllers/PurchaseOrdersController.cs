@@ -1,15 +1,17 @@
 using System.Text.Json;
 using Dapper;
 using IndoShipping.Api.Auditing;
+using IndoShipping.Api.Features.Purchasing;
 using IndoShipping.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Mvc;
+using Npgsql;
 
 namespace IndoShipping.Api.Controllers;
 
 // Mounted at /api/purchase to match old Node route exactly
 [ApiController]
 [Route("api/purchase")]
-public class PurchaseOrdersController(ISqlConnectionFactory factory) : ControllerBase
+public partial class PurchaseOrdersController(ISqlConnectionFactory factory) : ControllerBase
 {
     [HttpGet("blob")]
     public async Task<IActionResult> GetBlob()
@@ -28,7 +30,8 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
         using var c = factory.Create();
         var rows = await c.QueryAsync(@"
             SELECT DISTINCT tomy_po, product_code FROM po_items
-            WHERE tomy_po IS NOT NULL AND tomy_po <> '' AND product_code IS NOT NULL AND product_code <> ''");
+            WHERE tomy_po IS NOT NULL AND tomy_po <> '' AND product_code IS NOT NULL AND product_code <> ''
+              AND NOT EXISTS (SELECT 1 FROM tool_materials t WHERE t.material_id=po_items.material_id)");
         return Ok(rows);
     }
 
@@ -43,6 +46,7 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
                    MAX(currency) AS currency
             FROM po_items
             WHERE product_code IS NOT NULL AND product_code <> ''
+              AND NOT EXISTS (SELECT 1 FROM tool_materials t WHERE t.material_id=po_items.material_id)
             GROUP BY product_code");
         return Ok(rows);
     }
@@ -53,7 +57,7 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
         using var c = factory.Create();
         var rows = await c.QueryAsync(@"
             WITH receipt_totals AS (
-                SELECT po_item_id, SUM(qty) AS received_qty
+                SELECT po_item_id, SUM(qty) AS received_qty, SUM(spare_qty) AS spare_qty
                 FROM po_receipts
                 GROUP BY po_item_id
             ),
@@ -62,18 +66,22 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
                        COUNT(i.id) AS item_count,
                        SUM(COALESCE(i.purchase_qty, i.qty, 0) * COALESCE(i.price, 0)) AS total_amount,
                        SUM(COALESCE(i.purchase_qty, i.qty, 0)) AS purchase_qty,
-                       SUM(COALESCE(r.received_qty, 0)) AS received_qty
+                       SUM(COALESCE(r.received_qty, 0)) AS received_qty,
+                       SUM(COALESCE(r.spare_qty, 0)) AS spare_qty
                 FROM po_items i
                 LEFT JOIN receipt_totals r ON r.po_item_id = i.id
                 GROUP BY i.po_id
             )
             SELECT po.*,
+                   ARRAY(SELECT m.po_no FROM purchase_orders m WHERE m.merged_into_id=po.id ORDER BY m.id) AS merged_po_numbers,
                    COALESCE(s.item_count, 0) AS item_count,
                    COALESCE(s.total_amount, 0) AS total_amount,
                    COALESCE(s.received_qty, 0) AS received_qty,
+                   COALESCE(s.spare_qty, 0) AS spare_qty,
                    GREATEST(COALESCE(s.purchase_qty, 0) - COALESCE(s.received_qty, 0), 0) AS shortage_qty
             FROM purchase_orders po
             LEFT JOIN item_stats s ON s.po_id = po.id
+            WHERE po.merged_into_id IS NULL
             ORDER BY po.created_at DESC");
         return Ok(rows);
     }
@@ -86,9 +94,11 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
             WITH receipt_totals AS (
                 SELECT po_item_id,
                        SUM(qty) AS received_qty,
+                       SUM(spare_qty) AS spare_qty,
                        STRING_AGG(
                            TO_CHAR(receipt_date, 'MM/DD') || '入库' ||
                            TRIM(TRAILING '.' FROM TRIM(TRAILING '0' FROM qty::text)) ||
+                           CASE WHEN spare_qty > 0 THEN ' + 备品' || TRIM(TRAILING '.' FROM TRIM(TRAILING '0' FROM spare_qty::text)) ELSE '' END ||
                            CASE WHEN COALESCE(batch_no, '') = '' THEN '' ELSE ' [' || batch_no || ']' END,
                            '，' ORDER BY receipt_date, id
                        ) AS receipt_summary
@@ -96,9 +106,12 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
                 GROUP BY po_item_id
             )
             SELECT i.*,
-                   po.po_no, po.supplier, po.status, po.order_date, po.delivery_date,
+                   po.po_no, po.supplier, po.status, po.order_date,
+                   CASE WHEN i.has_delivery_date_override THEN i.delivery_date_override
+                        WHEN i.source_po_no IS NOT NULL THEN i.source_delivery_date ELSE po.delivery_date END AS delivery_date,
                    po.notes AS po_notes,
                    COALESCE(r.received_qty, 0) AS received_qty,
+                   COALESCE(r.spare_qty, 0) AS spare_qty,
                    GREATEST(COALESCE(i.purchase_qty, i.qty, 0) - COALESCE(r.received_qty, 0), 0) AS shortage_qty,
                    COALESCE(r.receipt_summary, '') AS receipt_summary
             FROM po_items i
@@ -114,14 +127,17 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
         using var c = factory.Create();
         var po = await c.QueryFirstOrDefaultAsync("SELECT * FROM purchase_orders WHERE id=@id", new { id });
         if (po == null) return NotFound(new { error = "not found" });
+        if (po.merged_into_id != null)
+            return Conflict(new { error = "采购单已合并，请打开合并后的采购单", merged_into_id = po.merged_into_id });
         var items = (await c.QueryAsync(@"
             WITH receipt_totals AS (
-                SELECT po_item_id, SUM(qty) AS received_qty
+                SELECT po_item_id, SUM(qty) AS received_qty, SUM(spare_qty) AS spare_qty
                 FROM po_receipts
                 GROUP BY po_item_id
             )
             SELECT i.*,
                    COALESCE(r.received_qty, 0) AS received_qty,
+                   COALESCE(r.spare_qty, 0) AS spare_qty,
                    GREATEST(COALESCE(i.purchase_qty, i.qty, 0) - COALESCE(r.received_qty, 0), 0) AS shortage_qty
             FROM po_items i
             LEFT JOIN receipt_totals r ON r.po_item_id = i.id
@@ -134,6 +150,8 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
 
     public class PoBody
     {
+        public int merge_revision { get; set; }
+        public bool apply_delivery_date_all { get; set; }
         public string? po_no { get; set; }
         public string? supplier { get; set; }
         public string? status { get; set; }
@@ -174,6 +192,8 @@ public class PurchaseOrdersController(ISqlConnectionFactory factory) : Controlle
         using var tx = c.BeginTransaction();
         try
         {
+            var customerError = await ValidateCustomerError(c, tx, body.items ?? []);
+            if (customerError is not null) { tx.Rollback(); return Conflict(new { error = customerError }); }
             var id = await c.ExecuteScalarAsync<int>(@"
 INSERT INTO purchase_orders(po_no, supplier, status, order_date, delivery_date, notes)
 VALUES (@po_no, @supplier, @status, @order_date, @delivery_date, @notes)
@@ -219,6 +239,11 @@ VALUES (@id, @pc, @mid, @mname, @qty, @price, @cur, @notes,
             tx.Commit();
             return Ok(new { ok = true, id });
         }
+        catch (PostgresException ex) when (ex.SqlState == "55P03")
+        {
+            tx.Rollback();
+            return Conflict(new { error = "货号或排期正在被修改，未保存采购单，请刷新后重试" });
+        }
         catch { tx.Rollback(); throw; }
     }
 
@@ -230,12 +255,37 @@ VALUES (@id, @pc, @mid, @mname, @qty, @price, @cur, @notes,
         using var tx = c.BeginTransaction();
         try
         {
+            var previous = await c.QueryFirstOrDefaultAsync(
+                "SELECT delivery_date FROM purchase_orders WHERE id=@id FOR UPDATE", new { id }, tx);
+            DateTime? previousDate = previous == null ? null : (DateTime?)previous.delivery_date;
+            var applyDeliveryDate = body.apply_delivery_date_all || previousDate?.Date != body.delivery_date?.Date;
+            var oldDeliveryDates = (await c.QueryAsync(@"
+                SELECT i.id, i.source_po_no, i.product_code, i.tomy_po, i.material_id,
+                    CASE WHEN i.has_delivery_date_override THEN i.delivery_date_override
+                         WHEN i.source_po_no IS NOT NULL THEN i.source_delivery_date ELSE @previousDate END AS delivery_date
+                FROM po_items i WHERE i.po_id=@id ORDER BY i.id FOR UPDATE",
+                new { id, previousDate }, tx)).ToList();
             var n = await c.ExecuteAsync(@"UPDATE purchase_orders SET po_no=@po_no, supplier=@supplier,
-                status=@status, order_date=@order_date, delivery_date=@delivery_date, notes=@notes WHERE id=@id",
+                status=@status, order_date=@order_date, delivery_date=@delivery_date, notes=@notes
+                WHERE id=@id AND merged_into_id IS NULL AND merge_revision=@merge_revision",
                 new { id, po_no = body.po_no ?? "", supplier = body.supplier ?? "",
                       status = body.status ?? "draft", order_date = body.order_date,
-                      delivery_date = body.delivery_date, notes = body.notes ?? "" }, tx);
-            if (n == 0) { tx.Rollback(); return NotFound(new { error = "采购单不存在" }); }
+                      delivery_date = body.delivery_date, notes = body.notes ?? "", body.merge_revision }, tx);
+            if (n == 0) { tx.Rollback(); return Conflict(new { error = "采购单不存在或已发生合并，请关闭后重新打开，避免覆盖合并明细" }); }
+            // Quantity/date/notes edits of legacy lines retain their original identity.
+            // Adding or relinking a line must establish the customer's identity for
+            // both the existing order and the proposed contents under the item locks.
+            var identitiesChanged = (body.items ?? []).Any(it => !oldDeliveryDates.Any(old =>
+                it.id == (int)old.id && (it.product_code ?? "") == ((string?)old.product_code ?? "") &&
+                (it.tomy_po ?? "") == ((string?)old.tomy_po ?? "") && it.material_id == (int?)old.material_id));
+            if (identitiesChanged)
+            {
+                var existing = oldDeliveryDates.Select(old => new PoItemBody {
+                    product_code = (string?)old.product_code, tomy_po = (string?)old.tomy_po,
+                    material_id = (int?)old.material_id });
+                var customerError = await ValidateCustomerError(c, tx, (body.items ?? []).Concat(existing));
+                if (customerError is not null) { tx.Rollback(); return Conflict(new { error = customerError }); }
+            }
             var existingIds = (await c.QueryAsync<int>(
                 "SELECT id FROM po_items WHERE po_id=@id FOR UPDATE", new { id }, tx)).ToHashSet();
             var keptIds = new List<int>();
@@ -304,13 +354,39 @@ RETURNING id",
                     "DELETE FROM po_items WHERE po_id=@id AND NOT (id = ANY(@keptIds))",
                     new { id, keptIds = keptIds.ToArray() }, tx);
             }
+            if (applyDeliveryDate)
+            {
+                await c.ExecuteAsync(@"UPDATE po_items SET delivery_date_override=@deliveryDate,
+                    has_delivery_date_override=TRUE WHERE po_id=@id", new { id, deliveryDate = body.delivery_date }, tx);
+                await this.WriteAsync(c, tx, "purchase", "change_delivery_date", "purchase_order", id,
+                    $"整单修改交货日期：{body.delivery_date?.ToString("yyyy-MM-dd") ?? "未填写"}",
+                    new { id, previous_header_date = previousDate, previous_items = oldDeliveryDates,
+                        delivery_date = body.delivery_date, item_ids = keptIds });
+            }
             await this.WriteAsync(c, tx, "purchase", "update", "purchase_order", id,
                 $"修改采购单 {body.po_no ?? ""}",
                 new { id, body.po_no, body.supplier, item_count = keptIds.Count });
             tx.Commit();
             return Ok(new { ok = true, id });
         }
+        catch (PostgresException ex) when (ex.SqlState == "55P03")
+        {
+            tx.Rollback();
+            return Conflict(new { error = "货号或排期正在被修改，未保存采购单，请刷新后重试" });
+        }
         catch { tx.Rollback(); throw; }
+    }
+
+    private static async Task<string?> ValidateCustomerError(System.Data.IDbConnection c,
+        System.Data.IDbTransaction tx, IEnumerable<PoItemBody> items)
+    {
+        try
+        {
+            await PurchaseCustomerValidation.ValidateAsync(c, tx,
+                items.Select(it => new PurchaseCustomerValidation.Line(it.product_code, it.tomy_po, it.material_id)));
+            return null;
+        }
+        catch (InvalidOperationException ex) { return ex.Message; }
     }
 
     private static object ItemParameters(int poId, int? itemId, PoItemBody it) => new
@@ -342,6 +418,7 @@ RETURNING id",
     {
         public DateTime? receipt_date { get; set; }
         public decimal? qty { get; set; }
+        public decimal? spare_qty { get; set; }
         public string? batch_no { get; set; }
         public string? notes { get; set; }
     }
@@ -350,6 +427,7 @@ RETURNING id",
     {
         public int po_item_id { get; set; }
         public decimal? qty { get; set; }
+        public decimal? spare_qty { get; set; }
     }
 
     public class BulkReceiptBody
@@ -371,12 +449,16 @@ RETURNING id",
     [HttpPost("{poId:int}/receipts/bulk")]
     public async Task<IActionResult> CreateBulkReceipt(int poId, [FromBody] BulkReceiptBody body)
     {
+        if ((body.items ?? new()).Any(x => (x.qty ?? 0) < 0))
+            return BadRequest(new { error = "入库数量不能小于 0" });
+        if ((body.items ?? new()).Any(x => (x.spare_qty ?? 0) < 0))
+            return BadRequest(new { error = "备品入数不能小于 0" });
         var requested = (body.items ?? new())
-            .Where(x => x.po_item_id > 0 && (x.qty ?? 0) > 0)
+            .Where(x => (x.qty ?? 0) > 0 || (x.spare_qty ?? 0) > 0)
             .GroupBy(x => x.po_item_id)
-            .Select(g => new { PoItemId = g.Key, Qty = g.Sum(x => x.qty ?? 0) })
+            .Select(g => new { PoItemId = g.Key, Qty = g.Sum(x => x.qty ?? 0), SpareQty = g.Sum(x => x.spare_qty ?? 0) })
             .ToList();
-        if (requested.Count == 0) return BadRequest(new { error = "请至少填写一项入库数量" });
+        if (requested.Count == 0) return BadRequest(new { error = "请至少填写一项入库数量或备品入数" });
 
         using var c = factory.Create();
         c.Open();
@@ -384,11 +466,7 @@ RETURNING id",
         try
         {
             var itemIds = requested.Select(x => x.PoItemId).ToArray();
-            // 锁序与单条入库路径保持一致（po_items -> purchase_orders），避免 ABBA 死锁
-            await c.ExecuteAsync(@"
-                SELECT i.id FROM po_items i
-                WHERE i.po_id=@poId AND i.id = ANY(@itemIds)
-                FOR UPDATE", new { poId, itemIds }, tx);
+            // 收货与采购编辑/合并统一锁序：订单 -> 按序物料 -> 入库记录。
             var poNo = await c.ExecuteScalarAsync<string?>(
                 "SELECT po_no FROM purchase_orders WHERE id=@poId FOR UPDATE", new { poId }, tx);
             if (poNo is null)
@@ -396,6 +474,10 @@ RETURNING id",
                 tx.Rollback();
                 return NotFound(new { error = "采购单不存在" });
             }
+            await c.ExecuteAsync(@"
+                SELECT i.id FROM po_items i
+                WHERE i.po_id=@poId AND i.id = ANY(@itemIds)
+                ORDER BY i.id FOR UPDATE", new { poId, itemIds }, tx);
 
             var stocks = (await c.QueryAsync<BulkReceiptStock>(@"
                 SELECT i.id AS ""PoItemId"",
@@ -430,10 +512,10 @@ RETURNING id",
             foreach (var line in requested)
             {
                 var receiptId = await c.ExecuteScalarAsync<int>(@"
-                    INSERT INTO po_receipts(po_item_id, receipt_date, qty, batch_no, notes)
-                    VALUES (@poItemId, @receiptDate, @qty, @batchNo, @notes)
+                    INSERT INTO po_receipts(po_item_id, receipt_date, qty, spare_qty, batch_no, notes)
+                    VALUES (@poItemId, @receiptDate, @qty, @spareQty, @batchNo, @notes)
                     RETURNING id",
-                    new { line.PoItemId, receiptDate, line.Qty, batchNo, notes }, tx);
+                    new { line.PoItemId, receiptDate, line.Qty, spareQty = line.SpareQty, batchNo, notes }, tx);
                 ids.Add(receiptId);
             }
 
@@ -453,11 +535,12 @@ RETURNING id",
                   )", new { poId }, tx);
 
             var totalQty = requested.Sum(x => x.Qty);
+            var totalSpareQty = requested.Sum(x => x.SpareQty);
             await this.WriteAsync(c, tx, "inventory", "bulk_receipt", "purchase_order", poId,
                 $"采购单 {poNo} 统一入库 {requested.Count} 项 / {totalQty:0.####}",
                 new { po_id = poId, po_no = poNo, receipt_date = receiptDate, batch_no = batchNo, items = requested });
             tx.Commit();
-            return Ok(new { ok = true, receipt_ids = ids, item_count = requested.Count, qty = totalQty });
+            return Ok(new { ok = true, receipt_ids = ids, item_count = requested.Count, qty = totalQty, spare_qty = totalSpareQty });
         }
         catch { tx.Rollback(); throw; }
     }
@@ -470,7 +553,7 @@ RETURNING id",
             "SELECT COUNT(*) FROM po_items WHERE id=@itemId", new { itemId });
         if (exists == 0) return NotFound(new { error = "采购明细不存在" });
         var rows = await c.QueryAsync(@"
-            SELECT id, po_item_id, receipt_date, qty, batch_no, notes, created_at
+            SELECT id, po_item_id, receipt_date, qty, spare_qty, batch_no, notes, created_at
             FROM po_receipts
             WHERE po_item_id=@itemId
             ORDER BY receipt_date, id", new { itemId });
@@ -481,22 +564,39 @@ RETURNING id",
     public async Task<IActionResult> CreateReceipt(int itemId, [FromBody] ReceiptBody body)
     {
         var receiptQty = body.qty ?? 0;
-        if (receiptQty <= 0) return BadRequest(new { error = "入库数量必须大于 0" });
+        var spareQty = body.spare_qty ?? 0;
+        if (receiptQty < 0) return BadRequest(new { error = "入库数量不能小于 0" });
+        if (spareQty < 0) return BadRequest(new { error = "备品入数不能小于 0" });
+        if (receiptQty == 0 && spareQty == 0) return BadRequest(new { error = "请填写入库数量或备品入数" });
 
         using var c = factory.Create();
         c.Open();
         using var tx = c.BeginTransaction();
         try
         {
-            var item = await c.QueryFirstOrDefaultAsync<(int PoId, decimal OrderedQty)>(@"
-                SELECT po_id AS PoId, COALESCE(purchase_qty, qty, 0) AS OrderedQty
-                FROM po_items
-                WHERE id=@itemId
-                FOR UPDATE", new { itemId }, tx);
-            if (item.PoId == 0)
+            var ownerPoId = await c.ExecuteScalarAsync<int>(
+                "SELECT po_id FROM po_items WHERE id=@itemId", new { itemId }, tx);
+            if (ownerPoId == 0)
             {
                 tx.Rollback();
                 return NotFound(new { error = "采购明细不存在" });
+            }
+            var lockedPoId = await c.ExecuteScalarAsync<int>(
+                "SELECT id FROM purchase_orders WHERE id=@ownerPoId FOR UPDATE", new { ownerPoId }, tx);
+            if (lockedPoId == 0)
+            {
+                tx.Rollback();
+                return Conflict(new { error = "采购明细归属已变化，请刷新后重新入库" });
+            }
+            var item = await c.QueryFirstOrDefaultAsync<(int PoId, decimal OrderedQty)>(@"
+                SELECT po_id AS PoId, COALESCE(purchase_qty, qty, 0) AS OrderedQty
+                FROM po_items
+                WHERE id=@itemId AND po_id=@ownerPoId
+                FOR UPDATE", new { itemId, ownerPoId }, tx);
+            if (item.PoId != ownerPoId)
+            {
+                tx.Rollback();
+                return Conflict(new { error = "采购明细归属已变化，请刷新后重新入库" });
             }
 
             var receivedQty = await c.ExecuteScalarAsync<decimal>(
@@ -513,14 +613,15 @@ RETURNING id",
             }
 
             var receiptId = await c.ExecuteScalarAsync<int>(@"
-                INSERT INTO po_receipts(po_item_id, receipt_date, qty, batch_no, notes)
-                VALUES (@itemId, @receiptDate, @qty, @batchNo, @notes)
+                INSERT INTO po_receipts(po_item_id, receipt_date, qty, spare_qty, batch_no, notes)
+                VALUES (@itemId, @receiptDate, @qty, @spareQty, @batchNo, @notes)
                 RETURNING id",
                 new
                 {
                     itemId,
                     receiptDate = body.receipt_date?.Date ?? DateTime.Today,
                     qty = receiptQty,
+                    spareQty,
                     batchNo = body.batch_no?.Trim() ?? "",
                     notes = body.notes?.Trim() ?? ""
                 }, tx);
@@ -553,6 +654,7 @@ RETURNING id",
                     po_item_id = itemId,
                     po_id = item.PoId,
                     qty = receiptQty,
+                    spare_qty = spareQty,
                     receipt_date = body.receipt_date?.Date ?? DateTime.Today,
                     batch_no = body.batch_no?.Trim() ?? "",
                     shortage_qty = remaining
@@ -569,13 +671,13 @@ RETURNING id",
         using var c = factory.Create();
         c.Open();
         using var tx = c.BeginTransaction();
-        var row = await c.QueryFirstOrDefaultAsync<(int PoId, int ReceiptId, int PoItemId, decimal Qty)>(@"
-            SELECT i.po_id AS PoId, r.id AS ReceiptId, r.po_item_id AS PoItemId, r.qty AS Qty
-            FROM po_receipts r
-            JOIN po_items i ON i.id=r.po_item_id
-            WHERE r.id=@receiptId
-            FOR UPDATE OF r, i", new { receiptId }, tx);
-        if (row.ReceiptId == 0)
+        var (row, ownershipChanged) = await LockReceiptAsync(c, tx, receiptId);
+        if (ownershipChanged)
+        {
+            tx.Rollback();
+            return Conflict(new { error = "采购明细归属已变化，请刷新后重新删除" });
+        }
+        if (row is null)
         {
             tx.Rollback();
             return NotFound(new { error = "入库记录不存在" });
@@ -584,8 +686,8 @@ RETURNING id",
             "SELECT COALESCE(SUM(qty), 0) FROM outbound WHERE po_item_id=@poItemId",
             new { row.PoItemId }, tx);
         var receivedAfterDelete = await c.ExecuteScalarAsync<decimal>(
-            "SELECT COALESCE(SUM(qty), 0) - @qty FROM po_receipts WHERE po_item_id=@poItemId",
-            new { row.PoItemId, qty = row.Qty }, tx);
+            "SELECT COALESCE(SUM(qty + spare_qty), 0) - @qty FROM po_receipts WHERE po_item_id=@poItemId",
+            new { row.PoItemId, qty = row.Qty + row.SpareQty }, tx);
         if (receivedAfterDelete < totalOut)
         {
             tx.Rollback();
@@ -596,7 +698,13 @@ RETURNING id",
         }
         await c.ExecuteAsync("DELETE FROM po_receipts WHERE id=@receiptId", new { receiptId }, tx);
         await c.ExecuteAsync(
-            "UPDATE purchase_orders SET status='sent' WHERE id=@poId AND status='received'",
+            @"UPDATE purchase_orders po SET status='sent'
+              WHERE po.id=@poId AND po.status='received'
+                AND EXISTS (
+                    SELECT 1 FROM po_items i WHERE i.po_id=po.id
+                      AND COALESCE(i.purchase_qty, i.qty, 0) >
+                          COALESCE((SELECT SUM(r.qty) FROM po_receipts r WHERE r.po_item_id=i.id), 0)
+                )",
             new { poId = row.PoId }, tx);
         await this.WriteAsync(c, tx, "inventory", "delete_receipt", "po_receipt", receiptId,
             $"删除入库 {row.Qty:0.####}",
@@ -620,7 +728,7 @@ RETURNING id",
         var dyn = new DynamicParameters();
         foreach (var k in cols) dyn.Add(k, ParamValues.Normalize(body[k]));
         dyn.Add("id", id);
-        var n = await c.ExecuteAsync($"UPDATE purchase_orders SET {sets} WHERE id=@id", dyn, tx);
+        var n = await c.ExecuteAsync($"UPDATE purchase_orders SET {sets} WHERE id=@id AND merged_into_id IS NULL", dyn, tx);
         if (n == 0)
         {
             tx.Rollback();
@@ -644,6 +752,14 @@ RETURNING id",
         {
             tx.Rollback();
             return NotFound(new { error = "采购单不存在" });
+        }
+        var merged = await c.ExecuteScalarAsync<bool>(@"
+            SELECT EXISTS(SELECT 1 FROM purchase_orders
+                WHERE (id=@id AND (merged_into_id IS NOT NULL OR merge_revision>0)) OR merged_into_id=@id)", new { id }, tx);
+        if (merged)
+        {
+            tx.Rollback();
+            return Conflict(new { error = "采购单有合并来源记录，不能直接删除；可取消采购单并保留追溯记录" });
         }
         // 与入库/出库的写路径同一把锁（po_items 行），防止检查与删除之间被并发写入
         await c.ExecuteAsync("SELECT id FROM po_items WHERE po_id=@id FOR UPDATE", new { id }, tx);

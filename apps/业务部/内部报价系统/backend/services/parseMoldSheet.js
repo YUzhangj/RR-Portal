@@ -12,6 +12,7 @@ const XLSX = require('xlsx');
 // 字段 → 关键词候选（越靠前优先级越高）
 // 关键词全部以「去空格 + 大写」比较，故英文关键词写成大写即可同时兼容中英表头
 const FIELD_KEYWORDS = {
+  product_code:   ['小产品编号', '小产品货号', '产品ITEM＃', '产品ITEM#', '产品货号', '产品编号', 'MINI_ITEMNO', 'MINIITEMNO', 'PRODUCTCODE', 'ITEMNO', 'ITEM#', 'ITEM＃'],
   mold_no:        ['模号', '模具编号', '客人模具编号', '编号', 'MOLDNO'],
   part_name:      ['配件名称', 'PARTNAME', 'PART NAME'],
   part_name_cn:   ['中文名称', 'CHINESENAME', 'CHINESE NAME'],
@@ -27,8 +28,10 @@ const FIELD_KEYWORDS = {
   product_size:   ['产品尺寸'],
   machine:        ['机型(TON)', '机台大小', 'INJECTIONMACHINETYPE', '机型'],
   weight:         ['净重', '重量', '料重', '克重', '零件重量', '零件重', 'PARTWEIGHT'],
+  production_demand: ['日产能要求', '产能要求', '生产需求量', 'PRODUCTIONDEMAND'],
+  daily_capacity: ['预计产品日产能', '日产能', 'DAILYCAP', 'PCS/DAY'],
   cycle:          ['周期', 'CYCLETIME', 'CYCLE'],   // 注塑生产周期(秒)
-  target:         ['模具预计日啤数', '日产能', '目标数', 'CYCLES/DAY', 'CYCLESDAY'],
+  target:         ['模具预计日啤数', '目标数', 'CYCLES/DAY', 'CYCLESDAY'],
   shot_price:     ['啤工价', '啤工', '啤价HK$/啤', '啤价'],
   structure:      ['滑块', '斜顶', '模具结构', '加工内容', 'SLIDE', '行位'],
   price_hkd:      ['模价HKD', 'HKD模价', '港币模价', '模价港币'],
@@ -81,6 +84,14 @@ function mapColumns(headerRow) {
       if (cols[field] >= 0) break;
     }
   }
+  // 实际啤数优先于原产能；件数与啤数不得混用。同名列取最左侧。
+  const compact = value => nu(value).replace(/[（）()]/g, '');
+  const actualShots = headerRow.findIndex(v => /^实际产能啤数$/.test(compact(v)));
+  const actualPieces = headerRow.findIndex(v => /^实际产能个数$/.test(compact(v)));
+  const originalShots = headerRow.findIndex(v => compact(v) === '原产能');
+  if (actualShots >= 0) cols.target = actualShots;
+  else if (cols.target < 0 && originalShots >= 0) cols.target = originalShots;
+  if (actualPieces >= 0) cols.daily_capacity = actualPieces;
   // “件*套”常以一个合并表头覆盖相邻两列：左列为出模数，右列为套数。
   const pieceSetIdx = headerRow.findIndex(v => /件[*×X\/]?套/i.test(nu(v)));
   if (pieceSetIdx >= 0) {
@@ -97,6 +108,15 @@ function mapColumns(headerRow) {
     }
   }
   return cols;
+}
+
+// 需求列允许数字及“数量*份数+数量*份数”，不执行单元格文本。
+function parseDemand(value) {
+  const text = String(value ?? '').normalize('NFKC').replace(/[\s,，]/g, '').replace(/[×xX]/g, '*');
+  if (!text) return null;
+  if (!/^\d+(?:\.\d+)?(?:\*\d+(?:\.\d+)?)*(?:\+\d+(?:\.\d+)?(?:\*\d+(?:\.\d+)?)*)*$/.test(text)) return null;
+  const result = text.split('+').reduce((sum, term) => sum + term.split('*').reduce((product, n) => product * Number(n), 1), 0);
+  return Number.isFinite(result) ? result : null;
 }
 
 function parseNumber(v) {
@@ -306,6 +326,19 @@ function tryParseSheet(wb, sheetName) {
   }
   const cols = mapColumns(header);
   const machineHeader = cols.machine >= 0 ? header[cols.machine] : '';
+  // 只展开真实纵向合并区域；普通空白不能沿用上一零件的货号或需求。
+  for (const key of ['production_demand', 'product_code']) if (cols[key] >= 0) {
+    for (const range of ws['!merges'] || []) {
+      if (range.s.c !== cols[key] || range.e.c !== cols[key] || range.s.r < dataStart) continue;
+      const value = aoa[range.s.r]?.[cols[key]];
+      if (value == null || value === '') continue;
+      for (let row = range.s.r + 1; row <= range.e.r; row++) {
+        aoa[row] ||= [];
+        if (aoa[row][cols[key]] == null || aoa[row][cols[key]] === '') aoa[row][cols[key]] = value;
+      }
+    }
+  }
+
 
   const cell = (r, k) => cols[k] >= 0 ? String(r[cols[k]] ?? '').trim() : '';
 
@@ -321,8 +354,13 @@ function tryParseSheet(wb, sheetName) {
     if (!txt) continue;
     const rowText = r.map(c => nu(c)).join('|');
     const firstNonEmpty = r.map(c => String(c ?? '').trim()).find(Boolean) || '';
+    // 附录开始后是钢料标准/签字信息，不再属于模具明细。
+    if (r.some(c => /^(?:模具标准(?:一览表|表)?|模具制作标准|制定\s*Prepared\s*by\s*[:：]?)$/i.test(String(c ?? '').trim()))) break;
+
     // 边界：再遇到 "X、XXX部分" 章节标题 → 停止
     if (/[一二三四五六七八九十]、.+部分/.test(rowText)) break;
+    // 同一工作表的五金/包装区不是注塑模具，不能继承上一模具参数。
+    if (/^(?:[一二三四五六七八九十]+[、.．]\s*)?(?:五金|包装|辅料|电子)(?:部分|配件|明细)?$/.test(firstNonEmpty)) break;
     // 模具明细后的总套数/总价行表示数据区结束，后面通常是付款与交期条款。
     if (/^共\s*\d+\s*套.*模/.test(firstNonEmpty) || /合计\s*[（(]?\s*RMB\s*[）)]?\s*[:：]/i.test(rowText)) break;
     // 边界：再遇到 header-like 行（高密度关键字）→ 停止
@@ -333,7 +371,7 @@ function tryParseSheet(wb, sheetName) {
     if (/^(小计|合计|总计|大写|说明|备注|以下空白|客户确认|签名|损耗)/.test(norm(r[0]))) continue;
     if (/以下空白|客户确认|确认签名|付款方式|完成时间|交货地点|交货时间|交货期|不含税|不含报价|不包含报价|请回电|协商|此单有问题|交付后|工作日完成|甲方|乙方|签字|盖章|改图|抄数费用|模具寿命|消耗品|本报价单|影印件|特别说明|蚀纹|温控箱|订金|首款|尾款|中款|另计/.test(rowText)) continue;
     // 条款可能位于任意列；检查首个非空单元格，而不是固定检查 B 列。
-    if (/^NOTE\s*[:：]?/i.test(firstNonEmpty)) continue;
+    if (/^NOTE\s*[:：]?/i.test(firstNonEmpty) || /^(制表|审核|批准|签名)\s*[:：]?$/.test(firstNonEmpty)) continue;
     if (/^\d+\s*[.:：、，,]/.test(firstNonEmpty) && firstNonEmpty.length > 12) continue;
     if (/[一二三四五六七八九十]、/.test(String(r[0] || ''))) continue;
     // 页脚/签名/条款（如 "Authorized signature"）；英文条款
@@ -346,7 +384,7 @@ function tryParseSheet(wb, sheetName) {
   }
   const productGroups = detectProductGroups(ws, cols.image, dataStart, dataRows);
 
-  const hasPartDetailCols = cols.part_name >= 0
+  const hasPartDetailCols = cols.product_code >= 0 || cols.part_name >= 0
     && (cols.part_name_cn >= 0 || (cols.name >= 0 && cols.part_name !== cols.name));
   if (hasPartDetailCols) {
     const detailMolds = applyProductGroups(buildPartDetailMolds(dataRows, cell, machineHeader), productGroups);
@@ -367,6 +405,10 @@ function tryParseSheet(wb, sheetName) {
   const groups = [];
   let current = null;
   for (const { r, ri } of dataRows) {
+    // Footer labels are not parts; filter before inheriting the previous mold.
+    const first = r.find(v => String(v ?? '').trim());
+    if (/^(制表|审核|批准|签名)\s*[:：]?$/.test(String(first || '').trim())) continue;
+    if (['part_name', 'part_name_cn', 'name'].some(k => /^(制表|审核|批准|签名)\s*[:：]?$/.test(cell(r, k)))) continue;
     const moldNo = hasMoldNoCol ? cell(r, 'mold_no') : '';
     const isNew = !hasMoldNoCol || /^P?\w/.test(moldNo);
 
@@ -415,6 +457,8 @@ function tryParseSheet(wb, sheetName) {
     }
     const cyc = parseNumber(cell(r, 'cycle')); if (cyc != null && current.cycle == null) current.cycle = cyc;
     const machine = normalizeMachine(cell(r, 'machine'), machineHeader); if (machine && !current.machine) current.machine = machine;
+    const demand = parseDemand(cell(r, 'production_demand')); if (demand != null && current.production_demand == null) current.production_demand = demand;
+    const capacity = parseNumber(cell(r, 'daily_capacity')); if (capacity != null && current.daily_capacity == null) current.daily_capacity = capacity;
     const target = parseNumber(cell(r, 'target')); if (target != null && current.target == null) current.target = target;
     const shotPrice = parseNumber(cell(r, 'shot_price')); if (shotPrice != null && current.shot_price == null) current.shot_price = shotPrice;
     const mm = cell(r, 'mold_material'); if (mm && !current.mold_material) current.mold_material = mm;
@@ -477,6 +521,8 @@ function tryParseSheet(wb, sheetName) {
       machine: g.machine,
       machine_model: machineTonToModel(g.machine, machineHeader),
       target: g.target,
+      daily_capacity: g.daily_capacity,
+      production_demand: g.production_demand ?? null,
       shot_price: g.shot_price,
       price_rmb: g.price_rmb,
       price_usd: g.price_usd,
@@ -509,6 +555,10 @@ function buildPartDetailMolds(dataRows, cell, machineHeader = '') {
   };
 
   for (const { r, ri } of dataRows) {
+    // Footer labels are not parts; filter before inheriting the previous mold.
+    const first = r.find(v => String(v ?? '').trim());
+    if (/^(制表|审核|批准|签名)\s*[:：]?$/.test(String(first || '').trim())) continue;
+    if (['part_name', 'part_name_cn', 'name'].some(k => /^(制表|审核|批准|签名)\s*[:：]?$/.test(cell(r, k)))) continue;
     const moldNo = keep('mold_no', cell(r, 'mold_no'));
     const groupName = keep('group_name', cell(r, 'name'));
     const partNameEn = cell(r, 'part_name');
@@ -525,6 +575,8 @@ function buildPartDetailMolds(dataRows, cell, machineHeader = '') {
     if (setsCell != null) state.sets = setsCell;
     const cycleCell = parseNumber(cell(r, 'cycle'));
     if (cycleCell != null) state.cycle = cycleCell;
+    const capacityCell = parseNumber(cell(r, 'daily_capacity'));
+    if (capacityCell != null) state.daily_capacity = capacityCell;
     const targetCell = parseNumber(cell(r, 'target'));
     if (targetCell != null) state.target = targetCell;
     const shotPriceCell = parseNumber(cell(r, 'shot_price'));
@@ -564,6 +616,7 @@ function buildPartDetailMolds(dataRows, cell, machineHeader = '') {
         mold_size: moldSize,
         machine,
         target: state.target ?? null,
+        daily_capacity: state.daily_capacity ?? null,
         shot_price: state.shot_price ?? null,
         parent_name: groupName,
         parts: [],
@@ -575,6 +628,8 @@ function buildPartDetailMolds(dataRows, cell, machineHeader = '') {
     const g = groups.get(key);
     g.parts.push({
       name: partName,
+      ...(cell(r, 'product_code') ? {source_product_code:cell(r, 'product_code')} : {}),
+      production_demand: parseDemand(cell(r, 'production_demand')),
       name_en: partNameEn,
       name_cn: partNameCn,
       material,
@@ -629,10 +684,13 @@ function buildPartDetailMolds(dataRows, cell, machineHeader = '') {
         machine: g.machine,
         machine_model: machineModel,
         target: g.target,
+      daily_capacity: g.daily_capacity,
       },
       machine: g.machine,
       machine_model: machineModel,
       target: g.target,
+      daily_capacity: g.daily_capacity,
+      production_demand: g.production_demand ?? null,
       shot_price: g.shot_price,
       note: [...new Set(g.notes)].join('；'),
       _rows: [g.rowStart, g.rowEnd],

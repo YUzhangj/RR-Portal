@@ -1,0 +1,15 @@
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY server/QcInspection.Api/QcInspection.Api.csproj server/QcInspection.Api/
+RUN dotnet restore server/QcInspection.Api/QcInspection.Api.csproj
+COPY server/QcInspection.Api/ server/QcInspection.Api/
+RUN dotnet publish server/QcInspection.Api/QcInspection.Api.csproj -c Release --no-restore -o /publish
+
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+WORKDIR /app
+# 健康检查用（aspnet 基础镜像不带 curl，与 voyageplex-api 同款处理）
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+COPY --from=build /publish .
+ENV ASPNETCORE_URLS=http://0.0.0.0:5188
+EXPOSE 5188
+ENTRYPOINT ["dotnet", "QcInspection.Api.dll"]

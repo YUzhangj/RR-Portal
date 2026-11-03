@@ -5,6 +5,17 @@
 
 const $ = (id) => document.getElementById(id);
 
+// crypto.randomUUID 仅在安全上下文（HTTPS/localhost）可用；
+// 内网 HTTP 部署下用 getRandomValues 生成 UUIDv4 降级（该 API 非安全上下文也可用）。
+const uuid = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+};
+
 const STATUS_TXT = { empty: '空', filled: '已填', approved: '已审', rejected: '驳回' };
 const STATUS_CLS = { empty: 'b-empty', filled: 'b-filled', approved: 'b-approved', rejected: 'b-rejected' };
 let quoteSaveShortcutHandler = null;
@@ -262,6 +273,7 @@ function renderTable(container, columns, rows, opts = {}) {
     footer = null,
     beforeRow = null,
     rowStyle = null,
+    showRowNumber = true,
   } = opts;
   container.innerHTML = '';
 
@@ -270,7 +282,7 @@ function renderTable(container, columns, rows, opts = {}) {
   const thead = document.createElement('thead');
   const tr = document.createElement('tr');
   const headerRefreshers = [];
-  tr.innerHTML = '<th style="width:36px">#</th>' +
+  tr.innerHTML = (showRowNumber ? '<th style="width:36px">#</th>' : '') +
     columns.map(c => `<th${c.className ? ` class="${c.className}"` : ''}${c.width ? ` style="width:${c.width}"` : ''}>${c.headerInput
       ? `${c.label} <input type="number" step="any" class="th-hinput" data-k="${c.key}" value="${c.headerInput.get() ?? ''}" style="width:56px"${readonly ? ' disabled' : ''}>${c.headerInput.suffix ?? ''}`
       : c.label}</th>`).join('') +
@@ -296,14 +308,14 @@ function renderTable(container, columns, rows, opts = {}) {
         const groupRow = document.createElement('tr');
         groupRow.className = before.className || 'wb-group-row';
         const groupCell = document.createElement('td');
-        groupCell.colSpan = columns.length + 1 + (readonly ? 0 : 1);
+        groupCell.colSpan = columns.length + (showRowNumber ? 1 : 0) + (readonly ? 0 : 1);
         groupCell.innerHTML = before.html || '';
         Object.assign(groupCell.style, before.style || {});
         groupRow.appendChild(groupCell);
         tbody.appendChild(groupRow);
       }
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${idx + 1}</td>`;
+      tr.innerHTML = showRowNumber ? `<td>${idx + 1}</td>` : '';
       const calcCells = []; // [{ td, fn }] — 行内所有计算列，用于实时刷新
       const refreshCalcs = () => calcCells.forEach(({ td, fn }) => { td.textContent = formatNum(fn(row)); });
       headerRefreshers.push(refreshCalcs);
@@ -1038,7 +1050,7 @@ function addManualMoldGroup(molds, name) {
   if (molds.some(m => String(m.product_group_name || '').trim() === name)) {
     throw new Error('产品分组已存在，请在该组内增加模具');
   }
-  const row = { images: [], product_group_id: 'manual-product-' + crypto.randomUUID(), product_group_name: name };
+  const row = { images: [], product_group_id: 'manual-product-' + uuid(), product_group_name: name };
   molds.push(row);
   return row;
 }
@@ -1079,9 +1091,18 @@ function copyMoldRow(molds, index) {
   return copy;
 }
 
+function cleanupMoldNumberObservers(root) {
+  if (!root) return;
+  const owners = new Set([root]);
+  for (const table of root.querySelectorAll?.('.mold-table') || []) owners.add(table.parentElement);
+  for (const owner of owners) {
+    owner?._moldNumberObserver?.disconnect();
+    if (owner) owner._moldNumberObserver = null;
+  }
+}
+
 function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
-  container._moldNumberObserver?.disconnect();
-  container._moldNumberObserver = null;
+  cleanupMoldNumberObservers(container);
   const moldNumberInputs = new Map();
   container.innerHTML = '';
   const table = document.createElement('table'); table.className = 'wb-table mold-table';
@@ -1173,8 +1194,7 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
 
     const tr = document.createElement('tr');
     // 序号
-    const tdNo = document.createElement('td'); tdNo.className = 'ro'; tdNo.textContent = idx + 1;
-    tr.appendChild(tdNo);
+    const tdNo = document.createElement('td'); tdNo.className = 'ro'; tdNo.textContent = idx + 1; tr.appendChild(tdNo);
 
     fields.forEach((f) => {
       const td = document.createElement('td');
@@ -1252,7 +1272,7 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
           const ta = document.createElement('textarea');
           ta.rows = k === 'mold_no' ? 1 : 3; ta.value = get() ?? '';
           ta.style.resize = 'vertical';
-          const autoSize = () => { ta.style.height = 'auto'; ta.style.height = (ta.scrollHeight + 2) + 'px'; };
+          const autoSize = () => { if (!ta.isConnected) return; ta.style.height = 'auto'; ta.style.height = (ta.scrollHeight + 2) + 'px'; };
           if (k === 'mold_no') {
             ta.setAttribute('aria-label', `第${idx + 1}行模号`);
             moldNumberInputs.set(ta, { autoSize, width: 0 });
@@ -1337,15 +1357,36 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
 
   container.appendChild(table);
   if (moldNumberInputs.size && typeof ResizeObserver === 'function') {
+    const pending = new Set();
+    let frame = 0;
+    let disposed = false;
     const observer = new ResizeObserver(entries => {
+      if (disposed) return;
       for (const entry of entries) {
         const state = moldNumberInputs.get(entry.target);
         const width = Math.round(entry.contentRect.width * 100);
-        if (state && state.width !== width) { state.width = width; state.autoSize(); }
+        if (state && state.width !== width) { state.width = width; pending.add(entry.target); }
+      }
+      if (pending.size && !frame) {
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          if (disposed) return;
+          for (const input of pending) {
+            if (input.isConnected) moldNumberInputs.get(input)?.autoSize();
+          }
+          pending.clear();
+        });
       }
     });
     for (const input of moldNumberInputs.keys()) observer.observe(input);
-    container._moldNumberObserver = observer;
+    container._moldNumberObserver = {
+      disconnect() {
+        disposed = true;
+        observer.disconnect();
+        if (frame) cancelAnimationFrame(frame);
+        pending.clear();
+      },
+    };
   }
   if (canEdit) {
     const add = document.createElement('button');
@@ -1605,6 +1646,8 @@ function buildElectronicSummaryRows(split, taxLabel) {
   return icRows;
 }
 
+// Only replace an untouched, previously generated summary. Existing rows without
+// a baseline are conservatively preserved because their edit history is unknown.
 function electronicDetailFingerprint(row) {
   return JSON.stringify([row.name || '', row.spec || '', Number(row.qty) || 0,
     Number(Number(row.unit_price_rmb || 0).toFixed(6)), row.tax_label || '含税',
@@ -2239,8 +2282,11 @@ function renderSummaryPane(host, sections, quote, me) {
     const autoFill = {
       ...components,
       base_price: totalBeforeMarkup * (num(legacy.formula_markup_x) || 1),
+      // Match live itemized report/export tax; keep other costing modes unchanged.
+      itemized_labor13_basis: (num(components.injection_labor)
+        + num(components.painting_labor) + num(components.assembly_labor)) * 0.08,
     };
-    host.innerHTML = '<div id="legacy-tax-deduction-block" class="hidden"></div>';
+    host.innerHTML = '<div id="legacy-tax-deduction-block"></div>';
     renderLegacyPricingTail(host, legacy, {
       cost: totalBeforeMarkup,
       markup: num(legacy.formula_markup_x) || 1,
@@ -2249,7 +2295,6 @@ function renderSummaryPane(host, sections, quote, me) {
     });
     const salesSec = sections.find(x => x.dept === 'sales');
     const taxSummary = renderTaxDeductionBlock(host.querySelector('#legacy-tax-deduction-block'), sales, salesSec, me, autoFill);
-    const importedTax = renderLegacyTaxSummary(host, legacy, sales.pricing_summary, taxSummary, true);
     return {
       material: num(autoFill.imp_mat) + num(autoFill.dom_mat) + num(autoFill.hardware)
         + num(autoFill.electronic) + num(autoFill.motor) + num(autoFill.suction)
@@ -2261,9 +2306,9 @@ function renderSummaryPane(host, sections, quote, me) {
         + num(autoFill.plating) + num(autoFill.flocking) + num(autoFill.other_buy) + num(autoFill.carton)
         + num(autoFill.freight) + num(autoFill.cabinet) + num(autoFill.misc),
       total: num(taxSummary?.totalCost),
-      totalDeduction: num(importedTax?.totalDeduction),
-      afterDeduction: num(importedTax?.afterDeduction),
-      financial: { ...taxSummary.financial, totalDeduction: num(importedTax?.totalDeduction), afterDeduction: num(importedTax?.afterDeduction) },
+      totalDeduction: num(taxSummary?.totalDeduction),
+      afterDeduction: num(taxSummary?.afterDeduction),
+      financial: taxSummary.financial,
     };
   }
 
@@ -2629,6 +2674,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
   salesPayload.pricing_summary = salesPayload.pricing_summary || {};
   const ps = salesPayload.pricing_summary;
   autoFill = autoFill || {};
+  const itemizedLaborTax = Object.hasOwn(autoFill, 'itemized_labor13_basis');
   // 减税明细只读：每次均以各部门实时金额覆盖历史手工值。
   ps.overrides = ps.overrides || {};
   const applyAuto = (tbl, key, val) => {
@@ -2680,7 +2726,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
   const RATE_DEFAULTS = {
     rmb_buy: 0,       // 人民币外购件成本（总额参考，不参与减税）
     tax13: 0,         // 含税13%类成本（成本基数参考，不参与减税；减税在"含税13%类"列）
-    carton: 10,       // 纸箱类
+    carton: 11.5,     // 纸箱类：原成本 / 1.1 × 11.5%
     tax1: 0.99,       // 含税1%
     slush3: 3,        // 搪胶类3%
     sewhair13: 11.5,  // 车发类13%
@@ -2688,6 +2734,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     suction6: 6,      // 吸塑类6%
     freight9: 8.26,   // 运费含税9%
     tax13b: 11.5,     // 含税13%类
+    ...(itemizedLaborTax ? { labor13: 11.5 } : {}),
   };
   ps.t4 = ps.t4 || {};
   Object.keys(RATE_DEFAULTS).forEach(k => {
@@ -2705,6 +2752,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     ['carton', '纸箱'], ['freight', '运费'], ['cabinet', '吊柜费'], ['misc', '杂项'],
   ];
   const t4Cols = [
+    ...(itemizedLaborTax ? [['labor13', '人工类13%（人工×8%）']] : []),
     ['tax13', '含税13%类成本'], ['carton', '纸箱类'],
     ['tax1', '含税1%'], ['slush3', '搪胶类3%'], ['sewhair13', '车发类13%'], ['sewcloth13', '车衣类13%'],
     ['suction6', '吸塑类6%'], ['freight9', '运费类9%'], ['tax13b', '含税13%类'],
@@ -2729,10 +2777,10 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
       : `<td><span class="tk-readout" data-tbl="t4r" data-key="${k}" title="税率%">${num(ps.t4[k].rate)}</span>%</td>`).join('')
       + '<td></td><td></td>';
     const dedRow = t4Cols.map(([k]) => T4_NO_RATE.has(k) ? '<td class="tk-calc">—</td>'
-      : `<td class="tk-calc" id="tk-ded-${k}" title="减税额=金额×税率">0.0000</td>`).join('')
+      : `<td class="tk-calc" id="tk-ded-${k}" title="${k === 'carton' ? '减税额=金额÷1.1×税率' : '减税额=金额×税率'}">0.0000</td>`).join('')
       + '<td class="tk-sum" id="tk-total-ded">0.00</td>'
       + '<td class="tk-sum" id="tk-after-ded" style="background:#dcfce7;color:#166534;font-weight:700">0.00</td>';
-    return `<div class="tk-block"><div class="tk-title">四、减税明细 <small class="muted">（1=金额，2=税率%，3=减税额=金额×税率；合计减税=Σ减税额；减税后成本 = 总成本 − 合计减税）</small></div>
+    return `<div class="tk-block"><div class="tk-title">四、减税明细 <small class="muted">（1=金额，2=税率%，3=减税额：纸箱金额÷1.1×税率，其余金额×税率；合计减税=Σ减税额；减税后成本 = 总成本 − 合计减税）</small></div>
       <div class="tk-scroll"><table class="tk-table"><thead><tr>${headRow}</tr></thead><tbody>
         <tr>${amtRow}</tr>
         <tr>${rateRow}</tr>
@@ -2818,6 +2866,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
       const inp = host.querySelector(`[data-tbl="t4a"][data-key="${key}"]`);
       if (inp) inp.textContent = formatNum(ps.t4[key].amt);
     };
+    if (itemizedLaborTax) setT4Amt('labor13', autoFill.itemized_labor13_basis);
     setT4Amt('rmb_buy', rmbBuyCost);                                           // 人民币外购件成本
     // 含税13%类成本 = 国内料 + 五金 + 马达 + 彩盒/内咭 + 电池 + 利宝 + 其他外购 + 油漆 + 胶袋
     const tax13Cost = num(ps.t1.dom_mat) + num(ps.t1.hardware) + num(ps.t1.motor)
@@ -2840,7 +2889,8 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     // 表4：每行 减税额 = 金额 × 税率%；参考列(无税率)不计；填入减税额行 + 合计
     const totalDed = t4Cols.reduce((s, [k]) => {
       if (T4_NO_RATE.has(k)) return s;  // 含税13%类成本为参考列，不重复参与减税
-      const ded = num(ps.t4[k].amt) * num(ps.t4[k].rate) / 100;
+      const basis = num(ps.t4[k].amt) / (k === 'carton' ? 1.1 : 1);
+      const ded = basis * num(ps.t4[k].rate) / 100;
       const cell = host.querySelector('#tk-ded-' + k);
       if (cell) cell.textContent = formatNum(ded);
       return s + ded;
@@ -2862,14 +2912,14 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     ps.t2.code_after = +codeAfter.toFixed(4);
     const codeAfterInp = host.querySelector('[data-tbl="t2"][data-key="code_after"]');
     if (codeAfterInp) codeAfterInp.textContent = formatNum(ps.t2.code_after);
-    const taxLabels = { tax13: '含税13%类成本', carton: '纸箱类', tax1: '含税1%', slush3: '搪胶类3%', sewhair13: '车发类13%', sewcloth13: '车衣类13%', suction6: '吸塑类6%', freight9: '运费含税9%', tax13b: '含税13%类' };
+    const taxLabels = { ...(itemizedLaborTax ? { labor13: '人工类13%（人工×8%）' } : {}), tax13: '含税13%类成本', carton: '纸箱类', tax1: '含税1%', slush3: '搪胶类3%', sewhair13: '车发类13%', sewcloth13: '车衣类13%', suction6: '吸塑类6%', freight9: '运费含税9%', tax13b: '含税13%类' };
     calculatedSummary = { totalCost, totalDeduction: totalDed, afterDeduction: afterDed,
       financial: {
         fields: { ...ps.t1, ...ps.t2, ...ps.t3 },
         totalCost, totalDeduction: totalDed, afterDeduction: afterDed, noLabor: noLaborCost,
         taxRows: Object.entries(taxLabels).map(([key, label]) => ({ key, label,
           base: num(ps.t4[key]?.amt), rate: num(ps.t4[key]?.rate),
-          deduction: num(ps.t4[key]?.amt) * num(ps.t4[key]?.rate) / 100 })),
+          deduction: num(ps.t4[key]?.amt) / (key === 'carton' ? 1.1 : 1) * num(ps.t4[key]?.rate) / 100 })),
       },
     };
   }
@@ -3030,10 +3080,10 @@ function renderSlush(host, payload, canEdit, onChange, fxRmbHkd) {
 
 // ============== 车缝部门 ==============
 function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
+  const spinSewing = typeof window !== 'undefined' && window.SewingTax?.isSpin(window.__data?.quote?.customer);
   payload.sewing_groups = payload.sewing_groups || [];
   payload.sewing_loss_pct = payload.sewing_loss_pct ?? 1;
   const fx = num(fxRmbHkd) || 0.85;
-  const spinSewing = typeof window !== 'undefined' && window.SewingTax?.isSpin(window.__data?.quote?.customer);
 
   const itemCols = [
     { key: 'fabric', label: '布料名称', type: 'textarea', width: '240px' },
@@ -3263,7 +3313,9 @@ function engineeringSummaryTotals(payload, fxRmbHkd, fxHkdUsd) {
 }
 function engineeringCartonDetails(c) {
   const boxes = c.cartons?.length ? c.cartons : (c.cl ? [{cl:c.cl,cw:c.cw,ch:c.ch,qty:c.qty,flat_cards:c.flat_card ? [{l:c.cl,w:c.cw,qty:1}] : []}] : []);
-  const rate = c.paper_rate == null ? defaultCartonRate(boxes[0]?.ka_label || c.ka_label) : c.paper_rate === '' ? 2.75 : num(c.paper_rate);
+  // Read-only totals use the stored quote's fallback, as the server does.
+  // Current factory defaults apply only when the editor initializes new data.
+  const rate = c.paper_rate == null || c.paper_rate === '' ? 2.75 : num(c.paper_rate);
   return boxes.filter(box => num(box.cl) || num(box.cw) || num(box.ch)).flatMap((box,index) => [
     {type:'纸箱',name:box.name || `纸箱 ${index + 1}`,l:box.cl,w:box.cw,h:box.ch,qty:box.qty,rate,
       ka_label:box.ka_label || c.ka_label,unit:cartonBoxPrice(box,rate),amount:cartonBoxPrice(box,rate)/Math.max(num(box.qty),1)},
@@ -3593,7 +3645,7 @@ function attachSupplierMaterialImportUI(host, payload, canEdit, onChange, fxRmbH
             {id:'__shared__',label:'每包装共有费用',byCode:true,existing:mixedRoot.mixed_shared?.[targetKey] || [],items:allocation.sharedItems}];
         };
         const detectedSupplier = String(result.supplier_name || '').trim();
-        const supplierNameKey = value => supplierSync.normalize(value).replace(/\s/g, '');
+        const supplierNameKey = value => supplierSync.normalize(value);
         if (supplierSync && detectedSupplier) {
           const matches = supplierSync.suppliers(scopeBatches([])).filter(supplier=>supplierNameKey(supplier.name)===supplierNameKey(detectedSupplier));
           if (matches.length === 1) supplierChoice = matches[0].id;
@@ -3885,6 +3937,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
   payload.electronics_extra = payload.electronics_extra || { test_repair: 0, packing_shipping: 0, profit_pct: 10, tax_diff: 0, tax_payable: 0 };
   ['profit_pct', 'tax_diff', 'tax_payable'].forEach(k => { if (payload.electronics_extra[k] == null) payload.electronics_extra[k] = k === 'profit_pct' ? 10 : 0; });
 
+  cleanupMoldNumberObservers(host);
   host.innerHTML = `
     <h3>一、模具部分
       ${canEdit ? `<small><label class="upload-mold-sheet" style="display:inline-block;margin-left:12px">
@@ -4077,10 +4130,30 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
       input.type = 'text'; input.value = row.supplier_name || row.supplier_id || '';
       input.placeholder = '填写供应商'; input.maxLength = 100;
       input.setAttribute('aria-label', '供应商'); input.style.minWidth = '140px';
+      let original = { supplier_name: row.supplier_name, supplier_id: row.supplier_id };
+      let supplierError = '';
+      input.onfocus = () => { original = { supplier_name: row.supplier_name, supplier_id: row.supplier_id }; };
       input.oninput = () => {
-        window.SupplierMaterialSync.setSupplier(row, input.value,
-          [...payload.hardware, ...payload.aux_materials, ...payload.packaging_materials]);
+        try {
+          const candidate = { ...original };
+          window.SupplierMaterialSync.setSupplier(candidate, input.value,
+            [...payload.hardware, ...payload.aux_materials, ...payload.packaging_materials].filter(item => item !== row));
+          Object.assign(row, candidate);
+          supplierError = '';
+        } catch (error) {
+          // 同名歧义时恢复编辑前的归属，快捷保存也不能提交逐字输入的临时标识。
+          Object.assign(row, original);
+          supplierError = error.message;
+        }
+        input.setCustomValidity(supplierError);
         onChange();
+      };
+      input.onchange = () => {
+        if (!supplierError) return;
+        input.value = row.supplier_name || row.supplier_id || '';
+        input.setCustomValidity('');
+        alert(supplierError);
+        supplierError = '';
       };
       td.appendChild(input);
     },
@@ -4164,6 +4237,27 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
 }
 
 // ============ 电子部 ============
+function applyElectronicQuoteImport(payload, result, fxRmbHkd, fxHkdUsd) {
+  const fx = num(fxRmbHkd) || 0.85;
+  const normalized = normalizeElectronicImport(result, fx, fxHkdUsd);
+  const sp = elecImportedSummaryRows(normalized, normalized.extras || {}, fx);
+  const taxLabel = (normalized.meta && normalized.meta.tax_label) || '含税';
+  syncElectronicDetailSummary(payload, buildElectronicSummaryRows(sp, taxLabel));
+  if (normalized.extras) {
+    payload.electronics_extra = payload.electronics_extra || {};
+    ['test_repair', 'packing_shipping', 'profit_pct', 'tax_diff', 'tax_payable', 'bonding_cost', 'smt_cost', 'labor_cost'].forEach(k => {
+      if (normalized.extras[k] != null) payload.electronics_extra[k] = normalized.extras[k];
+    });
+  }
+  // 保存原始 parts/extras 供导出
+  payload.electronics_doc = {
+    ...normalized,
+    source_format: normalized.source_format || 'dengxin',
+    parts_count: elecDetailRowCount(normalized.parts || []),
+    imported_at: new Date().toISOString().slice(0, 10),
+  };
+}
+
 function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) {
   fxHkdUsd = num(fxHkdUsd) || 7.8;
   payload.electronics = payload.electronics || [];
@@ -4444,23 +4538,7 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
             // 明细是 RMB，总表单价是 HKD：单价 HKD = RMB ÷ 汇率（与税点下拉/由明细汇总按钮口径一致）
             const fx = num(fxRmbHkd) || 0.85;
             j.source_currency = impPreview.querySelector('#el-source-currency').value;
-            const normalized = normalizeElectronicImport(j, fx, fxHkdUsd);
-            const sp = elecImportedSummaryRows(normalized, normalized.extras || {}, fx);
-            const taxLabel = (normalized.meta && normalized.meta.tax_label) || '含税';
-            syncElectronicDetailSummary(payload, buildElectronicSummaryRows(sp, taxLabel));
-            if (normalized.extras) {
-              payload.electronics_extra = payload.electronics_extra || {};
-              ['test_repair', 'packing_shipping', 'profit_pct', 'tax_diff', 'tax_payable', 'bonding_cost', 'smt_cost', 'labor_cost'].forEach(k => {
-                if (normalized.extras[k] != null) payload.electronics_extra[k] = normalized.extras[k];
-              });
-            }
-            // 保存原始 parts/extras 供导出
-            payload.electronics_doc = {
-              ...normalized,
-              source_format: normalized.source_format || 'dengxin',
-              parts_count: elecDetailRowCount(normalized.parts || []),
-              imported_at: new Date().toISOString().slice(0, 10),
-            };
+            applyElectronicQuoteImport(payload, j, fx, fxHkdUsd);
             impPreview.innerHTML = ''; impFile.value = '';
             onChange();
             renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd);
@@ -4499,11 +4577,9 @@ function lookupMachinePrice(model, prices) {
 }
 
 function syncInjectionMolds(payload, refMolds) {
-  const key = row => [row.product_group_id || row.product_group_name || '',
-    row.mold_no || '', row.name || '', row.mold_part_index ?? 0].join('|');
-  const existingRows = new Map(payload.injection.map(row => [key(row), row]));
+  const existingRows = new Map(payload.injection.map(row => [engineeringMoldSyncKey(row), row]));
   payload.injection = refMolds.map(m => {
-    const existing = existingRows.get(key(m));
+    const existing = existingRows.get(engineeringMoldSyncKey(m));
     const next = {
       ...(existing || {}),
       product_group_id: m.product_group_id || '',
@@ -4515,6 +4591,7 @@ function syncInjectionMolds(payload, refMolds) {
       mold_no: m.mold_no || existing?.mold_no || '',
       name: m.name,
       mold_size: m.mold_size || existing?.mold_size || '',
+      side_action: m.side_action || existing?.side_action || '',
       material: m.material || existing?.material || '',
       material_grade: m.material_grade || existing?.material_grade || '',
       color: m.color || existing?.color || '',
@@ -4528,7 +4605,7 @@ function syncInjectionMolds(payload, refMolds) {
       machine_model: m.machine_model || existing?.machine_model || '',
       target: existing?.target ?? m.target ?? null,
       material_unit_price: m.material_unit_price ?? existing?.material_unit_price ?? null,
-      shot_price: existing?.shot_price ?? m.shot_price ?? null,
+      shot_price: existing ? existing.shot_price : (m.shot_price ?? null),
       note: m.note || existing?.note || '',
     };
     if (!existing || window.InjectionPricing.signature(existing, payload.machine_prices) !==
@@ -4580,7 +4657,23 @@ function isBlankInjectionPrice(value) {
   return value === null || value === undefined || value === '';
 }
 
-// 默认只补齐空白料价/啤价，避免进入页面时覆盖人工调整；按钮手动套价时可传 overwrite=true。
+function engineeringMoldSyncKey(row) {
+  return [
+    row?.product_group_id || row?.product_group_name || '',
+    row?.mold_no || '', row?.name || '', row?.mold_part_index ?? 0,
+  ].join('|');
+}
+
+function engineeringImagesForInjection(row, refMolds) {
+  const reference = (refMolds || []).find(mold => engineeringMoldSyncKey(mold) === engineeringMoldSyncKey(row));
+  const detailedImages = Array.isArray(reference?.images) ? reference.images : [];
+  return [...new Set([
+    ...detailedImages,
+    reference?.product_image || row?.product_image || '',
+  ].filter(Boolean))];
+}
+
+// 默认补齐空白料价、已明确自动计算行的空啤价；历史未标记值保持，按钮套价可传 overwrite=true。
 function applyInjectionReferencePrices(payload, { overwrite = false, material = true, machine = true } = {}) {
   let materialHits = 0;
   let machineHits = 0;
@@ -4607,13 +4700,16 @@ function applyInjectionReferencePrices(payload, { overwrite = false, material = 
       const matchedMachine = lookupMachinePrice(row.machine_model, payload.machine_prices);
       const nextPrice = window.InjectionPricing.calculate(row, payload.machine_prices);
       if (row.catalog_raw_weight != null) continue;
-      if ((overwrite || isBlankInjectionPrice(row.shot_price)) && nextPrice !== null) {
+      const shouldPrice = overwrite || (isBlankInjectionPrice(row.shot_price) && row.shot_price_mode === 'auto');
+      if (shouldPrice && nextPrice !== null) {
         if (row.shot_price !== nextPrice) changed = true;
         row.shot_price = nextPrice;
+        row.shot_price_mode = 'auto';
         machineHits++;
-      } else if (overwrite || isBlankInjectionPrice(row.shot_price)) {
+      } else if (shouldPrice) {
         if (row.shot_price !== null) changed = true;
         row.shot_price = null;
+        row.shot_price_mode = 'auto';
         machineMisses.push(`${row.machine_model || '(无机型)'}(请补齐有效机型价、套数和目标数)`);
       }
       if (!row.machine && matchedMachine && matchedMachine.normal) {
@@ -4703,6 +4799,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       source_sheet_name: m.source_sheet_name || '',
       source_sheet_index: m.source_sheet_index ?? null,
       mold_size: m.mold_size || '',
+      side_action: m.side_action || '',
       material: m.material || '',
       material_grade: m.material_grade || '',
       color: m.color || '',
@@ -4717,6 +4814,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       target: m.target ?? null,
       material_unit_price: m.material_unit_price ?? null,
       shot_price: m.shot_price ?? null,
+      shot_price_mode: m.shot_price_mode ?? (isBlankInjectionPrice(m.shot_price) ? 'auto' : undefined),
       note: m.note || '',
     }));
   }
@@ -4736,7 +4834,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     ${canEdit ? `<small style="margin-left:8px"><button id="btn-auto-price" class="mini" type="button">🔄 自动按材质套料价</button></small>` : ''}
     ${canEdit ? `<small style="margin-left:6px"><button id="btn-auto-shot" class="mini" type="button">🔄 自动按机型套啤价</button></small>` : ''}
     </h3>
-    <p class="muted">啤价＝本单机型台班费用 ÷ 目标数 ÷ 套数；修改机型、目标数、套数或机型费用时自动重算。修改后请保存本部门草稿。</p>
+    <p class="muted">啤价＝本单机型台班费用 ÷ 目标数 ÷ 套数。修改本行机型、目标数、套数或点击“自动按机型套啤价”后使用自动计算；手填啤价及历史固定值保留，机型费用变化只更新自动计算行。修改后请保存本部门草稿。</p>
     <div id="wb-inj"></div>
     <div id="wb-inj-shared"></div>
     <div id="wb-inj-summary"></div>
@@ -4797,9 +4895,33 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     machineRefreshers.get(row)?.();
     shotRefreshers.get(row)?.();
   };
+  const pricingCell = (key, refreshers, numeric = false) => (td, row, { readonly, refreshCalcs, onChange }) => {
+    if (readonly) {
+      td.classList.add('ro');
+      const refresh = () => { td.textContent = formatNum(row[key] ?? ''); refreshCalcs(); };
+      refreshers.set(row, refresh);
+      refresh();
+      return;
+    }
+    const input = document.createElement('input');
+    input.type = numeric ? 'number' : 'text';
+    if (numeric) input.step = 'any';
+    input.style.minWidth = numeric ? '100px' : '90px';
+    const refresh = () => { input.value = row[key] ?? ''; refreshCalcs(); };
+    refreshers.set(row, refresh);
+    refresh();
+    input.oninput = () => {
+      row[key] = numeric ? (input.value === '' ? null : Number(input.value)) : input.value;
+      if (key === 'shot_price') row.shot_price_mode = 'manual';
+      refreshCalcs();
+      onChange();
+    };
+    td.appendChild(input);
+  };
   const refreshChangedMachinePrices = () => {
     for (const row of payload.injection) {
-      if (priceSignatures.get(row) !== window.InjectionPricing.signature(row, payload.machine_prices)) refreshShot(row);
+      if (row.shot_price_mode === 'auto' &&
+          priceSignatures.get(row) !== window.InjectionPricing.signature(row, payload.machine_prices)) refreshShot(row);
     }
   };
   const onMachChange = () => { refreshChangedMachinePrices(); refreshInjectionTotals(); };
@@ -4935,6 +5057,16 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
   });
 
   const cols = [
+    { key: 'engineering_images', label: '图片', width: '116px', className: 'molding-image-column',
+      renderCell: (td, row) => {
+        const images = engineeringImagesForInjection(row, refMolds);
+        td.classList.add('ro', 'mold-img-cell');
+        if (!images.length) {
+          td.innerHTML = '<span class="muted">—</span>';
+          return;
+        }
+        renderImageCell(td, { images }, false, () => {});
+      } },
     { key: 'product_group_name', label: '产品', readonly: true, width: '110px' },
     { key: 'name', label: '模具名称', type: 'textarea', width: '220px' },
     { key: 'mold_no', label: '模号', width: '70px' },
@@ -4952,28 +5084,11 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     { key: 'raw_unit', label: '原料单价 HK$', readonly: true, width: '100px',
       calc: r => num(r.weight_g) * (1 + num(payload.injection_loss_pct ?? 3)/100) * num(r.material_unit_price) },
     { key: 'machine', label: '机台', width: '90px', className: 'molding-machine-key',
-      renderCell: (td, row, { readonly, onChange }) => {
-        if (readonly) { td.textContent = row.machine || lookupMachinePrice(row.machine_model, payload.machine_prices)?.normal || '—'; return; }
-        const input = document.createElement('input');
-        input.type = 'text'; input.style.minWidth = '90px'; input.value = row.machine || '';
-        machineRefreshers.set(row, () => { input.value = row.machine || ''; });
-        input.oninput = () => { row.machine = input.value; onChange(); };
-        td.appendChild(input);
-      } },
+      renderCell: pricingCell('machine', machineRefreshers) },
     { key: 'shot_price', label: payload.injection.some(r => r.catalog_raw_weight != null) ? '零件啤工(HK$/件)' : '啤价(HK$/啤)', type: 'number', width: '100px',
-      renderCell: (td, row, { readonly, refreshCalcs, onChange }) => {
-        const input = document.createElement('input');
-        input.type = 'number'; input.step = 'any'; input.readOnly = readonly;
-        input.style.minWidth = '100px';
-        const refresh = () => { input.value = row.shot_price ?? ''; refreshCalcs(); };
-        shotRefreshers.set(row, refresh); refresh();
-        if (!readonly) input.oninput = () => {
-          row.shot_price = input.value === '' ? null : Number(input.value);
-          refreshCalcs(); onChange();
-        };
-        td.appendChild(input);
-      } },
+      renderCell: pricingCell('shot_price', shotRefreshers, true) },
     { key: 'cavity', label: '出模数', width: '80px' },
+    { key: 'side_action', label: '行位', width: '90px' },
     { key: 'sets', label: '套数', type: 'number', width: '70px', onValue: refreshShot },
     { key: 'machine_model', label: '机型', width: '90px', className: 'molding-machine-key', onValue: refreshShot },
     { key: 'target', label: '目标数', type: 'number', width: '100px', className: 'molding-machine-key', onValue: refreshShot },
@@ -5004,6 +5119,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
   renderTable(host.querySelector('#wb-inj'), cols, payload.injection, {
     readonly: !canEdit,
     onChange: wrappedOnChange,
+    showRowNumber: false,
     beforeRow: showInjectionGroups ? (row, index, allRows) => {
       const key = injectionGroupKey(row);
       const previousKey = index > 0 ? injectionGroupKey(allRows[index - 1]) : '';
@@ -5424,7 +5540,7 @@ function renamePaintingProductGroup(payload, groupKey, name) {
   if (!members.length) throw new Error('产品分组不存在');
   if (rows.some(row => keyOf(row) !== groupKey && row.product_group_name === name))
     throw new Error('该产品名称已存在，请使用其他名称');
-  const id = members[0].product_group_id || 'manual-product-' + crypto.randomUUID();
+  const id = members[0].product_group_id || 'manual-product-' + uuid();
   payload.product_mix_ratios ||= {};
   const ratio = payload.product_mix_ratios[groupKey] ?? 1;
   for (const row of members) {
@@ -5625,7 +5741,7 @@ function renderPaintingTable(container, payload, onChange, canEdit) {
       const error = form.querySelector('[data-group-error]');
       if (!name || raw === '' || !Number.isFinite(ratio) || ratio < 0) { error.textContent = '请填写产品名称和大于等于 0 的配比。'; return; }
       if (groups.some(group => group.name === name)) { error.textContent = '该产品分组已存在，请使用“本组增加行”。'; return; }
-      const id = 'manual-product-' + crypto.randomUUID();
+      const id = 'manual-product-' + uuid();
       rows.push({name,images:[],product_group_id:id,product_group_name:name});
       payload.product_mix_ratios[id] = ratio;
       renderPaintingTable(container,payload,onChange,canEdit); onChange();
@@ -6153,8 +6269,8 @@ function createDepartmentExportButton(dept, quoteId) {
 function installDepartmentExport(host, dept, quoteId) {
   if (!host || !DEPARTMENT_EXPORT_NAMES[dept]) return;
   const sanitize = () => {
-    // 喷油部、电子部和车缝部保留报价导入入口，其余部门沿用手动填写模式。
-    if (!['painting', 'electronic', 'sewing'].includes(dept)) {
+    // 喷油部、电子部、搪胶和车缝部保留报价导入入口，其余部门沿用手动填写模式。
+    if (!['painting', 'electronic', 'slush', 'sewing'].includes(dept)) {
       host.querySelectorAll('button').forEach(button => {
         if (dept === 'assembly' && button.closest('[data-mixed-assembly-import]')) return;
         if (/导入/.test(button.textContent || '') || /上传.*报价/.test(button.textContent || '')) button.remove();
@@ -6942,6 +7058,7 @@ async function renderQuotePage() {
   };
   const data = await api('/quotes/' + id);
   const { quote, sections } = data;
+  const quoteLocked = Boolean(data.quote_locked);
   try {
     const basisResponse = await api('/refs/costing_basis');
     window.__costingBasis = basisResponse.data || {};
@@ -6953,7 +7070,7 @@ async function renderQuotePage() {
     try { authorizedCustomers = (await api('/quotes/customers')).customers || []; }
     catch { authorizedCustomers = []; }
   }
-  window.__data = { quote, sections, me, quotation_rates: data.quotation_rates, quote_locked: Boolean(data.quote_locked), mixed_quote: data.mixed_quote, mixed_engineering_molds: data.mixed_engineering_molds };
+  window.__data = { quote, sections, me, quotation_rates: data.quotation_rates, quote_locked: quoteLocked, mixed_quote: data.mixed_quote, mixed_engineering_molds: data.mixed_engineering_molds };
   // 从业务 section 读税率，给所有 loss-summary 用
   const salesSecForTax = sections.find(s => s.dept === 'sales');
   if (salesSecForTax && salesSecForTax.payload_json) {
@@ -6967,12 +7084,13 @@ async function renderQuotePage() {
   ).join(' ');
 
   // 工作台容器
+  cleanupMoldNumberObservers($('sections'));
   const mySec = sections.find(s => s.dept === me.dept);
   if (!mySec) { $('sections').innerHTML = '<i>未找到本部门 section</i>'; return; }
   const payload = sectionDraft(mySec);
   const canEdit = mySec.status !== 'approved' && me.dept !== 'sales' ? true : false;
   // 业务部门 section 永远可编辑（除非已审）
-  const canEditMine = mySec.status !== 'approved' && canEditDepartment(me, mySec.dept);
+  const canEditMine = !quoteLocked && mySec.status !== 'approved' && canEditDepartment(me, mySec.dept);
 
   const host = document.getElementById('sections'); host.innerHTML = '';
   const dirtyByDept = new Map();
@@ -7097,10 +7215,10 @@ async function renderQuotePage() {
     <div class="wb-bar">
       ${canEditMine ? `<button id="btn-save" title="快捷键：Ctrl+S / Command+S">保存草稿（Ctrl/⌘+S）</button>
                        <button id="btn-submit">提交审核</button>` : ''}
-      ${hasPerm(me, DEPT_MENU[mySec.dept], 'review') && (me.role === 'supervisor' || me.role === 'admin') && mySec.status === 'filled'
+      ${!quoteLocked && hasPerm(me, DEPT_MENU[mySec.dept], 'review') && (me.role === 'supervisor' || me.role === 'admin') && mySec.status === 'filled'
         ? `<button id="btn-approve">审核通过</button>
            <button id="btn-reject" class="danger">驳回</button>` : ''}
-      ${hasPerm(me, DEPT_MENU[mySec.dept], 'review') && mySec.status === 'approved'
+      ${!quoteLocked && hasPerm(me, DEPT_MENU[mySec.dept], 'review') && mySec.status === 'approved'
         ? `<button id="btn-reopen" class="mini">🔓 解除审核 / 重新编辑</button>` : ''}
       ${mySec.review_comment ? `<span class="muted">${mySec.review_comment}</span>` : ''}
     </div>`;
@@ -7127,12 +7245,13 @@ async function renderQuotePage() {
     const renderMyDepartment = () => {
       renderedRates = quotationExchangeRates(sections, data.quotation_rates);
       const { rmb_hkd: fx, hkd_usd: fxHU } = renderedRates;
+      cleanupMoldNumberObservers(body);
       body.innerHTML = '';
       if (me.dept === 'engineering') {
         const headerHost = document.createElement('div');
         const engineeringHost = document.createElement('div');
         body.append(headerHost, engineeringHost);
-        renderEngineeringQuoteHeader(headerHost, quote, authorizedCustomers, patch =>
+        if (!quoteLocked) renderEngineeringQuoteHeader(headerHost, quote, authorizedCustomers, patch =>
           api('/quotes/' + id + '/header', { method: 'PUT', body: JSON.stringify(patch) }));
         renderEngineering(engineeringHost, payload, canEditMine, onChange, fx, fxHU, quote.qty, quote.customer);
       }
@@ -7160,7 +7279,7 @@ async function renderQuotePage() {
       // 例外：工程/业务部门由业务查看时直接可编辑（两者同属，免点按钮）；其他部门仍只读。
       // 工程/业务直接可编辑：仅在「未提交审核」(status=empty) 时自动进入编辑；
       // 已提交(filled) 则退出编辑、露出 审核通过/驳回 按钮（否则跳不出审核界面）
-      const mayEdit = canEditDepartment(me, s.dept);
+      const mayEdit = !quoteLocked && canEditDepartment(me, s.dept);
       const mayReview = hasPerm(me, DEPT_MENU[s.dept], 'review') && ['supervisor','admin'].includes(me.role);
       let inEdit = mayEdit && (s.dept === 'engineering' && (me.dept === 'sales' || me.dept === 'engineering') && s.status === 'empty');
       const c = document.createElement('div'); c.className = 'card section-pane';
@@ -7185,6 +7304,7 @@ async function renderQuotePage() {
       const renderBody = () => {
         renderedRates = quotationExchangeRates(sections, data.quotation_rates);
         const { rmb_hkd: fxRate, hkd_usd: fxRateUsd } = renderedRates;
+        cleanupMoldNumberObservers(body);
         body.innerHTML = '';
         const onChangeOther = () => markDirty(s.dept);
         if (s.dept === 'engineering') renderEngineering(body, sectionPayload, inEdit, onChangeOther, fxRate, fxRateUsd, quote.qty, quote.customer);
@@ -7212,7 +7332,10 @@ async function renderQuotePage() {
       renderBody();
       rateRefreshers.set(s.dept, () => {
         const rates = quotationExchangeRates(sections, data.quotation_rates);
-        if (rates.rmb_hkd !== renderedRates.rmb_hkd || rates.hkd_usd !== renderedRates.hkd_usd) renderBody();
+        if (rates.rmb_hkd !== renderedRates.rmb_hkd || rates.hkd_usd !== renderedRates.hkd_usd) {
+          renderBody();
+          bindActs();
+        }
       });
 
       // 绑定本卡操作（每次重渲染都重新绑定）
@@ -7469,6 +7592,8 @@ if (window.MixedQuotation && !window.__WORKBENCH_EMBED__) {
   };
 }
 window.VerificationWorkbench = {
+  cleanupMoldNumberObservers,
+  renderSummaryPane,
   renderEngineering,
   renderElectronic,
   renderMolding,

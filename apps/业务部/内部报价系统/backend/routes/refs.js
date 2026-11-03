@@ -6,7 +6,7 @@ const { syncOpenQuotes } = require('../services/materialPriceSync');
 const router = express.Router();
 router.use(requireAuth);
 
-const ALLOWED = new Set(['material_prices', 'machine_prices']);
+const ALLOWED = new Set(['material_prices', 'machine_prices', 'costing_basis']);
 
 // GET /api/refs/:key — 拉全局参考表
 router.get('/:key', async (req, res) => {
@@ -41,6 +41,7 @@ router.get('/:key', async (req, res) => {
 router.put('/:key', async (req, res) => {
   const key = req.params.key;
   if (!ALLOWED.has(key)) return res.status(400).json({ error: 'invalid key' });
+  if(key==='costing_basis')return res.status(403).json({error:'统一核价基准只能由管理员在管理后台调整'});
   const data = Array.isArray(req.body && req.body.data) ? req.body.data : [];
 
   if (key === 'material_prices') {

@@ -7,7 +7,10 @@ are ``report_no``, ``revision``, ``company_name``, ``report_title``,
 ``inspection_date``, ``result``, ``result_reason``, ``overview``, ``aql``,
 ``defects``, ``tests``, ``product``, ``packing``, ``remarks``, ``photo_slots``
 (or flat ``photos``), and ``inspector``.  Missing optional values render as
-``-`` rather than being invented.
+blank rather than being invented.
+
+Layout follows the classic TigerHead Toys pre-shipment inspection report:
+plain table grid, light section bands, company header on every page.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ from reportlab.pdfgen import canvas
 __all__ = ["generate_unified_report_pdf"]
 
 PAGE_W, PAGE_H = A4
-MARGIN = 34
+MARGIN = 46
 CONTENT_W = PAGE_W - MARGIN * 2
 
 NAVY = colors.HexColor("#15324A")
@@ -49,6 +52,20 @@ AMBER_BG = colors.HexColor("#FFFAEB")
 RED = colors.HexColor("#B42318")
 RED_BG = colors.HexColor("#FEF3F2")
 WHITE = colors.white
+
+# TigerHead classic layout palette
+BAND_BG = colors.HexColor("#D9DEE7")
+TH_BORDER = colors.HexColor("#3A4150")
+TH_GREEN = colors.HexColor("#1E7B34")
+TH_GREY = colors.HexColor("#777777")
+
+HEADER_COMPANY = "TigerHead Toys Ltd."
+HEADER_ADDRESS = [
+    "Room 916, 9/F, Houston Centre",
+    "63 Mody Road, Tsim Sha Tsui East",
+    "Kowloon, Hong Kong",
+    "Phone (+852) 3103 7300",
+]
 
 try:
     pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
@@ -148,6 +165,10 @@ def _weight_value(value: Any) -> str:
     if rendered == "-":
         return rendered
     return rendered if re.search(r"\bkgs?\b", rendered, re.IGNORECASE) else f"{rendered} kg"
+
+
+def _weights(net: Any, gross: Any) -> str:
+    return f"N.W. {_weight_value(net)} / G.W. {_weight_value(gross)}" if net not in (None, "") or gross not in (None, "") else ""
 
 
 def _timestamp_value(value: Any) -> str:
@@ -297,101 +318,9 @@ def _draw_image_contain(c: canvas.Canvas, path: str | Path | None, x: float, y: 
         return False
 
 
-def _draw_header(c: canvas.Canvas, data: Mapping[str, Any], page_no: int, total_pages: int) -> None:
-    c.setFillColor(NAVY)
-    c.rect(0, PAGE_H - 67, PAGE_W, 67, fill=1, stroke=0)
-    logo = _first(data, "logo_path", "logo")
-    has_logo = bool(logo and Path(str(logo)).is_file())
-    text_x = MARGIN
-    if has_logo:
-        c.setFillColor(WHITE)
-        c.roundRect(MARGIN, PAGE_H - 56, 40, 40, 4, fill=1, stroke=0)
-        _draw_image_contain(c, logo, MARGIN + 3, PAGE_H - 53, 34, 34)
-        text_x += 50
-    _draw_text(c, text_x, PAGE_H - 27, _first(data, "company_name", "company", default="QUALITY CONTROL"), size=8.5, bold=True, color=WHITE, width=300)
-    _draw_text(c, text_x, PAGE_H - 48, _first(data, "report_title", default="QUALITY INSPECTION REPORT"), size=15, bold=True, color=WHITE, width=330)
-    report_no = _text_value(_first(data, "report_no", default="DRAFT"))
-    revision = _text_value(_first(data, "revision", default=0), "0")
-    _draw_text(c, PAGE_W - MARGIN - 168, PAGE_H - 28, report_no, size=8.5, bold=True, color=WHITE, width=168)
-    _draw_text(c, PAGE_W - MARGIN - 168, PAGE_H - 47, f"Rev.{revision}  |  Page {page_no} of {total_pages}", size=7.5, color=colors.HexColor("#DCE7F4"), width=168)
-
-
-def _draw_footer(c: canvas.Canvas, data: Mapping[str, Any], page_no: int, total_pages: int) -> None:
-    c.setStrokeColor(LINE)
-    c.setLineWidth(0.5)
-    c.line(MARGIN, 35, PAGE_W - MARGIN, 35)
-    _draw_text(c, MARGIN, 22, "AI-assisted observations reviewed and confirmed by QC.", size=6.5, color=MUTED, width=330)
-    _draw_text(c, PAGE_W - MARGIN - 92, 22, f"{page_no} / {total_pages}", size=6.5, bold=True, color=MUTED, width=92)
-
-
-def _section(c: canvas.Canvas, y: float, title: str, subtitle: str = "") -> float:
-    c.setFillColor(BLUE)
-    c.roundRect(MARGIN, y - 5, 28, 3, 1.5, fill=1, stroke=0)
-    _draw_text(c, MARGIN, y - 17, title.upper(), size=9.5, bold=True, color=NAVY, width=330)
-    if subtitle:
-        _draw_text(c, PAGE_W - MARGIN - 210, y - 17, subtitle, size=6.5, color=MUTED, width=210)
-    return y - 27
-
-
-def _draw_key_card(c: canvas.Canvas, x: float, top: float, w: float, h: float, label: str, value: Any) -> None:
-    c.setFillColor(PALE)
-    c.setStrokeColor(colors.HexColor("#E0E7F0"))
-    c.roundRect(x, top - h, w, h, 5, fill=1, stroke=1)
-    _draw_text(c, x + 7, top - 12, label.upper(), size=5.6, bold=True, color=MUTED, width=w - 14)
-    _draw_text(c, x + 7, top - 29, value, size=8.2, bold=True, color=INK, width=w - 14, max_lines=2, leading=9.5)
-
-
-def _draw_grid(
-    c: canvas.Canvas,
-    x: float,
-    top: float,
-    width: float,
-    col_fracs: Sequence[float],
-    headers: Sequence[str],
-    rows: Sequence[Sequence[Any]],
-    *,
-    row_h: float,
-    header_h: float = 22,
-    font_size: float = 7,
-    max_lines: int = 2,
-) -> float:
-    col_widths = [width * fraction for fraction in col_fracs]
-    total_h = header_h + row_h * max(1, len(rows))
-    c.setFillColor(WHITE)
-    c.setStrokeColor(LINE)
-    c.setLineWidth(0.55)
-    c.rect(x, top - total_h, width, total_h, fill=1, stroke=1)
-    c.setFillColor(SKY)
-    c.rect(x, top - header_h, width, header_h, fill=1, stroke=0)
-    xpos = x
-    for index, col_w in enumerate(col_widths):
-        if index:
-            c.line(xpos, top, xpos, top - total_h)
-        _draw_text(c, xpos + 5, top - 14, headers[index], size=6.3, bold=True, color=NAVY, width=col_w - 10)
-        xpos += col_w
-    rendered_rows = list(rows) or [["-"] * len(headers)]
-    for row_index, row in enumerate(rendered_rows):
-        row_top = top - header_h - row_index * row_h
-        c.line(x, row_top, x + width, row_top)
-        xpos = x
-        for col_index, col_w in enumerate(col_widths):
-            value = row[col_index] if col_index < len(row) else "-"
-            is_result = headers[col_index].upper() in {"RESULT", "DECISION"}
-            color = _status_style(_text_value(value))[0] if is_result else INK
-            _draw_text(
-                c,
-                xpos + 5,
-                row_top - 11,
-                value,
-                size=font_size,
-                bold=is_result or col_index == 0,
-                color=color,
-                width=col_w - 10,
-                max_lines=max_lines,
-                leading=font_size * 1.18,
-            )
-            xpos += col_w
-    return top - total_h
+# ---------------------------------------------------------------------------
+# Data normalization helpers (payload contract kept stable)
+# ---------------------------------------------------------------------------
 
 
 def _normalize_aql(data: Mapping[str, Any]) -> list[list[Any]]:
@@ -432,17 +361,17 @@ def _defect_rows(defects: Iterable[Mapping[str, Any]]) -> list[list[Any]]:
     for defect in defects:
         severity = _text_value(_first(defect, "severity", "classification", default="minor"), "minor").lower()
         quantity = _first(defect, "quantity", "affected_quantity", "count", default=0)
-        description = _first(defect, "description", "english_description", "name", default="-")
+        description = _first(defect, "description", "english_description", "name", default="")
         sample_ids = _first(defect, "sample_ids", "sample_id")
         if sample_ids:
-            description = f"{_text_value(description)} | Sample: {_text_value(sample_ids)}"
+            description = f"{_text_value(description, '')} | Sample: {_text_value(sample_ids)}"
         rows.append([
             quantity if severity == "critical" else 0,
             quantity if severity == "major" else 0,
             quantity if severity == "minor" else 0,
             description,
         ])
-    return rows or [[0, 0, 0, "No confirmed defects"]]
+    return rows or [[0, 0, 0, ""]]
 
 
 def _test_rows(data: Mapping[str, Any]) -> list[list[Any]]:
@@ -450,11 +379,11 @@ def _test_rows(data: Mapping[str, Any]) -> list[list[Any]]:
     for raw in _list(_first(data, "tests", "performance_tests", default=[])):
         test = _mapping(raw)
         rows.append([
-            _first(test, "name", "test_name", default="-"),
-            _first(test, "standard", "requirement", default="-"),
-            _first(test, "result", default="-"),
+            _first(test, "name", "test_name", default=""),
+            _first(test, "standard", "requirement", default=""),
+            _first(test, "result", default=""),
         ])
-    return rows or [["No tests recorded", "-", "-"]]
+    return rows
 
 
 def _normalize_photos(data: Mapping[str, Any]) -> tuple[list[_Evidence], list[_Evidence]]:
@@ -547,75 +476,14 @@ def _normalize_photos(data: Mapping[str, Any]) -> tuple[list[_Evidence], list[_E
             if label.lower() not in used:
                 evidence.append(_Evidence(label, "No photo supplied", None, False))
 
-    if len(warehouses) > 2:
-        evidence.extend(warehouses[2:])
-        warehouses = warehouses[:2]
+    if len(warehouses) > 4:
+        evidence.extend(warehouses[4:])
+        warehouses = warehouses[:4]
     return evidence, warehouses
 
 
 def _product_and_packing(data: Mapping[str, Any]) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     return _mapping(data.get("product")), _mapping(data.get("packing"))
-
-
-def _draw_page_one(c: canvas.Canvas, data: Mapping[str, Any], total_pages: int, defect_rows: list[list[Any]], test_rows: list[list[Any]]) -> None:
-    _draw_header(c, data, 1, total_pages)
-    result = _text_value(_first(data, "result", "status", default="ON HOLD")).upper()
-    result_color, result_bg = _status_style(result)
-    _draw_text(c, MARGIN, PAGE_H - 92, "PRE-SHIPMENT INSPECTION", size=15, bold=True, color=NAVY, width=330)
-    _draw_text(c, MARGIN, PAGE_H - 110, "Unified QC report - QC-confirmed findings only", size=7.2, color=MUTED, width=350)
-    c.setFillColor(result_bg)
-    c.setStrokeColor(result_color)
-    c.roundRect(PAGE_W - MARGIN - 112, PAGE_H - 120, 112, 39, 7, fill=1, stroke=1)
-    _draw_text(c, PAGE_W - MARGIN - 98, PAGE_H - 94, "FINAL RESULT", size=5.8, bold=True, color=MUTED, width=86)
-    _draw_text(c, PAGE_W - MARGIN - 98, PAGE_H - 111, result, size=11.5, bold=True, color=result_color, width=86)
-
-    overview = _mapping(data.get("overview"))
-    product = _mapping(data.get("product"))
-    sample_size = _first(overview, "sample_size", default=_first(data, "sample_size"))
-    inspected_quantity = _first(
-        overview,
-        "inspected_qty",
-        "inspected_quantity",
-        default=_first(data, "inspected_qty", "inspected_quantity"),
-    )
-    completion = _first(
-        overview,
-        "completed_pct",
-        "completion",
-        default=_first(data, "completed_pct", "completion"),
-    )
-    card_values = [
-        ("Customer", _first(overview, "customer", "customer_name", default=_first(product, "customer", "customer_name"))),
-        ("P.O. No.", _first(overview, "po_no", "po_number", default=_first(product, "po_no"))),
-        ("Item No.", _first(overview, "item_no", "sku", "product_no", default=_first(product, "item_no"))),
-        ("Order quantity", _first(overview, "order_qty", "order_quantity", "po_quantity", "quantity", default=_first(product, "order_qty", "po_quantity"))),
-        ("Factory", _first(overview, "factory", "factory_name", default=_first(data, "factory"))),
-        ("Inspection date", _first(data, "inspection_date", default=_first(overview, "inspection_date"))),
-        ("Sample / inspected", f"{_text_value(sample_size)} / {_text_value(inspected_quantity)} PCS"),
-        ("Completion", _percentage_value(completion)),
-    ]
-    y = PAGE_H - 139
-    gap = 6
-    card_w = (CONTENT_W - gap * 3) / 4
-    for index, (label, value) in enumerate(card_values):
-        row, col = divmod(index, 4)
-        _draw_key_card(c, MARGIN + col * (card_w + gap), y - row * 48, card_w, 41, label, value)
-
-    y = _section(c, PAGE_H - 242, "AQL decision", "Company-authorized sampling plan")
-    _draw_grid(c, MARGIN, y, CONTENT_W, [0.23, 0.14, 0.12, 0.12, 0.16, 0.23], ["Class", "AQL", "Ac", "Re", "Found", "Decision"], _normalize_aql(data), row_h=23, font_size=7, max_lines=1)
-
-    section_top = PAGE_H - 365
-    gap = 10
-    left_w = CONTENT_W * 0.52
-    right_w = CONTENT_W - left_w - gap
-    _draw_text(c, MARGIN, section_top, "CONFIRMED DEFECTS", size=8.5, bold=True, color=NAVY, width=left_w)
-    _draw_text(c, MARGIN + left_w + gap, section_top, "PRODUCT PERFORMANCE & RELIABILITY", size=8.5, bold=True, color=NAVY, width=right_w)
-    table_top = section_top - 12
-    _draw_grid(c, MARGIN, table_top, left_w, [0.11, 0.13, 0.13, 0.63], ["CR", "MAJ", "MIN", "Description of defect"], defect_rows[:8], row_h=35, font_size=6.6, max_lines=3)
-    _draw_grid(c, MARGIN + left_w + gap, table_top, right_w, [0.46, 0.34, 0.20], ["Abuse test", "Standard", "Result"], test_rows[:12], row_h=23, font_size=6.2, max_lines=2)
-    if len(defect_rows) > 8 or len(test_rows) > 12:
-        _draw_text(c, MARGIN, 47, "Additional inspection rows continue after the specification page.", size=6.5, color=AMBER, width=CONTENT_W)
-    _draw_footer(c, data, 1, total_pages)
 
 
 def _packaging_items(product: Mapping[str, Any], packing: Mapping[str, Any]) -> list[tuple[str, str]]:
@@ -626,7 +494,7 @@ def _packaging_items(product: Mapping[str, Any], packing: Mapping[str, Any]) -> 
         items: list[tuple[str, str]] = []
         for entry in raw:
             if isinstance(entry, Mapping):
-                items.append((_english_text(_first(entry, "name", "label", default="Requirement"), "Requirement"), _text_value(_first(entry, "value", "required", default="-"))))
+                items.append((_english_text(_first(entry, "name", "label", default="Requirement"), "Requirement"), _text_value(_first(entry, "value", "required", default=""))))
             else:
                 items.append((_english_text(entry, "Requirement"), "YES"))
         return items
@@ -652,108 +520,379 @@ def _packaging_items(product: Mapping[str, Any], packing: Mapping[str, Any]) -> 
     return []
 
 
-def _draw_spec_row(c: canvas.Canvas, x: float, top: float, width: float, label: str, value: Any, *, h: float = 25) -> float:
-    label_w = width * 0.27
-    c.setFillColor(WHITE)
+# ---------------------------------------------------------------------------
+# TigerHead classic layout
+# ---------------------------------------------------------------------------
+
+
+def _bundled_logo() -> str | None:
+    candidate = Path(__file__).resolve().parent / "assets" / "tigerhead_logo.png"
+    return str(candidate) if candidate.is_file() else None
+
+
+def _th_header(c: canvas.Canvas, data: Mapping[str, Any]) -> float:
+    """Company logo (left) + address block (right). Returns content top y."""
+    top = PAGE_H - 22
+    logo = _first(data, "logo_path", "logo") or _bundled_logo()
+    if logo and Path(str(logo)).is_file():
+        _draw_image_contain(c, logo, MARGIN, top - 50, 105, 50)
+    company = _text_value(_first(data, "header_company", default=HEADER_COMPANY))
+    address = data.get("company_address") or HEADER_ADDRESS
+    if isinstance(address, str):
+        address = [line.strip() for line in address.splitlines() if line.strip()]
+    lines = [company, *[_text_value(line, "") for line in address]]
+    y = top - 8
+    for index, line in enumerate(lines):
+        bold = index == 0
+        c.setFont(_font(line, bold), 8.5 if bold else 8)
+        c.setFillColor(colors.black)
+        c.drawRightString(PAGE_W - MARGIN, y, line)
+        y -= 11
+    return PAGE_H - 84
+
+
+def _th_footer(c: canvas.Canvas, data: Mapping[str, Any], page: int, total: int) -> None:
     c.setStrokeColor(LINE)
-    c.rect(x, top - h, width, h, fill=1, stroke=1)
-    c.setFillColor(SKY)
-    c.rect(x, top - h, label_w, h, fill=1, stroke=0)
-    c.line(x + label_w, top, x + label_w, top - h)
-    _draw_text(c, x + 6, top - 16, label, size=6.4, bold=True, color=NAVY, width=label_w - 12)
-    _draw_text(c, x + label_w + 7, top - 16, value, size=7.1, bold=True, color=INK, width=width - label_w - 14, max_lines=2, leading=8)
-    return top - h
+    c.line(MARGIN, 32, PAGE_W - MARGIN, 32)
+    _draw_text(c, MARGIN, 20, f"{_text_value(data.get('report_no'), 'DRAFT')} | Rev.{_text_value(data.get('revision'), '0')}", size=7, width=CONTENT_W - 90)
+    c.setFont("Helvetica", 7)
+    c.drawRightString(PAGE_W - MARGIN, 20, f"Page {page} of {total}")
 
 
-def _draw_page_two(c: canvas.Canvas, data: Mapping[str, Any], total_pages: int) -> None:
-    _draw_header(c, data, 2, total_pages)
-    product, packing = _product_and_packing(data)
-    y = _section(c, PAGE_H - 84, "Product specification")
+def _band(c: canvas.Canvas, y: float, title: str, *, x: float = MARGIN, w: float = CONTENT_W, h: float = 17, size: float = 9) -> float:
+    c.setFillColor(BAND_BG)
+    c.setStrokeColor(TH_BORDER)
+    c.setLineWidth(0.8)
+    c.rect(x, y - h, w, h, fill=1, stroke=1)
+    _draw_text(c, x + 6, y - h + 5, title, size=size, bold=True, color=colors.black, width=w - 12)
+    return y - h
+
+
+def _cell(
+    c: canvas.Canvas,
+    x: float,
+    row_top: float,
+    w: float,
+    h: float,
+    text: Any,
+    *,
+    size: float = 9,
+    bold: bool = False,
+    color: colors.Color = colors.black,
+    align: str = "left",
+    max_lines: int = 2,
+    pad: float = 6,
+    border: bool = True,
+) -> None:
+    if border:
+        c.setFillColor(WHITE)
+        c.setStrokeColor(TH_BORDER)
+        c.setLineWidth(0.8)
+        c.rect(x, row_top - h, w, h, fill=0, stroke=1)
+    lines = _fit_lines(text, w - pad * 2, size, max_lines, bold) if text not in (None, "") else []
+    if not lines:
+        return
+    leading = size * 1.22
+    block_h = len(lines) * leading
+    start_y = row_top - (h - block_h) / 2 - size * 0.82
+    for index, line in enumerate(lines):
+        font_name = _font(line, bold)
+        c.setFont(font_name, size)
+        c.setFillColor(color)
+        line_y = start_y - index * leading
+        if align == "center":
+            c.drawCentredString(x + w / 2, line_y, line)
+        elif align == "right":
+            c.drawRightString(x + w - pad, line_y, line)
+        else:
+            c.drawString(x + pad, line_y, line)
+
+
+def _checkbox(c: canvas.Canvas, x: float, y_center: float, checked: bool, s: float = 9) -> None:
+    c.setStrokeColor(colors.black)
+    c.setLineWidth(0.9)
+    c.rect(x, y_center - s / 2, s, s, fill=0, stroke=1)
+    if checked:
+        c.setLineWidth(1.1)
+        c.line(x + 1, y_center - s / 2 + 1, x + s - 1, y_center + s / 2 - 1)
+        c.line(x + 1, y_center + s / 2 - 1, x + s - 1, y_center - s / 2 + 1)
+
+
+def _kv_row(c: canvas.Canvas, y: float, pairs: Sequence[tuple[str, Any]], *, h: float = 22, col_w: float | None = None, size: float = 9) -> float:
+    """One bordered row of 1 or 2 'Label: value' cells."""
+    col_w = col_w or CONTENT_W / len(pairs)
+    x = MARGIN
+    for label, value in pairs:
+        c.setStrokeColor(TH_BORDER)
+        c.setLineWidth(0.8)
+        c.rect(x, y - h, col_w, h, fill=0, stroke=1)
+        text = f"{label} {_text_value(value, '')}".rstrip()
+        _cell(c, x, y, col_w, h, text, size=size, bold=True, max_lines=2, border=False)
+        x += col_w
+    return y - h
+
+
+def _spec_row(c: canvas.Canvas, y: float, label: str, value: Any, *, h: float = 20, label_w: float = 170) -> float:
+    c.setStrokeColor(TH_BORDER)
+    c.setLineWidth(0.8)
+    c.rect(MARGIN, y - h, CONTENT_W, h, fill=0, stroke=1)
+    c.line(MARGIN + label_w, y, MARGIN + label_w, y - h)
+    _cell(c, MARGIN, y, label_w, h, label, size=8.8, bold=True, border=False)
+    _cell(c, MARGIN + label_w, y, CONTENT_W - label_w, h, _text_value(value, ""), size=8.8, bold=True, max_lines=2, border=False)
+    return y - h
+
+
+def _result_options(c: canvas.Canvas, x: float, y_center: float, w: float, result: str) -> None:
+    """Render 'PASS / ON HOLD / REJECT / AOD' with the active one highlighted."""
+    options = ["PASS", "ON HOLD", "REJECT", "AOD"]
+    size = 6.5
+    segments: list[tuple[str, str, bool]] = []  # (text, kind, active)
+    for index, option in enumerate(options):
+        if index:
+            segments.append((" / ", "sep", False))
+        segments.append((option, "opt", option == result))
+    total_w = sum(pdfmetrics.stringWidth(text, "Helvetica-Bold" if active else "Helvetica", size) for text, _kind, active in segments)
+    cursor = x + (w - total_w) / 2
+    for text, kind, active in segments:
+        font_name = "Helvetica-Bold" if active else "Helvetica"
+        c.setFont(font_name, size)
+        c.setFillColor(TH_GREEN if active else TH_GREY)
+        c.drawString(cursor, y_center, text)
+        seg_w = pdfmetrics.stringWidth(text, font_name, size)
+        if kind == "opt" and not active:
+            c.setStrokeColor(TH_GREY)
+            c.setLineWidth(0.6)
+            c.line(cursor, y_center + 2, cursor + seg_w, y_center + 2)
+        cursor += seg_w
+
+
+def _num_text(value: Any) -> str:
+    """Format AQL figures without a trailing '.0'."""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return _text_value(value, "")
+
+
+def _draw_page_one(c: canvas.Canvas, data: Mapping[str, Any], total_pages: int, defect_rows: list[list[Any]], test_rows: list[list[Any]]) -> None:
+    y = _th_header(c, data)
     overview = _mapping(data.get("overview"))
-    product_rows = [
-        ("Product description", _first(product, "description", "product_description", default=_first(overview, "description"))),
-        ("Product size (mm)", _first(product, "size_mm", "product_size", "dimensions")),
-        ("Product weight (kg)", f"N.W. {_text_value(_first(product, 'net_weight_kg', 'nw'))}  /  G.W. {_text_value(_first(product, 'gross_weight_kg', 'gw'))}"),
-        ("Date code", _first(product, "date_code", "batch_code")),
-        ("UPC / EAN barcode", _first(product, "barcode", "upc", "ean")),
-        ("Assortment ratio", _first(product, "assortment_ratio", default=_first(packing, "assortment_ratio"))),
-        ("Age grade / Origin", f"{_text_value(_first(product, 'age_grade'))}  /  {_text_value(_first(product, 'origin', 'country_of_origin'))}"),
-    ]
-    for label, value in product_rows:
-        y = _draw_spec_row(c, MARGIN, y, CONTENT_W, label, value, h=24)
-
-    y -= 13
-    y = _section(c, y, "Individual packaging")
-    packaging = _packaging_items(product, packing)
-    if not packaging:
-        packaging = [("Packaging requirement", "-")]
-    packaging = packaging[:18]
-    pair_w = CONTENT_W / 3
-    rows_needed = ceil(len(packaging) / 3)
-    row_h = 20
-    for row_index in range(rows_needed):
-        top = y - row_index * row_h
-        for col in range(3):
-            index = row_index * 3 + col
-            x = MARGIN + col * pair_w
-            c.setFillColor(WHITE)
-            c.setStrokeColor(LINE)
-            c.rect(x, top - row_h, pair_w, row_h, fill=1, stroke=1)
-            if index < len(packaging):
-                label, value = packaging[index]
-                value_w = 46
-                label_w = pair_w - value_w
-                c.line(x + label_w, top, x + label_w, top - row_h)
-                _draw_text(c, x + 5, top - 13, label, size=5.8, bold=True, color=INK, width=label_w - 10)
-                _draw_text(c, x + label_w + 5, top - 13, value, size=5.8, bold=True, color=BLUE, width=value_w - 10)
-    y -= rows_needed * row_h + 13
-
-    y = _section(c, y, "Packing", "Master and inner carton")
+    product, packing = _product_and_packing(data)
     master = _mapping(_first(packing, "master_carton", default={}))
-    inner = _mapping(_first(packing, "inner_carton", default={}))
-    half_w = (CONTENT_W - 10) / 2
-    _draw_text(c, MARGIN, y, "MASTER CARTON", size=7, bold=True, color=NAVY, width=half_w)
-    _draw_text(c, MARGIN + half_w + 10, y, "INNER CARTON", size=7, bold=True, color=NAVY, width=half_w)
-    pack_top = y - 10
-    master_rows = [
-        ["Dimension", _first(master, "dimension", "dimensions", default=_first(packing, "master_carton_dimension"))],
-        ["Weight", f"N.W. {_weight_value(_first(master, 'net_weight_kg', 'net_weight', 'nw', default=_first(packing, 'master_carton_nw')))} / G.W. {_weight_value(_first(master, 'gross_weight_kg', 'gross_weight', 'gw', default=_first(packing, 'master_carton_gw')))}"],
-        ["Outer barcode", _first(master, "barcode", "outer_carton_barcode", default=_first(packing, "outer_carton_barcode"))],
-        ["Case pack", _first(master, "case_pack", default=_first(packing, "case_pack"))],
-        ["Assortment", _first(master, "assortment_ratio", default=_first(packing, "assortment_ratio"))],
-        ["Date code", _first(master, "date_code", default=_first(product, "date_code"))],
-    ]
-    inner_rows = [
-        ["Dimension", _first(inner, "dimension", "dimensions")],
-        ["Weight", f"N.W. {_weight_value(_first(inner, 'net_weight_kg', 'net_weight', 'nw'))} / G.W. {_weight_value(_first(inner, 'gross_weight_kg', 'gross_weight', 'gw'))}"],
-        ["Barcode", _first(inner, "barcode")],
-        ["Case pack", _first(inner, "case_pack")],
-        ["Assortment", _first(inner, "assortment_ratio")],
-        ["Date code", _first(inner, "date_code")],
-    ]
-    _draw_grid(c, MARGIN, pack_top, half_w, [0.32, 0.68], ["Field", "Value"], master_rows, row_h=20, header_h=20, font_size=5.8, max_lines=2)
-    pack_bottom = _draw_grid(c, MARGIN + half_w + 10, pack_top, half_w, [0.32, 0.68], ["Field", "Value"], inner_rows, row_h=20, header_h=20, font_size=5.8, max_lines=2)
+    result = _text_value(_first(data, "result", "status", default="")).upper()
 
-    y = pack_bottom - 13
-    y = _section(c, y, "Remarks and measurements")
-    remarks = _first(data, "remarks", default="-")
-    if isinstance(remarks, Mapping):
-        lines = [f"{_text_value(key)}: {_text_value(value)}" for key, value in remarks.items()]
-    elif isinstance(remarks, (list, tuple)):
-        lines = [_text_value(item) for item in remarks]
-    else:
-        lines = [line.strip() for line in _text_value(remarks).splitlines() if line.strip()] or ["-"]
-    display_lines: list[str] = []
-    for line in lines[:6]:
-        display_lines.extend(_fit_lines(line, CONTENT_W - 18, 6.8, 2))
-    display_lines = display_lines[:8]
-    box_h = max(52, min(92, 18 + len(display_lines) * 9))
-    c.setFillColor(PALE)
-    c.setStrokeColor(LINE)
-    c.roundRect(MARGIN, y - box_h, CONTENT_W, box_h, 5, fill=1, stroke=1)
-    for index, line in enumerate(display_lines):
-        _draw_text(c, MARGIN + 9, y - 16 - index * 9, line, size=6.8, color=INK, width=CONTENT_W - 18, max_lines=1)
-    _draw_footer(c, data, 2, total_pages)
+    # Title
+    title = "Pre-Shipment Inspection Report"
+    c.setFont("Helvetica-Bold", 14.5)
+    c.setFillColor(colors.black)
+    title_w = pdfmetrics.stringWidth(title, "Helvetica-Bold", 14.5)
+    title_y = y - 16
+    c.drawCentredString(PAGE_W / 2, title_y, title)
+    c.setLineWidth(1)
+    c.line(PAGE_W / 2 - title_w / 2, title_y - 3, PAGE_W / 2 + title_w / 2, title_y - 3)
+    y = title_y - 12
+
+    # Info table: label | value | Result (rowspan 5)
+    label_w, result_w = 128, 106
+    value_w = CONTENT_W - label_w - result_w
+    row_h = 21
+    table_top = y
+    info_rows = [
+        ("Factory Name", _first(overview, "factory", "factory_name", default=_first(data, "factory"))),
+        ("Customer Name", _first(overview, "customer", "customer_name", default=_first(product, "customer", "customer_name"))),
+        ("Country", _first(overview, "country", default=_first(product, "country"))),
+        ("Inspection Date", _first(data, "inspection_date", default=_first(overview, "inspection_date"))),
+    ]
+    for row_index, (label, value) in enumerate(info_rows):
+        row_top = table_top - row_index * row_h
+        c.setStrokeColor(TH_BORDER)
+        c.setLineWidth(0.8)
+        c.rect(MARGIN, row_top - row_h, label_w, row_h, fill=0, stroke=1)
+        c.rect(MARGIN + label_w, row_top - row_h, value_w, row_h, fill=0, stroke=1)
+        _cell(c, MARGIN, row_top, label_w, row_h, label, size=9, bold=True, align="center", border=False)
+        _cell(c, MARGIN + label_w, row_top, value_w, row_h, _text_value(value, ""), size=9.5, bold=True, align="center", border=False)
+    # Inspection Status row with checkboxes
+    status_top = table_top - 4 * row_h
+    c.rect(MARGIN, status_top - row_h, label_w, row_h, fill=0, stroke=1)
+    c.rect(MARGIN + label_w, status_top - row_h, value_w, row_h, fill=0, stroke=1)
+    _cell(c, MARGIN, status_top, label_w, row_h, "Inspection Status", size=9, bold=True, align="center", border=False)
+    stage = _text_value(_first(overview, "inspection_stage", default=_first(data, "inspection_stage", default="")), "").lower()
+    stage = re.sub(r"^final\s+", "", stage)
+    cx = MARGIN + label_w + 12
+    cy = status_top - row_h / 2
+    c.setFont("Helvetica-Bold", 9)
+    c.setFillColor(colors.black)
+    c.drawString(cx, cy - 3.2, "Final 1st")
+    cx += pdfmetrics.stringWidth("Final 1st", "Helvetica-Bold", 9) + 5
+    _checkbox(c, cx, cy, stage in {"1", "1st", "first"})
+    cx += 14
+    c.drawString(cx, cy - 3.2, "2nd")
+    cx += pdfmetrics.stringWidth("2nd", "Helvetica-Bold", 9) + 5
+    _checkbox(c, cx, cy, stage in {"2", "2nd", "second"})
+    cx += 14
+    c.drawString(cx, cy - 3.2, "3rd")
+    cx += pdfmetrics.stringWidth("3rd", "Helvetica-Bold", 9) + 5
+    _checkbox(c, cx, cy, stage in {"3", "3rd", "third"})
+    cx += 14
+    c.drawString(cx, cy - 3.2, "/  In-line")
+    cx += pdfmetrics.stringWidth("/  In-line", "Helvetica-Bold", 9) + 5
+    _checkbox(c, cx, cy, stage in {"in-line", "inline", "in line"})
+    # Result cell spanning all 5 rows
+    result_x = MARGIN + label_w + value_w
+    c.setStrokeColor(TH_BORDER)
+    c.rect(result_x, table_top - 5 * row_h, result_w, 5 * row_h, fill=0, stroke=1)
+    _cell(c, result_x, table_top, result_w, 18, "Result", size=9.5, bold=True, align="center", border=False)
+    _result_options(c, result_x, table_top - 32, result_w, result)
+    if result:
+        result_color, _ = _status_style(result)
+        _cell(c, result_x, table_top - 38, result_w, 62, result, size=13, bold=True, color=result_color, align="center", border=False)
+    y = table_top - 5 * row_h - 12
+
+    # GENERAL INFORMATION
+    y = _band(c, y, "GENERAL INFORMATION")
+    po_qty = _first(overview, "order_qty", "order_quantity", "po_quantity", "quantity", default=_first(product, "order_qty", "po_quantity"))
+    carton_count = _first(master, "carton_count", default=_first(packing, "carton_count"))
+    completed = _first(product, "qty_completed", "completed_qty", "completed_pct", default=_first(overview, "completed_pct", "completion"))
+    completed_txt = _percentage_value(completed) if completed not in (None, "") else ""
+    sample_size = _first(overview, "sample_size", default=_first(data, "sample_size"))
+    inspected_qty = _first(overview, "inspected_qty", "inspected_quantity", default=_first(data, "inspected_qty", "inspected_quantity"))
+    half = CONTENT_W / 2
+    y = _kv_row(c, y, [("P.O. No.:", _first(overview, "po_no", "po_number", default=_first(product, "po_no"))), ("P.O. Qty:", f"{_text_value(po_qty, '')} PCS" if po_qty not in (None, "") else "")], h=21)
+    y = _kv_row(c, y, [("Item No.:", _first(overview, "item_no", "sku", "product_no", default=_first(product, "item_no"))), ("Item Description:", _first(product, "description", "product_description", default=_first(overview, "description")))], h=21)
+    y = _kv_row(c, y, [("Batch code (Date Code):", _first(product, "date_code", "batch_code")), ("No. of Carton:", f"{_text_value(carton_count, '')} ctn" if carton_count not in (None, "") else "")], h=21)
+    y = _kv_row(c, y, [("Age Grade:", _first(product, "age_grade")), ("Qty Completed:", completed_txt)], h=21)
+    y = _kv_row(c, y, [("Samples Size:", f"{_text_value(sample_size, '')}PCS" if sample_size not in (None, "") else ""), ("Inspected Qty :", f"{_text_value(inspected_qty, '')}pcs" if inspected_qty not in (None, "") else "")], h=21)
+    # Signed sample row with checkboxes
+    signed = _text_value(_first(product, "signed_sample", "signed_sample_available", default=""), "").lower()
+    row_top = y
+    c.setStrokeColor(TH_BORDER)
+    c.rect(MARGIN, row_top - 21, half, 21, fill=0, stroke=1)
+    c.rect(MARGIN + half, row_top - 21, half, 21, fill=0, stroke=1)
+    sx = MARGIN + 6
+    sy = row_top - 21 / 2
+    c.setFont("Helvetica-Bold", 9)
+    c.setFillColor(colors.black)
+    c.drawString(sx, sy - 3.2, "Signed Sample available :  Yes (")
+    sx += pdfmetrics.stringWidth("Signed Sample available :  Yes (", "Helvetica-Bold", 9) + 3
+    _checkbox(c, sx, sy, signed in {"yes", "y", "true", "1"})
+    sx += 13
+    c.drawString(sx, sy - 3.2, ")   No (")
+    sx += pdfmetrics.stringWidth(")   No (", "Helvetica-Bold", 9) + 3
+    _checkbox(c, sx, sy, signed in {"no", "n", "false", "0"})
+    c.drawString(sx + 13, sy - 3.2, ")")
+    _cell(c, MARGIN + half, row_top, half, 21, f"Country of Origin : {_text_value(_first(product, 'origin', 'country_of_origin'), '')}".rstrip(), size=9, bold=True, border=False)
+    y = row_top - 21 - 12
+
+    # AQL table + Product photo
+    aql_rows = _normalize_aql(data)
+    aql_w = 300
+    photo_w = CONTENT_W - aql_w - 10
+    std = _text_value(_first(overview, "inspection_std", default="ANSI/ASQ Z1.4"))
+    level = _text_value(_first(overview, "inspection_level", default="Level II"), "")
+    if level and not level.lower().startswith("level"):
+        level = f"Level {level}"
+    header_h, class_h = 32, 24
+    aql_top = y
+    col_ws = [86, 54, 54, 54, 52]
+    x = MARGIN
+    headers = [f"Inspection Std\n{std}", f"AQL\n{level}", "Accept", "Reject", "Total"]
+    for col_w, header in zip(col_ws, headers):
+        c.setStrokeColor(TH_BORDER)
+        c.rect(x, aql_top - header_h, col_w, header_h, fill=0, stroke=1)
+        _cell(c, x, aql_top, col_w, header_h, header.replace("\n", " ") if "\n" not in header else None, size=8, bold=True, align="center", border=False)
+        # two-line header
+        parts = header.split("\n")
+        if len(parts) == 2:
+            _cell(c, x, aql_top, col_w, header_h / 2 + 4, parts[0], size=8, bold=True, align="center", border=False)
+            _cell(c, x, aql_top - header_h / 2 + 4, col_w, header_h / 2 - 4, parts[1], size=7.5, bold=True, align="center", border=False)
+        x += col_w
+    for row_index, row in enumerate(aql_rows):
+        row_top = aql_top - header_h - row_index * class_h
+        values = [row[0], _num_text(row[1]), _num_text(row[2]), _num_text(row[3]), _num_text(row[4])]
+        x = MARGIN
+        for col_w, value in zip(col_ws, values):
+            c.setStrokeColor(TH_BORDER)
+            c.rect(x, row_top - class_h, col_w, class_h, fill=0, stroke=1)
+            _cell(c, x, row_top, col_w, class_h, value, size=9, bold=(col_w == col_ws[0]), align="center" if col_w != col_ws[0] else "left", border=False)
+            x += col_w
+    # Product photo box
+    photo_x = MARGIN + aql_w + 10
+    photo_h = header_h + 3 * class_h
+    c.setStrokeColor(TH_BORDER)
+    c.rect(photo_x, aql_top - photo_h, photo_w, photo_h, fill=0, stroke=1)
+    _cell(c, photo_x, aql_top, photo_w, 16, "Product Photo", size=8.5, bold=False, align="center", border=False)
+    product_photo = _first(data, "product_photo", "product_photo_path")
+    evidence_for_photo, _wh = _normalize_photos(data)
+    if not product_photo:
+        for item in evidence_for_photo:
+            if item.path and item.category in {"product", ""}:
+                product_photo = item.path
+                break
+    if not product_photo:
+        for item in evidence_for_photo:
+            if item.path:
+                product_photo = item.path
+                break
+    _draw_image_contain(c, product_photo, photo_x + 4, aql_top - photo_h + 4, photo_w - 8, photo_h - 24)
+    y = aql_top - photo_h - 12
+
+    # Defects (left) + Product Performance & Reliability (right)
+    left_w = 262
+    gap = 8
+    right_w = CONTENT_W - left_w - gap
+    bottom_limit = 42
+
+    # Defect table header (two rows)
+    cr_w, maj_w, min_w = 34, 34, 34
+    desc_w = left_w - cr_w - maj_w - min_w
+    x = MARGIN
+    c.setStrokeColor(TH_BORDER)
+    c.rect(x, y - 16, cr_w + maj_w + min_w, 16, fill=0, stroke=1)
+    c.rect(x + cr_w + maj_w + min_w, y - 32, desc_w, 32, fill=0, stroke=1)
+    _cell(c, x, y, cr_w + maj_w + min_w, 16, "Defective", size=8.5, bold=True, align="center", border=False)
+    _cell(c, x + cr_w + maj_w + min_w, y, desc_w, 32, "Description of Defect", size=8.5, bold=True, align="center", border=False)
+    for label, w in (("CR", cr_w), ("Maj", maj_w), ("Min", min_w)):
+        c.rect(x, y - 32, w, 16, fill=0, stroke=1)
+        _cell(c, x, y - 16, w, 16, label, size=8.5, bold=True, align="center", border=False)
+        x += w
+    defect_row_h = 17
+    max_defect_rows = max(1, int((y - 32 - bottom_limit) / defect_row_h) )
+    max_defect_rows = min(max_defect_rows, 12)
+    for row_index, row in enumerate(defect_rows[:max_defect_rows]):
+        row_top = y - 32 - row_index * defect_row_h
+        values = [row[0], row[1], row[2], row[3]]
+        x = MARGIN
+        for w, value in zip((cr_w, maj_w, min_w, desc_w), values):
+            c.setStrokeColor(TH_BORDER)
+            c.rect(x, row_top - defect_row_h, w, defect_row_h, fill=0, stroke=1)
+            _cell(c, x, row_top, w, defect_row_h, _text_value(value, ""), size=8, bold=False, align="center" if w != desc_w else "left", max_lines=1, border=False)
+            x += w
+
+    # Test table
+    tx = MARGIN + left_w + gap
+    c.setStrokeColor(TH_BORDER)
+    c.rect(tx, y - 16, right_w, 16, fill=0, stroke=1)
+    _cell(c, tx, y, right_w, 16, "Product Performance & Reliability", size=8.5, bold=True, align="center", border=False)
+    name_w = right_w * 0.46
+    std_w = right_w * 0.32
+    res_w = right_w - name_w - std_w
+    x = tx
+    for label, w in (("Abuse Test", name_w), ("Standard", std_w), ("Result", res_w)):
+        c.rect(x, y - 32, w, 16, fill=0, stroke=1)
+        _cell(c, x, y - 16, w, 16, label, size=8.5, bold=True, align="center", border=False)
+        x += w
+    test_row_h = 17
+    max_test_rows = min(12, max(1, int((y - 32 - bottom_limit) / test_row_h)))
+    for row_index, row in enumerate(test_rows[:max_test_rows]):
+        row_top = y - 32 - row_index * test_row_h
+        values = [_text_value(row[0], ""), _text_value(row[1], ""), _text_value(row[2], "")]
+        x = tx
+        for col_index, (w, value) in enumerate(zip((name_w, std_w, res_w), values)):
+            c.setStrokeColor(TH_BORDER)
+            c.rect(x, row_top - test_row_h, w, test_row_h, fill=0, stroke=1)
+            is_result = col_index == 2
+            color = _status_style(value.upper())[0] if is_result and value.upper() in {"PASS", "REJECT"} else colors.black
+            _cell(c, x, row_top, w, test_row_h, value, size=8, bold=is_result, color=color, align="center" if col_index else "left", max_lines=1, border=False)
+            x += w
 
 
 def _draw_continuation_page(
@@ -764,137 +903,387 @@ def _draw_continuation_page(
     defects: list[list[Any]],
     tests: list[list[Any]],
 ) -> None:
-    _draw_header(c, data, page_no, total_pages)
-    y = _section(c, PAGE_H - 86, "Inspection details - continued")
-    gap = 10
-    left_w = CONTENT_W * 0.52
+    y = _th_header(c, data)
+    y = _band(c, y, "INSPECTION DETAILS (CONTINUED)")
+    left_w = 262
+    gap = 8
     right_w = CONTENT_W - left_w - gap
-    _draw_text(c, MARGIN, y, "CONFIRMED DEFECTS", size=8.5, bold=True, color=NAVY, width=left_w)
-    _draw_text(c, MARGIN + left_w + gap, y, "MANUAL PERFORMANCE TESTS", size=8.5, bold=True, color=NAVY, width=right_w)
-    table_top = y - 12
-    _draw_grid(c, MARGIN, table_top, left_w, [0.11, 0.13, 0.13, 0.63], ["CR", "MAJ", "MIN", "Description of defect"], defects, row_h=35, font_size=6.5, max_lines=3)
-    _draw_grid(c, MARGIN + left_w + gap, table_top, right_w, [0.46, 0.34, 0.20], ["Abuse test", "Standard", "Result"], tests, row_h=23, font_size=6.1, max_lines=2)
-    _draw_footer(c, data, page_no, total_pages)
+    cr_w, maj_w, min_w = 34, 34, 34
+    desc_w = left_w - cr_w - maj_w - min_w
+    row_h = 17
+    # defects
+    x = MARGIN
+    c.setStrokeColor(TH_BORDER)
+    c.rect(x, y - 16, cr_w + maj_w + min_w, 16, fill=0, stroke=1)
+    c.rect(x + cr_w + maj_w + min_w, y - 32, desc_w, 32, fill=0, stroke=1)
+    _cell(c, x, y, cr_w + maj_w + min_w, 16, "Defective", size=8.5, bold=True, align="center", border=False)
+    _cell(c, x + cr_w + maj_w + min_w, y, desc_w, 32, "Description of Defect", size=8.5, bold=True, align="center", border=False)
+    for label, w in (("CR", cr_w), ("Maj", maj_w), ("Min", min_w)):
+        c.rect(x, y - 32, w, 16, fill=0, stroke=1)
+        _cell(c, x, y - 16, w, 16, label, size=8.5, bold=True, align="center", border=False)
+        x += w
+    for row_index, row in enumerate(defects[:38]):
+        row_top = y - 32 - row_index * row_h
+        x = MARGIN
+        for w, value in zip((cr_w, maj_w, min_w, desc_w), row):
+            c.setStrokeColor(TH_BORDER)
+            c.rect(x, row_top - row_h, w, row_h, fill=0, stroke=1)
+            _cell(c, x, row_top, w, row_h, _text_value(value, ""), size=8, align="center" if w != desc_w else "left", max_lines=1, border=False)
+            x += w
+    # tests
+    tx = MARGIN + left_w + gap
+    c.setStrokeColor(TH_BORDER)
+    c.rect(tx, y - 16, right_w, 16, fill=0, stroke=1)
+    _cell(c, tx, y, right_w, 16, "Product Performance & Reliability", size=8.5, bold=True, align="center", border=False)
+    name_w = right_w * 0.46
+    std_w = right_w * 0.32
+    res_w = right_w - name_w - std_w
+    x = tx
+    for label, w in (("Abuse Test", name_w), ("Standard", std_w), ("Result", res_w)):
+        c.rect(x, y - 32, w, 16, fill=0, stroke=1)
+        _cell(c, x, y - 16, w, 16, label, size=8.5, bold=True, align="center", border=False)
+        x += w
+    for row_index, row in enumerate(tests[:38]):
+        row_top = y - 32 - row_index * row_h
+        x = tx
+        for col_index, (w, value) in enumerate(zip((name_w, std_w, res_w), [_text_value(row[0], ""), _text_value(row[1], ""), _text_value(row[2], "")])):
+            c.setStrokeColor(TH_BORDER)
+            c.rect(x, row_top - row_h, w, row_h, fill=0, stroke=1)
+            is_result = col_index == 2
+            color = _status_style(value.upper())[0] if is_result and value.upper() in {"PASS", "REJECT"} else colors.black
+            _cell(c, x, row_top, w, row_h, value, size=8, bold=is_result, color=color, align="center" if col_index else "left", max_lines=1, border=False)
+            x += w
 
 
-def _draw_photo_card(c: canvas.Canvas, item: _Evidence, x: float, top: float, w: float, h: float, number: int) -> None:
-    c.setFillColor(WHITE)
-    c.setStrokeColor(LINE)
-    c.roundRect(x, top - h, w, h, 6, fill=1, stroke=1)
-    c.setFillColor(SKY)
-    c.roundRect(x + 1, top - 25, w - 2, 24, 5, fill=1, stroke=0)
-    _draw_text(c, x + 8, top - 16, f"{number:02d}  {item.title}", size=6.8, bold=True, color=NAVY, width=w - 16)
-    image_x = x + 7
-    image_y = top - h + 48
-    image_w = w - 14
-    image_h = h - 79
-    c.setFillColor(PALE)
-    c.setStrokeColor(colors.HexColor("#E4EAF2"))
-    c.rect(image_x, image_y, image_w, image_h, fill=1, stroke=1)
-    rendered = _draw_image_contain(c, item.path, image_x + 2, image_y + 2, image_w - 4, image_h - 4)
-    if not rendered:
-        message = "REQUIRED PHOTO NOT SUPPLIED" if item.required else "NO PHOTO SUPPLIED"
-        _draw_text(c, image_x + 20, image_y + image_h / 2 + 4, message, size=7, bold=True, color=AMBER if item.required else MUTED, width=image_w - 40)
+_FIXED_PACKAGING_LABELS = [
+    "Open Box", "Closed Box", "Window Box",
+    "Mailer", "Bulk", "Header",
+    "PolyBag", "Hang Tag", "Sewn-in label",
+    "Blister Tray/ Card", "Instruction Sheet", "Warning label",
+    "Customer label", "Price Label / tag", "CE Marks",
+    "Green Dot", "Name & Address", "WEEE",
+]
+
+
+def _label_key(label: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", label.lower())
+
+
+def _draw_page_two(c: canvas.Canvas, data: Mapping[str, Any], total_pages: int, detail_notes: Sequence[str] = ()) -> list[str]:
+    y = _th_header(c, data)
+    product, packing = _product_and_packing(data)
+    master = _mapping(_first(packing, "master_carton", default={}))
+    inner = _first(packing, "inner_carton", "inner_carton_details", default={})
+    inner_map = _mapping(inner)
+
+    y = _band(c, y, "PRODUCT SPECIFICATION")
+    y = _spec_row(c, y, "Product Size (mm)", _first(product, "size_mm", "product_size", "dimensions"))
+    nw = _text_value(_first(product, "net_weight_kg", "nw"), "")
+    gw = _text_value(_first(product, "gross_weight_kg", "gw"), "")
+    weight = _weights(nw, gw)
+    y = _spec_row(c, y, "Product Weight (kg)", weight)
+    y = _spec_row(c, y, "Date Code", _first(product, "date_code", "batch_code"))
+    y = _spec_row(c, y, "UPC / EAN barcode", _first(product, "barcode", "upc", "ean"))
+    y = _spec_row(c, y, "Assortment Ratio", _first(product, "assortment_ratio", default=_first(packing, "assortment_ratio")))
+    y -= 10
+
+    y = _band(c, y, "Individual Packaging", h=15, size=8.5)
+    provided = {_label_key(label): value for label, value in _packaging_items(product, packing)}
+    packaging_rows: list[tuple[str, str]] = []
+    used_keys: set[str] = set()
+    for label in _FIXED_PACKAGING_LABELS:
+        key = _label_key(label)
+        value = provided.get(key, "")
+        if value:
+            used_keys.add(key)
+        packaging_rows.append((label, value))
+    col_w = CONTENT_W / 3
+    value_w = 42
+    row_h = 19
+    for row_index in range(ceil(len(packaging_rows) / 3)):
+        row_top = y - row_index * row_h
+        for col in range(3):
+            index = row_index * 3 + col
+            x = MARGIN + col * col_w
+            c.setStrokeColor(TH_BORDER)
+            c.setLineWidth(0.8)
+            c.rect(x, row_top - row_h, col_w, row_h, fill=0, stroke=1)
+            if index < len(packaging_rows):
+                label, value = packaging_rows[index]
+                c.line(x + col_w - value_w, row_top, x + col_w - value_w, row_top - row_h)
+                _cell(c, x, row_top, col_w - value_w, row_h, label, size=8, bold=True, max_lines=1, border=False)
+                _cell(c, x + col_w - value_w, row_top, value_w, row_h, value, size=8, bold=True, align="center", max_lines=1, border=False)
+    y -= ceil(len(packaging_rows) / 3) * row_h + 10
+
+    y = _band(c, y, "PACKING")
+    y = _band(c, y, "MASTER CARTON", h=15, size=8.5)
+    master_rows = [
+        ("Dimension", _first(master, "dimension", "dimensions", default=_first(packing, "master_carton_dimension"))),
+        ("Carton Weight (kg)", _weights(
+            _text_value(_first(master, "net_weight_kg", "net_weight", "nw", default=_first(packing, "master_carton_nw")), ""),
+            _text_value(_first(master, "gross_weight_kg", "gross_weight", "gw", default=_first(packing, "master_carton_gw")), ""),
+        )),
+        ("Outer Carton barcode", _first(master, "barcode", "outer_carton_barcode", default=_first(packing, "outer_carton_barcode"))),
+        ("Case Pack", _first(master, "case_pack", default=_first(packing, "case_pack"))),
+        ("Assortment Ratio", _first(master, "assortment_ratio", default=_first(packing, "assortment_ratio"))),
+        ("Date Code", _first(master, "date_code", default=_first(product, "date_code"))),
+    ]
+    for label, value in master_rows:
+        y = _spec_row(c, y, label, _text_value(value, ""), h=18)
+    y = _band(c, y, "INNER CARTON", h=15, size=8.5)
+    inner_rows = [
+        ("Dimension", _first(inner_map, "dimension", "dimensions")),
+        ("Carton Weight (kg)", _weights(
+            _text_value(_first(inner_map, "net_weight_kg", "net_weight", "nw"), ""),
+            _text_value(_first(inner_map, "gross_weight_kg", "gross_weight", "gw"), ""),
+        )),
+        ("Outer Carton barcode", _first(inner_map, "barcode")),
+        ("Case Pack", _first(inner_map, "case_pack")),
+        ("Assortment Ratio", _first(inner_map, "assortment_ratio")),
+        ("Date Code", _first(inner_map, "date_code")),
+    ]
+    for label, value in inner_rows:
+        y = _spec_row(c, y, label, _text_value(value, ""), h=18)
+    if isinstance(inner, str) and inner.strip():
+        y = _spec_row(c, y, "Details", inner.strip(), h=18)
+    y -= 10
+
+    remarks = _first(data, "remarks", default="")
+    if isinstance(remarks, Mapping):
+        lines = [f"{_text_value(key)}: {_text_value(value)}" for key, value in remarks.items()]
+    elif isinstance(remarks, (list, tuple)):
+        lines = [_text_value(item, "") for item in remarks]
+    else:
+        lines = [line.strip() for line in _text_value(remarks, "").splitlines() if line.strip()]
+    reason = _text_value(data.get("result_reason"), "")
+    if reason:
+        lines.insert(0, f"Result reason: {reason}")
+    fixed_keys = {_label_key(label) for label in _FIXED_PACKAGING_LABELS}
+    lines.extend(f"Packaging - {label}: {value}" for label, value in _packaging_items(product, packing) if _label_key(label) not in fixed_keys)
+    lines.extend(detail_notes)
+    wrapped_lines = [wrapped for line in lines for wrapped in _wrap(line, CONTENT_W - 12, 8.5)]
+    if lines:
+        y = _band(c, y, "REMARKS:")
+        for index, wrapped in enumerate(wrapped_lines):
+            if y - 10 < 46:
+                return wrapped_lines[index:]
+            _draw_text(c, MARGIN + 6, y - 10, wrapped, size=8.5, color=colors.black, width=CONTENT_W - 12)
+            y -= 11
+    return []
+
+
+def _detail_notes(defects: Sequence[list[Any]], tests: Sequence[list[Any]], evidence: Sequence[_Evidence]) -> list[str]:
+    """Preserve values shortened to fit the classic fixed-height tables/captions."""
+    notes = []
+    for index, row in enumerate(defects, 1):
+        if len(_wrap(row[3], 148, 8)) > 1:
+            notes.append(f"Defect {index}: {_text_value(row[3], '')}")
+    for index, row in enumerate(tests, 1):
+        if any(len(_wrap(value, width, 8)) > 1 for value, width in zip(row, (95, 62, 27))):
+            notes.append(f"Test {index}: " + " | ".join(_text_value(value, "") for value in row))
+    for item in evidence:
+        caption = _evidence_caption(item)
+        if len(_wrap(caption, (CONTENT_W - 10) / 2 - 12, 7)) > 2:
+            notes.append(f"Photo - {item.title}: {caption}")
+    return [line for note in notes for line in _wrap(note, CONTENT_W - 12, 8.5)]
+
+
+def _draw_notes_page(c: canvas.Canvas, data: Mapping[str, Any], lines: Sequence[str]) -> None:
+    y = _band(c, _th_header(c, data), "INSPECTION NOTES (CONTINUED)") - 12
+    for line in lines:
+        _draw_text(c, MARGIN + 6, y, line, size=8.5, color=colors.black)
+        y -= 11
+
+
+# ---------------------------------------------------------------------------
+# Fixed photo template (matches the classic report photo pages)
+# ---------------------------------------------------------------------------
+
+_PHOTO_LABEL_H = 15
+_PHOTO_IMG_H = 135
+_PHOTO_CELL_H = _PHOTO_LABEL_H + _PHOTO_IMG_H  # 150
+_PHOTO_ROW_STEP = _PHOTO_CELL_H + 8
+
+# Fixed slot layout. Each row holds 1~2 cells: (label, keywords, negatives).
+_FIXED_PHOTO_PAGES: list[list[list[tuple[str, tuple[str, ...], tuple[str, ...]]]]] = [
+    [
+        [("Components Photo", ("component",), ())],
+        [("Product / TSD Marking on Product", ("marking", "tsd"), ()), ("Date Code on Product", ("date code",), ("pack",))],
+        [("Packaging Photo  Front Side View", ("front",), ("mark",)), ("Packaging Photo  Rear side View", ("rear",), ())],
+        [("Left Side View", ("left",), ()), ("Right Side View", ("right",), ())],
+    ],
+    [
+        [("Top Side View", ("top side", "top view"), ()), ("Bottom Side View", ("bottom side", "bottom view", "buttom side"), ())],
+        [("Barcode reading", ("barcode",), ()), ("Menu book", ("menu", "book", "instruction"), ())],
+        [("Date Code on Packing", ("date code",), ())],
+        [("Voltage of battery", ("voltage", "battery"), ()), ("Label", ("label",), ())],
+    ],
+]
+
+_CARTON_ROWS = [
+    [("Front Mark photo", ("front mark", "frontmark"), ()), ("Side Mark Photo", ("side mark", "sidemark"), ())],
+    [("Top and Buttom photo", ("top and", "top &", "top/buttom", "top/bottom"), ()), ("Open the master carton", ("open",), ())],
+]
+
+
+def _photo_text(item: _Evidence) -> str:
+    return f"{item.title} {item.caption} {item.category}".lower()
+
+
+def _pop_match(pool: list[_Evidence], keywords: tuple[str, ...], negatives: tuple[str, ...] = ()) -> _Evidence | None:
+    for index, item in enumerate(pool):
+        text = _photo_text(item)
+        if any(neg in text for neg in negatives):
+            continue
+        if any(keyword in text for keyword in keywords):
+            return pool.pop(index)
+    return None
+
+
+def _pop_all_defects(pool: list[_Evidence]) -> list[_Evidence]:
+    defects = [item for item in pool if "defect" in _photo_text(item)]
+    for item in defects:
+        pool.remove(item)
+    return defects
+
+
+def _build_photo_pages(evidence: Sequence[_Evidence]) -> list[list[tuple[str, Any]]]:
+    """Render every fixed photo slot (empty box when no photo) and never drop photos."""
+    pool = [item for item in evidence if item.path or item.required]
+    pages: list[list[tuple[str, Any]]] = []
+    for fixed_page in _FIXED_PHOTO_PAGES:
+        elements: list[tuple[str, Any]] = []
+        for row in fixed_page:
+            cells = [(label, _pop_match(pool, keywords, negatives)) for label, keywords, negatives in row]
+            elements.append(("row", cells))
+        pages.append(elements)
+
+    defects = _pop_all_defects(pool)
+    defect_rows = [defects[index : index + 2] for index in range(0, len(defects), 2)]
+    page_c: list[tuple[str, Any]] = [("band", "DEFECT PHOTO")]
+    page_c_defects = defect_rows[:2]
+    extra_defects = defect_rows[2:]
+    if page_c_defects:
+        for row in page_c_defects:
+            page_c.append(("defect_row", row))
+    else:
+        page_c.append(("defect_row", [None]))
+    page_c.append(("band", "CARTON PACK"))
+    for row in _CARTON_ROWS:
+        cells = [(label, _pop_match(pool, keywords, negatives)) for label, keywords, negatives in row]
+        page_c.append(("row", cells))
+    pages.append(page_c)
+
+    overflow: list[tuple[str, Any]] = []
+    if extra_defects:
+        overflow.append(("band", "DEFECT PHOTO (CONTINUED)"))
+        for row in extra_defects:
+            overflow.append(("defect_row", row))
+    while pool:
+        pair = [pool.pop(0) for _ in range(min(2, len(pool)))]
+        overflow.append(("row", [(item.title or "Photo", item) for item in pair]))
+    while overflow:
+        page = overflow[:4]
+        overflow = overflow[4:]
+        pages.append(page)
+    return pages
+
+
+def _evidence_caption(item: _Evidence) -> str:
     caption = item.caption
     if item.sample_id:
-        caption = f"{caption} | Sample: {item.sample_id}"
-    _draw_text(c, x + 8, top - h + 33, caption, size=6.2, color=INK, width=w - 16, max_lines=2, leading=7.2)
+        caption += f" | Sample: {item.sample_id}"
+    return caption
 
 
-def _draw_photo_page(c: canvas.Canvas, data: Mapping[str, Any], page_no: int, total_pages: int, items: Sequence[_Evidence], start_index: int) -> None:
-    _draw_header(c, data, page_no, total_pages)
-    y = _section(c, PAGE_H - 86, "Inspection photo evidence", "Ordered by the configured QC checklist")
-    gap = 11
-    visible_items = list(items[:4])
-    count = len(visible_items)
-    if count == 1:
-        placements = [(MARGIN, y, CONTENT_W, 648)]
-    elif count == 2:
-        card_w = (CONTENT_W - gap) / 2
-        placements = [
-            (MARGIN, y, card_w, 648),
-            (MARGIN + card_w + gap, y, card_w, 648),
-        ]
-    elif count == 3:
-        card_w = (CONTENT_W - gap) / 2
-        card_h = 319
-        placements = [
-            (MARGIN, y, card_w, card_h),
-            (MARGIN + card_w + gap, y, card_w, card_h),
-            (MARGIN, y - card_h - gap, CONTENT_W, card_h),
-        ]
+def _photo_image(c: canvas.Canvas, item: _Evidence, x: float, bottom: float, w: float, h: float) -> None:
+    _draw_image_contain(c, item.path, x + 2, bottom + 24, w - 4, h - 26)
+    _draw_text(c, x + 6, bottom + 16, _evidence_caption(item), size=7, width=w - 12, max_lines=2, leading=8)
+
+
+def _th_photo_cell(c: canvas.Canvas, x: float, top: float, w: float, label: str, item: _Evidence | None) -> None:
+    c.setStrokeColor(TH_BORDER)
+    c.setLineWidth(0.8)
+    if label:
+        c.rect(x, top - _PHOTO_LABEL_H, w, _PHOTO_LABEL_H, fill=0, stroke=1)
+        _cell(c, x, top, w, _PHOTO_LABEL_H, label, size=8, bold=True, max_lines=1, border=False)
+        img_top = top - _PHOTO_LABEL_H
+        c.rect(x, img_top - _PHOTO_IMG_H, w, _PHOTO_IMG_H, fill=0, stroke=1)
+        if item is not None:
+            _photo_image(c, item, x, img_top - _PHOTO_IMG_H, w, _PHOTO_IMG_H)
     else:
-        card_w = (CONTENT_W - gap) / 2
-        card_h = 319
-        placements = [
-            (MARGIN + col * (card_w + gap), y - row * (card_h + gap), card_w, card_h)
-            for row in range(2)
-            for col in range(2)
-        ]
-    for index, (item, placement) in enumerate(zip(visible_items, placements)):
-        _draw_photo_card(c, item, *placement, start_index + index)
-    _draw_footer(c, data, page_no, total_pages)
+        c.rect(x, top - _PHOTO_CELL_H, w, _PHOTO_CELL_H, fill=0, stroke=1)
+        if item is not None:
+            _photo_image(c, item, x, top - _PHOTO_CELL_H, w, _PHOTO_CELL_H)
 
 
-def _draw_final_page(c: canvas.Canvas, data: Mapping[str, Any], page_no: int, total_pages: int, warehouse: Sequence[_Evidence]) -> None:
-    _draw_header(c, data, page_no, total_pages)
-    y = _section(c, PAGE_H - 86, "Pictures of all goods in warehouse")
+def _draw_photo_page(c: canvas.Canvas, data: Mapping[str, Any], elements: Sequence[tuple[str, Any]], *, first: bool) -> None:
+    y = _th_header(c, data)
+    if first:
+        y = _band(c, y, "PHOTOS")
+        y -= 8
     gap = 10
-    warehouse_items = list(warehouse[:2]) or [_Evidence("Warehouse stock", "No warehouse photo supplied", None)]
-    card_w = CONTENT_W if len(warehouse_items) == 1 else (CONTENT_W - gap) / 2
-    for index, item in enumerate(warehouse_items):
-        _draw_photo_card(c, item, MARGIN + index * (card_w + gap), y, card_w, 234, index + 1)
+    col_w = (CONTENT_W - gap) / 2
+    for kind, payload in elements:
+        if kind == "band":
+            y = _band(c, y, _text_value(payload), h=16, size=8.5)
+            y -= 6
+        elif kind == "defect_row":
+            for col in range(2):
+                item = payload[col] if col < len(payload) else None
+                x = MARGIN + col * (col_w + gap)
+                c.setStrokeColor(TH_BORDER)
+                c.setLineWidth(0.8)
+                c.rect(x, y - _PHOTO_CELL_H, col_w, _PHOTO_CELL_H, fill=0, stroke=1)
+                if item is not None:
+                    _photo_image(c, item, x, y - _PHOTO_CELL_H, col_w, _PHOTO_CELL_H)
+            y -= _PHOTO_ROW_STEP
+        else:
+            for col in range(2):
+                label, item = payload[col] if col < len(payload) else ("", None)
+                _th_photo_cell(c, MARGIN + col * (col_w + gap), y, col_w, label, item)
+            y -= _PHOTO_ROW_STEP
 
-    y -= 254
-    y = _section(c, y, "Inspection conclusion")
-    result = _text_value(_first(data, "result", "status", default="ON HOLD")).upper()
-    result_color, result_bg = _status_style(result)
-    c.setFillColor(result_bg)
-    c.setStrokeColor(result_color)
-    c.roundRect(MARGIN, y - 74, CONTENT_W, 74, 7, fill=1, stroke=1)
-    _draw_text(c, MARGIN + 13, y - 20, "FINAL RESULT", size=6.5, bold=True, color=MUTED, width=95)
-    _draw_text(c, MARGIN + 13, y - 49, result, size=19, bold=True, color=result_color, width=105)
-    _draw_text(c, MARGIN + 132, y - 22, "QC conclusion", size=6.5, bold=True, color=MUTED, width=CONTENT_W - 150)
-    _draw_text(c, MARGIN + 132, y - 40, _first(data, "result_reason", "conclusion", default="-"), size=7.2, color=INK, width=CONTENT_W - 150, max_lines=3, leading=8.5)
 
-    y -= 96
-    y = _section(c, y, "QC sign-off", "Final responsibility remains with the QC inspector")
+def _draw_final_page(c: canvas.Canvas, data: Mapping[str, Any], warehouse: Sequence[_Evidence]) -> None:
+    y = _th_header(c, data)
+    y = _band(c, y, "PICTURES OF ALL GOODS STORE IN WAREHOUSE")
+    y -= 8
+    gap = 10
+    col_w = (CONTENT_W - gap) / 2
+    items = list(warehouse[:4])
+    for index, item in enumerate(items):
+        row, col = divmod(index, 2)
+        x = MARGIN + col * (col_w + gap)
+        top = y - row * _PHOTO_ROW_STEP
+        c.setStrokeColor(TH_BORDER)
+        c.setLineWidth(0.8)
+        c.rect(x, top - _PHOTO_CELL_H, col_w, _PHOTO_CELL_H, fill=0, stroke=1)
+        _photo_image(c, item, x, top - _PHOTO_CELL_H, col_w, _PHOTO_CELL_H)
+
+    # Signature area
     inspector_value = data.get("inspector")
     inspector = _mapping(inspector_value)
-    inspector_name = _first(inspector, "name", "inspector_name", default=inspector_value if isinstance(inspector_value, str) else _first(data, "inspector_name"))
-    signed_at = _first(inspector, "signed_at", "signature_time", default=_first(data, "signed_at"))
+    inspector_name = _text_value(_first(inspector, "name", "inspector_name", default=inspector_value if isinstance(inspector_value, str) else _first(data, "inspector_name")), "")
     signature = _first(inspector, "signature_path", "signature", default=_first(data, "signature_path"))
-    block_h = 137
-    c.setFillColor(PALE)
-    c.setStrokeColor(LINE)
-    c.roundRect(MARGIN, y - block_h, CONTENT_W, block_h, 7, fill=1, stroke=1)
-    _draw_text(c, MARGIN + 13, y - 20, "Inspected and electronically signed by", size=6.5, bold=True, color=MUTED, width=220)
-    _draw_text(c, MARGIN + 13, y - 45, inspector_name, size=12, bold=True, color=INK, width=220)
-    _draw_text(c, MARGIN + 13, y - 66, f"Signed at: {_timestamp_value(signed_at)}", size=6.8, color=MUTED, width=220)
-    c.setFillColor(WHITE)
-    c.setStrokeColor(colors.HexColor("#DDE4EC"))
-    c.roundRect(PAGE_W - MARGIN - 211, y - 116, 198, 94, 5, fill=1, stroke=1)
-    if not _draw_image_contain(c, signature, PAGE_W - MARGIN - 201, y - 107, 178, 74):
-        _draw_text(c, PAGE_W - MARGIN - 180, y - 70, "SIGNATURE NOT PROVIDED", size=6.5, bold=True, color=AMBER, width=150)
-    _draw_text(c, MARGIN + 13, y - 104, "All AI observations and report entries were reviewed before sign-off.", size=6.5, color=MUTED, width=280)
-
-    trace = _mapping(data.get("ai_trace"))
-    if trace:
-        trace_text = " | ".join(
-            part
-            for part in (
-                f"Model: {_text_value(_first(trace, 'model', 'model_version'))}",
-                f"Prompt: {_text_value(_first(trace, 'prompt_version'))}",
-                f"Schema: {_text_value(_first(trace, 'schema_version'))}",
-            )
-            if not part.endswith("-")
-        )
-        _draw_text(c, MARGIN, 49, trace_text, size=5.8, color=MUTED, width=CONTENT_W, max_lines=1)
-    _draw_footer(c, data, page_no, total_pages)
+    line_y = 110
+    c.setStrokeColor(colors.black)
+    c.setLineWidth(0.9)
+    c.setFont("Helvetica-Bold", 10)
+    c.setFillColor(colors.black)
+    _draw_text(c, MARGIN, line_y, f"Inspected By: {inspector_name}", size=10, bold=True, width=210)
+    c.line(MARGIN, line_y - 6, MARGIN + 200, line_y - 6)
+    c.drawString(MARGIN + 240, line_y, "Supplier/ Factory Signature:")
+    c.line(MARGIN + 240 + pdfmetrics.stringWidth("Supplier/ Factory Signature: ", "Helvetica-Bold", 10), line_y - 6, PAGE_W - MARGIN, line_y - 6)
+    if signature:
+        _draw_image_contain(c, signature, MARGIN + 30, line_y + 4, 150, 44)
+    signed_at = _first(inspector, "signed_at")
+    if signed_at:
+        _draw_text(c, MARGIN, line_y - 20, f"Signed at: {_timestamp_value(signed_at)}", size=7, width=210)
 
 
 def generate_unified_report_pdf(payload: Mapping[str, Any], destination: str | Path) -> Path:
-    """Generate the unified English QC report and return its output path.
+    """Generate the TigerHead-format QC report and return its output path.
 
     ``payload`` must be a mapping of already-normalized application data.  The
     generator never calls a database or an AI service and never infers missing
@@ -914,44 +1303,59 @@ def generate_unified_report_pdf(payload: Mapping[str, Any], destination: str | P
     test_rows = _test_rows(data)
     evidence, warehouse = _normalize_photos(data)
 
-    extra_defects = defect_rows[8:]
+    page_one_defects = defect_rows[:12]
+    page_one_tests = test_rows[:12]
+    extra_defects = defect_rows[12:]
     extra_tests = test_rows[12:]
-    continuation_count = max(ceil(len(extra_defects) / 18), ceil(len(extra_tests) / 18)) if extra_defects or extra_tests else 0
-    photo_page_count = max(2, ceil(len(evidence) / 4))
-    total_pages = 2 + continuation_count + photo_page_count + 1
+    continuation_count = max(ceil(len(extra_defects) / 38), ceil(len(extra_tests) / 38)) if extra_defects or extra_tests else 0
+    photo_pages = _build_photo_pages(evidence)
+    # Measure the fixed form's remaining notes with the same renderer. No file
+    # is emitted; this keeps pagination in sync with optional inner-carton rows.
+    detail_notes = _detail_notes(defect_rows, test_rows, [*evidence, *warehouse])
+    remaining_notes = _draw_page_two(canvas.Canvas(BytesIO(), pagesize=A4), data, 0, detail_notes)
+    note_pages = [remaining_notes[index:index + 60] for index in range(0, len(remaining_notes), 60)]
+    total_pages = 2 + continuation_count + len(note_pages) + len(photo_pages) + 1
 
     pdf = canvas.Canvas(str(output), pagesize=A4, pageCompression=1)
     report_no = _text_value(_first(data, "report_no", default="DRAFT"))
     revision = _text_value(_first(data, "revision", default=0), "0")
-    pdf.setTitle(f"{report_no} Rev.{revision} - Quality Inspection Report")
-    pdf.setAuthor(_text_value(_first(data, "company_name", "company", default="Quality Control")))
-    pdf.setSubject("Unified English AI-assisted QC inspection report")
+    pdf.setTitle(f"{report_no} Rev.{revision} - Pre-Shipment Inspection Report")
+    pdf.setAuthor(HEADER_COMPANY)
+    pdf.setSubject("Pre-Shipment Inspection Report")
 
-    _draw_page_one(pdf, data, total_pages, defect_rows, test_rows)
+    _draw_page_one(pdf, data, total_pages, page_one_defects, page_one_tests)
+    _th_footer(pdf, data, 1, total_pages)
     pdf.showPage()
-    _draw_page_two(pdf, data, total_pages)
+    _draw_page_two(pdf, data, total_pages, detail_notes)
+    _th_footer(pdf, data, 2, total_pages)
     pdf.showPage()
 
-    page_no = 3
     for index in range(continuation_count):
         _draw_continuation_page(
             pdf,
             data,
-            page_no,
+            3 + index,
             total_pages,
-            extra_defects[index * 18 : (index + 1) * 18],
-            extra_tests[index * 18 : (index + 1) * 18],
+            extra_defects[index * 38 : (index + 1) * 38],
+            extra_tests[index * 38 : (index + 1) * 38],
         )
+        _th_footer(pdf, data, 3 + index, total_pages)
+        pdf.showPage()
+
+    page_no = 3 + continuation_count
+    for lines in note_pages:
+        _draw_notes_page(pdf, data, lines)
+        _th_footer(pdf, data, page_no, total_pages)
+        pdf.showPage()
+        page_no += 1
+    for page_index, cells in enumerate(photo_pages):
+        _draw_photo_page(pdf, data, cells, first=page_index == 0)
+        _th_footer(pdf, data, page_no, total_pages)
         pdf.showPage()
         page_no += 1
 
-    for photo_page_index in range(photo_page_count):
-        chunk = evidence[photo_page_index * 4 : (photo_page_index + 1) * 4]
-        _draw_photo_page(pdf, data, page_no, total_pages, chunk, photo_page_index * 4 + 1)
-        pdf.showPage()
-        page_no += 1
-
-    _draw_final_page(pdf, data, page_no, total_pages, warehouse)
+    _draw_final_page(pdf, data, warehouse)
+    _th_footer(pdf, data, page_no, total_pages)
     pdf.showPage()
     pdf.save()
     return output

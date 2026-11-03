@@ -4,20 +4,19 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'../frontend/verification-summary.js'),'utf8');
-async function page(responses,options={}){
+async function page(responses){
   const nodes=new Map();
   const node=id=>{
     if(!nodes.has(id)){
       const classes=new Set();
-      nodes.set(id,{value:'',checked:false,textContent:'',innerHTML:'',disabled:false,handlers:{},attributes:{},setAttribute(k,v){this.attributes[k]=v;},removeAttribute(k){delete this.attributes[k];},classList:{add:c=>classes.add(c),remove:c=>classes.delete(c),contains:c=>classes.has(c)},addEventListener(event,fn){this.handlers[event]=fn;}});
+      nodes.set(id,{value:'',checked:false,textContent:'',innerHTML:'',disabled:false,handlers:{},classList:{add:c=>classes.add(c),remove:c=>classes.delete(c),contains:c=>classes.has(c)},addEventListener(event,fn){this.handlers[event]=fn;}});
     }
     return nodes.get(id);
   };
   const location={pathname:'/verification-summary.html',href:''};
-  const downloads=[];
-  vm.runInNewContext(source,{VerificationReportGroups:require('../frontend/verification-report-groups'),document:{getElementById:node,body:{appendChild(){}},createElement:()=>({click(){downloads.push(this.href);},remove(){}})},location,URLSearchParams,setTimeout:fn=>setImmediate(fn),fetch:async url=>url.includes('/export-status/')?options.status():responses.shift()});
+  vm.runInNewContext(source,{VerificationReportGroups:require('../frontend/verification-report-groups'),document:{getElementById:node},location,URLSearchParams,fetch:async()=>responses.shift()});
   await new Promise(resolve=>setImmediate(resolve));
-  return {node,location,downloads};
+  return {node,location};
 }
 test('HTML 404 produces actionable error, and a successful retry clears it',async()=>{
   const p=await page([{status:404,ok:false,text:async()=>'<html>Cannot GET /api/verification-summary</html>'},
@@ -63,19 +62,4 @@ test('report values display exactly two decimals without rounding source calcula
   for(const value of ['5.79','6.08','0.00','100.00','12.35%'])assert.ok(html.includes(`>${value}</td>`),value);
   assert.ok(p.node('vs-overview').innerHTML.includes('>578.85</td>'));
   assert.equal(row.values.E,5.7885);
-});
-test('export shows progress, prevents duplicate downloads and uses current filters',async()=>{
-  let release;const gate=new Promise(r=>release=r);
-  const p=await page([{status:200,ok:true,text:async()=>JSON.stringify({rows:[],columns:[],customers:[]})}],{status:async()=>{await gate;return {status:200,ok:true,json:async()=>({state:'ready'})};}});
-  p.node('vs-status').value='completed';p.node('vs-workshop').value='华登';
-  const first=p.node('vs-export').handlers.click();await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(p.node('vs-export').disabled,true);assert.equal(p.node('vs-export').textContent,'生成中…');assert.equal(p.node('vs-export').attributes['aria-busy'],'true');
-  await p.node('vs-export').handlers.click();assert.equal(p.downloads.length,1);
-  assert.match(p.downloads[0],/status=completed/);assert.match(p.downloads[0],/export_id=/);assert.match(p.downloads[0],/workshop=%E5%8D%8E%E7%99%BB/);
-  release();await first;
-  assert.equal(p.node('vs-export').disabled,false);assert.equal(p.node('vs-export').textContent,'导出 Excel');assert.equal(p.node('vs-export').attributes['aria-busy'],undefined);assert.match(p.node('vs-export-message').textContent,/已生成/);
-});
-test('export failure restores the button and shows an actionable retry message',async()=>{
-  const p=await page([{status:200,ok:true,text:async()=>JSON.stringify({rows:[],columns:[],customers:[]})}],{status:async()=>({status:200,ok:true,json:async()=>({state:'error'})})});
-  await p.node('vs-export').handlers.click();assert.equal(p.node('vs-export').disabled,false);assert.match(p.node('vs-export-message').textContent,/导出失败，请重试/);
 });

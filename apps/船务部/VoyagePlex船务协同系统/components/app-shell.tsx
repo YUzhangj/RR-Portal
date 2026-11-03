@@ -1,0 +1,991 @@
+"use client";
+
+import { hasSpecialCargoDetails } from "@/lib/cargo-extra-details";
+
+import Link from "next/link";
+import { taskMutation } from "@/lib/task-mutation";
+import { runInventoryWriteback } from "@/lib/inventory-writeback";
+import { InventoryWritebackRecovery } from "@/components/inventory-writeback-recovery";
+import { WarehouseTripPreview } from "@/components/warehouse-trip-preview";
+import { tripErrors, type WarehouseTripPlan } from "@/lib/warehouse-trips";
+import { applyWarehouseTruckSuggestion, isXingxinWarehouse, recommendTruck } from "@/lib/warehouse-truck";
+import { ExportTemplatePicker } from "@/components/export-template-picker";
+import { CargoExtraDetails, hasLegacyUnitWeights } from "@/components/cargo-extra-details";
+import { ContainerSplitPreview } from "@/components/container-split-preview";
+import { useRouter } from "next/navigation";
+import {
+  Anchor, ArrowLeft, CalendarDays, Check, ChevronRight, ClipboardCheck, ContactRound, Container,
+  Database, FileSpreadsheet, FileUp, Inbox, LayoutDashboard, ListChecks,
+  Download, History, Layers3, Map as MappingIcon, Plus, RefreshCw, Search, Settings, Ship, Trash2, Upload, Users,
+} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { qcResultText, qcState, qcSummary, readQcSnapshots, saveQcSnapshots, type QcResult } from "@/lib/qc-display";
+import { DailyMailWorkbench } from "@/components/daily-mail-workbench";
+import { FactoryMappingManagement } from "@/components/factory-mapping-management";
+import { TemplateManagement } from "@/components/template-management";
+import { ProductWorkbookImport } from "@/components/product-workbook-import";
+
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
+const apiFetch = (path: string, init?: RequestInit) => fetch(`${basePath}${path}`, init);
+
+const taskFetch=(path:string,init?:RequestInit)=>taskMutation(path,init,apiFetch);
+
+const navigation: Array<{href:string;label:string;icon:typeof LayoutDashboard;roles:UserRole[]}> = [
+  { href: "/", label: "首页", icon: LayoutDashboard, roles:["admin","supervisor","shipping","warehouse"] },
+  { href: "/mail", label: "邮件工作台", icon: Inbox, roles:["admin","supervisor","shipping"] },
+  { href: "/imports", label: "信息导入", icon: FileUp, roles:["admin","supervisor","shipping"] },
+  { href: "/shipments", label: "走柜任务", icon: Container, roles:["admin","supervisor","shipping","warehouse"] },
+  { href: "/inventory", label: "库存管理", icon: Database, roles:["admin","supervisor","warehouse"] },
+  { href: "/users", label: "用户管理", icon: Users, roles:["admin","supervisor"] },
+  { href: "/settings", label: "系统设置", icon: Settings, roles:["admin","supervisor","shipping"] },
+];
+
+const titles: Record<string, string> = {
+  mail: "邮件工作台", imports: "信息导入", shipments: "走柜任务", inventory: "库存管理",
+  users:"用户管理", settings: "系统设置",
+};
+
+type ParsedFields = Record<string, string>;
+type WarehouseGroup = { warehouse: string; references: string[]; items: Array<Record<string, unknown>>; source_files: string[]; container_type?:string; loading_factory?:string };
+type ParsedEmail = {
+  warehouse_trip_plan?:WarehouseTripPlan;
+  import_item_id: number; filename: string; status: string; error?: string;
+  mailbox_received_at?: string;
+  duplicate_of_item_id?: number; message?: { subject?: string; sender?: string; received_at?: string };
+  fields?: ParsedFields; attachments?: Array<{ filename: string; size: number }>;
+  attachment_results?: Array<{ filename: string; kind: string; item_count: number }>;
+  shipment_groups?:Array<{group_key:string;so_number:string;container_type:string;vessel_name?:string;si_deadline?:string;cutoff_date?:string;capacity_boxes?:string}>;
+  items?: Array<Record<string, unknown>>; warehouse_groups?: WarehouseGroup[]; warnings?: string[];
+};
+type EmailBatch = { import_batch_id?: number; total: number; parsed: number; failed: number; parser_version?:string; items: ParsedEmail[] };
+type MailWorkCategory = "Unclassified"|"Shipment"|"Change"|"FollowUp"|"Other";
+type MailHandlingStatus = "Pending"|"Processed"|"Ignored";
+type MailContactType = "Unknown"|"Internal"|"Customer"|"Forwarder"|"Trucker"|"Other";
+type MailContact = {id:number;email:string;displayName:string;contactType:MailContactType;defaultCategory:MailWorkCategory;isConfirmed:boolean;messageCount:number;updatedAt:string};
+type MailCandidate = {id:number;mailSubject:string;mailSender:string;mailReceivedAt:string;workCategory:MailWorkCategory;handlingStatus:MailHandlingStatus;status:string;soNumbers:string[];itemCount:number;warehouseCount:number;fields:Record<string,unknown>;items:Array<Record<string,unknown>>;warehouseGroups:WarehouseGroup[];relatedEmailCount:number;relatedEmailIds:number[];changes:Array<{field:string;label:string;previous:string;current:string}>;canConfirm:boolean;taskIds:number[]};
+type MailSettings = {syncEnabled:boolean;syncIntervalMinutes:number;retentionDays:number;startDate:string;updatedAt:string;address:string;connectionStatus?:"SelectMailbox"|"NotConfigured"|"PendingConnection"|"Connected"|"SyncError";testedAt?:string;lastSuccessAt?:string;lastError:string;mailCount:number;failedCount:number};
+type InspectionMappingRow = { customer: string; productCode: string; productName: string; owner: string; productionPlace: string; note: string };
+type InspectionMappingGroup = { name: string; inspectionSource: string; description?: string; excluded?: boolean; rows: InspectionMappingRow[] };
+type StoredInspectionMapping = InspectionMappingRow & { id: number; groupName: string; inspectionSource: string; isExcluded: boolean };
+type ProductInfo = {id:number;legacyId:number;customer:string;productCode:string;productName:string;quantityPerBox:number|null;toyCategory:string;factoryRemark:string;grossWeightPerBox:number|null;netWeightPerBox:number|null;netNetWeightPerBox?:number|null;boxDimensions?:string;brand?:string;measurementPerBox?:number|null;volumePerBox?:number|null;source:string};
+type ShipmentItem = Record<string, any>;
+type ShipmentTaskData = {
+  id:number; displayNumber?:string; relatedBatchTasks?:Array<{id:number;batchSequence:number;soNumber:string}>; batchRootId?:number; customer:string; emailSubject?:string; soNumber?:string; containerType:string; plannedShipDate?:string;
+  cutoffDate:string; siDeadline:string; port:string; destinationCountry:string; transportReference:string; specialRequirements:string;
+  status:"WaitingNotification"|"PendingReview"|"PendingShipment"|"Completed"|"Cancelled"; completedDate?:string;
+  warehouseGroups:WarehouseGroup[]; items:ShipmentItem[]; createdAt?:string; updatedAt?:string;
+  lastEditedBy?:string; lastEditedAt?:string; responsibleUserId?:number; responsibleUserName?:string; sourceMailboxAddress?:string;
+  canEdit?:boolean; company:"Xingxin"|"Huadeng"; exportDetails?:Record<string,string>;
+  sourceEmails?:Array<{id:number;isMailbox?:boolean;mailSubject:string;mailSender:string;mailReceivedAt:string;workCategory:MailWorkCategory;relation:string}>;
+};
+type LocalInventoryScan = {folder:string;exists:boolean;scanned_at?:string;total_rows:number;successful_files?:number;error?:string;files:Array<{filename:string;modified_at:string;size:number;status:string;kind:string;sheets:string[];row_count:number;warnings?:string[];error?:string}>};
+type UserRole = "admin" | "supervisor" | "shipping" | "warehouse";
+type CurrentUser = {mailboxAddress?:string;mailboxHost?:string;mailboxFolder?:string;mailboxConfigured?:boolean;companyAccess?:"Xingxin"|"Huadeng"|"Both";id:number;username:string;displayName:string;role:UserRole;isActive:boolean;createdAt:string;updatedAt:string;lastLoginAt?:string};
+type LocalDirectoryHandle = FileSystemDirectoryHandle & {
+  queryPermission(options?: { mode: "read" | "readwrite" }): Promise<PermissionState>;
+  requestPermission(options?: { mode: "read" | "readwrite" }): Promise<PermissionState>;
+  values(): AsyncIterableIterator<FileSystemFileHandle>;
+};
+
+const localDirectoryDatabase = "voyageplex-local-directories";
+const localDirectoryStore = "handles";
+const inventoryExtensions = [".xls", ".xlsx", ".xlsm", ".csv"];
+
+function activeCompany(){return typeof document!=="undefined"&&document.cookie.split("; ").some(value=>value==="voyageplex_company=Huadeng")?"Huadeng":"Xingxin";}
+function directoryKey(role: UserRole) { return activeCompany()==="Huadeng"?`inventory-Huadeng-${role}`:`inventory-${role}`; }
+
+function dateControlValue(value: string | undefined, includeTime = false) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2}))?/);
+  if (iso) return includeTime ? `${iso[1]}-${iso[2]}-${iso[3]}T${iso[4] || "00"}:${iso[5] || "00"}` : `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const short = raw.match(/(\d{1,2})[\/月.-](\d{1,2})日?(?:\s+(\d{1,2}):(\d{2}))?/);
+  if (!short) return "";
+  const year = new Date().getFullYear();
+  const date = `${year}-${short[1].padStart(2,"0")}-${short[2].padStart(2,"0")}`;
+  return includeTime ? `${date}T${(short[3] || "00").padStart(2,"0")}:${short[4] || "00"}` : date;
+}
+
+async function openLocalDirectoryDatabase() {
+  return await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(localDirectoryDatabase, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore(localDirectoryStore);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function saveLocalDirectory(role: UserRole, handle: LocalDirectoryHandle) {
+  const database = await openLocalDirectoryDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(localDirectoryStore, "readwrite");
+    transaction.objectStore(localDirectoryStore).put(handle, directoryKey(role));
+    transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error);
+  });
+  database.close();
+}
+
+async function loadLocalDirectory(role: UserRole) {
+  const database = await openLocalDirectoryDatabase();
+  const handle = await new Promise<LocalDirectoryHandle | undefined>((resolve, reject) => {
+    const request = database.transaction(localDirectoryStore, "readonly").objectStore(localDirectoryStore).get(directoryKey(role));
+    request.onsuccess = () => resolve(request.result as LocalDirectoryHandle | undefined);
+    request.onerror = () => reject(request.error);
+  });
+  database.close(); return handle;
+}
+
+async function loadConfiguredDirectory(role: UserRole) {
+  const direct = await loadLocalDirectory(role);
+  if (direct || role !== "admin") return direct;
+  return await loadLocalDirectory("shipping") || await loadLocalDirectory("warehouse");
+}
+
+async function authorizedInventoryFiles(role: UserRole) {
+  const handle = await loadConfiguredDirectory(role);
+  if (!handle) throw new Error("请先到系统设置选择本地库存文件夹");
+  let permission = await handle.queryPermission({ mode:"readwrite" });
+  if (permission !== "granted") permission = await handle.requestPermission({ mode:"readwrite" });
+  if (permission !== "granted") throw new Error("未获得本地库存文件夹读写权限，请重新授权");
+  const files: File[] = [];
+  for await (const entry of handle.values()) {
+    if (entry.kind !== "file" || entry.name.startsWith("~$") || entry.name.includes("回写前备份-") || entry.name.startsWith("库存扣减") || !inventoryExtensions.some(extension => entry.name.toLowerCase().endsWith(extension))) continue;
+    files.push(await entry.getFile());
+  }
+  if (!files.length) throw new Error("所选文件夹中没有可读取的库存表");
+  return { handle, files };
+}
+
+const shipmentStatus: Record<ShipmentTaskData["status"], string> = {
+  WaitingNotification:"等待客户通知", PendingReview:"待复核", PendingShipment:"待走货", Completed:"走货完成", Cancelled:"已取消",
+};
+
+async function readJsonResponse(response: Response) {
+  const text = await response.text();
+  try { return text ? JSON.parse(text) : {}; }
+  catch { return { error: response.ok ? "服务返回格式异常" : `后台服务异常（${response.status}）` }; }
+}
+
+
+function shortInventorySource(value:unknown) {
+  return String(value||"").split("；").map(source=>{
+    const parts=source.split("/").map(part=>part.trim());
+    if(parts.length<3)return source.trim();
+    const filename=parts[0].replace(/\.(xlsx|xlsm|xls)$/i,"").replace(/[（(]\d+[）)]$/g,"")
+      .replace(/^20\d{2}[\u5e74-]?/,"").replace(/(\d{1,2})月份/g,"$1月").replace("车间库存表","库存表");
+    return `${filename}/${parts[1]}/${parts.slice(2).join("/").replace(/^第/,"")}`;
+  }).join("；");
+}
+
+function normalizeInventorySourceDisplay(task:ShipmentTaskData) {
+  return {...task,items:task.items.map(item=>{
+    const fullSource=String(item.inventory_source_full||item.inventory_source||"");
+    return fullSource?{...item,inventory_source:shortInventorySource(fullSource),inventory_source_full:fullSource}:item;
+  })};
+}
+
+function productNameSpec(item:Record<string,unknown>){
+  const name=String(item.product_name||"").trim();const spec=String(item.spec??"").trim();
+  return spec?`${name}${name?" ":""}${spec}个/箱`:name;
+}
+
+function splitProductNameSpec(value:string){
+  const match=value.trim().match(/^(.*?)[,，;；\s]*(\d+(?:\.\d+)?)\s*个\s*\/?\s*箱\s*$/);
+  return match?{product_name:match[1].trim(),spec:match[2]}:{product_name:value,spec:""};
+}
+
+function fullSpecification(value:unknown){
+  const raw=String(value??"").trim();
+  if(!raw)return "";
+  return /^\d+(?:\.\d+)?$/.test(raw)?`${raw}个/箱`:raw;
+}
+
+function specificationValue(value:string){
+  const match=value.trim().match(/^(\d+(?:\.\d+)?)\s*个\s*\/?\s*箱$/);
+  return match?match[1]:value;
+}
+
+function EditableItemInput({value,disabled,label,placeholder,displayValue,onChange}:{value:unknown;disabled?:boolean;label:string;placeholder?:string;displayValue:(value:unknown)=>string;onChange:(value:string)=>void}){
+  const [editing,setEditing]=useState(false);
+  return <input aria-label={label} disabled={disabled} placeholder={placeholder} value={editing?String(value??""):displayValue(value)} onFocus={()=>setEditing(true)} onBlur={()=>setEditing(false)} onChange={event=>onChange(event.target.value)}/>;
+}
+
+const compactNumberFields=new Set(["quantity","pieces","gross_weight","net_weight","net_net_weight","volume","order_total_pieces","gross_weight_per_box","net_weight_per_box","net_net_weight_per_box","pallet_count"]);
+
+function itemDisplayValue(key:string,value:unknown){
+  if(value===null||value===undefined||value==="")return "";
+  if(!compactNumberFields.has(key))return String(value);
+  const numeric=Number(value);
+  if(!Number.isFinite(numeric))return String(value);
+  return String(Math.round((numeric+Number.EPSILON)*1000)/1000);
+}
+
+
+const inspectionMappingGroups: InspectionMappingGroup[] = [
+  { name: "兴信B车间", inspectionSource: "兴信验货总结表", rows: [
+    { customer:"ZURU", productCode:"77198", productName:"迷你小手袋", owner:"龙丽娟", productionPlace:"兴信B车间", note:"" },
+    { customer:"ZURU", productCode:"9284", productName:"摇头小狗", owner:"龙丽娟", productionPlace:"兴信B车间", note:"" },
+    { customer:"ZURU", productCode:"77366", productName:"迷你小手袋", owner:"龙丽娟", productionPlace:"兴信B车间", note:"" },
+    { customer:"Tigerhead", productCode:"BS062", productName:"手提包+毛绒公仔", owner:"龙丽娟", productionPlace:"兴信B车间", note:"" },
+    { customer:"Tigerhead", productCode:"BS063", productName:"手提包+毛绒公仔", owner:"龙丽娟", productionPlace:"兴信B车间", note:"" },
+    { customer:"TOMY", productCode:"47639", productName:"卡车", owner:"龙丽娟", productionPlace:"兴信B车间", note:"" },
+  ]},
+  { name: "兴信A车间 · 石玉珍", inspectionSource: "兴信验货总结表", rows: [
+    { customer:"ZURU", productCode:"77555GQ1-S002", productName:"迷你房子", owner:"石玉珍", productionPlace:"兴信A车间", note:"" },
+    { customer:"ZURU", productCode:"77584-S001", productName:"迷你房子*2", owner:"石玉珍", productionPlace:"兴信A车间", note:"" },
+    { customer:"ZURU", productCode:"25251-S001", productName:"鸭子", owner:"石玉珍", productionPlace:"兴信A车间", note:"" },
+    { customer:"TOMY", productCode:"46644B", productName:"发光车", owner:"石玉珍", productionPlace:"兴信A车间", note:"" },
+  ]},
+  { name: "兴信A车间 · 李诗妍", inspectionSource: "兴信验货总结表", rows: [
+    { customer:"ZURU", productCode:"9281", productName:"", owner:"李诗妍", productionPlace:"兴信B车间", note:"" },
+    { customer:"ZURU", productCode:"71101", productName:"", owner:"李诗妍", productionPlace:"兴信A车间", note:"" },
+    { customer:"ZURU", productCode:"15701", productName:"", owner:"李诗妍", productionPlace:"兴信A车间", note:"" },
+    { customer:"ZURU", productCode:"92125", productName:"", owner:"李诗妍", productionPlace:"兴信B车间", note:"" },
+  ]},
+  { name: "华嘉", inspectionSource: "兴信验货总结表", description:"华嘉货号统一在兴信验货总结表中查询", rows: [
+    { customer:"ZURU", productCode:"15728", productName:"", owner:"华嘉", productionPlace:"华嘉", note:"兴信表" },
+    { customer:"ZURU", productCode:"157140", productName:"", owner:"华嘉", productionPlace:"华嘉", note:"兴信表" },
+    { customer:"ZURU", productCode:"15757", productName:"", owner:"华嘉", productionPlace:"华嘉", note:"兴信表" },
+    { customer:"ZURU", productCode:"157149", productName:"", owner:"华嘉", productionPlace:"华嘉", note:"兴信表" },
+  ]},
+  { name: "湖南 · 钟雅娴", inspectionSource: "湖南验货总结表", rows: [
+    { customer:"ZURU", productCode:"7127", productName:"新颜色恐龙", owner:"钟雅娴", productionPlace:"新邵", note:"" },
+    { customer:"ZURU", productCode:"7132", productName:"红色霸王龙", owner:"钟雅娴", productionPlace:"湖南", note:"" },
+    { customer:"ZURU", productCode:"71137", productName:"眼镜蛇", owner:"钟雅娴", productionPlace:"邵阳厂区", note:"" },
+    { customer:"ZURU", productCode:"15726", productName:"富格乐拼接系列", owner:"钟雅娴", productionPlace:"湖南", note:"" },
+  ]},
+  { name: "湖南 · 吕宇祥", inspectionSource: "湖南验货总结表", rows: [
+    { customer:"ZURU", productCode:"77485", productName:"3代迷你小手袋", owner:"吕宇祥", productionPlace:"湖南", note:"" },
+    { customer:"ZURU", productCode:"77794", productName:"", owner:"吕宇祥", productionPlace:"湖南", note:"" },
+    { customer:"Tigerhead", productCode:"BS065", productName:"手提包+狗公仔", owner:"吕宇祥", productionPlace:"湖南", note:"" },
+    { customer:"TOMY", productCode:"T72465EN6", productName:"贪婪的奶奶", owner:"吕宇祥", productionPlace:"湖南", note:"" },
+  ]},
+  { name: "湖南 · 杨海彬", inspectionSource: "湖南验货总结表", rows: [
+    { customer:"ZURU", productCode:"92119", productName:"冰雪蛋", owner:"杨海彬", productionPlace:"湖南", note:"" },
+    { customer:"ZURU", productCode:"25282", productName:"鲨鱼", owner:"杨海彬", productionPlace:"湖南", note:"" },
+    { customer:"ZURU", productCode:"15727", productName:"毛毛系列", owner:"杨海彬", productionPlace:"湖南", note:"" },
+    { customer:"ZURU", productCode:"92105", productName:"", owner:"杨海彬", productionPlace:"湖南", note:"" },
+  ]},
+  { name: "华登", inspectionSource: "华登验货总结表", rows: [
+    { customer:"ZURU", productCode:"92150", productName:"", owner:"王远露", productionPlace:"东莞华登", note:"" },
+    { customer:"ZURU", productCode:"92107", productName:"", owner:"", productionPlace:"湖南华登", note:"" },
+    { customer:"ZURU", productCode:"15706", productName:"", owner:"王远露", productionPlace:"东莞华登", note:"" },
+    { customer:"ZURU", productCode:"92108", productName:"", owner:"王远露", productionPlace:"东莞华登", note:"" },
+  ]},
+  { name: "河源", inspectionSource: "不参与验货检查", description:"河源自行做柜，系统保留映射但不读取验货结果", excluded:true, rows: [
+    { customer:"ZURU", productCode:"15746", productName:"飞天小女警系列", owner:"钟雅娴", productionPlace:"河源", note:"自行做柜" },
+    { customer:"ZURU", productCode:"15751", productName:"食物系列", owner:"石玉珍", productionPlace:"河源", note:"自行做柜" },
+    { customer:"ZURU", productCode:"15760", productName:"六代钥匙扣系列", owner:"华登", productionPlace:"河源", note:"自行做柜" },
+  ]},
+];
+
+export function AppShell({ route }: { route: string }) {
+  const [user,setUser] = useState<CurrentUser|null>(null);
+  const [company,setCompany] = useState<"Xingxin"|"Huadeng">("Xingxin");
+  const [authLoading,setAuthLoading] = useState(true);
+  const [authError,setAuthError] = useState("");
+  const [setupRequired,setSetupRequired] = useState(false);
+  async function loadUser(){setAuthLoading(true);setAuthError("");try{const response=await apiFetch("/api/auth/me",{cache:"no-store"});if(response.ok){const current=await response.json() as CurrentUser;const selected=current.role!=="admin"&&current.companyAccess!=="Both"?(current.companyAccess||"Xingxin"):activeCompany();document.cookie=`voyageplex_company=${selected}; Path=/; SameSite=Lax`;setCompany(selected);setUser(current);setSetupRequired(false);}else if(response.status===401){setUser(null);const setup=await apiFetch("/api/auth/setup-status",{cache:"no-store"});if(!setup.ok)throw new Error("无法检查系统初始化状态");setSetupRequired(Boolean((await setup.json()).required));}else{throw new Error("后台暂时无法检查登录状态");}}catch(reason){setAuthError(reason instanceof Error?reason.message:"后台连接失败");}finally{setAuthLoading(false);}}
+  useEffect(()=>{
+    void (async()=>{
+      const url=new URL(window.location.href); const ticket=url.searchParams.get("sso_ticket");
+      if(ticket){try{await apiFetch("/api/auth/sso",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ticket})});url.searchParams.delete("sso_ticket");window.history.replaceState(null,"",url.toString());}catch{}}
+      await loadUser();
+    })();
+    const renewal = window.setInterval(()=>{
+      if(document.visibilityState === "visible") void apiFetch("/api/auth/me",{cache:"no-store"}).catch(()=>{});
+    },30*60*1000);
+    return ()=>window.clearInterval(renewal);
+  },[]);
+  async function logout(){await apiFetch("/api/auth/logout",{method:"POST"});setUser(null);window.location.href=basePath+"/";}
+  if(authLoading)return <div className="auth-screen"><div className="auth-card"><span className="brand-mark"><Anchor size={19}/></span><h1>VoyagePlex</h1><p>正在检查登录状态…</p></div></div>;
+  if(authError)return <div className="auth-screen"><div className="auth-card"><span className="brand-mark"><Anchor size={19}/></span><h1>暂时无法连接后台</h1><p>{authError}，请稍后重试。</p><button className="primary-button" onClick={()=>void loadUser()}>重新连接</button></div></div>;
+  if(!user)return <AuthScreen setupRequired={setupRequired} onAuthenticated={()=>void loadUser()} />;
+  const role=user.role;
+  const page = route.split("/")[0];
+  const currentPath = page ? `/${page}` : "/";
+  const pageAllowed=navigation.find(item=>item.href===currentPath)?.roles.includes(role)??false;
+  return (
+    <div className="app">
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="brand-mark"><Anchor size={19} /></span>
+          <span><strong>VoyagePlex</strong><small>船务协同系统</small></span>
+        </div>
+        <label className="company-switch"><span>公司板块</span><select aria-label="公司板块" value={company} onChange={event=>{document.cookie=`voyageplex_company=${event.target.value}; Path=/; SameSite=Lax`;window.location.assign(new URL(`${process.env.NEXT_PUBLIC_BASE_PATH || ""}/`,window.location.href).toString());}}>{(user.role==="admin"||user.companyAccess!=="Huadeng")&&<option value="Xingxin">兴信</option>}{(user.role==="admin"||user.companyAccess==="Both"||user.companyAccess==="Huadeng")&&<option value="Huadeng">华登</option>}</select></label>
+        <nav aria-label="主要导航">
+          {navigation.filter(item=>item.roles.includes(role)).map((item) => {
+            const Icon = item.icon;
+            return <Link key={item.href} href={item.href} className={currentPath === item.href ? "nav-item active" : "nav-item"}><Icon size={18} /><span>{item.label}</span></Link>;
+          })}
+        </nav>
+      </aside>
+      <main>
+        <header className="topbar">
+          <strong className="topbar-title">{company==="Huadeng"?"华登":"兴信"} · {titles[page] ?? "首页"}</strong>
+          <div className="avatar">{role==="admin"?"管理":role==="warehouse"?"仓务":"船务"}</div><span className="user-name"><b>{user.displayName}</b><small>{roleLabel(role)}</small></span><button className="logout-button" onClick={()=>void logout()}>退出</button>
+        </header>
+        {!pageAllowed?<AccessDenied/>:page === "mail" ? <MailWorkspace route={route} role={role} /> : page === "imports" ? <ImportCenter /> : page === "shipments" ? <ShipmentCenter route={route} role={role} /> : page === "inventory" ? <InventoryCenter route={route} role={role} /> : page === "users" ? <UserManagement currentUser={user}/> : page === "settings" ? <SettingsCenter role={role} /> : <Dashboard />}
+      </main>
+    </div>
+  );
+}
+
+function roleLabel(role:UserRole){return role==="admin"?"管理员":role==="supervisor"?"主管":role==="warehouse"?"仓库文员":"船务员";}
+
+function AuthScreen({setupRequired,onAuthenticated}:{setupRequired:boolean;onAuthenticated:(user:CurrentUser)=>void}){
+  const [username,setUsername]=useState("");const [displayName,setDisplayName]=useState("");const [password,setPassword]=useState("");const [error,setError]=useState("");const [saving,setSaving]=useState(false);
+  async function submit(event:React.FormEvent){event.preventDefault();setSaving(true);setError("");try{if(setupRequired){const setup=await apiFetch("/api/auth/setup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,displayName,password})});const result=await readJsonResponse(setup);if(!setup.ok)throw new Error(result.error||"初始化失败");}const response=await apiFetch("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"登录失败");onAuthenticated(result);}catch(reason){setError(reason instanceof Error?reason.message:"操作失败");}finally{setSaving(false);}}
+  return <div className="auth-screen"><form className="auth-card" onSubmit={submit}><span className="brand-mark"><Anchor size={19}/></span><h1>{setupRequired?"初始化管理员":"登录 VoyagePlex"}</h1><p>{setupRequired?"首次使用，请创建系统管理员账号。":"使用系统账号继续。"}</p><label><span>账号</span><input autoFocus autoComplete="username" value={username} onChange={event=>setUsername(event.target.value)} required/></label>{setupRequired&&<label><span>姓名</span><input value={displayName} onChange={event=>setDisplayName(event.target.value)} required maxLength={50}/></label>}<label><span>密码</span><input type="password" autoComplete={setupRequired?"new-password":"current-password"} value={password} onChange={event=>setPassword(event.target.value)} required minLength={8}/></label>{error&&<div className="form-error">{error}</div>}<button className="primary-button" disabled={saving}>{saving?"处理中…":setupRequired?"创建并登录":"登录"}</button></form></div>;
+}
+
+function AccessDenied(){return <div className="content"><section className="empty-state"><div className="empty-icon"><Users/></div><h2>无权访问</h2><p>当前账号没有此模块的使用权限，请联系管理员调整角色。</p></section></div>;}
+
+type MailSection = { key:"workbench"|"contacts"|"initialization"|"candidates"|"settings"; label:string; description:string; icon:typeof Inbox; temporary:boolean; adminOnly?:boolean };
+const mailSections:MailSection[] = [
+  { key:"workbench", label:"每日邮件确认", description:"查看、分类并处理邮箱中的业务邮件", icon:Inbox, temporary:false },
+  { key:"contacts", label:"联系人整理", description:"整理内部人员、客户、货代和车行联系人", icon:ContactRound, temporary:false },
+  { key:"settings", label:"同步与存储设置", description:"管理邮箱同步、保存期限和运行状态", icon:Settings, temporary:false, adminOnly:true },
+];
+
+type PersonalMailAccount = {id:number;displayName:string;mailboxAddress:string;configured:boolean};
+function PersonalMailboxChooser({role}:{role:UserRole}) {
+  const [accounts,setAccounts]=useState<PersonalMailAccount[]>([]);
+  const [owner,setOwner]=useState("");const [error,setError]=useState("");
+  useEffect(()=>{let active=true;void apiFetch("/api/mail/accounts",{cache:"no-store"}).then(async response=>{const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"读取邮箱失败");if(active){setAccounts(result.accounts);setOwner(result.selectedOwnerId?String(result.selectedOwnerId):"");}}).catch(reason=>{if(active)setError(reason instanceof Error?reason.message:"读取邮箱失败");});return()=>{active=false;};},[]);
+  const current=accounts.find(account=>String(account.id)===owner);
+  return <section className="panel personal-mailbox-panel"><label><span>{(role==="admin"||role==="supervisor")?"查看船务员邮箱":"我的邮箱"}</span>{(role==="admin"||role==="supervisor")?<select aria-label="查看船务员邮箱" value={owner} onChange={event=>{document.cookie=`voyageplex_mail_owner=${event.target.value}; Path=/; SameSite=Lax`;window.location.reload();}}><option value="">全部人员邮件</option>{accounts.map(account=><option key={account.id} value={account.id}>{account.displayName} · {account.mailboxAddress||"未绑定邮箱"}</option>)}</select>:<strong>{current?.mailboxAddress||"尚未绑定邮箱，请联系管理员"}</strong>}</label>{current&&!current.configured&&<small>邮箱尚未配置授权码，请联系管理员。</small>}{(role==="admin"||role==="supervisor")&&!owner&&<small>选择人员后可读取其邮箱和调整同步设置。</small>}{error&&<div className="form-error">{error}</div>}</section>;
+}
+
+function MailWorkspace({route,role}:{route:string;role:UserRole}) {
+  const requested=route.split("/")[1]||"workbench";
+  const available=mailSections.filter(section=>!section.adminOnly||role==="admin"||role==="supervisor");
+  const active=available.find(section=>section.key===requested)??available[0];
+  const ActiveIcon=active.icon;
+  return <div className="content mail-module">
+    {activeCompany()==="Huadeng"&&<PersonalMailboxChooser role={role}/>}
+    <nav className="mail-section-nav" aria-label="邮件工作台功能">
+      {available.map(section=>{const Icon=section.icon;return <Link key={section.key} href={`/mail/${section.key}`} className={section.key===active.key?"active":""}><Icon size={17}/><span>{section.label}</span>{section.temporary&&<small>阶段性</small>}</Link>;})}
+    </nav>
+    {active.key==="workbench"?<DailyMailWorkbench route={route}/>:active.key==="contacts"?<MailContactsWorkspace/>:active.key==="candidates"?<MailCandidatesWorkspace/>:active.key==="settings"?<MailSettingsWorkspace/>:active.key==="initialization"?<MailInitializationWorkspace role={role}/>:<section className="panel mail-foundation-panel">
+      <div className="mail-foundation-heading"><span><ActiveIcon size={22}/></span><div><h2>{active.label}</h2><p>{active.description}</p></div>{active.temporary&&<b>初始化完成后隐藏</b>}</div>
+      <div className="mail-foundation-grid">
+        {active.key==="initialization"&&<><article><strong>容量扫描</strong><p>先统计半年邮件数量、附件大小和重复情况。</p></article><article><strong>基准日</strong><p>基准日前仅归档，基准日后生成候选任务。</p></article><article><strong>分批进度</strong><p>分批读取并保存断点，失败邮件单独重试。</p></article></>}
+      </div>
+    </section>}
+  </div>;
+}
+
+const mailCategoryText:Record<MailWorkCategory,string>={Unclassified:"未分类",Shipment:"新增",Change:"变更",FollowUp:"待跟进",Other:"其他"};
+const mailHandlingText:Record<MailHandlingStatus,string>={Pending:"待确认",Processed:"已确认",Ignored:"已忽略"};
+const mailContactTypeText:Record<MailContactType,string>={Unknown:"待确认",Internal:"公司内部",Customer:"客户",Forwarder:"货代",Trucker:"车行",Other:"其他"};
+
+type MailInitialization = {startDate:string;before:number;unlinkedBefore:number;linkedBefore:number;missingDate:number;retained:number;candidates:number;eligible:number;failed:number;categories:{category:string;count:number}[]};
+function MailInitializationWorkspace({role}:{role:UserRole}){
+  const [summary,setSummary]=useState<MailInitialization>();const [error,setError]=useState("");const [notice,setNotice]=useState("");const [working,setWorking]=useState(false);
+  async function load(){setError("");try{const response=await apiFetch("/api/mail/initialization",{cache:"no-store"});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"读取初始化预览失败");setSummary(result as MailInitialization);}catch(reason){setError(reason instanceof Error?reason.message:"读取初始化预览失败");}}
+  useEffect(()=>{void load();},[]);
+  async function cleanup(){if(!summary||!window.confirm(`将清理 ${summary.unlinkedBefore} 封 ${summary.startDate} 之前且无业务关联的邮件。请先确认云端数据库已备份。继续吗？`))return;setWorking(true);setError("");setNotice("");try{const response=await apiFetch("/api/mail/initialization/cleanup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({startDate:summary.startDate})});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"清理失败");setNotice(`已清理 ${result.removed} 封起始日期前的邮件。`);await load();}catch(reason){setError(reason instanceof Error?reason.message:"清理失败");}finally{setWorking(false);}}
+  async function confirm(){
+    if(!summary||!window.confirm(`系统将根据 ${summary.eligible} 封明确写有未来走货日期且未建过同 SO 任务的邮件，一次生成待复核任务。其他邮件保留人工核对。继续吗？`))return;
+    setWorking(true);setError("");setNotice("");let total=0;let remaining=summary.eligible;
+    try{
+      while(remaining>0){
+        const response=await taskFetch("/api/mail/initialization/confirm",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({startDate:summary.startDate,eligible:remaining})});
+        const result=await readJsonResponse(response);
+        if(!response.ok)throw new Error(result.error||"初始化确认失败");
+        total+=result.confirmed;remaining=result.remaining;
+        setNotice(`已确认 ${total} 封，剩余 ${remaining} 封。`);
+      }
+      setNotice(`已确认 ${total} 封邮件并生成待复核任务。`);await load();
+    }catch(reason){await load();setError(`${reason instanceof Error?reason.message:"初始化确认失败"}；已完成 ${total} 封，请刷新预览后继续。`);}
+    finally{setWorking(false);}
+  }
+  return <section className="panel mail-foundation-panel"><div className="mail-foundation-heading"><span><History size={22}/></span><div><h2>历史初始化预览</h2><p>按北京时间 {summary?.startDate||"2026-10-08"} 起分析已读取邮件；核对候选资料后再建立任务。</p></div></div>{(error||notice)&&<div className={error?"form-error":"notice"}>{error||notice}</div>}{summary?<><div className="mail-foundation-grid"><article><strong>起始日期前</strong><p>{summary.before} 封；其中 {summary.linkedBefore} 封有业务关联需保留，{summary.unlinkedBefore} 封可清理。</p></article><article><strong>保留并分析</strong><p>{summary.retained} 封；{summary.candidates} 封进入候选任务池，{summary.failed} 封解析失败。</p></article><article><strong>可一次确认</strong><p>{summary.eligible} 封明确写有今天或未来走货日期、单一 SO，且系统没有同 SO 任务；其他邮件仍需人工核对。</p></article><article><strong>日期待核对</strong><p>{summary.missingDate} 封缺少有效收件日期，不会自动清理。</p></article></div><div className="mail-foundation-grid">{summary.categories.map(group=><article key={group.category}><strong>{mailCategoryText[group.category as MailWorkCategory]||group.category}</strong><p>{group.count} 封</p></article>)}</div><div className="mail-initialization-actions"><Link className="secondary-button" href="/mail/candidates">核对候选任务</Link>{(role==="admin"||role==="supervisor")&&<button className="primary-button" disabled={working||summary.eligible===0} onClick={()=>void confirm()}>{working?"处理中…":"一次确认可建任务邮件"}</button>}{(role==="admin"||role==="supervisor")&&<button className="secondary-button" disabled={working||summary.unlinkedBefore===0} onClick={()=>void cleanup()}>{working?"处理中…":"清理起始日期前邮件"}</button>}</div></>:<div className="mail-workbench-empty">正在统计已读取邮件…</div>}</section>;
+}
+
+function MailContactsWorkspace(){
+  const [contacts,setContacts]=useState<MailContact[]>([]);const [loading,setLoading]=useState(true);const [savingId,setSavingId]=useState<number>();const [error,setError]=useState("");const [notice,setNotice]=useState("");
+  async function load(){setLoading(true);setError("");try{const response=await apiFetch("/api/mail/contacts",{cache:"no-store"});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"读取联系人失败");setContacts(result as MailContact[]);}catch(reason){setError(reason instanceof Error?reason.message:"读取联系人失败");}finally{setLoading(false);}}
+  useEffect(()=>{void load();},[]);
+  function update(id:number,changes:Partial<MailContact>){setContacts(current=>current.map(contact=>contact.id===id?{...contact,...changes}:contact));}
+  async function save(contact:MailContact){setSavingId(contact.id);setError("");setNotice("");try{const response=await apiFetch(`/api/mail/contacts/${contact.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({displayName:contact.displayName,contactType:contact.contactType,isConfirmed:true})});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"保存联系人失败");update(contact.id,result as MailContact);setNotice(`已保存 ${contact.email} 的联系人资料。`);}catch(reason){setError(reason instanceof Error?reason.message:"保存联系人失败");}finally{setSavingId(undefined);}}
+  return <section className="panel mail-contacts-panel"><div className="mail-workbench-head"><div><h2>联系人整理</h2><p>系统从已收邮件自动汇总联系人，只需确认联系人身份；邮件分类由邮件内容自动判断。</p></div><b className="status warn">待确认 {contacts.filter(contact=>!contact.isConfirmed).length}</b></div>{(error||notice)&&<div className={error?"form-error":"notice"}><span>{error||notice}</span></div>}<div className="mail-contact-table"><div className="mail-contact-row head"><span>联系人 / 邮箱</span><span>身份</span><span>邮件数</span><span>操作</span></div>{loading?<div className="mail-workbench-empty">正在汇总联系人…</div>:contacts.map(contact=><div className="mail-contact-row" key={contact.id}><label><input value={contact.displayName} onChange={event=>update(contact.id,{displayName:event.target.value})}/><small>{contact.email}</small></label><select value={contact.contactType} onChange={event=>update(contact.id,{contactType:event.target.value as MailContactType})}>{Object.entries(mailContactTypeText).map(([key,label])=><option value={key} key={key}>{label}</option>)}</select><span>{contact.messageCount} 封</span><button className={contact.isConfirmed?"secondary-button":"primary-button"} disabled={savingId===contact.id} onClick={()=>void save(contact)}>{savingId===contact.id?"保存中…":contact.isConfirmed?"保存修改":"确认联系人"}</button></div>)}</div></section>;
+}
+
+function MailSettingsWorkspace(){
+  const [settings,setSettings]=useState<MailSettings>();const [saving,setSaving]=useState(false);const [error,setError]=useState("");const [notice,setNotice]=useState("");
+  useEffect(()=>{void(async()=>{try{const response=await apiFetch("/api/mail/settings",{cache:"no-store"});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"读取邮箱设置失败");setSettings(result as MailSettings);}catch(reason){setError(reason instanceof Error?reason.message:"读取邮箱设置失败");}})();},[]);
+  async function save(){if(!settings)return;setSaving(true);setError("");setNotice("");try{const response=await apiFetch("/api/mail/settings",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({syncEnabled:settings.syncEnabled,syncIntervalMinutes:Number(settings.syncIntervalMinutes),retentionDays:Number(settings.retentionDays),startDate:settings.startDate})});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"保存邮箱设置失败");setSettings({...settings,...result});setNotice("邮箱同步与存储设置已保存，后台将在下一轮同步时应用。");}catch(reason){setError(reason instanceof Error?reason.message:"保存邮箱设置失败");}finally{setSaving(false);}}
+  if(!settings)return <section className="panel mail-settings-panel"><div className="mail-workbench-empty">{error||"正在读取邮箱设置…"}</div></section>;
+  const status=settings.connectionStatus||(settings.lastError?"SyncError":settings.lastSuccessAt?"Connected":settings.address?"PendingConnection":"NotConfigured");
+  const statusText={SelectMailbox:"请选择船务员邮箱",NotConfigured:"未配置",PendingConnection:"已配置待连接",Connected:"连接成功",SyncError:"连接或同步异常"}[status];
+  return <section className="panel mail-settings-panel"><div className="mail-workbench-head"><div><h2>同步与存储设置</h2><p>管理邮箱后台同步频率及邮件在线保存期限。</p></div><b className={`status ${status==="SyncError"?"danger":status==="Connected"?"ok":"warn"}`}>{statusText}</b></div>{(error||notice)&&<div className={error?"form-error":"notice"}><span>{error||notice}</span></div>}<div className="mail-settings-status"><article><span>邮箱账号</span><b>{settings.address||"尚未配置"}</b></article><article><span>最近连接测试</span><b>{settings.testedAt?new Date(settings.testedAt).toLocaleString("zh-CN"):"尚未测试"}</b></article><article><span>上次成功同步</span><b>{settings.lastSuccessAt?new Date(settings.lastSuccessAt).toLocaleString("zh-CN"):"尚未同步"}</b></article><article><span>已读取邮件</span><b>{settings.mailCount} 封</b></article><article><span>失败邮件</span><b>{settings.failedCount} 封</b></article></div>{settings.lastError&&<div className="mail-setting-error">{settings.lastError}</div>}<div className="mail-settings-form"><label><span><b>邮件读取起始日期</b><small>按北京时间，仅同步当天及之后收到的邮件</small></span><div><input type="date" value={settings.startDate} onChange={event=>setSettings({...settings,startDate:event.target.value})}/></div></label><label className="mail-switch"><span><b>自动同步邮箱</b><small>关闭后仍可在邮件工作台手工点击立即同步</small></span><input type="checkbox" checked={settings.syncEnabled} onChange={event=>setSettings({...settings,syncEnabled:event.target.checked})}/></label><label><span><b>自动同步间隔</b><small>后台多久检查一次新邮件</small></span><div><input type="number" min={1} max={1440} value={settings.syncIntervalMinutes} onChange={event=>setSettings({...settings,syncIntervalMinutes:Number(event.target.value)})}/><em>分钟</em></div></label><label><span><b>邮件在线保存期限</b><small>用于容量规划；历史初始化和清理功能接入后按此期限执行</small></span><div><input type="number" min={30} max={730} value={settings.retentionDays} onChange={event=>setSettings({...settings,retentionDays:Number(event.target.value)})}/><em>天</em></div></label><button className="primary-button" disabled={saving} onClick={()=>void save()}>{saving?"保存中…":"保存设置"}</button></div></section>;
+}
+
+const candidateFieldLabels:Record<string,string>={customer:"客户",so_number:"SO号",container_type:"柜型",ship_date:"计划走货日期",cutoff_date:"截数期",si_deadline:"SI截止",port:"装货港",destination_country:"收货国家"};
+function MailCandidatesWorkspace(){
+  const [items,setItems]=useState<MailCandidate[]>([]);const [selectedId,setSelectedId]=useState<number>();const [selectedIds,setSelectedIds]=useState<Set<number>>(new Set());const [filter,setFilter]=useState<"Pending"|"Processed"|"Ignored"|"All">("Pending");const [loading,setLoading]=useState(true);const [acting,setActing]=useState(false);const [error,setError]=useState("");const [notice,setNotice]=useState("");
+  async function load(preferredId?:number){setLoading(true);setError("");try{const response=await apiFetch("/api/mail/candidates",{cache:"no-store"});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"读取候选任务失败");const next=result as MailCandidate[];setItems(next);const visible=filter==="All"?next:next.filter(item=>item.handlingStatus===filter);const id=visible.some(item=>item.id===(preferredId??selectedId))?(preferredId??selectedId):visible[0]?.id;setSelectedId(id);}catch(reason){setError(reason instanceof Error?reason.message:"读取候选任务失败");}finally{setLoading(false);}}
+  useEffect(()=>{void load();},[]);
+  const visible=filter==="All"?items:items.filter(item=>item.handlingStatus===filter);const pendingVisible=visible.filter(item=>item.handlingStatus==="Pending");const selected=items.find(item=>item.id===selectedId);
+  function chooseFilter(value:typeof filter){setFilter(value);const next=value==="All"?items:items.filter(item=>item.handlingStatus===value);if(!next.some(item=>item.id===selectedId))setSelectedId(next[0]?.id);}
+  function updateSelected(changes:Partial<MailCandidate>){if(!selectedId)return;setItems(current=>current.map(item=>item.id===selectedId?{...item,...changes}:item));}
+  function updateField(key:string,value:string){if(!selected)return;const nextFields={...selected.fields,[key]:value};const nextSo=key==="so_number"?value.split(/[,，]/).map(part=>part.trim()).filter(Boolean):selected.soNumbers;updateSelected({fields:nextFields,soNumbers:nextSo});}
+  function updateCargo(index:number,key:string,value:string){if(!selected)return;updateSelected({items:selected.items.map((item,itemIndex)=>itemIndex===index?{...item,[key]:value}:item)});}
+  function updateCandidateWarehouse(index:number,value:string){if(!selected)return;updateSelected({warehouseGroups:selected.warehouseGroups.map((group,groupIndex)=>groupIndex===index?{...group,warehouse:value}:group)});}
+  async function saveCandidate(){if(!selected)return;setActing(true);setError("");setNotice("");try{const response=await taskFetch(`/api/mail/candidates/${selected.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields:selected.fields,items:selected.items,warehouseGroups:selected.warehouseGroups})});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"保存候选资料失败");setNotice("候选资料已保存，可以继续确认生成任务。");await load(selected.id);}catch(reason){setError(reason instanceof Error?reason.message:"保存候选资料失败");}finally{setActing(false);}}
+  async function act(action:"confirm"|"ignore") {if(!selected)return;setActing(true);setError("");setNotice("");try{const response=await taskFetch(`/api/mail/candidates/${selected.id}/${action}`,{method:"POST"});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||(action==="confirm"?"确认任务失败":"忽略失败"));setNotice(action==="confirm"?`已生成或更新 ${result.taskIds?.length||0} 个走柜任务。`:"该候选项已忽略。");await load(selected.id);}catch(reason){setError(reason instanceof Error?reason.message:"操作失败");}finally{setActing(false);}}
+  async function batchAct(action:"confirm"|"ignore"){const ids=Array.from(selectedIds);if(!ids.length)return;setActing(true);setError("");setNotice("");try{const response=await taskFetch(`/api/mail/candidates/batch/${action}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ids})});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"批量操作失败");setNotice(`已批量${action==="confirm"?"确认":"忽略"} ${result.processed} 个候选项。`);setSelectedIds(new Set());await load();}catch(reason){setError(reason instanceof Error?reason.message:"批量操作失败");}finally{setActing(false);}}
+  const fields=selected?Object.entries(candidateFieldLabels).map(([key])=>[key,selected.fields?.[key]??""] as [string,unknown]).filter(([,value])=>selected.handlingStatus==="Pending"||String(value||"").trim()):[];
+  const candidateCargoExtras=Boolean(selected?.items?.some(item=>hasSpecialCargoDetails(item,selected.fields?.export_template==="sky-castle-multi")||hasLegacyUnitWeights(item)));
+  return <section className="panel mail-candidates-panel"><div className="mail-workbench-head"><div><h2>候选任务池</h2><p>进入候选池的邮件已经完成解析；请核对基础资料和货物明细，确认后进入走柜任务。</p></div><div className="candidate-summary"><b>待确认 {items.filter(item=>item.handlingStatus==="Pending").length}</b><span>已处理 {items.filter(item=>item.handlingStatus==="Processed").length}</span></div></div><div className="candidate-tabs">{([['Pending','待确认'],['Processed','已处理'],['Ignored','已忽略'],['All','全部']] as const).map(([key,label])=><button className={filter===key?"active":""} key={key} onClick={()=>chooseFilter(key)}>{label}</button>)}</div>{pendingVisible.length>0&&<div className="candidate-batch-bar"><label><input type="checkbox" checked={pendingVisible.every(item=>selectedIds.has(item.id))} onChange={event=>setSelectedIds(previous=>{const next=new Set(previous);pendingVisible.forEach(item=>event.target.checked?next.add(item.id):next.delete(item.id));return next;})}/>选择当前待确认</label><span>已选 {selectedIds.size} 项</span><button className="secondary-button" disabled={acting||selectedIds.size===0} onClick={()=>void batchAct("ignore")}>批量忽略</button><button className="primary-button" disabled={acting||selectedIds.size===0} onClick={()=>void batchAct("confirm")}><Check size={16}/><span>{acting?"处理中…":"批量确认生成任务"}</span></button></div>}{(error||notice)&&<div className={error?"form-error":"notice"}><span>{error||notice}</span></div>}<div className="candidate-layout"><div className="candidate-list">{loading?<div className="mail-workbench-empty">正在生成候选任务…</div>:visible.length?visible.map(item=><div className={`candidate-list-item ${item.id===selectedId?"active":""}`} key={item.id} role="button" tabIndex={0} onClick={()=>setSelectedId(item.id)} onKeyDown={event=>{if(event.key==="Enter"||event.key===" ")setSelectedId(item.id);}}>{item.handlingStatus==="Pending"&&<input className="candidate-select-checkbox" type="checkbox" aria-label={`选择邮件 ${item.id}`} checked={selectedIds.has(item.id)} onClick={event=>event.stopPropagation()} onChange={event=>setSelectedIds(previous=>{const next=new Set(previous);event.target.checked?next.add(item.id):next.delete(item.id);return next;})}/>}<strong>{item.mailSubject||"（无主题）"}</strong><span>{item.soNumbers.length?item.soNumbers.join("、"):"SO号待识别"}</span><small>{mailCategoryText[item.workCategory]} · {item.itemCount} 条货物 · {item.warehouseCount} 个仓库{item.relatedEmailCount>1?` · 同SO ${item.relatedEmailCount}封`:""}</small></div>):<div className="mail-workbench-empty">当前没有候选任务</div>}</div><div className="candidate-detail">{selected?<><div className="mail-detail-heading"><div><h3>{selected.mailSubject}</h3><p>{selected.mailSender} · {new Date(selected.mailReceivedAt).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})}</p></div><b className={`status ${selected.handlingStatus==="Processed"?"ok":selected.handlingStatus==="Ignored"?"":"warn"}`}>{mailHandlingText[selected.handlingStatus]}</b></div>{selected.relatedEmailCount>1&&<div className="candidate-related"><strong>同一SO关联 {selected.relatedEmailCount} 封邮件</strong><span>邮件编号：{selected.relatedEmailIds.map(id=>`#${id}`).join("、")}</span>{selected.changes.length>0?<div>{selected.changes.map(change=><p key={change.field}><b>{change.label}</b><del>{change.previous||"空"}</del><i>→</i><ins>{change.current||"空"}</ins></p>)}</div>:<small>与上一封关联邮件相比，基础字段和明细数量没有变化。</small>}</div>}<dl className="candidate-fields">{fields.length?fields.map(([key,value])=><div key={key}><dt>{candidateFieldLabels[key]}</dt><dd>{selected.handlingStatus==="Pending"?<input value={String(value)} onChange={event=>updateField(key,event.target.value)}/>:String(value)}</dd></div>):<div><dt>识别结果</dt><dd>邮件中暂未识别出基础字段</dd></div>}<div><dt>SO号</dt><dd>{selected.soNumbers.join("、")||"待识别"}</dd></div><div><dt>货物明细</dt><dd>{selected.itemCount} 条</dd></div><div><dt>仓库分组</dt><dd>{selected.warehouseCount} 个</dd></div></dl>{selected.warehouseGroups.length>0&&<div className="review-section candidate-review-section"><h3>分柜/多仓分组</h3><div className="warehouse-grid">{selected.warehouseGroups.map((group,index)=><article key={`${group.warehouse}-${index}`}>{selected.handlingStatus==="Pending"?<input className="candidate-warehouse-input" value={group.warehouse||""} placeholder="待确认仓库" onChange={event=>updateCandidateWarehouse(index,event.target.value)}/>:<strong>{group.warehouse||"待确认仓库"}</strong>}{group.container_type&&<small>柜型：{group.container_type}</small>}<small>SO/附件编号：{group.references.join("、")||"待确认"}</small><small>{group.items.length} 条货物明细</small></article>)}</div></div>}{selected.items.length>0&&<div className="review-section candidate-review-section"><h3>货物明细 <small>共 {selected.items.length} 条，已完成解析</small></h3><div className="review-items candidate-cargo-table"><div><b>货号</b><b>货名</b><b>规格</b><b>合同号</b><b>客户PO</b><b>数量</b><b>件数</b><b>体积</b><b>卡板</b><b>生产工厂</b>{candidateCargoExtras&&<b>更多资料</b>}</div>{selected.items.map((item,index)=><div key={index}>{["product_code","product_name","spec","contract_number","customer_po","quantity","pieces","volume","pallet_count","supplier"].map(key=>{const value=String((key==="supplier"?(item.supplier||item.factory_remark):item[key])??"");return selected.handlingStatus==="Pending"?<input key={key} value={value} aria-label={`${key}-${index+1}`} onChange={event=>updateCargo(index,key,event.target.value)}/>:<span key={key}>{value||"—"}</span>;})}{candidateCargoExtras&&<span><CargoExtraDetails item={item} specialTemplate={selected.fields.export_template==="sky-castle-multi"} disabled={selected.handlingStatus!=="Pending"||acting} onChange={(key,value)=>updateCargo(index,key,value)}/></span>}</div>)}</div></div>}{selected.handlingStatus==="Pending"&&<div className="candidate-actions"><button className="secondary-button" disabled={acting} onClick={()=>void act("ignore")}>忽略此项</button><button className="secondary-button" disabled={acting} onClick={()=>void saveCandidate()}>保存候选资料</button><button className="primary-button" disabled={acting||!selected.canConfirm} onClick={()=>void act("confirm")}><Check size={16}/><span>{acting?"处理中…":"确认生成任务"}</span></button></div>}{selected.taskIds.length>0&&<div className="candidate-task-links"><span>关联走柜任务：</span>{selected.taskIds.map(id=><Link href={`/shipments/${id}`} key={id}>#{id} 查看任务</Link>)}</div>}{!selected.canConfirm&&<div className="notice"><span>缺少SO号和货物明细，暂时不能生成任务。</span></div>}</>:<div className="mail-workbench-empty">从左侧选择一个候选项</div>}</div></div></section>;
+}
+
+
+function Dashboard() {
+  const [tasks,setTasks]=useState<ShipmentTaskData[]>([]);
+  useEffect(()=>{void(async()=>{try{const response=await apiFetch("/api/shipments",{cache:"no-store"});if(response.ok)setTasks(await response.json());}catch{/* 首页保留空状态，避免影响其他操作 */}})();},[]);
+  const active=tasks.filter(task=>task.status!=="Cancelled");
+  const counts={changes:active.filter(hasTaskChange).length,review:active.filter(task=>task.status==="PendingReview").length,shipment:active.filter(task=>task.status==="PendingShipment").length,completed:active.filter(task=>task.status==="Completed").length};
+  const anomalies=active.flatMap(task=>taskAnomalies(task).map(anomaly=>({task,...anomaly}))).sort((left,right)=>right.priority-left.priority||left.deadline.localeCompare(right.deadline));
+  return <div className="content">
+    <div className="page-heading"><div><p className="eyebrow">{new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",year:"numeric",month:"long"}).format(new Date())} · 船务工作台</p><h1>今天需要处理的出货任务</h1><p>先核对资料，再生成走柜表。</p></div><Link href="/shipments" className="primary-button"><Container size={17} />查看走柜安排</Link></div>
+    <section className="stats" aria-label="任务统计">
+      <article className="gradient-violet"><span>变更待处理</span><strong>{counts.changes}</strong><small>任务资料发生变更</small><RefreshCw className="stat-icon" /></article>
+      <article className="gradient-orange"><span>待复核</span><strong>{counts.review}</strong><small>等待船务复核</small><ClipboardCheck className="stat-icon" /></article>
+      <article className="gradient-green"><span>待走货</span><strong>{counts.shipment}</strong><small>等待仓务出货</small><Container className="stat-icon" /></article>
+      <article className="gradient-pink"><span>已完成</span><strong>{counts.completed}</strong><small>走货任务已完成</small><Ship className="stat-icon" /></article>
+    </section>
+    <CalendarBoard tasks={tasks} />
+    <section className="panel tasks-panel"><PanelTitle title="异常走柜任务" subtitle="按紧急程度排列" link="/shipments" />
+      <div className="task-row anomaly table-head"><span>客户 / SO</span><span>计划出货</span><span>异常原因</span><span>当前状态</span></div>
+      {anomalies.map(({task,reason},index)=><Link href={`/shipments/${task.id}`} className="task-row anomaly" key={`${task.id}-${reason}-${index}`}><span><strong>{task.customer}</strong><small>{task.soNumber||"SO待确认"}</small></span><span>{task.plannedShipDate||"待安排"}</span><span><b className="status danger">{reason}</b></span><span>{shipmentStatus[task.status]}</span></Link>)}
+      {!anomalies.length&&<div className="shipment-empty">暂无异常任务</div>}
+    </section>
+  </div>;
+}
+
+const anomalyPriority={scheduleDelay:400,inspectionFailed:300,inventoryShortage:200,changed:100} as const;
+function hasTaskChange(task:ShipmentTaskData){return Boolean(task.updatedAt&&task.createdAt&&new Date(task.updatedAt).getTime()-new Date(task.createdAt).getTime()>1000);}
+function taskTimeDisplay(task:ShipmentTaskData){
+  const modified=hasTaskChange(task);const value=modified?task.updatedAt:task.createdAt;
+  if(!value)return {label:modified?"修改":"创建",value:"—"};
+  const date=new Date(value);if(Number.isNaN(date.getTime()))return {label:modified?"修改":"创建",value:String(value)};
+  const pad=(part:number)=>String(part).padStart(2,"0");
+  return {label:modified?"修改":"创建",value:`${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`};
+}
+function taskAnomalies(task:ShipmentTaskData){
+  if(task.status==="Completed")return [];
+  const today=new Date().toLocaleDateString("sv-SE");const deadline=task.plannedShipDate||"9999-12-31";const result:Array<{reason:string;priority:number;deadline:string}>=[];
+  if(task.plannedShipDate&&task.plannedShipDate<today)result.push({reason:"船期延误",priority:anomalyPriority.scheduleDelay,deadline});
+  if(task.items.some(item=>/不通过|未通过|fail|reject/i.test(String(item.inspection_result||item.qc_result||""))))result.push({reason:"验货不过",priority:anomalyPriority.inspectionFailed,deadline});
+  if(task.items.some(item=>item.inventory_quantity!==undefined&&item.inventory_quantity!==""&&Number(item.inventory_quantity)<Number(item.quantity)))result.push({reason:"货品数量不够",priority:anomalyPriority.inventoryShortage,deadline});
+  if(hasTaskChange(task))result.push({reason:"变更时间",priority:anomalyPriority.changed,deadline});
+  return result;
+}
+
+function ImportCenter() {
+  const [emailFiles, setEmailFiles] = useState<File[]>([]);
+  const [emailBatch, setEmailBatch] = useState<EmailBatch | null>(null);
+  const [selectedEmailIndex, setSelectedEmailIndex] = useState(0);
+  const [emailError, setEmailError] = useState("");
+  const [emailLoading, setEmailLoading] = useState(false);
+  const [confirmLoading, setConfirmLoading] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const [createdTaskIds, setCreatedTaskIds] = useState<number[]>([]);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const selectedEmail = emailBatch?.items?.[selectedEmailIndex];
+  const selectedCargoExtras=Boolean(selectedEmail?.items?.some(item=>hasSpecialCargoDetails(item,selectedEmail.fields?.export_template==="sky-castle-multi")||hasLegacyUnitWeights(item)));
+  const parsedFields = selectedEmail?.fields;
+  const fields = [["SO号",parsedFields?.so_number || "待识别"],["柜型",parsedFields?.container_type || "待识别"],["计划走货日期",parsedFields?.ship_date || ""],["SI截止",parsedFields?.si_deadline || "待识别"],["截数期",parsedFields?.cutoff_date || "待识别"],["装货港",parsedFields?.port || "待识别"],["收货地",parsedFields?.destination_country || "待确认"],["特殊要求",parsedFields?.special_requirements || "待人工确认"]];
+
+  async function parseSelectedEmails() {
+    if (!emailFiles.length) { fileInput.current?.click(); return; }
+    const maxFileBytes = 25 * 1024 * 1024;
+    const maxBatchBytes = 200 * 1024 * 1024;
+    if (emailFiles.length > 50) { setEmailError("单批最多上传 50 封邮件"); return; }
+    if (emailFiles.some(file => file.size <= 0 || file.size > maxFileBytes)) { setEmailError("每封邮件必须大于 0 且不超过 25MB"); return; }
+    if (emailFiles.reduce((total, file) => total + file.size, 0) > maxBatchBytes) { setEmailError("所选邮件总大小超过 200MB，请分批上传"); return; }
+    setEmailLoading(true); setEmailError(""); setEmailBatch(null); setSelectedEmailIndex(0); setConfirmed(false); setCreatedTaskIds([]);
+    const data = new FormData();
+    emailFiles.forEach(file => data.append("files", file));
+    try {
+      const response = await apiFetch("/api/imports/email", { method: "POST", body: data });
+      const result = await readJsonResponse(response);
+      if (!response.ok) throw new Error(result.error || "解析服务返回错误");
+      setEmailBatch(result as EmailBatch);
+    } catch (error) {
+      setEmailError(error instanceof Error ? error.message : "邮件解析失败");
+    } finally { setEmailLoading(false); }
+  }
+
+  function updateField(key: string, value: string) {
+    setEmailBatch(current => {
+      if (!current) return current;
+      const items = current.items.map((item, index) => index === selectedEmailIndex
+        ? { ...item, warehouse_trip_plan:item.warehouse_trip_plan?{...item.warehouse_trip_plan,confirmed:false}:undefined, fields: { ...(item.fields || {}), [key]: value } }
+        : item);
+      return { ...current, items };
+    });
+  }
+
+  function addEmailCargo(){setEmailBatch(current=>current?{...current,items:current.items.map((item,index)=>index===selectedEmailIndex?{...item,items:[...(item.items||[]),{product_code:"",spec:"",quantity:"",pieces:""}]}:item)}:current);}
+  function updateContainerCapacity(index:number,value:string){setEmailBatch(current=>current?{...current,items:current.items.map((item,position)=>position===selectedEmailIndex?{...item,shipment_groups:item.shipment_groups?.map((group,i)=>i===index?{...group,capacity_boxes:value}:group)}:item)}:current);}
+  function updateWarehouse(groupIndex: number, value: string) {
+    setEmailBatch(current => {
+      if (!current) return current;
+      const items = current.items.map((item, index) => {
+        if (index !== selectedEmailIndex) return item;
+        const groups = (item.warehouse_groups || []).map((group, i) => i === groupIndex ? { ...group, warehouse: value } : group);
+        return { ...item, warehouse_groups: groups };
+      });
+      return { ...current, items };
+    });
+  }
+
+  function updateEmailItem(itemIndex: number, key: string, value: string) {
+    setEmailBatch(current => {
+      if (!current) return current;
+      const items = current.items.map((emailItem, emailIndex) => {
+        if (emailIndex !== selectedEmailIndex) return emailItem;
+        const original = emailItem.items?.[itemIndex];
+        const cargoItems = (emailItem.items || []).map((cargoItem, index) =>
+          index === itemIndex ? { ...cargoItem, [key]: value } : cargoItem);
+        const warehouseGroups = (emailItem.warehouse_groups || []).map(group => ({
+          ...group,
+          items: group.items.map(groupItem => original &&
+            (!original.source_file || group.source_files.includes(String(original.source_file))) &&
+            String(groupItem.source_row ?? "") === String(original.source_row ?? "") &&
+            String(groupItem.product_code ?? "") === String(original.product_code ?? "") &&
+            String(groupItem.container_assignment ?? "") === String(original.container_assignment ?? "")
+              ? { ...groupItem, [key]: value } : groupItem),
+        }));
+        return { ...emailItem, warehouse_trip_plan:emailItem.warehouse_trip_plan?{...emailItem.warehouse_trip_plan,confirmed:false}:undefined, items: cargoItems, warehouse_groups: warehouseGroups };
+      });
+      return { ...current, items };
+    });
+  }
+
+  async function confirmBatch() {
+    if (!emailBatch) return;
+    for(let index=0;index<emailBatch.items.length;index++){
+      const email=emailBatch.items[index];
+      if(email.status==="failed"||email.fields?.separate_warehouse_so!=="true")continue;
+      const plan=email.warehouse_trip_plan;
+      const errors=plan?tripErrors(email.items||[],plan.trips,email.fields?.cargo_split_required==="true"):[];
+      if(!plan?.confirmed||errors.length){setSelectedEmailIndex(index);setEmailError(`第${index+1}封邮件：${errors[0]||"请先核对并确认交仓分车"}`);return;}
+    }
+    setConfirmLoading(true); setEmailError("");
+    try {
+      const response = await taskFetch(emailBatch.import_batch_id ? `/api/imports/email/${emailBatch.import_batch_id}/confirm` : "/api/imports/email/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(emailBatch) });
+      const result = await readJsonResponse(response);
+      if (!response.ok) throw new Error(result.error || "确认保存失败");
+      setConfirmed(true);
+      setCreatedTaskIds(result.shipment_task_ids || []);
+    } catch (error) {
+      setEmailError(error instanceof Error ? error.message : "确认保存失败");
+    } finally { setConfirmLoading(false); }
+  }
+
+  return <div className="content import-center">
+    <section className="panel import-panel"><div className="compact-upload"><span className="upload-icon"><Inbox size={23} /></span><div className="upload-copy"><h2>导入邮件及附件</h2><p>{emailFiles.length ? `已选择 ${emailFiles.length} 封 EML 邮件` : "支持一次选择多封 EML；单封失败不会中断整批"}</p></div><input ref={fileInput} type="file" accept=".eml,message/rfc822" multiple style={{display:"none"}} onChange={event => setEmailFiles(Array.from(event.target.files || []))} /><div className="upload-actions"><button className="primary-button" onClick={() => fileInput.current?.click()}><Upload size={16} />选择文件</button>{emailFiles.length > 0 && <button className="secondary-button" disabled={emailLoading} onClick={parseSelectedEmails}>{emailLoading ? "解析中…" : "开始批量解析"}</button>}</div></div>{emailError && <div className="notice"><span>{emailError}</span></div>}</section>
+    <section className="panel preview-panel"><div className="panel-title"><div><h2>解析结果预览</h2><p>{emailBatch ? `批次共 ${emailBatch.total} 个：成功 ${emailBatch.parsed}，失败 ${emailBatch.failed}` : "选择邮件并解析后，在这里人工核对"}</p></div><b className={`status ${confirmed ? "ok" : emailBatch?.failed ? "danger" : "warn"}`}>{confirmed ? "已确认" : emailBatch ? "待确认" : "未解析"}</b></div>
+      {emailBatch && <div className="email-review-layout">
+        <div className="email-review-list">{emailBatch.items.map((item,index) => <button key={`${item.filename}-${index}`} className={selectedEmailIndex === index ? "active" : ""} onClick={() => setSelectedEmailIndex(index)}><strong>#{index + 1} {item.filename}</strong><small>{item.status === "failed" ? "解析失败" : item.duplicate_of_item_id ? "重复邮件" : item.message?.subject || "无主题"}</small></button>)}</div>
+        <div className="email-review-detail">
+          {selectedEmail?.error && <div className="notice"><span>{selectedEmail.error}</span></div>}
+          {selectedEmail?.duplicate_of_item_id && <div className="notice"><span>该邮件与记录 #{selectedEmail.duplicate_of_item_id} 重复，请确认是否继续保留。</span></div>}
+          <div className="mail-meta"><span><b>主题</b>{selectedEmail?.message?.subject || "—"}</span><span><b>发件人</b>{selectedEmail?.message?.sender || "—"}</span>{selectedEmail?.mailbox_received_at && <span><b>邮箱收件时间</b>{new Date(selectedEmail.mailbox_received_at).toLocaleString("zh-CN", {timeZone:"Asia/Shanghai"})}</span>}</div>
+        <div className="form-grid">{fields.map(([label,value], index) => { const key = ["so_number","container_type","ship_date","si_deadline","cutoff_date","port","destination_country","special_requirements"][index]; const deadline=key==="si_deadline"||key==="cutoff_date"; return <label key={label} className={key === "special_requirements" ? "full-width" : ""}><span>{label}</span>{key === "special_requirements" ? <textarea rows={4} value={String(value)} disabled={confirmed || selectedEmail?.status === "failed"} onChange={event => updateField(key, event.target.value)} /> : <input type={key === "ship_date" ? "date" : deadline ? "datetime-local" : "text"} value={key === "ship_date" ? dateControlValue(String(value)) : deadline ? dateControlValue(String(value),true) : String(value)} disabled={confirmed || selectedEmail?.status === "failed"} onChange={event => updateField(key, event.target.value)} />}</label>; })}</div>
+          {(selectedEmail?.fields?.multi_container==="true"||selectedEmail?.fields?.explicit_container_allocation==="true")&&<div className="review-section"><h3>分柜安排 · {selectedEmail.shipment_groups?.length} 个任务</h3><p>{selectedEmail.fields?.explicit_container_allocation==="true"?"已按附件中的柜归属分组，保留各柜原有产品和数量。":"相同产品优先集中装柜，箱数需人工核对；没有产品时只建立柜安排。"}</p>{selectedEmail.shipment_groups?.map((group,index)=><label className="cargo-scope-row" key={group.group_key}><span>{index+1}. {group.so_number} · {group.container_type} · {group.vessel_name} · SI {group.si_deadline} · 截关 {group.cutoff_date}</span>{selectedEmail.fields?.explicit_container_allocation!=="true"&&<input type="number" min="1" step="1" aria-label={`柜${index+1}容量箱数`} placeholder="可装箱数（选填）" value={group.capacity_boxes||""} disabled={confirmed} onChange={event=>updateContainerCapacity(index,event.target.value)}/>}</label>)}{!confirmed&&selectedEmail.fields?.explicit_container_allocation!=="true"&&<button className="ghost-button" onClick={addEmailCargo}>补充整批产品</button>}<ContainerSplitPreview payload={selectedEmail}/></div>}
+          {selectedEmail?.fields?.separate_warehouse_so==="true"&&<WarehouseTripPreview source={selectedEmail} disabled={confirmed} onChange={plan=>setEmailBatch(current=>current?{...current,items:current.items.map((email,index)=>index===selectedEmailIndex?{...email,warehouse_trip_plan:plan}:email)}:current)}/>}
+          {selectedEmail?.fields?.separate_warehouse_so!=="true"&&!!selectedEmail?.warehouse_groups?.length && <div className="review-section"><h3>分柜/多仓分组</h3><div className="warehouse-grid">{selectedEmail.warehouse_groups.map((group,index) => <article key={`${group.warehouse}-${index}`}><label><span>仓库</span><input value={group.warehouse} disabled={confirmed} onChange={event => updateWarehouse(index,event.target.value)} /></label>{group.container_type&&<small>柜型：{group.container_type}</small>}<small>SO/附件编号：{group.references.join("、")}</small><strong>{group.items.length} 条货物明细</strong></article>)}</div></div>}
+          {!!selectedEmail?.items?.length && <div className="review-section"><h3>{selectedEmail.fields?.separate_warehouse_so==="true"?"全部货物原资料":"货物明细"} <small>共{selectedEmail.items.length}条，可在确认前修改</small></h3><div className="review-items editable"><div><b>货号</b><b>货名</b><b>规格</b><b>合同号</b><b>客户PO</b><b>数量</b><b>件数</b><b>体积</b><b>卡板</b><b>生产工厂</b>{selectedCargoExtras&&<b>更多资料</b>}</div>{selectedEmail.items.map((item,index) => { const fields = ["product_code","product_name","spec","contract_number","customer_po","quantity","pieces","volume","pallet_count","supplier"]; return <div key={index}>{fields.map(key => {const raw=key==="supplier"?(item.supplier||item.factory_remark):item[key];return key==="spec"||compactNumberFields.has(key)?<EditableItemInput key={key} value={raw} disabled={confirmed} label={`${key}-${index + 1}`} displayValue={value=>key==="spec"?fullSpecification(value):itemDisplayValue(key,value)} onChange={value=>updateEmailItem(index,key,key==="spec"?specificationValue(value):value)}/>:<input key={key} value={itemDisplayValue(key,raw)} disabled={confirmed} aria-label={`${key}-${index + 1}`} onChange={event => updateEmailItem(index,key,event.target.value)} />;})}{selectedCargoExtras&&<span><CargoExtraDetails item={item} company={activeCompany()} specialTemplate={selectedEmail.fields?.export_template==="sky-castle-multi"} disabled={confirmed} onChange={(key,value)=>updateEmailItem(index,key,value)}/></span>}</div>; })}</div></div>}
+          {selectedEmail?.fields?.cargo_split_required==="true"&&<div className="review-section"><h3>本次出运 / 等待通知分配</h3>{selectedEmail.items?.map((item,index)=><label className="cargo-scope-row" key={index}><span>{String(item.product_code||"")} · {String(item.customer_po||"")} · {String(item.quantity||0)} 个</span><select disabled={confirmed} value={String(item.shipment_scope||"unassigned")} onChange={event=>updateEmailItem(index,"shipment_scope",event.target.value)}><option value="unassigned">请选择</option><option value="current">本次出运</option><option value="waiting">剩余散货，等待客户通知</option></select></label>)}</div>}
+          {!!selectedEmail?.warnings?.length && <div className="notice"><span>{selectedEmail.warnings.join("；")}</span></div>}
+        </div>
+      </div>}
+      {!emailBatch && <div className="form-grid">{fields.map(([label,value]) => <label key={label}><span>{label}</span><input value={String(value)} readOnly /></label>)}</div>}
+      <div className="notice"><ListChecks size={18} /><span>邮件确认后即可创建走柜任务和制表；库存、验货未确认时仅显示提示，不阻断操作。</span></div>
+      {confirmed && <div className="task-created-result"><span>{createdTaskIds.length ? `已自动创建或更新 ${createdTaskIds.length} 个走柜任务` : "本批邮件未新增任务（重复邮件不会重复创建）"}</span>{createdTaskIds.length === 1 ? <Link href={`/shipments/${createdTaskIds[0]}`}>打开任务</Link> : createdTaskIds.length > 1 ? <Link href="/shipments">查看任务列表</Link> : null}</div>}
+      <div className="panel-actions"><button className="ghost-button" onClick={() => { setEmailBatch(null); setEmailFiles([]); setConfirmed(false); setCreatedTaskIds([]); }}>取消本次导入</button><button className="primary-button" disabled={!emailBatch || confirmed || confirmLoading || (!!emailBatch.failed && !emailBatch.import_batch_id)} onClick={confirmBatch}><Check size={16} />{confirmLoading ? "保存中…" : confirmed ? "已确认" : "确认本批次"}</button></div>
+    </section>
+  </div>;
+}
+
+function ShipmentCenter({ route, role }: { route:string; role:UserRole }) {
+  const router=useRouter();
+  const detailId = route.split("/")[1];
+  const [view, setView] = useState<"tasks" | "done">("tasks");
+  const [tasks, setTasks] = useState<ShipmentTaskData[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [creating,setCreating]=useState(false); const [createDraft,setCreateDraft]=useState({customer:"",soNumber:"",containerType:"",plannedShipDate:"",port:""}); const [createSaving,setCreateSaving]=useState(false);
+  async function loadTasks() {
+    setLoading(true); setError("");
+    try {
+      const response = await apiFetch("/api/shipments", { cache:"no-store" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "读取走柜任务失败");
+      setTasks(result);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "读取走柜任务失败"); }
+    finally { setLoading(false); }
+  }
+  useEffect(() => { if (!detailId) void loadTasks(); }, [detailId]);
+  async function createTask(event:React.FormEvent){event.preventDefault();setCreateSaving(true);setError("");try{const response=await apiFetch("/api/shipments",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(createDraft)});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"新建任务失败");setCreating(false);router.push(`/shipments/${result.id}`);}catch(reason){setError(reason instanceof Error?reason.message:"新建任务失败");}finally{setCreateSaving(false);}}
+  async function deleteTask(task:ShipmentTaskData){if(!window.confirm(`是否删除任务“${task.customer} / ${task.soNumber||"SO待确认"}”及其邮件解析记录？\n\n删除后可重新导入原邮件，产品信息和产品映射不会删除。`))return;setError("");try{const response=await taskFetch(`/api/shipments/${task.id}`,{method:"DELETE"});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"删除任务失败");setTasks(current=>current.filter(value=>value.id!==task.id));}catch(reason){setError(reason instanceof Error?reason.message:"删除任务失败");}}
+  if (detailId) return <ShipmentDetail id={detailId} role={role} />;
+  return <div className="content">
+    <div className="page-heading"><div><p className="eyebrow">核心业务模块</p><h1>走柜任务</h1><p>查看走柜安排、复核制表信息，并在车辆离厂后完成任务。</p></div>{role!=="warehouse"&&<button className="primary-button" onClick={()=>setCreating(true)}><Plus size={16}/>新建走柜任务</button>}</div>
+    <div className="tabs"><button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}><ListChecks size={16} />任务列表</button><button className={view === "done" ? "active" : ""} onClick={() => setView("done")}><Check size={16} />完成汇总</button></div>
+    {error && <div className="notice"><span>{error}</span></div>}
+    {loading ? <section className="panel shipment-loading">正在读取走柜任务…</section> : <TaskBoard tasks={tasks} completed={view === "done"} onDelete={deleteTask} />}
+    {creating&&<div className="mapping-modal-backdrop" onMouseDown={()=>setCreating(false)}><form className="mapping-modal" onSubmit={createTask} onMouseDown={event=>event.stopPropagation()}><div><h2>新建走柜任务</h2><p>先填写基本资料，建立后进入任务详情补充货物明细并复核。</p></div><div className="mapping-form-grid"><label><span>客户 / 洋行 *</span><input autoFocus required value={createDraft.customer} onChange={event=>setCreateDraft({...createDraft,customer:event.target.value})}/></label><label><span>SO号</span><input value={createDraft.soNumber} onChange={event=>setCreateDraft({...createDraft,soNumber:event.target.value})}/></label><label><span>柜型／吨车</span><input placeholder="例如：1*40HQ" value={createDraft.containerType} onChange={event=>setCreateDraft({...createDraft,containerType:event.target.value})}/></label><label><span>计划走货日期</span><input type="date" value={createDraft.plannedShipDate} onChange={event=>setCreateDraft({...createDraft,plannedShipDate:event.target.value})}/></label><label><span>装货港</span><input value={createDraft.port} onChange={event=>setCreateDraft({...createDraft,port:event.target.value})}/></label></div><div className="mapping-modal-actions"><button type="button" className="ghost-button" onClick={()=>setCreating(false)}>取消</button><button className="primary-button" disabled={createSaving}>{createSaving?"建立中…":"建立并打开任务"}</button></div></form></div>}
+  </div>;
+}
+
+function CalendarBoard({ tasks }: { tasks:ShipmentTaskData[] }) {
+  const today = new Date();
+  const dateKey = (value:Date) => `${value.getFullYear()}-${String(value.getMonth()+1).padStart(2,"0")}-${String(value.getDate()).padStart(2,"0")}`;
+  const [month,setMonth]=useState(`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}`);
+  const [year,monthNumber]=month.split("-").map(Number);const first=new Date(year,monthNumber-1,1);const gridStart=new Date(first);gridStart.setDate(1-first.getDay());const days=Array.from({length:42},(_,index)=>{const value=new Date(gridStart);value.setDate(gridStart.getDate()+index);return value;});
+  const activeTasks = tasks.filter(task => task.status !== "Completed" && task.status !== "Cancelled" && task.status !== "WaitingNotification");
+  const unscheduled = activeTasks.filter(task => !task.plannedShipDate);
+  return <><section className="panel"><div className="panel-title"><div><h2>{year}年{monthNumber}月</h2><p>月视图；优先采用邮件出货日，未明确时按原规则推算</p></div><div className="calendar-actions range"><label><span>查看月份</span><input type="month" value={month} onChange={event=>setMonth(event.target.value)}/></label></div></div>
+    <div className="calendar-weekdays">{"日一二三四五六".split("").map(value=><b key={value}>周{value}</b>)}</div><div className="calendar-grid month-grid">{days.map(day => { const key=dateKey(day); const dayTasks=activeTasks.filter(task => task.plannedShipDate===key); const classes=["calendar-day",key===dateKey(today)?"today":"",day.getMonth()!==monthNumber-1?"outside-month":""].filter(Boolean).join(" ");return <div className={classes} key={key}><strong>{day.getDate()}</strong>{dayTasks.map(task => <Link className={`schedule-card ${task.status === "PendingReview" ? "orange" : "green"}`} href={`/shipments/${task.id}`} key={task.id}><strong>{task.customer}</strong><small>{task.containerType || "柜型待确认"} · {shipmentStatus[task.status]}</small></Link>)}</div>; })}</div>
+  </section>{unscheduled.length > 0 && <section className="panel unscheduled-panel"><div><h2>未安排日期</h2><p>以下任务未识别到截关日期，请进入详情选择走货日期。</p></div><div>{unscheduled.map(task => <Link key={task.id} href={`/shipments/${task.id}`}>{task.customer}<small>{task.containerType || "柜型待确认"}</small></Link>)}</div></section>}</>;
+}
+
+function TaskBoard({ tasks, completed, onDelete }: { tasks:ShipmentTaskData[]; completed:boolean; onDelete:(task:ShipmentTaskData)=>Promise<void> }) {
+  const [sort,setSort] = useState("imported");
+  const [query,setQuery] = useState(""); const [customer,setCustomer] = useState(""); const [status,setStatus] = useState("");
+  const currentMonth = `${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,"0")}`;
+  const [dateFrom,setDateFrom] = useState(completed ? `${currentMonth}-01` : "");
+  const [dateTo,setDateTo] = useState(completed ? new Date(new Date().getFullYear(),new Date().getMonth()+1,0).toISOString().slice(0,10) : "");
+  const customers = Array.from(new Set(tasks.map(task => task.customer))).sort();
+  const visible = tasks.filter(task => {
+    if (completed && task.status !== "Completed") return false;
+    if (!completed && task.status === "Completed") return false;
+    if (customer && task.customer !== customer) return false;
+    if (status && task.status !== status) return false;
+    const targetDate = completed ? task.completedDate : task.plannedShipDate;
+    if (dateFrom && (!targetDate || targetDate < dateFrom)) return false;
+    if (dateTo && (!targetDate || targetDate > dateTo)) return false;
+    const text = `${task.customer} ${task.soNumber || ""} ${task.items.map(item => `${item.product_code || ""} ${item.customer_po || ""}`).join(" ")}`.toLowerCase();
+    return !query || text.includes(query.toLowerCase());
+  }).sort((left,right)=>sort==="planned" ? (left.plannedShipDate||"9999").localeCompare(right.plannedShipDate||"9999")||right.id-left.id : (right.createdAt||"").localeCompare(left.createdAt||"")||right.id-left.id);
+  const total = (key:string) => visible.reduce((sum,task) => sum + task.items.reduce((inner,item) => inner + Number(item[key] || 0),0),0);
+  return <section className="panel data-panel"><div className="filters"><label className="filter-input"><Search size={15}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索客户、SO、PO或货号" /></label>{!completed&&<><select className="filter-select" value={customer} onChange={event => setCustomer(event.target.value)}><option value="">全部客户</option>{customers.map(value => <option key={value}>{value}</option>)}</select><select className="filter-select" value={status} onChange={event => setStatus(event.target.value)}><option value="">全部状态</option><option value="PendingReview">待复核</option><option value="PendingShipment">待走货</option><option value="WaitingNotification">等待客户通知</option><option value="Cancelled">已取消</option></select><select className="filter-select" aria-label="任务排序" value={sort} onChange={event=>setSort(event.target.value)}><option value="imported">导入时间：最新在前</option><option value="planned">计划走货日期：最早在前</option></select></>}<label className="date-range-filter"><span>{completed?"完成日期":"计划日期"}</span><input type="date" value={dateFrom} max={dateTo||undefined} onChange={event=>setDateFrom(event.target.value)}/><i>至</i><input type="date" value={dateTo} min={dateFrom||undefined} onChange={event=>setDateTo(event.target.value)}/></label></div>
+    {completed && <div className="monthly-summary"><span><b>{visible.length}</b> 柜</span><span>总数量 <b>{total("quantity")}</b></span><span>总件数 <b>{total("pieces")}</b></span><span>总体积 <b>{total("volume").toFixed(2)} CBM</b></span><a className="ghost-button action-shipping" href={`/api/shipments/completed/summary/export?from=${dateFrom}&to=${dateTo}`}><Download size={14}/>导出走柜任务汇总</a></div>}
+    <div className={`data-table shipment-table numbered ${completed?"":"with-task-time"}`}><div className="data-row header"><span>编号</span><span>客户 / SO</span><span>{completed ? "完成日期" : "计划日期"}</span><span>柜型／吨车</span><span>数量</span><span>件数</span><span>验货结果</span><span>状态</span><span>操作</span>{!completed&&<span>导入时间 / 最近修改</span>}</div>{visible.map(task => {const time=taskTimeDisplay(task);return <div className="data-row" key={task.id}><span>#{task.displayNumber||task.id}</span><span><b>{task.customer}</b><small>{task.soNumber || "SO待确认"}</small></span><span>{completed ? task.completedDate : task.plannedShipDate || "待安排"}</span><span>{task.containerType || "—"}</span><span>{task.items.reduce((sum,item)=>sum+Number(item.quantity||0),0)}</span><span>{task.items.reduce((sum,item)=>sum+Number(item.pieces||0),0)}</span><span><b className="qc-pending">待接入</b></span><span><b className={`status ${task.status === "Completed" ? "ok" : task.status === "Cancelled" ? "danger" : "warn"}`}>{shipmentStatus[task.status]}</b></span><span className="task-row-actions"><Link className="table-action" href={`/shipments/${task.id}`}>打开任务</Link><button className="icon-danger task-delete-icon" title="删除任务" aria-label={`删除任务 ${task.customer} ${task.soNumber||"SO待确认"}`} onClick={()=>void onDelete(task)}><Trash2 size={14}/></button></span>{!completed&&<span className="task-time"><b>导入 {task.createdAt?new Date(task.createdAt).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"}):"—"}</b>{time.label==="修改"&&<small>修改 {time.value}</small>}</span>}</div>})}</div>
+    {!visible.length && <div className="shipment-empty">当前条件下没有任务</div>}
+  </section>;
+}
+
+function InventoryCenter({route,role}:{route:string;role:UserRole}) {
+  const detailId=route.split("/")[2];
+  const now=new Date(); const month=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
+  const [from,setFrom]=useState(`${month}-01`); const [to,setTo]=useState(new Date(now.getFullYear(),now.getMonth()+1,0).toISOString().slice(0,10));
+  const [tasks,setTasks]=useState<ShipmentTaskData[]>([]); const [error,setError]=useState(""); const [writebackNotice,setWritebackNotice]=useState("");
+  const [localScan,setLocalScan]=useState<LocalInventoryScan|null>(null); const [scanning,setScanning]=useState(false); const [writing,setWriting]=useState(false);
+  useEffect(()=>{void(async()=>{try{const response=await apiFetch("/api/shipments",{cache:"no-store"});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"读取出库记录失败");setTasks(result);}catch(reason){setError(reason instanceof Error?reason.message:"读取出库记录失败");}})();},[]);
+  async function scanLocalInventory(){setScanning(true);setError("");try{const {handle,files}=await authorizedInventoryFiles(role);const form=new FormData();files.forEach(file=>form.append("files",file,file.name));form.append("folder",handle.name);const response=await apiFetch("/api/inventory/local-files/scan",{method:"POST",body:form});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"读取本地库存表失败");setLocalScan(result);}catch(reason){setError(reason instanceof Error?reason.message:"读取本地库存表失败");}finally{setScanning(false);}}
+  async function writeAllPendingInventory(){
+    const eligible=tasks.filter(task=>task.status==="PendingShipment"&&!!task.plannedShipDate&&task.plannedShipDate>=from&&task.plannedShipDate<=to)
+      .filter(task=>!task.items.some(item=>String(item.inventory_writeback_task_id||"")===String(task.id))&&!window.localStorage.getItem(`voyageplex-inventory-writeback-${task.id}`))
+      .sort((left,right)=>String(left.plannedShipDate).localeCompare(String(right.plannedShipDate))||left.id-right.id);
+    if(!eligible.length){setError("所选日期范围内没有待回写的待走货任务");return;}
+    const emptyTask=eligible.find(task=>!task.items.length);
+    if(emptyTask){setError(`任务 #${emptyTask.id} 没有货物明细，已停止批量回写`);return;}
+    const missingTrips=eligible.filter(task=>!task.transportReference?.trim()).map(task=>`#${task.id}`);
+    const tripWarning=missingTrips.length?`\n\n提醒：编号 ${missingTrips.join("、")} 的任务没有车次，仍然允许回写。`:"";
+    if(!window.confirm(`确认按先进先出规则，一次回写 ${eligible.length} 个未回写任务？${tripWarning}`))return;
+    setWriting(true);setError("");setWritebackNotice("");
+    try{
+      const {handle,files}=await authorizedInventoryFiles(role);
+      const result=await runInventoryWriteback(handle,files,eligible.map(task=>task.id));
+      const refreshed=await apiFetch("/api/shipments",{cache:"no-store"});
+      if(!refreshed.ok)throw new Error("库存及完成状态已保存，请刷新任务列表");
+      setTasks(await refreshed.json());
+      setWritebackNotice(`批量回写成功：${eligible.length} 个任务已走货完成，更新 ${Number(result.updated_rows||0)} 行库存，已生成原表备份`);
+    }catch(reason){setError(reason instanceof Error?reason.message:"批量库存回写失败");}finally{setWriting(false);}
+  }
+  if(detailId)return <ShipmentDetail id={detailId} role="warehouse" directoryRole={role} backHref="/inventory" backLabel="返回出库任务" />;
+  const pendingWriteback=tasks.filter(task=>task.status==="PendingShipment"&&!!task.plannedShipDate&&task.plannedShipDate>=from&&task.plannedShipDate<=to)
+    .filter(task=>!task.items.some(item=>String(item.inventory_writeback_task_id||"")===String(task.id)));
+  const outboundTasks=tasks.filter(task=>task.status==="PendingShipment"||task.status==="Completed");
+  const taskTotal=(task:ShipmentTaskData,key:string)=>task.items.reduce((sum,item)=>sum+Number(item[key]||0),0);
+  const locationState=(task:ShipmentTaskData)=>{const matched=task.items.filter(item=>item.warehouse_location).length;return matched===task.items.length&&matched>0?"已查询":matched>0?`${matched}/${task.items.length} 已匹配`:"待查询";};
+  return <div className="content"><PageHeading eyebrow="库存资料与出库处理" title="库存管理" description="集中查询库存匹配结果，并将待走货任务批量回写到本地库存表。" />
+    <section className="panel local-inventory-source"><div className="panel-title"><div><h2>本地库存数据源</h2><p>读取当前用户在“系统设置”中授权的本地库存文件夹。</p></div><button className="ghost-button action-location" disabled={scanning} onClick={()=>void scanLocalInventory()}><RefreshCw size={14}/>{scanning?"读取中…":"读取本地库存表"}</button></div>{localScan&&<><div className="local-inventory-summary"><span><b>{localScan.successful_files||0}</b> 个文件读取成功</span><span><b>{localScan.total_rows||0}</b> 条库存记录</span><span>目录：{localScan.folder||"—"}</span><span>扫描时间：{localScan.scanned_at?.replace("T"," ")||"—"}</span></div><div className="local-inventory-files">{localScan.files.map(file=><div key={file.filename}><span><b>{file.filename}</b><small>更新：{file.modified_at.replace("T"," ")}</small></span><span>{file.sheets.length} 个工作表</span><span>{file.row_count} 条记录</span><b className={`status ${file.status==="ok"?"ok":"danger"}`}>{file.status==="ok"?"读取成功":"读取失败"}</b></div>)}</div></>}</section>
+    <InventoryWritebackRecovery getDirectory={async()=>(await authorizedInventoryFiles(role)).handle} onRecovered={()=>window.location.reload()}/>
+    <section className="panel inventory-toolbar"><div><h2>一键回写库存</h2><p>按计划走货日期处理待走货任务，回写成功后自动标记为走货完成。</p></div><label className="date-range-filter"><span>计划走货日期</span><input type="date" value={from} max={to} onChange={event=>setFrom(event.target.value)}/><i>至</i><input type="date" value={to} min={from} onChange={event=>setTo(event.target.value)}/></label><button className="ghost-button action-inventory" disabled={writing||!pendingWriteback.length} onClick={()=>void writeAllPendingInventory()}><Check size={14}/>{writing?"回写中…":`一键回写 ${pendingWriteback.length} 个任务`}</button></section>
+    {writebackNotice&&<div className="notice">{writebackNotice}</div>}{error&&<div className="notice">{error}</div>}<section className="panel data-panel"><div className="panel-title inventory-list-title"><div><h2>出库任务</h2><p>一柜一行；打开后查询放货区、核对数量和件数并生成仓务走柜表。</p></div><div className="inventory-task-stats"><span><b>{outboundTasks.filter(task=>task.status!=="Completed").length}</b> 个待出库</span><span><b>{pendingWriteback.length}</b> 个区间内待回写</span></div></div>
+    <div className="data-table shipment-table"><div className="data-row header"><span>客户 / SO</span><span>走货日期</span><span>柜型／吨车</span><span>数量</span><span>件数</span><span>放货区</span><span>状态</span><span>操作</span></div>{outboundTasks.map(task=><div className="data-row" key={task.id}><span><b>{task.customer}</b><small>{task.soNumber||"SO待确认"}</small></span><span>{task.plannedShipDate||"待安排"}</span><span>{task.containerType||"待确认"}</span><span>{taskTotal(task,"quantity")}</span><span>{taskTotal(task,"pieces")}</span><span><b className={`status ${locationState(task)==="已查询"?"ok":"warn"}`}>{locationState(task)}</b></span><span><b className={`status ${task.status==="Completed"?"ok":"warn"}`}>{shipmentStatus[task.status]}</b></span><span><Link className="table-action" href={`/inventory/tasks/${task.id}`}>打开出库任务</Link></span></div>)}</div>
+    {!outboundTasks.length&&<div className="shipment-empty">暂无出库任务</div>}</section></div>;
+}
+
+function ShipmentDetail({ id, role, directoryRole=role, backHref="/shipments", backLabel="返回走柜任务" }: { id:string; role:UserRole; directoryRole?:UserRole; backHref?:string; backLabel?:string }) {
+  const router=useRouter();
+  const [task,setTask] = useState<ShipmentTaskData|null>(null); const [error,setError] = useState(""); const [saving,setSaving] = useState(false); const [qcNotice,setQcNotice] = useState(""); const [qcResults,setQcResults]=useState<QcResult[]|null>(null); const [qcCheckedAt,setQcCheckedAt]=useState(""); const [qcUnsaved,setQcUnsaved]=useState(false); const [queryingQc,setQueryingQc]=useState(false); const [locationNotice,setLocationNotice] = useState(""); const [refreshingLocations,setRefreshingLocations] = useState(false); const [writingBack,setWritingBack]=useState(false);
+  useEffect(() => { setQcResults(null); setQcCheckedAt(""); setQcUnsaved(false); setQcNotice(""); void (async () => { try { const response=await taskFetch(`/api/shipments/${id}`,{cache:"no-store"}); const result=await response.json(); if(!response.ok) throw new Error(result.error||"读取任务失败"); const loaded=applyWarehouseTruckSuggestion(normalizeInventorySourceDisplay(result)); const saved=readQcSnapshots(loaded.items); setTask(loaded); setQcResults(saved?.results||null); setQcCheckedAt(saved?.checkedAt||""); } catch(reason){setError(reason instanceof Error?reason.message:"读取任务失败");} })(); },[id]);
+  async function update(changes:Record<string,string>) { if(!task)return; setSaving(true); setError(""); try { const response=await taskFetch(`/api/shipments/${id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(changes)}); const result=await response.json(); if(!response.ok) throw new Error(result.error||"保存失败"); setTask(result); } catch(reason){setError(reason instanceof Error?reason.message:"保存失败");} finally{setSaving(false);} }
+  async function cancelTask(){if(!task||!window.confirm("确认取消这个走柜任务？取消后不能恢复。"))return;await update({status:"Cancelled"});}
+  async function deleteTask(){if(!task||!window.confirm(`是否删除任务“${task.customer} / ${task.soNumber||"SO待确认"}”及其邮件解析记录？\n\n删除后可重新导入原邮件；产品信息和产品映射不会删除。${task.items.some(item=>item.inventory_writeback_task_id)?"\n已写入本地库存的数据不会撤销。":""}`))return;setSaving(true);setError("");try{const response=await taskFetch(`/api/shipments/${id}`,{method:"DELETE"});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"删除任务失败");router.push(backHref);router.refresh();}catch(reason){setError(reason instanceof Error?reason.message:"删除任务失败");setSaving(false);}}
+  async function saveReview():Promise<boolean> { if(!task)return false; setSaving(true); setError(""); try { const items=qcResults&&qcCheckedAt?saveQcSnapshots(task.items,qcResults,qcCheckedAt):task.items; const response=await taskFetch(`/api/shipments/${id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({customer:task.customer,soNumber:task.soNumber||"",containerType:task.containerType,plannedShipDate:task.plannedShipDate||"",cutoffDate:task.cutoffDate,siDeadline:task.siDeadline,port:task.port,destinationCountry:task.destinationCountry||"",transportReference:task.transportReference||"",specialRequirements:task.specialRequirements,exportDetails:task.exportDetails||{},warehouseGroups:task.warehouseGroups,items})}); const result=await readJsonResponse(response); if(!response.ok) throw new Error(result.error||"保存失败"); setTask(result); setQcUnsaved(false); return true; } catch(reason){setError(reason instanceof Error?reason.message:"保存失败");return false;} finally{setSaving(false);} }
+  async function queryQcResult(){if(!task)return;setQueryingQc(true);setQcNotice("");try{const items=task.items.map(item=>({contractNumber:String(item.contract_number||""),customerPo:String(item.customer_po||""),itemNumber:String(item.product_code||"")}));const response=await apiFetch("/api/qc/results",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({items})});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"查询验货结果失败");setQcResults(result.results as QcResult[]);setQcCheckedAt(new Date().toISOString());setQcUnsaved(true);}catch(reason){setQcNotice(reason instanceof Error?reason.message:"查询验货结果失败");}finally{setQueryingQc(false);}}
+  async function saveWarehouseQuantities():Promise<boolean> { if(!task)return false; setSaving(true); setError(""); try { const response=await taskFetch(`/api/shipments/${id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({items:task.items,transportReference:task.transportReference||""})}); const result=await readJsonResponse(response); if(!response.ok) throw new Error(result.error||"保存失败"); setTask(result); setLocationNotice("柜号/车次、数量、件数、入库单号和放货区已保存"); return true; } catch(reason){setError(reason instanceof Error?reason.message:"保存失败");return false;} finally{setSaving(false);} }
+  const [exportPurpose,setExportPurpose]=useState<"Shipping"|"Warehouse"|null>(null);
+  async function exportShipment(templateId:number|undefined,warehouse:boolean):Promise<boolean> {
+    if(saving || !task)return false;
+    const saved=warehouse?await saveWarehouseQuantities():await saveReview();
+    if(!saved)return false;
+    setSaving(true);setError("");
+    try{
+      const exportUrl=`/api/shipments/${id}/${warehouse?"warehouse-export":"export"}${templateId===undefined?"":`?templateId=${templateId}`}`;
+      let response=await taskFetch(exportUrl,{cache:"no-store"});
+      if(response.status===422){
+        const warning=await response.clone().json();
+        if(warning.code==="MissingWeights"){
+          const missing=(warning.missing as Array<{itemIndex:number;productCode:string;label:string}>).map(value=>`第${value.itemIndex+1}行 ${value.productCode}：${value.label}`).join("\n");
+          if(!window.confirm(`${missing}\n\n选择取消返回补齐；继续则带缺项导出，缺失重量及对应合计标为“待核对”。`))return false;
+          response=await taskFetch(`${exportUrl}${exportUrl.includes("?")?"&":"?"}allowIncomplete=true`,{cache:"no-store"});
+        }
+      }
+      if(!response.ok){const result=await readJsonResponse(response);throw new Error(result.error||"走柜表生成失败");}
+      const blob=await response.blob();
+      const encoded=response.headers.get("content-disposition")?.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const filename=encoded?decodeURIComponent(encoded):`走柜表-${id}.xlsx`;
+      const url=URL.createObjectURL(blob);
+      const link=document.createElement("a");link.href=url;link.download=filename;document.body.appendChild(link);link.click();link.remove();
+      window.setTimeout(()=>URL.revokeObjectURL(url),60000);
+      return true;
+    }catch(reason){setError(reason instanceof Error?reason.message:"走柜表生成失败");return false;}
+    finally{setSaving(false);}
+  }
+  async function refreshWarehouseLocations() {
+    if(!task)return;setRefreshingLocations(true);setError("");setLocationNotice("");
+    try{
+      const {files}=await authorizedInventoryFiles(directoryRole);const form=new FormData();files.forEach(file=>form.append("files",file,file.name));
+      form.append("payload",JSON.stringify({customer:task.customer,items:task.items}));
+      const matchResponse=await apiFetch("/api/inventory/local-files/match",{method:"POST",body:form});const matchResult=await readJsonResponse(matchResponse);
+      if(!matchResponse.ok)throw new Error(matchResult.error||"查询放货区失败");
+      const matches=Array.isArray(matchResult.items)?matchResult.items:[];
+      const matchedItems=task.items.map((item,index)=>{
+        const match=matches.find((value:Record<string,unknown>)=>Number(value.index)===index);
+        if(!match)return item;
+        const fullSource=Array.isArray(match.sources)?match.sources.join("；"):"";
+        return {...item,warehouse_location:String(match.location||""),warehouse_match_status:String(match.status||"未匹配"),inventory_customer_name:String(match.customer_name||""),inventory_country:String(match.country||""),inventory_receipt_number:String(match.receipt_number||""),inventory_source:shortInventorySource(fullSource),inventory_source_full:fullSource};
+      });
+      const saveResponse=await taskFetch(`/api/shipments/${id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({items:matchedItems})});const saved=await readJsonResponse(saveResponse);
+      if(!saveResponse.ok)throw new Error(saved.error||"保存查询结果失败");setTask(saved);
+      setLocationNotice(`已重新读取本地库存表，${matches.filter((value:Record<string,unknown>)=>Number(value.match_count)>0).length} 条明细已更新`);
+    }catch(reason){setError(reason instanceof Error?reason.message:"查询放货区失败");}finally{setRefreshingLocations(false);}
+  }
+  async function confirmInventoryWriteback(){
+    if(!task||task.status!=="PendingShipment"){setError("只有待走货任务可以回写库存");return;}
+    if(window.localStorage.getItem(`voyageplex-inventory-writeback-${task.id}`)){setError("此浏览器有旧版回写标记，请先人工核对原表和任务状态，不可重复扣库存");return;}
+    if(!window.confirm("确认按先进先出规则回写库存？后台将保存回写记录，完成后任务自动标记为走货完成。"))return;
+    if(!await saveWarehouseQuantities())return;
+    setWritingBack(true);setError("");setLocationNotice("");
+    try{
+      const {handle,files}=await authorizedInventoryFiles(directoryRole);
+      const result=await runInventoryWriteback(handle,files,[task.id]);
+      const response=await taskFetch(`/api/shipments/${id}`,{cache:"no-store"});
+      if(!response.ok)throw new Error("库存及完成状态已保存，请刷新任务页面");
+      setTask(await response.json());setLocationNotice(`库存回写成功：更新 ${Number(result.updated_rows||0)} 行库存，完成状态已保存`);
+    }catch(reason){setError(reason instanceof Error?reason.message:"库存回写未完成，请核对恢复记录");}finally{setWritingBack(false);}
+  }
+  function changeField(key:keyof ShipmentTaskData,value:string) { if(task)setTask({...task,[key]:value,...(key==="containerType"&&isXingxinWarehouse(task)?{exportDetails:{...task.exportDetails,truckTypeSource:"manual"}}:{})}); }
+  function changeWarehouse(index:number,value:string) { if(!task)return; const groups=task.warehouseGroups.length ? task.warehouseGroups.map((group,i)=>i===index?{...group,warehouse:value}:group) : [{warehouse:value,references:[],items:[],source_files:[]}]; setTask({...task,warehouseGroups:groups,exportDetails:{...task.exportDetails,warehouse:groups.length===1?value:""}}); }
+  function changeItem(index:number,key:string,value:string) { if(!task)return; const lookupChanged=key==="contract_number"||key==="customer_po"||key==="product_code"; if(lookupChanged){setQcResults(null);setQcCheckedAt("");setQcUnsaved(false);setQcNotice("");} setTask(applyWarehouseTruckSuggestion({...task,items:task.items.map((item,row)=>{if(row!==index)return item;const updated={...item,[key]:value};if(lookupChanged)delete updated.qc_snapshot;return updated;})})); }
+  function removeItem(index:number) { if(task){setQcResults(null);setQcCheckedAt("");setQcUnsaved(false);setQcNotice("");setTask(applyWarehouseTruckSuggestion({...task,items:task.items.filter((_,row)=>row!==index)}));} }
+  function addItem() { if(task){setQcResults(null);setQcCheckedAt("");setQcUnsaved(false);setQcNotice("");setTask(applyWarehouseTruckSuggestion({...task,items:[...task.items,{product_code:"",product_name:"",spec:"",customer_po:"",contract_number:"",quantity:"",pieces:"",pallet_count:"",gross_weight_per_box:"",net_weight_per_box:"",volume:"",box_dimensions:"",supplier:""}]}));} }
+  if (!task) return <div className="content"><Link className="back-button" href={backHref}><ArrowLeft size={15}/>{backLabel}</Link>{error ? <div className="notice">{error}</div> : <section className="panel shipment-loading">正在读取任务…</section>}</div>;
+  const warehouseUser=role==="warehouse";
+  if(warehouseUser&&task.status!=="PendingShipment"&&task.status!=="Completed")return <div className="content"><Link className="back-button" href={backHref}><ArrowLeft size={15}/>{backLabel}</Link><section className="panel shipment-loading"><h2>任务尚未移交仓务</h2><p>船务复核完成并将状态改为“待走货”后，仓务才能查看和操作此任务。</p></section></div>;
+  const sum=(key:string)=>task.items.reduce((total,item)=>total+Number(item[key]||0),0);
+  const specialCargoTemplate=task.exportDetails?.templateKey==="sky-castle-multi";
+  const extraCargoDetails=task.items.some(item=>hasSpecialCargoDetails(item,specialCargoTemplate)||hasLegacyUnitWeights(item));
+  const itemFields=["customer","contract_number","customer_po","product_code","product_name","spec","quantity","pieces","gross_weight_per_box","net_weight_per_box","pallet_count","volume","order_total_pieces",...(warehouseUser?["inventory_receipt_number","warehouse_location","inventory_source"]:[]),"category","loading_factory"];
+  const itemColumnWidths:Record<string,string>={contract_number:"minmax(145px,1.2fr)",customer_po:"minmax(155px,1.3fr)",product_code:"minmax(165px,1.4fr)",product_name:"minmax(220px,1.8fr)"};
+  const itemGridColumns=[...itemFields.map(key=>itemColumnWidths[key]||"minmax(90px,1fr)"),...(extraCargoDetails?["minmax(100px,1fr)"]:[]),"50px","minmax(220px,1.8fr)"].join(" ");
+  // 行宽包含所有列的最小宽度、列间距和左右内边距，避免末尾列溢出表头底色。
+  const itemGridTrackWidths=itemGridColumns.match(/\d+px/g)||[];
+  const itemGridMinWidth=itemGridTrackWidths.reduce((width,value)=>width+parseInt(value,10),0)+(itemGridTrackWidths.length-1)*10+36;
+
+  const qcByIndex=new Map(qcResults?.map(result=>[result.itemIndex,result])||[]);
+  const qcSummaryText=qcResults?qcSummary(task.items,qcResults).text:"";
+  const writebackRecord=task.items.find(item=>String(item.inventory_writeback_task_id||"")===String(task.id));
+  const taskTitle=`${task.customer} · ${task.emailSubject?.trim()||task.soNumber?.trim()||`任务 #${task.id}`}`;
+  return <div className="content shipment-detail"><fieldset className="shipment-access-fields"><Link className="back-button" href={backHref}><ArrowLeft size={15}/>{backLabel}</Link><div className="page-heading shipment-detail-heading"><div><p className="eyebrow">{task.exportDetails?.shipmentMode==="Delivery"?"送货任务":"走柜任务"} #{task.displayNumber||task.id}</p><h1 title={taskTitle}>{taskTitle}</h1></div><div className="heading-status-actions"><select className="heading-status-select" aria-label="任务状态" value={task.status} disabled={saving||warehouseUser||(task.status!=="PendingReview"&&task.status!=="WaitingNotification"&&task.status!=="PendingShipment")} onChange={event=>void update({status:event.target.value})}><option value={task.status}>{shipmentStatus[task.status]}</option>{task.status==="PendingShipment"&&<option value="PendingReview">退回待复核</option>}{task.status==="WaitingNotification"&&<option value="PendingReview">已收到通知，转为待复核</option>}{task.status==="PendingReview"&&<option value="PendingShipment" disabled={!task.plannedShipDate}>{task.plannedShipDate?"待走货":"待走货（请先填写日期）"}</option>}</select>{!warehouseUser&&(task.status==="WaitingNotification"||task.status==="PendingReview"||task.status==="PendingShipment")&&<button className="ghost-button action-cancel" disabled={saving} onClick={()=>void cancelTask()}>取消任务</button>}<button className="ghost-button action-delete" disabled={saving} onClick={()=>void deleteTask()}><Trash2 size={14}/>删除任务</button></div></div>{error&&<div className="notice">{error}</div>}
+    {task.status==="WaitingNotification"&&<div className="notice">剩余货物等待客户另行通知，不安排日期、不生成出运表；收到通知后转为待复核并填写交仓日期。</div>}
+    {task.exportDetails?.deliveryTime&&<div className="notice">交仓时间要求：{task.exportDetails.deliveryTime}，请按邮件截止要求安排。</div>}{task.exportDetails?.shipmentMode==="Delivery"&&<section className="panel"><h3>送货安排</h3><p>送货地点：{task.exportDetails.deliveryFactory||"待确认"} · 货代提货日期：{task.exportDetails.pickupDate||"待确认"}</p><small>{task.exportDetails.dispatchDateSource==="pickup_previous_day"?"计划送货日期按货代提货前一天安排，请核对。":"计划送货日期按邮件明确指令安排。"}</small></section>}<section className="panel shipment-core"><div className={`shipment-fields ${task.exportDetails?.shipmentMode==="Warehouse"?"has-warehouse":""}`}><label className="field-so"><span>SO号</span><input value={task.soNumber||""} disabled={warehouseUser} placeholder="SO待确认" onChange={event=>changeField("soNumber",event.target.value)}/></label><label className="field-container"><span>柜型／吨车</span><input value={task.containerType||""} disabled={warehouseUser} placeholder="例如：1*40HQ 或 1*3T" onChange={event=>changeField("containerType",event.target.value)}/>{isXingxinWarehouse(task)&&<small>{recommendTruck(task.items)?`按本任务体积推荐 ${recommendTruck(task.items)}，可人工修改` : "体积缺失、无效或超过50 CBM，请人工确认吨车或分车"}{[task.exportDetails?.warehouse,...task.warehouseGroups.map(group=>group.warehouse)].some(name=>name?.includes("裕泰"))?"；裕泰仓每车上限35 CBM，超限请在导入预览中分车":""}</small>}</label><label className="field-transport"><span>柜号/车次</span><input value={task.transportReference||""} disabled={saving} placeholder="待手工录入" onChange={event=>changeField("transportReference",event.target.value)}/></label><label className="field-date"><span>计划走货日期</span><input type="date" value={task.plannedShipDate||""} disabled={saving||warehouseUser||task.status==="WaitingNotification"} onChange={event=>changeField("plannedShipDate",event.target.value)}/><small>转为待走货前必须填写</small></label><label className="field-cutoff"><span>截关日期</span><input type="datetime-local" value={dateControlValue(task.cutoffDate,true)} disabled={warehouseUser} onChange={event=>changeField("cutoffDate",event.target.value)}/></label><label className="field-si"><span>SI 截止期</span><input type="datetime-local" value={dateControlValue(task.siDeadline,true)} disabled={warehouseUser} onChange={event=>changeField("siDeadline",event.target.value)}/></label><label className="field-port"><span>装货港</span><input value={task.port||""} disabled={warehouseUser} placeholder="待确认" onChange={event=>changeField("port",event.target.value)}/></label><label className="field-destination"><span>收货地</span><input value={task.destinationCountry||""} disabled={warehouseUser} placeholder="待确认" onChange={event=>changeField("destinationCountry",event.target.value)}/></label>{task.exportDetails?.shipmentMode==="Warehouse"&&(task.warehouseGroups.length?task.warehouseGroups:[{warehouse:String(task.exportDetails?.warehouse||"")}]).map((group,index)=><label className="field-warehouse" key={index}><span>{task.warehouseGroups.length>1?`交仓仓库 ${index+1}`:"交仓仓库"}</span><input aria-label={`交仓仓库 ${index+1}`} maxLength={200} value={group.warehouse==="待确认仓库"?"":group.warehouse} disabled={warehouseUser||saving} placeholder="待确认仓库" onChange={event=>changeWarehouse(index,event.target.value)}/></label>)}{!warehouseUser&&<div className="shipment-actions field-actions"><div className="shipment-action-buttons"><button className="primary-button" onClick={()=>void saveReview()} disabled={saving}>{saving?"保存中…":"保存核对修改"}</button><button className="ghost-button action-shipping" disabled={saving||task.status==="WaitingNotification"} onClick={()=>task.exportDetails?.shipmentMode==="Delivery"?void exportShipment(undefined,false):setExportPurpose("Shipping")}>生成船务走柜表</button></div></div>}</div>{warehouseUser&&<div className="shipment-actions warehouse-actions"><div className="shipment-action-buttons"><button className="primary-button" onClick={()=>void saveWarehouseQuantities()} disabled={saving||task.status!=="PendingShipment"}>{saving?"保存中…":"保存仓务修改"}</button><button className="ghost-button action-location" onClick={()=>void refreshWarehouseLocations()} disabled={refreshingLocations||task.status!=="PendingShipment"}>{refreshingLocations?"查询中…":"查询/刷新放货区"}</button><button className="ghost-button action-warehouse" disabled={saving||task.status==="WaitingNotification"} onClick={()=>setExportPurpose("Warehouse")}>生成仓务走柜表</button><button className="ghost-button action-writeback" disabled={writingBack||Boolean(writebackRecord)||task.status!=="PendingShipment"} onClick={()=>void confirmInventoryWriteback()}>{writingBack?"回写中…":writebackRecord?"今日出库已回写":task.status==="Completed"?"任务已走货完成":"确认今日出库并回写"}</button></div>{locationNotice&&<small className="action-notice">{locationNotice}</small>}</div>}</section>
+    {<section className="panel personal-mailbox-panel"><span>任务所属账号：{task.responsibleUserName||"历史任务未记录所属账号"}</span>{task.lastEditedBy&&<span>最近修改：{task.lastEditedBy} · {task.lastEditedAt?new Date(task.lastEditedAt).toLocaleString("zh-CN"):""}</span>}<span>来源邮箱：{task.sourceMailboxAddress||"手工建立"}</span></section>}
+    {!!task.sourceEmails?.length&&<section className="panel shipment-source-mails"><div><h2>来源邮件</h2><p>该任务由以下邮件创建、补充或变更。</p></div><div>{task.sourceEmails.map(email=>{const summary=<span><b>{email.relation} · #{email.id}</b><strong>{email.mailSubject||"（无主题）"}</strong><small>{email.mailReceivedAt?`${email.mailSender} · ${new Date(email.mailReceivedAt).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})}`:"手工导入资料"}</small></span>;return (email.isMailbox??Boolean(email.mailReceivedAt))?<Link className="shipment-source-summary" href={`/mail/workbench/${email.id}`} key={email.id}>{summary}<ChevronRight size={16}/></Link>:<div className="shipment-source-summary" key={email.id}>{summary}</div>;})}</div></section>}
+    <section className="shipment-metrics"><article><span>货物明细</span><b>{task.items.length} 条</b></article><article><span>总体积</span><b>{sum("volume").toFixed(2)} CBM</b></article></section>
+    {!!task.relatedBatchTasks?.length&&<section className="panel"><div className="panel-title"><h2>同一邮件的分柜任务</h2></div><div className="panel-actions">{task.relatedBatchTasks.map(other=><Link className="ghost-button" key={other.id} href={`/shipments/${other.id}`}>#{task.batchRootId}-{other.batchSequence} · {other.soNumber}</Link>)}</div></section>}
+    {warehouseUser&&writebackRecord&&<section className="panel writeback-log"><div><h2>库存回写记录</h2><p>任务 #{task.id} 已扣减，系统已拦截重复回写。</p></div><div><b>{String(writebackRecord.inventory_writeback_date||"—")}</b><small>{String(writebackRecord.inventory_writeback_at||"").replace("T"," ").slice(0,19)}</small></div></section>}
+    <section className="panel shipment-notes editable"><label><span>制表备注</span><textarea value={task.specialRequirements||""} disabled={warehouseUser} placeholder="无特殊要求" onChange={event=>changeField("specialRequirements",event.target.value)}/></label><div className="qc-placeholder"><div className="qc-result-content"><h2>验货结果</h2>{qcNotice&&<p>{qcNotice}</p>}{qcResults?<><p>{qcSummaryText}</p><small>{qcUnsaved?"查询结果未保存，请点击“保存核对修改”":`已保存 · 查询时间 ${new Date(qcCheckedAt).toLocaleString("zh-CN")}`}</small></>:!qcNotice&&<p>点击查询 QC 验货系统结果</p>}</div>{!warehouseUser&&<button className="ghost-button" disabled={queryingQc} onClick={()=>void queryQcResult()}><RefreshCw size={14}/>{queryingQc?"查询中…":"查询验货结果"}</button>}</div></section>
+    <section className={`panel shipment-items editable ${warehouseUser?"warehouse-view":"shipping-view"} ${task.company==="Huadeng"?"huadeng-view":""}`}><div className="panel-title"><div><h2>货物明细</h2><p>{warehouseUser?"放货区和入库单号从本地库存表查询，仓务可人工修正":"核对走柜货物资料、数量和装箱信息"}</p></div>{!warehouseUser&&<button className="ghost-button" onClick={addItem}><Plus size={14}/>新增明细</button>}</div><div className="shipment-item-table"><div style={{gridTemplateColumns:itemGridColumns,minWidth:itemGridMinWidth}}><b>洋行</b><b>合同号</b><b>客人PO</b><b>货号</b><b>货名</b><b>规格</b><b>数量</b><b>件数</b><b>每箱毛重</b><b>每箱净重</b><b>卡板</b><b>体积</b><b>每单总件数</b>{warehouseUser&&<><b>入库单号</b><b>放货区</b><b>来源表</b></>}<b>类别</b><b>做柜工厂</b>{extraCargoDetails&&<b>补充资料</b>}<b>操作</b><b>客户验货结果/第三方验货结果</b></div>{task.items.map((item,index)=><div key={index} style={{gridTemplateColumns:itemGridColumns,minWidth:itemGridMinWidth}}>{itemFields.map(key=>{const derived=key==="customer";const warehouseEditable=key==="quantity"||key==="pieces"||key==="inventory_receipt_number"||key==="warehouse_location";const warehouseLocked=warehouseUser&&(task.status!=="PendingShipment"||!warehouseEditable);const inventoryField=key==="inventory_receipt_number"||key==="warehouse_location";const pendingWeight=key==="gross_weight_per_box"||key==="net_weight_per_box";const raw=key==="customer"?task.customer:key==="supplier"?(item.supplier||item.factory_remark||item.loading_factory):item[key];const placeholder=pendingWeight?"待货品资料":key==="inventory_receipt_number"?"待查询入库单":key==="warehouse_location"?"待查询放货区":key==="inventory_source"?"待查询来源表":"";return key==="spec"||compactNumberFields.has(key)?<EditableItemInput key={key} value={raw} disabled={derived||warehouseLocked} label={`${key}-${index+1}`} placeholder={placeholder} displayValue={value=>key==="spec"?fullSpecification(value):itemDisplayValue(key,value)} onChange={value=>changeItem(index,key,key==="spec"?specificationValue(value):value)}/>:<input key={key} className={inventoryField?"inventory-match-input":""} aria-label={`${key}-${index+1}`} title={key==="inventory_source"?String(item.inventory_source_full||item.inventory_source||""):undefined} disabled={derived||warehouseLocked} placeholder={placeholder} value={itemDisplayValue(key,raw)} onChange={event=>changeItem(index,key,event.target.value)}/>})}{extraCargoDetails&&<span><CargoExtraDetails item={item} company={task.company} specialTemplate={specialCargoTemplate} disabled={warehouseUser||saving} onChange={(key,value)=>changeItem(index,key,value)}/></span>}{warehouseUser?<span>{task.status==="PendingShipment"?"可保存":"只读"}</span>:<button className="icon-danger" aria-label={`删除第${index+1}条明细`} onClick={()=>removeItem(index)}><Trash2 size={14}/></button>}<span className={`qc-item-result ${qcState(qcByIndex.get(index))}`} title={qcByIndex.get(index)?.latest?`${qcByIndex.get(index)?.latest?.site||"待分配"} · ${String(qcByIndex.get(index)?.latest?.inspectionDate||"").slice(0,10)||"日期未填"} · ${qcResultText(qcByIndex.get(index))}${qcByIndex.get(index)?.latest?.holdRejectReason?` · ${qcByIndex.get(index)?.latest?.holdRejectReason}`:""}`:undefined}>{qcResults?qcResultText(qcByIndex.get(index)):"待查询"}</span></div>)}</div></section>
+  {warehouseUser&&<InventoryWritebackRecovery getDirectory={async()=>(await authorizedInventoryFiles(directoryRole)).handle} onRecovered={()=>window.location.reload()}/>}
+  </fieldset><ExportTemplatePicker purpose={exportPurpose} company={task.company||"Xingxin"} mode={String(task.exportDetails?.shipmentMode||(task.warehouseGroups.length?"Warehouse":"Container"))} special={specialCargoTemplate} busy={saving} onClose={()=>setExportPurpose(null)} onConfirm={exportShipment}/></div>;
+}
+
+function UserManagement({currentUser}:{currentUser:CurrentUser}){
+  const empty={username:"",displayName:"",role:"shipping" as UserRole,companyAccess:(currentUser.companyAccess||"Xingxin") as string,password:""};
+  const [users,setUsers]=useState<CurrentUser[]>([]);const [draft,setDraft]=useState(empty);const [editing,setEditing]=useState<CurrentUser|null>(null);const [error,setError]=useState("");const [notice,setNotice]=useState("");const [saving,setSaving]=useState(false);
+  async function load(){const response=await apiFetch("/api/users",{cache:"no-store"});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"读取用户失败");setUsers(result);}
+  useEffect(()=>{void load().catch(reason=>setError(reason instanceof Error?reason.message:"读取用户失败"));},[]);
+  async function create(event:React.FormEvent){event.preventDefault();setSaving(true);setError("");setNotice("");try{const response=await apiFetch("/api/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(draft)});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"新增用户失败");setDraft(empty);setNotice("用户已创建");await load();}catch(reason){setError(reason instanceof Error?reason.message:"新增用户失败");}finally{setSaving(false);}}
+  async function saveEdit(event:React.FormEvent){event.preventDefault();if(!editing)return;setSaving(true);setError("");setNotice("");try{const response=await apiFetch(`/api/users/${editing.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({displayName:editing.displayName,role:editing.role,companyAccess:editing.companyAccess||"Xingxin",isActive:editing.isActive,mailboxAddress:editing.mailboxAddress||""})});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"保存失败");setEditing(null);setNotice("用户资料已更新");await load();}catch(reason){setError(reason instanceof Error?reason.message:"保存失败");}finally{setSaving(false);}}
+  async function toggle(user:CurrentUser){setError("");setNotice("");const response=await apiFetch(`/api/users/${user.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({displayName:user.displayName,role:user.role,isActive:!user.isActive})});const result=await readJsonResponse(response);if(!response.ok){setError(result.error||"操作失败");return;}setNotice(user.isActive?"用户已停用":"用户已启用");await load();}
+  async function resetPassword(user:CurrentUser){
+    const password=window.prompt(`请输入 ${user.displayName} 的新密码（8至128位）`);
+    if(!password)return;
+    setError("");setNotice("");
+    if(password.length<8||password.length>128){setError("密码需为8至128个字符");return;}
+    setSaving(true);
+    try{
+      const response=await apiFetch(`/api/users/${user.id}/reset-password`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password})});
+      const result=await readJsonResponse(response);
+      if(!response.ok)throw new Error(result.error||"重置密码失败");
+      if(user.id===currentUser.id){window.alert("密码已修改，请使用新密码重新登录。");window.location.reload();return;}
+      setNotice("密码已重置，该用户需要重新登录");
+    }catch(reason){setError(reason instanceof Error?reason.message:"重置密码失败，请检查连接后重试");}
+    finally{setSaving(false);}
+  }
+  return <div className="content"><PageHeading eyebrow="管理员功能" title="用户管理" description="创建系统账号并按岗位分配使用权限。" />
+    <form className="panel user-create-form" autoComplete="off" onSubmit={create}><div className="panel-title"><div><h2>新增用户</h2><p>账号创建后即可登录系统</p></div></div><div className="user-form-grid"><label><span>登录账号</span><input value={draft.username} onChange={event=>setDraft({...draft,username:event.target.value.toLowerCase()})} name="new-user-account" autoComplete="off" required/></label><label><span>姓名</span><input name="new-user-display-name" autoComplete="off" value={draft.displayName} onChange={event=>setDraft({...draft,displayName:event.target.value})} required/></label><label><span>角色</span><select value={draft.role} onChange={event=>setDraft({...draft,role:event.target.value as UserRole})}><option value="shipping">船务员</option><option value="warehouse">仓库文员</option>{currentUser.role==="admin"&&<><option value="supervisor">主管</option><option value="admin">管理员</option></>}</select></label><label><span>公司权限</span><select disabled={currentUser.role!=="admin"} value={draft.companyAccess} onChange={event=>setDraft({...draft,companyAccess:event.target.value})}><option value="Xingxin">兴信</option><option value="Huadeng">华登</option></select></label><label><span>初始密码</span><input type="password" name="new-user-password" autoComplete="new-password" value={draft.password} onChange={event=>setDraft({...draft,password:event.target.value})} minLength={8} required/></label><button className="primary-button" disabled={saving}>{saving?"创建中…":"新增用户"}</button></div></form>
+    {(error||notice)&&<div className={error?"form-error page-message":"form-notice page-message"}>{error||notice}</div>}
+    <section className="panel user-list"><div className="panel-title"><div><h2>系统用户</h2><p>共 {users.length} 个账号</p></div></div><div className="data-table"><div className="data-row header"><span>用户</span><span>角色</span><span>状态</span><span>最后登录</span><span>操作</span></div>{users.map(user=><div className="data-row" key={user.id}><span><b>{user.displayName}</b><small>{user.username}</small>{user.mailboxAddress&&<small>{user.mailboxAddress}</small>}</span><span>{roleLabel(user.role)}<small>{user.role==="admin"||user.companyAccess==="Both"?"兴信和华登":user.companyAccess==="Huadeng"?"华登":"兴信"}</small></span><span><b className={`status ${user.isActive?"ok":"danger"}`}>{user.isActive?"启用":"停用"}</b></span><span>{user.lastLoginAt?new Date(user.lastLoginAt).toLocaleString("zh-CN"):"尚未登录"}</span><span className="user-actions"><button className="table-action" onClick={()=>{setEditing({...user});}}>编辑</button><button className="table-action" disabled={saving} onClick={()=>void resetPassword(user)}>重置密码</button><button className="table-action danger-text" disabled={user.id===currentUser.id} onClick={()=>void toggle(user)}>{user.isActive?"停用":"启用"}</button></span></div>)}</div></section>
+    {editing&&<div className="modal-backdrop"><form className="modal-card user-edit-modal" onSubmit={saveEdit}><h2>编辑用户</h2><p>{editing.username}</p><label><span>姓名</span><input value={editing.displayName} onChange={event=>setEditing({...editing,displayName:event.target.value})} required/></label><label><span>角色</span><select value={editing.role} onChange={event=>setEditing({...editing,role:event.target.value as UserRole})}><option value="shipping">船务员</option><option value="warehouse">仓库文员</option>{currentUser.role==="admin"&&<><option value="supervisor">主管</option><option value="admin">管理员</option></>}</select></label><label><span>公司权限</span><select disabled={currentUser.role!=="admin"} value={editing.companyAccess||"Xingxin"} onChange={event=>setEditing({...editing,companyAccess:event.target.value as "Xingxin"|"Huadeng"|"Both"})}><option value="Xingxin">兴信</option><option value="Huadeng">华登</option></select></label>{(editing.companyAccess==="Huadeng"||editing.companyAccess==="Both"||editing.role==="admin")&&<fieldset className="personal-mailbox-fields"><legend>华登邮箱绑定</legend><label><span>邮箱地址</span><input type="email" value={editing.mailboxAddress||""} onChange={event=>{setEditing({...editing,mailboxAddress:event.target.value});}}/></label><small>服务器管理员在后台按此用户账号配置邮箱服务器、文件夹和授权码；这里仅绑定邮箱地址。留空邮箱地址可解除绑定。</small></fieldset>}<label className="checkbox-label"><input type="checkbox" checked={editing.isActive} disabled={editing.id===currentUser.id} onChange={event=>setEditing({...editing,isActive:event.target.checked})}/>账号启用</label><div className="modal-actions"><button type="button" className="ghost-button" onClick={()=>setEditing(null)}>取消</button><button className="primary-button" disabled={saving}>保存</button></div></form></div>}
+  </div>;
+}
+
+function SettingsCenter({role}:{role:UserRole}) {
+  const [section, setSection] = useState<"home" | "inspection-mapping" | "product-info" | "templates" | "factory-mapping">("home");
+  const [localFolder,setLocalFolder]=useState("");
+  const [directoryMessage,setDirectoryMessage]=useState("");
+  useEffect(()=>{void loadConfiguredDirectory(role).then(handle=>setLocalFolder(handle?.name||""));},[role]);
+  async function chooseLocalFolder(){setDirectoryMessage("");try{const picker=(window as Window & {showDirectoryPicker?:()=>Promise<LocalDirectoryHandle>}).showDirectoryPicker;if(!picker)throw new Error("当前浏览器不支持文件夹授权，请使用最新版 Chrome 或 Edge");const handle=await picker();const permission=await handle.requestPermission({mode:"readwrite"});if(permission!=="granted")throw new Error("未获得文件夹读写权限");await saveLocalDirectory(role,handle);setLocalFolder(handle.name);setDirectoryMessage("本地库存文件夹已保存，仅对当前用户和当前浏览器生效");}catch(reason){if(reason instanceof DOMException&&reason.name==="AbortError")return;setDirectoryMessage(reason instanceof Error?reason.message:"选择文件夹失败");}}
+  if (section === "factory-mapping") return <FactoryMappingManagement onBack={()=>setSection("home")} />;
+  if (section === "templates") return <TemplateManagement company={activeCompany()} onBack={()=>setSection("home")} />;
+  if (section === "inspection-mapping") return <InspectionMappingSettings onBack={() => setSection("home")} />;
+  if (section === "product-info") return <ProductInfoSettings onBack={() => setSection("home")} />;
+  return <div className="content"><PageHeading eyebrow="基础配置" title="系统设置" description="按用户权限配置本地文件夹、共享盘目录、导入规则和模板。" />
+    {directoryMessage&&<div className="notice">{directoryMessage}</div>}
+    <div className="settings-grid">
+      <section className="panel setting-card directory-setting-card"><Database size={22}/><div><h2>文件夹目录</h2><p>本地库存：{localFolder||"尚未设置"}</p><small>{role==="admin"?"管理员":role==="warehouse"?"仓务文员":"船务用户"}的独立本地配置</small></div><button className="ghost-button" onClick={()=>void chooseLocalFolder()}>{localFolder?"重新选择":"选择文件夹"}</button><div className="directory-shared-row"><span><b>共享盘目录</b><small>仅管理员可以设置，本次保持原配置</small></span><button className="ghost-button" disabled>{role==="admin"?"待配置":"仅管理员"}</button></div></section>
+      <section className="panel setting-card"><MappingIcon size={22}/><div><h2>工厂名映射</h2><p>管理生产工厂英文名和中文简称，支持Excel导入。</p></div><button className="ghost-button" onClick={()=>setSection("factory-mapping")}>管理</button></section>
+      <section className="panel setting-card"><Container size={22}/><div><h2>导出模板管理</h2><p>分别管理走柜、交仓及船务、仓务模板配置。</p></div><button className="ghost-button" onClick={()=>setSection("templates")}>管理</button></section>
+      <section className="panel setting-card"><MappingIcon size={22}/><div><h2>验货映射</h2><p>按车间管理货号、负责人和验货总结表来源。</p></div><button className="ghost-button" onClick={() => setSection("inspection-mapping")}>管理</button></section>
+      <section className="panel setting-card"><Database size={22}/><div><h2>产品信息库</h2><p>管理装箱规格、毛净重及旧系统产品资料。</p></div><button className="ghost-button" onClick={() => setSection("product-info")}>管理</button></section>
+    </div>
+  </div>;
+}
+
+function ProductInfoSettings({onBack}:{onBack:()=>void}) {
+  const empty:ProductInfo={id:0,legacyId:0,customer:"",productCode:"",productName:"",quantityPerBox:null,toyCategory:"",factoryRemark:"",grossWeightPerBox:null,netWeightPerBox:null,source:"manual"};
+  const [rows,setRows]=useState<ProductInfo[]>([]),[customers,setCustomers]=useState<string[]>([]),[customer,setCustomer]=useState(""),[query,setQuery]=useState(""),[page,setPage]=useState(1),[total,setTotal]=useState(0);
+  const [editing,setEditing]=useState<ProductInfo|null>(null),[workbookOpen,setWorkbookOpen]=useState(false),[loading,setLoading]=useState(true),[message,setMessage]=useState(""); const pageSize=50;
+  async function load(target=page){setLoading(true);try{const params=new URLSearchParams({page:String(target),pageSize:String(pageSize)});if(query.trim())params.set("query",query.trim());if(customer)params.set("customer",customer);const response=await apiFetch(`/api/product-infos?${params}`,{cache:"no-store"});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"读取产品资料失败");setRows(result.items);setCustomers(result.customers);setTotal(result.total);setPage(result.page);}catch(reason){setMessage(reason instanceof Error?reason.message:"读取产品资料失败");}finally{setLoading(false);}}
+  useEffect(()=>{void load(1);},[customer]);
+  async function save(event:React.FormEvent){event.preventDefault();if(!editing)return;const response=await apiFetch(editing.id?`/api/product-infos/${editing.id}`:"/api/product-infos",{method:editing.id?"PUT":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(editing)});const result=await readJsonResponse(response);if(!response.ok){setMessage(result.error||"保存失败");return;}setEditing(null);setMessage("产品资料已保存");await load();}
+  async function remove(row:ProductInfo){if(!window.confirm(`确认删除货号 ${row.productCode}？`))return;const response=await apiFetch(`/api/product-infos/${row.id}`,{method:"DELETE"});if(!response.ok){setMessage("删除失败");return;}setMessage(`已删除货号 ${row.productCode}`);await load();}
+  const pages=Math.max(1,Math.ceil(total/pageSize)); const numberValue=(value:string)=>value===""?null:Number(value);
+  return <div className="content inspection-mapping-page"><button className="back-button" onClick={onBack}><ArrowLeft size={15}/>返回系统设置</button>
+    <div className="page-heading mapping-heading"><div><p className="eyebrow">产品基础资料</p><h1>产品信息库</h1><p>每个货号可保留不同装箱规格；支持从已生成的走柜表提取产品资料。</p></div><div className="mapping-actions"><button className="ghost-button" onClick={()=>setEditing({...empty})}><Plus size={15}/>新增产品</button><button className="primary-button" onClick={()=>setWorkbookOpen(true)}><Upload size={16}/>从走柜表提取</button></div></div>
+    <div className="mapping-summary"><span><b>{total}</b> 条产品规格</span><span><b>{customers.length}</b> 个客户</span></div>{message&&<div className="notice mapping-message">{message}</div>}
+    <section className="panel mapping-card"><div className="mapping-card-head"><div><h2>产品资料</h2><p>相同货号和装箱规格的资料需人工确认后更新。</p></div><div className="product-filters"><select value={customer} onChange={event=>setCustomer(event.target.value)}><option value="">全部客户</option>{customers.map(value=><option key={value}>{value}</option>)}</select><div className="mapping-search"><Search size={15}/><input value={query} onChange={event=>setQuery(event.target.value)} onKeyDown={event=>{if(event.key==="Enter")void load(1);}} placeholder="搜索客户、货号或货名"/></div><button className="ghost-button" onClick={()=>void load(1)}>搜索</button></div></div>
+      <div className="mapping-table"><div className="product-row header"><span>客户</span><span>货号</span><span>货名</span><span>每箱个数</span><span>类别</span><span>柜单备注</span><span>毛重kg</span><span>净重kg</span><span>净净重kg</span><span>来源</span><span>操作</span></div>{rows.map(row=><div className="product-row" key={row.id}><span>{row.customer||"—"}</span><span className="product-code">{row.productCode}</span><span>{row.productName||"—"}</span><span>{row.quantityPerBox??"默认"}</span><span>{row.toyCategory||"—"}</span><span>{row.factoryRemark||"—"}</span><span>{row.grossWeightPerBox??"—"}</span><span>{row.netWeightPerBox??"—"}</span><span>{row.netNetWeightPerBox??"—"}</span><span>{row.source||"—"}</span><span className="mapping-row-actions"><button onClick={()=>setEditing({...row})}>编辑</button><button className="delete" onClick={()=>void remove(row)}><Trash2 size={12}/></button></span></div>)}</div>
+      {!rows.length&&<div className="mapping-empty">{loading?"正在读取产品资料…":"没有找到符合条件的产品"}</div>}<div className="product-pagination"><span>第 {page} / {pages} 页</span><div><button className="ghost-button" disabled={page<=1||loading} onClick={()=>void load(page-1)}>上一页</button><button className="ghost-button" disabled={page>=pages||loading} onClick={()=>void load(page+1)}>下一页</button></div></div></section>
+    {workbookOpen&&<ProductWorkbookImport onClose={()=>setWorkbookOpen(false)} onSaved={()=>void load(1)}/>}
+    {editing&&<div className="mapping-modal-backdrop" onMouseDown={()=>setEditing(null)}><form className="mapping-modal" onSubmit={save} onMouseDown={event=>event.stopPropagation()}><div><h2>{editing.id?"编辑产品资料":"新增产品资料"}</h2><p>货号与每箱个数组合不能重复。</p></div><div className="mapping-form-grid">{[["客户","customer"],["货号","productCode"],["货名","productName"],["玩具类别","toyCategory"],["柜单备注","factoryRemark"],["箱尺寸","boxDimensions"],["品牌","brand"],["来源","source"]].map(([label,key])=><label key={key}><span>{label}</span><input required={key==="productCode"} value={String(editing[key as keyof ProductInfo]??"")} onChange={event=>setEditing(current=>current?{...current,[key]:event.target.value}:current)}/></label>)}{[["每箱个数","quantityPerBox"],["每箱毛重(kg)","grossWeightPerBox"],["每箱净重(含彩盒kg)","netWeightPerBox"],["每箱净净重(仅产品kg)","netNetWeightPerBox"],["每箱尺码","measurementPerBox"],["每箱CBM","volumePerBox"]].map(([label,key])=><label key={key}><span>{label}</span><input type="number" min="0.001" step={key==="quantityPerBox"?"1":"0.001"} value={String(editing[key as keyof ProductInfo]??"")} onChange={event=>setEditing(current=>current?{...current,[key]:numberValue(event.target.value)}:current)}/></label>)}</div><div className="panel-actions"><button type="button" className="ghost-button" onClick={()=>setEditing(null)}>取消</button><button className="primary-button">保存</button></div></form></div>}
+  </div>;
+}
+
+function InspectionMappingSettings({ onBack }: { onBack: () => void }) {
+  const [mappings, setMappings] = useState<StoredInspectionMapping[]>([]);
+  const [activeGroupName, setActiveGroupName] = useState("");
+  const [query, setQuery] = useState("");
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState<StoredInspectionMapping | null>(null);
+  const importInput = useRef<HTMLInputElement>(null);
+  const groups = Array.from(new Map(mappings.map(row => [row.groupName, {
+    name: row.groupName, inspectionSource: row.inspectionSource, excluded: row.isExcluded,
+    description: row.groupName === "华嘉" ? "华嘉货号统一在兴信验货总结表中查询" : row.isExcluded ? "河源自行做柜，系统保留映射但不读取验货结果" : undefined,
+  }])).values());
+  const group = groups.find(item => item.name === activeGroupName) || groups[0];
+  const normalizedQuery = query.trim().toLowerCase();
+  const rows = mappings.filter(row => row.groupName === group?.name && (!normalizedQuery || Object.values(row).some(value => String(value).toLowerCase().includes(normalizedQuery))));
+
+  async function loadMappings() {
+    setLoading(true);
+    try {
+      const response = await apiFetch("/api/inspection-mappings");
+      if (!response.ok) throw new Error("读取验货映射失败");
+      const result = await response.json() as StoredInspectionMapping[];
+      setMappings(result);
+      if (!activeGroupName && result.length) setActiveGroupName(result[0].groupName);
+    } catch (error) { setMessage(error instanceof Error ? error.message : "读取验货映射失败"); }
+    finally { setLoading(false); }
+  }
+  useEffect(() => { void loadMappings(); }, []);
+
+  async function importWorkbook(file?: File) {
+    if (!file) return;
+    setLoading(true); setMessage("");
+    const body = new FormData(); body.append("file", file);
+    try {
+      const response = await apiFetch("/api/inspection-mappings/import", { method:"POST", body });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "导入失败");
+      setActiveGroupName(""); setMessage(`已从 ${result.filename} 更新 ${result.total} 条映射`);
+      await loadMappings();
+    } catch (error) { setMessage(error instanceof Error ? error.message : "导入失败"); setLoading(false); }
+  }
+
+  async function saveMapping(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!editing) return;
+    const response = await apiFetch(editing.id ? `/api/inspection-mappings/${editing.id}` : "/api/inspection-mappings", {
+      method: editing.id ? "PUT" : "POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(editing),
+    });
+    if (!response.ok) { setMessage("保存失败，请重试"); return; }
+    setEditing(null); setMessage("验货映射已保存"); await loadMappings();
+  }
+
+  async function deleteMapping(row: StoredInspectionMapping) {
+    if (!window.confirm(`确认删除货号 ${row.productCode}？`)) return;
+    const response = await apiFetch(`/api/inspection-mappings/${row.id}`, { method:"DELETE" });
+    if (!response.ok) { setMessage("删除失败，请重试"); return; }
+    setMessage(`已删除货号 ${row.productCode}`); await loadMappings();
+  }
+
+  function newMapping() {
+    setEditing({ id:0, groupName:group?.name || "兴信A车间", inspectionSource:group?.inspectionSource || "兴信验货总结表", isExcluded:group?.excluded || false, customer:"", productCode:"", productName:"", owner:"", productionPlace:"", note:"" });
+  }
+  return <div className="content inspection-mapping-page">
+    <button className="back-button" onClick={onBack}><ArrowLeft size={15}/>返回系统设置</button>
+    <div className="page-heading mapping-heading"><div><p className="eyebrow">验货基础资料</p><h1>验货映射</h1><p>按跟单负责货号表管理；系统据此确定货号应查询的验货总结表。</p></div><div className="mapping-actions"><button className="ghost-button" onClick={newMapping}><Plus size={15}/>新增映射</button><input ref={importInput} type="file" accept=".xlsx,.xlsm" hidden onChange={event => { void importWorkbook(event.target.files?.[0]); event.target.value=""; }} /><button className="primary-button" disabled={loading} onClick={() => importInput.current?.click()}><Upload size={16}/>{loading ? "处理中…" : "导入更新"}</button></div></div>
+    <div className="mapping-summary"><span><b>{groups.length}</b> 个车间分组</span><span><b>{mappings.length}</b> 条映射</span><span>资料来源：跟单负责货号.xlsx</span></div>
+    {message && <div className="notice mapping-message"><span>{message}</span></div>}
+    <div className="mapping-layout">
+      <aside className="mapping-groups" aria-label="车间分组">{groups.map(item => <button key={item.name} className={group?.name === item.name ? "active" : ""} onClick={() => { setActiveGroupName(item.name); setQuery(""); }}><span>{item.name}</span><small>{mappings.filter(row => row.groupName === item.name).length} 条 · {item.inspectionSource}</small></button>)}</aside>
+      <section className="panel mapping-card">
+        {group && <><div className="mapping-card-head"><div><div className="mapping-title-line"><h2>{group.name}</h2><b className={`status ${group.excluded ? "warn" : "ok"}`}>{group.inspectionSource}</b></div><p>{group.description || `该分组货号从${group.inspectionSource}读取验货结果。`}</p></div><div className="mapping-search"><Search size={15}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索客户、货号、货名或负责人" /></div></div>
+        <div className="mapping-table"><div className="mapping-row header"><span>客户</span><span>货号</span><span>货名</span><span>负责人</span><span>生产地</span><span>备注</span><span>操作</span></div>{rows.map(row => <div className="mapping-row" key={row.id}><span>{row.customer || "—"}</span><span className="product-code">{row.productCode}</span><span>{row.productName || "—"}</span><span>{row.owner || "—"}</span><span>{row.productionPlace || "—"}</span><span>{row.note || "—"}</span><span className="mapping-row-actions"><button onClick={() => setEditing(row)}>编辑</button><button className="delete" onClick={() => void deleteMapping(row)}><Trash2 size={12}/></button></span></div>)}</div>
+        {!rows.length && <div className="mapping-empty">{loading ? "正在读取验货映射…" : "没有找到符合条件的货号"}</div>}</>}
+        {!group && <div className="mapping-empty">{loading ? "正在读取验货映射…" : "暂无验货映射，请点击“导入更新”选择跟单负责货号表"}</div>}
+      </section>
+    </div>
+    {editing && <div className="mapping-modal-backdrop" onMouseDown={() => setEditing(null)}><form className="mapping-modal" onSubmit={saveMapping} onMouseDown={event => event.stopPropagation()}><div><h2>{editing.id ? "编辑验货映射" : "新增验货映射"}</h2><p>填写货号所属分组及基础资料。</p></div><div className="mapping-form-grid">{[
+      ["车间分组","groupName"],["验货表来源","inspectionSource"],["客户","customer"],["货号","productCode"],["货名","productName"],["负责人","owner"],["生产地","productionPlace"],["备注","note"],
+    ].map(([label,key]) => <label key={key}><span>{label}</span><input required={key === "groupName" || key === "inspectionSource" || key === "productCode"} value={String(editing[key as keyof StoredInspectionMapping] ?? "")} onChange={event => setEditing(current => current ? {...current,[key]:event.target.value} : current)} /></label>)}</div><label className="mapping-check"><input type="checkbox" checked={editing.isExcluded} onChange={event => setEditing(current => current ? {...current,isExcluded:event.target.checked} : current)} />不参与系统验货检查</label><div className="panel-actions"><button type="button" className="ghost-button" onClick={() => setEditing(null)}>取消</button><button className="primary-button" type="submit">保存</button></div></form></div>}
+  </div>;
+}
+
+function PageHeading({ eyebrow,title,description,action }: { eyebrow:string; title:string; description:string; action?:string }) { return <div className="page-heading"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{description}</p></div>{action && <button className="primary-button"><Upload size={16}/>{action}</button>}</div>; }
+function PanelTitle({title,subtitle,link}:{title:string;subtitle:string;link?:string}) { return <div className="panel-title"><div><h2>{title}</h2><p>{subtitle}</p></div>{link && <Link href={link}>查看全部 <ChevronRight size={15}/></Link>}</div>; }

@@ -1473,7 +1473,8 @@ async function exportIQCReport(recordId) {
       allowTaint:      true,
       backgroundColor: '#ffffff',
       logging:         false,
-      windowWidth:     canvas.offsetWidth,
+      /* 有表格微量溢出（max-content > 794）时按 scrollWidth 截取，避免右侧被裁 */
+      windowWidth:     Math.max(canvas.offsetWidth, canvas.scrollWidth),
       windowHeight:    canvas.offsetHeight,
       scrollX: 0, scrollY: 0, x: 0, y: 0,
     });
@@ -1563,13 +1564,17 @@ function _buildIQCCanvas(r) {
     return items;
   }
 
-  /* ── 判定（measurements 有 FAIL 时强制 REJ）── */
-  const resultRaw   = (r.result || '').toUpperCase();
+  /* 报告与录入使用同一最终判定；人工 COND/HOLD 保留，测量 FAIL 明细仍如实显示。 */
+  const resultRaw = String(r.result || '').trim().toUpperCase();
   const hasMeasFail = Array.isArray(r.measurements) &&
     r.measurements.some(m => String(m.result || '').toUpperCase() === 'FAIL');
-  const _isP = !hasMeasFail && (resultRaw === 'PASS' || resultRaw === 'OK');
-  const _isR = hasMeasFail || resultRaw === 'REJ' || resultRaw === 'FAIL' || resultRaw === 'NG';
-  const _isC = !hasMeasFail && resultRaw === 'COND';
+  const finalResult = typeof getFinalRecordResult === 'function'
+    ? getFinalRecordResult(resultRaw, r.defects, r.measurements, Number(r.qty) || 0)
+    : (resultRaw === 'COND' || resultRaw === 'HOLD' ? resultRaw : hasMeasFail ? 'REJ' : resultRaw);
+  const _isP = finalResult === 'PASS' || finalResult === 'OK';
+  const _isR = finalResult === 'REJ' || finalResult === 'FAIL' || finalResult === 'NG';
+  const _isC = finalResult === 'COND';
+  const _isH = finalResult === 'HOLD';
 
   /* ── 解析不良 ── */
   const defectItems = _isP ? [] : parseDefectItems(r.defect);
@@ -1666,6 +1671,30 @@ function _buildIQCCanvas(r) {
     defRows.push({ desc:'', category:'', cr:0, maj:0, maj10:0, min:0, remark:'' });
   }
 
+  /* ── AQL 表联动高亮：录入不良明细选了哪个等级，AQL 表对应列头和
+     当前 LOT SIZE 行的 Ac 值就填色标注（黄色，打印友好）── */
+  /* 不良明细实际用到的等级（有数量才算）：表头和 Ac 数值格都高亮 */
+  const defectLv = {
+    CR:     defRows.some(d => (d.cr    || 0) > 0),
+    MAJ065: defRows.some(d => (d.maj   || 0) > 0),
+    MAJ10:  defRows.some(d => (d.maj10 || 0) > 0),
+    MIN25:  defRows.some(d => (d.min   || 0) > 0),
+    FUNC:   defRows.some(d => d.category === '功能'
+                          && ((d.cr||0) + (d.maj||0) + (d.maj10||0) + (d.min||0)) > 0),
+  };
+  /* 手动选择的 AQL 档位（可多选，逗号分隔）：没填不良数量时只高亮表头，Ac 数值格不填色 */
+  const manualLvs = String(r.aqlLevel || '').split(',').map(s => _nl(s)).filter(Boolean);
+  const usedLv = {
+    CR:     defectLv.CR     || manualLvs.includes('CR'),
+    MAJ065: defectLv.MAJ065 || manualLvs.includes('MAJ065'),
+    MAJ10:  defectLv.MAJ10  || manualLvs.includes('MAJ10'),
+    MIN25:  defectLv.MIN25  || manualLvs.includes('MIN25'),
+    FUNC:   defectLv.FUNC,
+  };
+  const AQL_HL = '#ffd54d';
+  const aqlHdStyle = on =>
+    `background:${on ? AQL_HL : '#ebebeb'};font-weight:700;text-align:center;padding:2px 2px;font-size:8px;border-right:1px solid #222;border-bottom:1px solid #222`;
+
   const sumCR    = defRows.reduce((s,d) => s+(d.cr||0), 0);
   const sumMAJ   = defRows.reduce((s,d) => s+(d.maj||0), 0);
   const sumMAJ10 = defRows.reduce((s,d) => s+(d.maj10||0), 0);
@@ -1674,6 +1703,9 @@ function _buildIQCCanvas(r) {
 
   /* ── 抽查数量（用于备注栏百分比） ── */
   const sampleQtyNum = Number(r.sampleQty != null ? r.sampleQty : 0);
+
+  /* ── 记录级备注（录入时填的「备注」，出报告时放到检验状况第一行的 简介/备注 栏） ── */
+  const recRemark = String(r.remark || '').trim();
 
   /* ── 每行备注：只显示百分比 ── */
   function itemPct(qty) {
@@ -1782,29 +1814,29 @@ function _buildIQCCanvas(r) {
           检&ensp;验&ensp;结&ensp;果
         </td>
       </tr>
-      <!-- 行2：LOT SIZE rowspan=2 | SAMPLE SIZE rowspan=2 | 分组 | 检验结果内容 rowspan=9 -->
+      <!-- 行2：LOT SIZE rowspan=2 | SAMPLE SIZE rowspan=2 | 分组 | 检验结果内容 rowspan=表头2行+全部数据行 -->
       <tr>
         <td rowspan="2" style="background:#ebebeb;font-weight:700;text-align:center;padding:2px 3px;vertical-align:middle;border-right:1px solid #222;border-bottom:1px solid #222">LOT&nbsp;SIZE</td>
         <td rowspan="2" style="background:#ebebeb;font-weight:700;text-align:center;padding:2px 3px;vertical-align:middle;border-right:1px solid #222;border-bottom:1px solid #222">SAMPLE<br/>SIZE</td>
         <td colspan="4" style="background:#ebebeb;font-weight:700;text-align:center;padding:2px 3px;font-size:8.5px;border-right:1px solid #222;border-bottom:1px solid #222">外观 AESTHETIC（AC）</td>
         <td colspan="3" style="background:#ebebeb;font-weight:700;text-align:center;padding:2px 3px;font-size:8.5px;border-right:1px solid #222;border-bottom:1px solid #222">FUNC / 功能</td>
-        <td rowspan="10" style="vertical-align:middle;border-right:1px solid #222;border-bottom:1px solid #222;padding:8px 6px">
+        <td rowspan="${IQC_AQL_TABLE.length + 2}" style="vertical-align:middle;border-right:1px solid #222;border-bottom:1px solid #222;padding:8px 6px">
           <div style="display:flex;flex-direction:column;justify-content:center;gap:8px">
             <div style="text-align:center;font-size:11px;white-space:nowrap;font-weight:${_isP?'900':'600'};${_isP?'background:#000;color:#fff;padding:5px 4px':'color:#4b5563;padding:5px 4px'}">合格</div>
             <div style="text-align:center;font-size:11px;white-space:nowrap;font-weight:${_isR?'900':'600'};${_isR?'background:#000;color:#fff;padding:5px 4px':'color:#4b5563;padding:5px 4px'}">不合格</div>
-            <div style="text-align:center;font-size:11px;white-space:nowrap;font-weight:${_isC?'900':'600'};${_isC?'background:#000;color:#fff;padding:5px 4px':'color:#4b5563;padding:5px 4px'}">AOD</div>
+            <div style="text-align:center;font-size:11px;white-space:nowrap;font-weight:${_isC||_isH?'900':'600'};${_isC||_isH?'background:#000;color:#fff;padding:5px 4px':'color:#4b5563;padding:5px 4px'}">${_isH?'待定':'AOD'}</div>
           </div>
         </td>
       </tr>
       <!-- 行3：列头 CR/MAJ/MIN -->
       <tr>
-        <td style="background:#ebebeb;font-weight:700;text-align:center;padding:2px 2px;font-size:8px;border-right:1px solid #222;border-bottom:1px solid #222">CR</td>
-        <td style="background:#ebebeb;font-weight:700;text-align:center;padding:2px 2px;font-size:8px;border-right:1px solid #222;border-bottom:1px solid #222">MAJ<br/>0.65</td>
-        <td style="background:#ebebeb;font-weight:700;text-align:center;padding:2px 2px;font-size:8px;border-right:1px solid #222;border-bottom:1px solid #222">MAJ<br/>1.0</td>
-        <td style="background:#ebebeb;font-weight:700;text-align:center;padding:2px 2px;font-size:8px;border-right:1px solid #222;border-bottom:1px solid #222">MIN<br/>2.5</td>
-        <td style="background:#ebebeb;font-weight:700;text-align:center;padding:2px 2px;font-size:8px;border-right:1px solid #222;border-bottom:1px solid #222">SMPL</td>
-        <td style="background:#ebebeb;font-weight:700;text-align:center;padding:2px 2px;font-size:8px;border-right:1px solid #222;border-bottom:1px solid #222">MAJ</td>
-        <td style="background:#ebebeb;font-weight:700;text-align:center;padding:2px 2px;font-size:8px;border-right:1px solid #222;border-bottom:1px solid #222">RE</td>
+        <td style="${aqlHdStyle(usedLv.CR)}">CR</td>
+        <td style="${aqlHdStyle(usedLv.MAJ065)}">MAJ<br/>0.65</td>
+        <td style="${aqlHdStyle(usedLv.MAJ10)}">MAJ<br/>1.0</td>
+        <td style="${aqlHdStyle(usedLv.MIN25)}">MIN<br/>2.5</td>
+        <td style="${aqlHdStyle(false)}">SMPL</td>
+        <td style="${aqlHdStyle(usedLv.FUNC)}">MAJ</td>
+        <td style="${aqlHdStyle(false)}">RE</td>
       </tr>
       <!-- 行4-11：数据行 -->
       ${IQC_AQL_TABLE.map(row => {
@@ -1817,15 +1849,16 @@ function _buildIQCCanvas(r) {
           ? `<span style="color:#ffffff;font-weight:700;opacity:1;filter:none;mix-blend-mode:normal;white-space:nowrap">✓ ${row.range}</span>`
           : row.range;
         const dB = active ? 'background:#fff;font-weight:600' : 'background:#fff;font-weight:400';
+        const cellHl = used => (active && used) ? `background:${AQL_HL};font-weight:700` : dB;
         return `<tr>
           <td style="${lotStyle}">${lotContent}</td>
           <td style="${base};${dB}">${row.sample}</td>
-          <td style="${base};${dB}">${row.cr}</td>
-          <td style="${base};${dB}">${row.maj065}</td>
-          <td style="${base};${dB}">${row.maj10}</td>
-          <td style="${base};${dB}">${row.min25}</td>
+          <td style="${base};${cellHl(defectLv.CR)}">${row.cr}</td>
+          <td style="${base};${cellHl(defectLv.MAJ065)}">${row.maj065}</td>
+          <td style="${base};${cellHl(defectLv.MAJ10)}">${row.maj10}</td>
+          <td style="${base};${cellHl(defectLv.MIN25)}">${row.min25}</td>
           <td style="${base};${dB}">${row.func_sample}</td>
-          <td style="${base};${dB}">${row.m065}</td>
+          <td style="${base};${cellHl(defectLv.FUNC)}">${row.m065}</td>
           <td style="${base};${dB}">${row.m065+1}</td>
         </tr>`;
       }).join('')}
@@ -1854,8 +1887,9 @@ function _buildIQCCanvas(r) {
           const pctStr = sampleQtyNum > 0 && (d.cr||d.maj||d.maj10||d.min) > 0
             ? ((d.cr||d.maj||d.maj10||d.min) / sampleQtyNum * 100).toFixed(2) + '%'
             : '';
-          if (pctStr && d.remark) return pctStr + ' / ' + d.remark;
-          return pctStr || d.remark || '';
+          let cell = (pctStr && d.remark) ? pctStr + ' / ' + d.remark : (pctStr || d.remark || '');
+          if (i === 0 && recRemark) cell = cell ? cell + ' / ' + recRemark : recRemark;
+          return cell;
         })()}</td>
       </tr>`).join('')}
       <tr class="total-row">
@@ -1898,20 +1932,23 @@ function _buildIQCCanvas(r) {
         <th style="font-size:7px;border-right:1px solid #222;border-bottom:1px solid #222">判定</th>
       </tr>
       ${(() => {
-        /* 格式化：整数不留小数，小数最多1位 */
+        /* 格式化：整数不留小数，小数保留两位；仅改变报告显示，不修改原始测量数据 */
         function _fmt(v) {
-          const n=parseFloat(v); if(isNaN(n)) return v||'';
-          return Number.isInteger(n)?String(n):n.toFixed(1);
+          const text=String(v??'').trim(), n=Number(text);
+          if (!text||!Number.isFinite(n)||!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text)) return v??'';
+          return Number.isInteger(n)?String(n):n.toFixed(2);   /* 测量数值保留两位小数 */
         }
         function _ra(arr) {
-          const f=(arr||[]).filter(v=>v!=='');
-          const n=f.map(Number).filter(x=>!isNaN(x));
-          return (n.length>0&&n.length===f.length)
-            ?(n.reduce((a,b)=>a+b,0)/n.length).toFixed(1):null;
+          const f=(arr||[]).filter(v=>v!=null&&String(v).trim()!=='');
+          const n=f.map(v=>Number(String(v).trim()));
+          if (!n.length||n.some(x=>!Number.isFinite(x))||f.some(v=>!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(String(v).trim()))) return null;
+          const average=n.reduce((a,b)=>a+b,0)/n.length;
+          return Number.isFinite(average)?average.toFixed(2):null;   /* 平均值保留两位小数 */
         }
-        function _stdTol(std,tol) {
-          const s=(std||'').trim(),t=(tol||'').trim();
-          return s&&t?`${_fmt(s)}±${_fmt(t)}`:_fmt(s)||'';
+        function _stdTol(std,tol,dir) {
+          const s=String(std??'').trim(),t=String(tol??'').trim();
+          const sym = dir==='+'?'+':(dir==='-'?'-':'±');
+          return s&&t?`${_fmt(s)}${sym}${_fmt(t)}`:_fmt(s)||'';
         }
         /* 竖排多行 div 显示 */
         function _lines(...vals) {
@@ -1948,31 +1985,31 @@ function _buildIQCCanvas(r) {
           if (mt==='LW') {
             const L=m.lValues||[],W=m.wValues||[];
             return {
-              stdLines: _star(_stdTol(m.standardL,m.toleranceL),_stdTol(m.standardW,m.toleranceW)),
-              valLines: Array.from({length:8},(_,j)=>_star(_fmt(L[j]||''),_fmt(W[j]||''))),
+              stdLines: _star(_stdTol(m.standardL,m.toleranceL,m.tolDir),_stdTol(m.standardW,m.toleranceW,m.tolDir)),
+              valLines: Array.from({length:8},(_,j)=>_star(_fmt(L[j]??''),_fmt(W[j]??''))),
               avgLines: _star(_ra(L)||'', _ra(W)||''),
             };
           }
           if (mt==='LWH') {
             const L=m.lValues||[],W=m.wValues||[],H=m.hValues||[];
             return {
-              stdLines: _star(_stdTol(m.standardL,m.toleranceL),_stdTol(m.standardW,m.toleranceW),_stdTol(m.standardH,m.toleranceH)),
-              valLines: Array.from({length:8},(_,j)=>_star(_fmt(L[j]||''),_fmt(W[j]||''),_fmt(H[j]||''))),
+              stdLines: _star(_stdTol(m.standardL,m.toleranceL,m.tolDir),_stdTol(m.standardW,m.toleranceW,m.tolDir),_stdTol(m.standardH,m.toleranceH,m.tolDir)),
+              valLines: Array.from({length:8},(_,j)=>_star(_fmt(L[j]??''),_fmt(W[j]??''),_fmt(H[j]??''))),
               avgLines: _star(_ra(L)||'', _ra(W)||'', _ra(H)||''),
             };
           }
           /* single */
-          const vs=[...(m.values||[]),...Array(8).fill('')].slice(0,8).map(v=>v?_fmt(v):'');
-          const rawAvg=m.avg||_ra(m.values||[])||'—';
+          const vs=[...(m.values||[]),...Array(8).fill('')].slice(0,8).map(_fmt);
+          const rawAvg=_ra(m.values||[])||m.avg||'—';
           return {
-            stdLines: _lines(_stdTol(m.standard,m.tolerance)||m.standard||''),
+            stdLines: _lines(_stdTol(m.standard,m.tolerance,m.tolDir)||m.standard||''),
             valLines: vs.map(v=>v?`<div style="line-height:11px;font-size:9px">${v}</div>`:'&nbsp;'),
-            avgLines: _lines(rawAvg==='—'?'—':_fmt(rawAvg)),
+            avgLines: _lines(rawAvg==='—'?'—':Number.isFinite(Number(rawAvg))?Number(rawAvg).toFixed(2):rawAvg),
           };
         }
 
         const meas=Array.isArray(r.measurements)
-          ?r.measurements.filter(m=>m.item||(m.lValues||m.values)?.some(v=>v!==''))
+          ?r.measurements.filter(m=>m.item||(m.measureType==='LW'?['lValues','wValues']:m.measureType==='LWH'?['lValues','wValues','hValues']:['values']).some(field=>(m[field]||[]).some(v=>v!=null&&String(v).trim()!=='')))
           :[];
         /* 每个测量项目占一行；多维(长宽高)在各单元格内用 * 横排连接，带公差 */
         const rd=meas.slice(0,2).map(m=>{

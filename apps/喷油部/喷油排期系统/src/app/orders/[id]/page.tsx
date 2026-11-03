@@ -4,14 +4,19 @@ import { getSession } from "@/lib/session";
 import Link from "next/link";
 import { DotnetHttpError, dotnetGet } from "@/lib/dotnet";
 import OrderDetailEditor, { type OrderDetailDto } from "./OrderDetailEditor";
+import { canEditPlanDates } from "@/lib/planDateAdjustment";
 
 export default async function OrderDetailPage({ params }: { params: { id: string } }) {
   const session = await getSession();
   if (!session.userId) redirect("/login");
 
   let dto: OrderDetailDto;
+  let lines: Array<{ id: number; name: string; craftType: string; isActive: boolean }>;
   try {
-    dto = await dotnetGet<OrderDetailDto>(`/api/orders/${Number(params.id)}`);
+    [dto, lines] = await Promise.all([
+      dotnetGet<OrderDetailDto>(`/api/orders/${Number(params.id)}`),
+      dotnetGet<Array<{ id: number; name: string; craftType: string; isActive: boolean }>>("/api/lines"),
+    ]);
   } catch (error) {
     if (error instanceof DotnetHttpError && error.status === 404) notFound();
     throw error;
@@ -25,5 +30,5 @@ export default async function OrderDetailPage({ params }: { params: { id: string
     </div>;
   }
 
-  return <OrderDetailEditor order={dto} isAdmin={session.role === "admin"} />;
+  return <OrderDetailEditor order={dto} lines={lines.filter(line => line.isActive)} isAdmin={session.role === "admin" || session.role === "manager"} canEdit={["admin", "manager", "clerk"].includes(session.role ?? "")} canAdjustDates={canEditPlanDates(session.role)} />;
 }

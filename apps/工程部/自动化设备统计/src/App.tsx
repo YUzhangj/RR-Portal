@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import ProductionDays from "./ProductionDays";
+import RecordSummary from "./RecordSummary";
+import { summarizeRecords } from "./record-summary";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Equipment = {
   id: number;
@@ -13,6 +16,8 @@ type Equipment = {
   saved: number;
   balance: number;
   unitSave: number;
+  manualPrice?: number | null;
+  machinePrice?: number | null;
   update: string;
 };
 type ProductionRecord = {
@@ -59,7 +64,10 @@ async function api(
       body !== undefined ? { "Content-Type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-  if (!r.ok) throw new Error(`请求失败（${r.status}）`);
+  if (!r.ok) {
+    const error = await r.json().catch(() => null);
+    throw new Error(error?.error || `请求失败（${r.status}）`);
+  }
   return r.json();
 }
 
@@ -88,6 +96,35 @@ export default function Home() {
   const [resetPasswordError, setResetPasswordError] = useState("");
   const [passwordResetNotice, setPasswordResetNotice] = useState("");
 
+  const [recordDialog, setRecordDialog] = useState<{ mode: "edit" | "delete"; record: ProductionRecord } | null>(null);
+  const [recordError, setRecordError] = useState("");
+  const [recordNotice, setRecordNotice] = useState("");
+  const [historyTable, setHistoryTable] = useState(false);
+  const [historyFactory, setHistoryFactory] = useState("");
+  const [historyMachine, setHistoryMachine] = useState("");
+  const [recordSaving, setRecordSaving] = useState(false);
+
+  async function changeRecord(formData?: FormData) {
+    if (!recordDialog || recordSaving) return;
+    setRecordSaving(true);
+    setRecordError("");
+    try {
+      const updated = await api(`records/${recordDialog.record.id}`, formData ? "PUT" : "DELETE", formData ? {
+        date: String(formData.get("date") || ""),
+        production: Number(formData.get("production")),
+        line: String(formData.get("line") || ""),
+        note: String(formData.get("note") || ""),
+      } : undefined);
+      setState(updated);
+      setRecordNotice(formData ? "记录已更新，汇总已同步。" : "记录已删除，相关产量已从汇总中扣除。");
+      setRecordDialog(null);
+    } catch (error) {
+      setRecordError(error instanceof Error ? error.message : "操作失败，请重试。");
+    } finally {
+      setRecordSaving(false);
+    }
+  }
+
   useEffect(() => {
     api("state")
       .then(setState)
@@ -96,6 +133,16 @@ export default function Home() {
 
   const rows = useMemo(() => state?.equipment ?? [], [state]);
   const records = useMemo(() => state?.records ?? [], [state]);
+  const historyFactories = [...new Set([...rows.map(row => row.factory), ...records.map(record => record.factory)])];
+  const historyMachines = [...new Set([
+    ...rows.filter(row => !historyFactory || row.factory === historyFactory).map(row => row.name),
+    ...records.filter(record => !historyFactory || record.factory === historyFactory).map(record => record.equipment),
+  ])];
+  const filteredRecords = useMemo(() => records.filter(record =>
+    (!historyFactory || record.factory === historyFactory) &&
+    (!historyMachine || record.equipment === historyMachine)
+  ), [records, historyFactory, historyMachine]);
+  const recordGroups = useMemo(() => summarizeRecords(filteredRecords), [filteredRecords]);
   const users = useMemo(() => state?.users ?? [], [state]);
 
   const visible = useMemo(
@@ -112,6 +159,7 @@ export default function Home() {
   );
   const total = visible.reduce((sum, r) => sum + r.investment, 0);
   const recovered = visible.reduce((sum, r) => sum + r.saved, 0);
+  const currentBalance = rows.reduce((sum, r) => sum + r.balance, 0);
 
   function run(action: Promise<AppState>, after?: () => void) {
     action
@@ -122,24 +170,32 @@ export default function Home() {
       .catch((e) => alert(String(e)));
   }
 
-  function submitEntry(formData: FormData) {
-    run(
-      api("records", "POST", {
-        date: String(formData.get("date")),
-        department: String(formData.get("department")),
-        workshop: String(formData.get("workshop")),
-        equipment: String(formData.get("equipment")),
-        line: String(formData.get("line") || ""),
-        production: Number(formData.get("production")) || 0,
+  const [entrySaving, setEntrySaving] = useState(false);
+  const entryPending = useRef(false);
+  const [entryError, setEntryError] = useState("");
+  const [entryVersion, setEntryVersion] = useState(0);
+  async function submitEntry(formData: FormData) {
+    if (entryPending.current) return;
+    const dates = formData.getAll("date").map(String);
+    const quantities = formData.getAll("production").map(Number);
+    if (!dates.length || new Set(dates).size !== dates.length) {
+      setEntryError("请为每行选择不同的生产日期，同一天的产量请合并填写。"); return;
+    }
+    entryPending.current = true; setEntrySaving(true); setEntryError("");
+    try {
+      setState(await api("records", "POST", {
+        department: String(formData.get("department")), workshop: String(formData.get("workshop")),
+        equipment: String(formData.get("equipment")), line: String(formData.get("line") || ""),
         note: String(formData.get("note") || ""),
-      }),
-      () => {
-        setShowEntry(false);
-        setActiveView("history");
-      },
-    );
+        entries: dates.map((date, index) => ({ date, production: quantities[index] })),
+      }));
+      setEntryVersion(value => value + 1);
+      setShowEntry(false); setActiveView("history");
+      setRecordNotice(`已保存 ${dates.length} 个日期的生产数据。`);
+    } catch (error) {
+      setEntryError(error instanceof Error ? error.message : "提交失败，请重试。");
+    } finally { entryPending.current = false; setEntrySaving(false); }
   }
-
   function submitUser(formData: FormData) {
     const password = String(formData.get("password") || "");
     const confirmPassword = String(formData.get("confirmPassword") || "");
@@ -236,6 +292,8 @@ export default function Home() {
         quantity: Number(formData.get("quantity")) || 1,
         unitPrice: Number(formData.get("unitPrice")) || 0,
         unitSave: Number(formData.get("unitSave")) || 0,
+        manualPrice: formData.get("manualPrice") === "" ? null : Number(formData.get("manualPrice")),
+        machinePrice: formData.get("machinePrice") === "" ? null : Number(formData.get("machinePrice")),
         maOrder: Number(formData.get("maOrder")) || 0,
         orders: Number(formData.get("orders")) || 0,
       }),
@@ -246,26 +304,8 @@ export default function Home() {
   function exportRecords() {
     const escapeCell = (value: string | number) =>
       `"${String(value).replaceAll('"', '""')}"`;
-    const header = [
-      "日期",
-      "部门",
-      "车间",
-      "设备名称",
-      "开机线/机台",
-      "生产数量（个）",
-      "上报人",
-      "备注",
-    ];
-    const csvRows = records.map((record) => [
-      record.date,
-      record.factory,
-      record.workshop,
-      record.equipment,
-      record.line,
-      record.production,
-      record.operator,
-      record.note,
-    ]);
+    const header = ["厂区", "机器", "生产日期", "汇总产量（个）", "上报条数"];
+    const csvRows = recordGroups.map(group => [group.factory, group.equipment, group.date, group.production, group.records.length]);
     const csv = [header, ...csvRows]
       .map((row) => row.map(escapeCell).join(","))
       .join("\r\n");
@@ -274,7 +314,7 @@ export default function Home() {
     );
     const link = document.createElement("a");
     link.href = url;
-    link.download = `生产数据更新记录-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.download = `生产数据日汇总-${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -295,6 +335,8 @@ export default function Home() {
       "设备单价（RMB/台）",
       "投资金额（万HKD）",
       "实际生产数（万）",
+      "原人工单价（RMB/件）",
+      "机器工单价（RMB/件）",
       "已节省成本（万）",
       "当前结余（万）",
       "MA订单（万）",
@@ -308,6 +350,8 @@ export default function Home() {
       row.unitPrice,
       row.investment.toFixed(2),
       row.orders,
+      row.manualPrice == null ? "未填写" : row.manualPrice.toFixed(4),
+      row.machinePrice == null ? "未填写" : row.machinePrice.toFixed(4),
       row.saved.toFixed(2),
       row.balance.toFixed(2),
       row.maOrder,
@@ -460,12 +504,12 @@ export default function Home() {
               </article>
               <article>
                 <div className="metric-icon jade">↗</div>
-                <p>已节省成本</p>
+                <p>当前结余</p>
                 <strong>
-                  {recovered.toFixed(1)}
+                  {currentBalance.toFixed(1)}
                   <em>万 HKD</em>
                 </strong>
-                <small>来自实际生产数</small>
+                <small>全部机器结余合计（不受筛选影响）</small>
               </article>
               <article>
                 <div className="metric-icon amber">◔</div>
@@ -504,7 +548,7 @@ export default function Home() {
                   placeholder="搜索设备、部门…"
                 />
               </div>
-              <div className="table-wrap">
+              <div className="table-wrap dashboard-cost-table">
                 <table>
                   <thead>
                     <tr>
@@ -514,6 +558,8 @@ export default function Home() {
                       <th>设备单价</th>
                       <th>投资金额</th>
                       <th>实际生产数</th>
+                      <th>原人工单价</th>
+                      <th>机器工单价</th>
                       <th>已节省成本</th>
                       <th>当前结余</th>
                       <th>更新</th>
@@ -536,6 +582,8 @@ export default function Home() {
                         </td>
                         <td>{row.investment.toFixed(2)} 万</td>
                         <td>{row.orders.toLocaleString()} 万</td>
+                        <td className="cost-price">{row.manualPrice == null ? <span className="missing-price">未填写</span> : row.manualPrice.toFixed(4)}</td>
+                        <td className="cost-price">{row.machinePrice == null ? <span className="missing-price">未填写</span> : row.machinePrice.toFixed(4)}</td>
                         <td>{row.saved.toFixed(2)} 万</td>
                         <td>
                           <span
@@ -615,7 +663,7 @@ export default function Home() {
                       <th>设备名称</th>
                       <th>设备数量</th>
                       <th>总投资 HKD</th>
-                      <th>节省单价</th>
+                      <th>节省单价HKD</th>
                       <th>实际生产数</th>
                       <th>回收状态</th>
                       <th>MA订单（万）</th>
@@ -638,7 +686,7 @@ export default function Home() {
                         </td>
                         <td>{row.qty} 台</td>
                         <td>{row.investment.toFixed(2)} 万</td>
-                        <td>{row.unitSave.toFixed(4)} RMB/件</td>
+                        <td>{row.unitSave.toFixed(4)}</td>
                         <td>{row.orders.toLocaleString()} 万</td>
                         <td>
                           <span
@@ -688,7 +736,7 @@ export default function Home() {
               </div>
             </div>
             <div className="entry-layout">
-              <form className="entry-panel" action={submitEntry}>
+              <form className="entry-panel" key={entryVersion} onSubmit={(event) => { event.preventDefault(); void submitEntry(new FormData(event.currentTarget)); }} onReset={(event) => { event.preventDefault(); setEntryVersion(value => value + 1); setEntryError(""); }}>
                 <div className="entry-section">
                   <span>01</span>
                   <div>
@@ -735,15 +783,7 @@ export default function Home() {
                   </select>
                 </label>
                 <div className="form-grid">
-                  <label>
-                    生产日期
-                    <input
-                      name="date"
-                      type="date"
-                      defaultValue={todayStr()}
-                      required
-                    />
-                  </label>
+
                   <label>
                     开机线 / 机台
                     <input name="line" placeholder="例：2号机" />
@@ -753,19 +793,11 @@ export default function Home() {
                   <span>02</span>
                   <div>
                     <h3>填写产量</h3>
-                    <p>填写当日实际完成的合格生产数</p>
+                    <p>按日期填写实际完成的合格生产数</p>
                   </div>
                 </div>
-                <label>
-                  今日生产数量（个）
-                  <input
-                    name="production"
-                    type="number"
-                    min="1"
-                    placeholder="请输入实际产量"
-                    required
-                  />
-                </label>
+                <ProductionDays key={entryVersion} today={todayStr()} disabled={entrySaving} />
+              {entryError && <p role="alert" className="form-error">{entryError}</p>}
                 <label>
                   备注
                   <textarea
@@ -774,9 +806,9 @@ export default function Home() {
                   />
                 </label>
                 <div className="form-submit">
-                  <button type="reset">重置</button>
-                  <button className="primary" type="submit">
-                    提交生产数据
+                  <button type="reset" disabled={entrySaving}>重置</button>
+                  <button className="primary" type="submit" disabled={entrySaving}>
+                    {entrySaving ? "提交中…" : "提交生产数据"}
                   </button>
                 </div>
               </form>
@@ -803,57 +835,48 @@ export default function Home() {
           <section className="module-view">
             <div className="module-toolbar">
               <div>
-                <h2>更新记录</h2>
-                <p>查看各部门的生产数据上报和修改痕迹</p>
+                <div className="history-heading-filters">
+                  <h2>更新记录</h2>
+                  <select aria-label="按厂区筛选" value={historyFactory} onChange={(event) => {
+                    setHistoryFactory(event.target.value);
+                    setHistoryMachine("");
+                  }}>
+                    <option value="">全部厂区</option>
+                    {historyFactories.map(item => <option key={item} value={item}>{item}</option>)}
+                  </select>
+                  <select aria-label="按机器筛选" value={historyMachine} onChange={(event) => setHistoryMachine(event.target.value)}>
+                    <option value="">全部机器</option>
+                    {historyMachines.map(item => <option key={item} value={item}>{item}</option>)}
+                  </select>
+                </div>
+                <p>按厂区、机器、日期汇总产量，展开明细可编辑或删除</p>
               </div>
-              <button className="outline-button" onClick={exportRecords}>
-                导出记录
-              </button>
+              <div className="module-actions history-view-actions">
+                <button className={`outline-button history-view-toggle${historyTable ? " selected" : ""}`} aria-pressed={historyTable} aria-controls="history-records" onClick={() => setHistoryTable((current) => !current)}>
+                  <svg width="16" height="16" viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="2" y="3" width="16" height="14" rx="2" stroke="currentColor" strokeWidth="1.5"/><path d="M2 8h16M2 12.5h16M7 8v9" stroke="currentColor" strokeWidth="1.5"/></svg>
+                  {historyTable ? "返回列表" : "查看表格"}
+                </button>
+                <button className="outline-button" onClick={exportRecords}>导出记录</button>
+              </div>
             </div>
             <div className="history-summary">
               <div>
-                <strong>{records.length}</strong>
-                <span>近期更新</span>
+                <strong>{recordGroups.length}</strong>
+                <span>日汇总组数 · {filteredRecords.length} 条上报</span>
               </div>
               <div>
-                <strong>{new Set(records.map((r) => r.factory)).size}</strong>
-                <span>涉及部门</span>
+                <strong>{new Set(filteredRecords.map((r) => r.factory)).size}</strong>
+                <span>涉及厂区</span>
               </div>
               <div>
-                <strong>
-                  {records
-                    .reduce((s, r) => s + r.production, 0)
-                    .toLocaleString()}
-                </strong>
+                <strong>{filteredRecords.reduce((s, r) => s + r.production, 0).toLocaleString()}</strong>
                 <span>累计上报产量</span>
               </div>
             </div>
-            <div className="history-list">
-              {records.map((record) => (
-                <article key={record.id}>
-                  <div className="history-date">
-                    <strong>{record.date.slice(8)}</strong>
-                    <small>{record.date.slice(0, 7)}</small>
-                  </div>
-                  <div className="history-dot" />
-                  <div className="history-main">
-                    <div>
-                      <span className="dept-tag">
-                        {record.factory} · {record.workshop}
-                      </span>
-                      <strong>{record.equipment}</strong>
-                    </div>
-                    <p>
-                      {record.line} · 生产{" "}
-                      <b>{record.production.toLocaleString()}</b> 个 ·{" "}
-                      {record.note}
-                    </p>
-                    <small>由 {record.operator} 上报</small>
-                  </div>
-                  <span className="history-status">已计入汇总</span>
-                </article>
-              ))}
-            </div>
+            {recordNotice && <p className="record-notice" role="status">{recordNotice}</p>}
+            <RecordSummary groups={recordGroups} table={historyTable} onAction={(mode, record) => {
+              setRecordError(""); setRecordNotice(""); setRecordDialog({ mode, record });
+            }} />
           </section>
         )}
         {activeView === "users" && (
@@ -988,7 +1011,7 @@ export default function Home() {
           >
             <form
               className="entry-modal"
-              action={submitEntry}
+              key={entryVersion} onSubmit={(event) => { event.preventDefault(); void submitEntry(new FormData(event.currentTarget)); }} onReset={(event) => { event.preventDefault(); setEntryVersion(value => value + 1); setEntryError(""); }}
               onMouseDown={(e) => e.stopPropagation()}
             >
               <div className="modal-head">
@@ -1039,30 +1062,14 @@ export default function Home() {
                 </select>
               </label>
               <div className="form-grid">
-                <label>
-                  生产日期
-                  <input
-                    name="date"
-                    type="date"
-                    defaultValue={todayStr()}
-                    required
-                  />
-                </label>
+
                 <label>
                   开机线 / 机台
                   <input name="line" placeholder="例：2号机" />
                 </label>
               </div>
-              <label>
-                今日生产数量（个）
-                <input
-                  name="production"
-                  type="number"
-                  min="1"
-                  placeholder="请输入实际产量"
-                  required
-                />
-              </label>
+              <ProductionDays key={entryVersion} today={todayStr()} disabled={entrySaving} />
+              {entryError && <p role="alert" className="form-error">{entryError}</p>}
               <label>
                 备注
                 <textarea
@@ -1078,8 +1085,8 @@ export default function Home() {
                 <button type="button" onClick={() => setShowEntry(false)}>
                   取消
                 </button>
-                <button className="primary" type="submit">
-                  确认提交
+                <button className="primary" type="submit" disabled={entrySaving}>
+                  {entrySaving ? "提交中…" : "确认提交"}
                 </button>
               </div>
             </form>
@@ -1255,6 +1262,31 @@ export default function Home() {
         {passwordResetNotice && (
           <div className="success-toast" role="status"><span>✓</span>{passwordResetNotice}<button type="button" onClick={() => setPasswordResetNotice("")}>×</button></div>
         )}
+        {recordDialog && (
+          <dialog className="record-dialog" aria-labelledby="record-dialog-title" ref={(node) => { if (node && !node.open) node.showModal(); }} onCancel={(event) => { if (recordSaving) event.preventDefault(); else setRecordDialog(null); }}>
+            <form className="entry-modal" action={recordDialog.mode === "edit" ? changeRecord : () => changeRecord()}>
+              <div className="modal-head">
+                <div><small>更新记录</small><h2 id="record-dialog-title">{recordDialog.mode === "edit" ? "编辑更新记录" : "删除更新记录"}</h2></div>
+                <button type="button" aria-label="关闭" disabled={recordSaving} onClick={() => setRecordDialog(null)}>×</button>
+              </div>
+              <p className="record-context">{recordDialog.record.factory} · {recordDialog.record.workshop} · {recordDialog.record.equipment}</p>
+              {recordDialog.mode === "edit" ? <>
+                <div className="form-grid">
+                  <label>生产日期<input name="date" type="date" defaultValue={recordDialog.record.date} required /></label>
+                  <label>开机线 / 机台<input name="line" defaultValue={recordDialog.record.line} /></label>
+                </div>
+                <label>生产数量（个）<input name="production" type="number" min="1" step="1" defaultValue={recordDialog.record.production} required /></label>
+                <label>备注<textarea name="note" defaultValue={recordDialog.record.note} /></label>
+                <div className="formula-note">保存后同步更新设备累计产量、节省金额及结余。</div>
+              </> : <p className="record-delete-note">确定删除 {recordDialog.record.date} 的这条记录吗？对应的 {recordDialog.record.production.toLocaleString()} 个产量和节省金额将从汇总中扣除，此操作无法撤销。</p>}
+              {recordError && <p className="form-error" role="alert">{recordError}</p>}
+              <div className="modal-actions">
+                <button type="button" autoFocus={recordDialog.mode === "delete"} disabled={recordSaving} onClick={() => setRecordDialog(null)}>取消</button>
+                <button type="submit" disabled={recordSaving} className={recordDialog.mode === "edit" ? "primary" : "danger-button"}>{recordSaving ? "处理中…" : recordDialog.mode === "edit" ? "保存修改" : "确认删除"}</button>
+              </div>
+            </form>
+          </dialog>
+        )}
         {equipmentDialog?.mode === "view" && (
           <div
             className="modal-backdrop"
@@ -1298,9 +1330,9 @@ export default function Home() {
                   </strong>
                 </div>
                 <div>
-                  <small>节省单价</small>
+                  <small>节省单价HKD</small>
                   <strong>
-                    {equipmentDialog.row.unitSave.toFixed(4)} RMB/件
+                    {equipmentDialog.row.unitSave.toFixed(4)}
                   </strong>
                 </div>
                 <div>
@@ -1425,6 +1457,14 @@ export default function Home() {
                     defaultValue={equipmentDialog.row.unitPrice}
                     required
                   />
+                </label>
+              </div>
+              <div className="form-grid">
+                <label>原人工单价（RMB/件）
+                  <input name="manualPrice" type="number" min="0" step="0.0001" defaultValue={equipmentDialog.row.manualPrice ?? ""} placeholder="未填写" />
+                </label>
+                <label>机器工单价（RMB/件）
+                  <input name="machinePrice" type="number" min="0" step="0.0001" defaultValue={equipmentDialog.row.machinePrice ?? ""} placeholder="未填写" />
                 </label>
               </div>
               <div className="form-grid">

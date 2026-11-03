@@ -7,10 +7,80 @@ namespace SprayPlan.Api.Tests;
 public class OrderCalcTests
 {
     [Fact]
+    public void ScheduleBalances_UsesActualsAndPendingPlansPerStep_IgnoresDeletedPlans()
+    {
+        var parts = new List<OrderPartQty> { new() { PartName = "头", Qty = 100 }, new() { PartName = "脚", Qty = 50 } };
+        var plans = new List<ProductionPlan> {
+            new() { PartName = "头", StepNo = 1, PlannedQty = 100, GoodQty = 60 },
+            new() { PartName = "头", StepNo = 1, PlannedQty = 20 },
+            new() { PartName = "头", StepNo = 1, PlannedQty = 999, DeletedAt = DateTime.UtcNow },
+            new() { PartName = "头", StepNo = 2, PlannedQty = 100, GoodQty = 0 }
+        };
+        var rows = OrderCalc.ScheduleBalances(parts, plans);
+        Assert.Equal(new long[] { 20, 100, 50 }, rows.Select(row => row.SupplementQty));
+        Assert.Equal(new long[] { 20, 0, 0 }, rows.Select(row => row.PendingQty));
+        Assert.Equal(0, rows.Last().StepNo);
+        Assert.All(rows, row => Assert.Equal(0, row.ReduceQty));
+    }
+
+    [Fact]
+    public void RemainingQty_DifferentPartDemands_UsesLargestIndependentDeficit()
+    {
+        var order = new Order {
+            PartQtys = new() { new() { PartName = "头", Qty = 100 }, new() { PartName = "脚", Qty = 50 } },
+            Plans = new() { new() { PartName = "头", GoodQty = 100 }, new() { PartName = "脚", GoodQty = 50 } }
+        };
+        Assert.Equal(0, OrderCalc.RemainingQty(order));
+        order.PartQtys[0].Qty = 120;
+        Assert.Equal(20, OrderCalc.RemainingQty(order));
+    }
+
+    [Fact]
+    public void ResizeDemand_PreservesRatiosAndDistributesRoundingForDuplicatePartNames()
+    {
+        var parts = new List<OrderPartQty> {
+            new() { Id = 1, PartName = "头", Qty = 1 },
+            new() { Id = 2, PartName = "头", Qty = 2 },
+            new() { Id = 3, PartName = "脚", Qty = 6 },
+            new() { Id = 4, PartName = "尾", Qty = 0 }
+        };
+        OrderCalc.ResizeDemand(parts, 10);
+        Assert.Equal(new[] { 2, 3, 10, 0 }, parts.Select(part => part.Qty).ToArray());
+        OrderCalc.ResizeDemand(parts, 1);
+        Assert.Equal(1, parts.GroupBy(part => part.PartName).Max(group => group.Sum(part => part.Qty)));
+        Assert.All(parts, part => Assert.True(part.Qty >= 0));
+    }
+
+    [Fact]
+    public void ResizeDemand_ZeroDemand_InitializesEachPart()
+    {
+        var parts = new List<OrderPartQty> {
+            new() { PartName = "头", Qty = 0 }, new() { PartName = "脚", Qty = 0 }
+        };
+        OrderCalc.ResizeDemand(parts, 100);
+        Assert.All(parts, part => Assert.Equal(100, part.Qty));
+    }
+
+    [Fact]
     public void OrderTotalQty_SumsAllPartQtys()
     {
         var partQtys = new List<OrderPartQty> { new() { Qty = 3 }, new() { Qty = 4 }, new() { Qty = 5 } };
         Assert.Equal(12, OrderCalc.OrderTotalQty(partQtys));
+    }
+
+    [Fact]
+    public void RemainingQty_UsesSlowestStepAndIgnoresDeletedPlansAndOverproduction()
+    {
+        var order = new Order {
+            PartQtys = new() { new() { PartName = "头", Qty = 100 }, new() { PartName = "脚", Qty = 100 } },
+            Plans = new() {
+                new() { PartName = "头", StepNo = 1, GoodQty = 80 },
+                new() { PartName = "头", StepNo = 2, GoodQty = 30 },
+                new() { PartName = "头", StepNo = 2, GoodQty = 60, DeletedAt = DateTime.UtcNow },
+                new() { PartName = "脚", GoodQty = 120 }
+            }
+        };
+        Assert.Equal(70, OrderCalc.RemainingQty(order));
     }
 
     [Fact]

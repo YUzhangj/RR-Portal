@@ -4,9 +4,10 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { importCostPrices } = require('./cost-price-import');
 
 const PORT = process.env.PORT || 3008;
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.AUTOMATION_DATA_DIR || path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'data.json');
 
 // ─── 种子数据（迁移自原 OpenAI Sites 版本 2026-08-15 快照）─────────────────────
@@ -47,10 +48,12 @@ function loadData() {
   if (_cache) return _cache;
   if (!fs.existsSync(DATA_FILE)) {
     _cache = JSON.parse(JSON.stringify(SEED));
+    importCostPrices(_cache);
     saveData(_cache);
     return _cache;
   }
   _cache = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  if (importCostPrices(_cache)) saveData(_cache);
   return _cache;
 }
 function saveData(data) {
@@ -86,6 +89,22 @@ function todayLabel() {
 // investment：RMB → HKD（汇率 0.87），单位万
 function calcInvestment(unitPrice, qty) { return unitPrice * qty / 0.87 / 10000; }
 
+// Missing historical prices remain unknown; never infer them from the savings difference.
+function readCostPrices(body) {
+  const prices = {};
+  for (const key of ['manualPrice', 'machinePrice']) {
+    if (!Object.prototype.hasOwnProperty.call(body, key)) continue;
+    const value = body[key];
+    if (value === null || value === '') { prices[key] = null; continue; }
+    if ((typeof value !== 'number' && typeof value !== 'string') ||
+        (typeof value === 'string' && !value.trim()) || !Number.isFinite(Number(value)) || Number(value) < 0) {
+      throw new Error('人工和机器单价须为大于或等于 0 的数字');
+    }
+    prices[key] = Number(value);
+  }
+  return prices;
+}
+
 const app = express();
 app.use(express.json());
 
@@ -103,14 +122,16 @@ app.post('/api/equipment', (req, res) => {
   }
   const qty = Number(b.quantity) || 1;
   const unitPrice = Number(b.unitPrice) || 0;
-  const unitSave = Math.max(0, (Number(b.manualPrice) || 0) - (Number(b.machinePrice) || 0));
+  let prices;
+  try { prices = readCostPrices(b); } catch (error) { return res.status(400).json({ error: error.message }); }
+  const unitSave = Math.max(0, (prices.manualPrice ?? 0) - (prices.machinePrice ?? 0));
   const orders = Number(b.orders) || 0;
   const investment = calcInvestment(unitPrice, qty);
   const saved = orders * unitSave;
   data.equipment.push({
     id: data.nextId++, factory: b.department, workshop: b.workshop, name: b.name,
     qty, unitPrice, investment, maOrder: Number(b.maOrder) || 0, orders, saved,
-    balance: saved - investment, unitSave, update: todayLabel(),
+    balance: saved - investment, unitSave, ...prices, update: todayLabel(),
   });
   saveData(data);
   res.status(201).json(publicState(data));
@@ -122,13 +143,23 @@ app.put('/api/equipment/:id', (req, res) => {
   const eq = data.equipment.find(e => e.id === +req.params.id);
   if (!eq) return res.status(404).json({ error: '设备不存在' });
   const b = req.body || {};
+  let prices;
+  try { prices = readCostPrices(b); } catch (error) { return res.status(400).json({ error: error.message }); }
   const qty = Number(b.quantity) || 1;
   const unitPrice = Number(b.unitPrice) || 0;
   const unitSave = Number(b.unitSave) || 0;
   const orders = Number(b.orders) || 0;
   const investment = calcInvestment(unitPrice, qty);
   const saved = orders * unitSave;
+  for (const record of data.records) {
+    if (record.factory === eq.factory && record.workshop === eq.workshop && record.equipment === eq.name) {
+      record.factory = b.department ?? eq.factory;
+      record.workshop = b.workshop ?? eq.workshop;
+      record.equipment = b.name ?? eq.name;
+    }
+  }
   Object.assign(eq, {
+    ...prices,
     factory: b.department ?? eq.factory, workshop: b.workshop ?? eq.workshop,
     name: b.name ?? eq.name, qty, unitPrice, investment,
     maOrder: Number(b.maOrder) || 0, orders, saved,
@@ -141,24 +172,72 @@ app.put('/api/equipment/:id', (req, res) => {
 // 录入生产数据：追加记录并重算设备累计
 app.post('/api/records', (req, res) => {
   const b = req.body || {};
-  const production = Number(b.production) || 0;
-  if (!b.equipment || !production) return res.status(400).json({ error: '缺少必填字段' });
-  const data = loadData();
-  const eq = data.equipment.find(e => e.factory === b.department && e.workshop === b.workshop && e.name === b.equipment);
-  if (eq) {
-    eq.orders += production / 10000;
-    eq.saved += production * eq.unitSave / 10000;
-    eq.balance += production * eq.unitSave / 10000;
-    eq.update = todayLabel();
+  const entries = b.entries === undefined ? [{ date: b.date || new Date().toISOString().slice(0, 10), production: b.production }] : b.entries;
+  if (!Array.isArray(entries) || !entries.length || entries.length > 366) return res.status(400).json({ error: '请填写 1 至 366 行日期和产量' });
+  const dates = new Set();
+  for (const entry of entries) {
+    if (!entry || typeof entry.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(entry.date) ||
+        !Number.isFinite(Date.parse(entry.date)) || new Date(entry.date).toISOString().slice(0, 10) !== entry.date ||
+        !Number.isSafeInteger(Number(entry.production)) || Number(entry.production) <= 0 || dates.has(entry.date)) {
+      return res.status(400).json({ error: '每行须填写有效且不重复的日期，以及大于 0 的整数产量' });
+    }
+    dates.add(entry.date);
   }
-  data.records.unshift({
-    id: data.nextId++, date: b.date || new Date().toISOString().slice(0, 10),
-    factory: b.department, workshop: b.workshop, equipment: b.equipment,
-    line: b.line || '未填写', production, operator: '当前负责人', note: b.note || '日常产量上报',
-  });
+  const production = entries.reduce((sum, entry) => sum + Number(entry.production), 0);
+  if (!Number.isSafeInteger(production)) return res.status(400).json({ error: '合计产量超出有效范围' });
+  const data = structuredClone(loadData());
+  const eq = data.equipment.find(e => e.factory === b.department && e.workshop === b.workshop && e.name === b.equipment);
+  if (!eq) return res.status(404).json({ error: '请选择有效的设备' });
+  eq.orders += production / 10000;
+  eq.saved += production * eq.unitSave / 10000;
+  eq.balance += production * eq.unitSave / 10000;
+  eq.update = todayLabel();
+  const additions = entries.map(entry => ({
+    id: data.nextId++, date: entry.date,
+    factory: eq.factory, workshop: eq.workshop, equipment: eq.name,
+    line: String(b.line || '未填写'), production: Number(entry.production), operator: '当前负责人', note: String(b.note || '日常产量上报'),
+  }));
+  data.records.unshift(...additions);
+  data.records.sort((a, b) => b.date.localeCompare(a.date));
   saveData(data);
   res.status(201).json(publicState(data));
 });
+
+// 编辑/删除生产记录，按产量差额同步累计；保留历史快照中的原有金额。
+function changeProductionRecord(req, res, deleting) {
+  const data = structuredClone(loadData());
+  const record = data.records.find(r => r.id === Number(req.params.id));
+  if (!record) return res.status(404).json({ error: '更新记录不存在，请刷新后重试' });
+  const b = req.body || {};
+  const production = deleting ? 0 : Number(b.production);
+  const date = deleting ? record.date : b.date;
+  if (!deleting && (!Number.isSafeInteger(production) || production <= 0 ||
+      typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+      !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date ||
+      (b.line !== undefined && typeof b.line !== 'string') ||
+      (b.note !== undefined && typeof b.note !== 'string'))) {
+    return res.status(400).json({ error: '请填写有效的生产日期和大于 0 的整数产量，机台和备注须为文字' });
+  }
+  const eq = data.equipment.find(e => e.factory === record.factory && e.workshop === record.workshop && e.name === record.equipment);
+  const delta = production - record.production;
+  if (!eq || !Number.isFinite(eq.orders + delta / 10000) || eq.orders + delta / 10000 < -1e-8) {
+    return res.status(409).json({ error: '关联设备或累计产量异常，请先核对设备台账' });
+  }
+  eq.orders = Math.max(0, eq.orders + delta / 10000);
+  eq.saved += delta * eq.unitSave / 10000;
+  eq.balance += delta * eq.unitSave / 10000;
+  eq.update = todayLabel();
+  if (deleting) {
+    data.records = data.records.filter(r => r.id !== record.id);
+  } else {
+    Object.assign(record, { date, production, line: b.line?.trim() || '未填写', note: b.note?.trim() || '' });
+    data.records.sort((a, b) => b.date.localeCompare(a.date));
+  }
+  saveData(data);
+  res.json(publicState(data));
+}
+app.put('/api/records/:id', (req, res) => changeProductionRecord(req, res, false));
+app.delete('/api/records/:id', (req, res) => changeProductionRecord(req, res, true));
 
 // 新增用户
 app.post('/api/users', (req, res) => {
@@ -208,6 +287,9 @@ app.get(/^(?!\/(api|health)(\/|$)).*/, (req, res) => {
   res.sendFile(path.join(DIST_DIR, 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`自动化设备统计系统已启动: http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`自动化设备统计系统已启动: http://localhost:${PORT}`);
+  });
+}
+module.exports = app;

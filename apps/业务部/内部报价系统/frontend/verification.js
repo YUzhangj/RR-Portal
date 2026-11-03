@@ -7,6 +7,7 @@ const nearZero = value => Math.abs(num(value)) < 0.00001;
 const parseJson = (value, fallback = {}) => {
   try { return typeof value === 'string' ? JSON.parse(value) : (value || fallback); } catch { return fallback; }
 };
+let authRedirectStarted = false;
 
 async function api(path, options = {}) {
   const response = await fetch('/api' + path, {
@@ -14,7 +15,18 @@ async function api(path, options = {}) {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   });
-  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || response.statusText);
+  const errorBody = response.ok ? null : await response.json().catch(() => ({}));
+  // An incorrect current password is a validation failure, not an expired session.
+  const incorrectCurrentPassword = path === '/auth/change-password'
+    && errorBody?.error === '当前密码错误';
+  if (response.status === 401 && !incorrectCurrentPassword) {
+    if (!authRedirectStarted) {
+      authRedirectStarted = true;
+      window.location.replace('./index.html?next=verification');
+    }
+    throw new Error('登录状态已失效，正在返回登录页…');
+  }
+  if (!response.ok) throw new Error(errorBody.error || response.statusText);
   return response.json();
 }
 
@@ -41,6 +53,7 @@ function requestText(title, initialValue = '') {
 const SECTION_STATUS = {
   empty: '草稿', filled: '待审核', approved: '已审核', rejected: '已驳回',
 };
+
 async function openCreateVerification() {
   const button = $('verification-create');
   button.disabled = true;
@@ -91,7 +104,7 @@ async function openCreateVerification() {
 }
 const VERSION_STATUS = {
   not_started: '待创建', drafting: '填写中', in_review: '审核中',
-  ready: '待锁定', completed: '已完成',
+  ready: '待锁定', completed: '已完成', cancelled: '已取消',
 };
 const versionTitle = version => [version?.label, String(version?.category || '').trim()].filter(Boolean).join(' · ');
 const currencySymbol = currency => currency === 'USD' ? 'US$' : currency === 'RMB' ? '¥' : currency === 'NUMBER' ? '' : 'HK$';
@@ -246,17 +259,6 @@ function collectCostFields(section) {
     addSteps(payload.assembly_step_groups, 'assembly_step_groups', '组装');
     addSteps(payload.packaging_step_groups, 'packaging_step_groups', '包装');
   }
-  (payload.legacy_items || []).forEach((item, index) => {
-    let value = num(item.current_hkd);
-    if (item.formula_kind === 'quantity_x_unit') {
-      value = num(item.formula_quantity) * num(item.formula_unit_hkd);
-    } else if (item.formula_kind === 'assembly_base_per_output') {
-      value = num(payload.assembly_base_rate) * num(item.people) * (num(item.team) || 1)
-        / Math.max(num(item.output), 1);
-    }
-    addPrice(rows, `legacy_items[${index}].current_hkd`, item.name || `历史明细 ${index + 1}`, value, 'HKD',
-      item.formula_quantity ?? item.quantity ?? '—');
-  });
   return rows;
 }
 
@@ -267,7 +269,12 @@ let taskState = null;
 let detailMode = 'workflow';
 let activeDepartment = null;
 let sectionDirty = false;
-let comparisonState = { selected: [], dept: 'all', changedOnly: true, query: '' };
+let sectionSavePending = false;
+let versionLoadPending = false;
+let factorySwitchPending = false;
+let taskRequestSequence = 0;
+let comparisonState = { quoteId: null, baseline: 'quote', targets: null, dept: 'all', changedOnly: true, query: '' };
+let comparisonRefreshToken = 0;
 const versionCache = new Map();
 let costingBasisState = null;
 let costingBasisMeta = {};
@@ -287,6 +294,49 @@ function hasPermission(user, menu, action) {
   return Boolean(user?.perms?.[menu]?.[`can_${action}`]);
 }
 
+async function switchFactory(factoryCode) {
+  if (factoryCode === me.active_factory_code || factorySwitchPending
+    || sectionSavePending || versionLoadPending || workshopSavePending) return;
+  if (sectionDirty && !confirm('当前部门有未保存修改，切换厂区会放弃这些修改。确认继续？')) return;
+  const previousFactory = me.active_factory_code;
+  factorySwitchPending = true;
+  versionLoadPending = true;
+  const content = document.querySelector('main.verification-page');
+  const wasInert = content?.inert;
+  if (content) content.inert = true;
+  $('factory-switch').querySelectorAll('button').forEach(button => { button.disabled = true; });
+  try {
+    await api('/auth/factory', { method: 'POST', body: JSON.stringify({ factory_code: factoryCode }) });
+    // Recreate the entire workspace in the new factory. Old detail callbacks,
+    // drafts and pending reads must not be reused with the changed session.
+    sectionDirty = false;
+    window.location.href = './verification.html';
+  } catch (error) {
+    // The session cookie may already have changed even when the response was
+    // interrupted or its JSON could not be read. Never unlock an old factory's
+    // editors until the server has confirmed the effective session factory.
+    let currentUser;
+    try {
+      currentUser = await api('/auth/me');
+      if (!currentUser?.active_factory_code) throw new Error('无法确认当前厂区');
+    } catch {
+      alert('未能确认当前厂区，已暂停编辑以防保存到错误厂区。请用浏览器刷新页面后再继续。');
+      return;
+    }
+    if (currentUser.active_factory_code !== previousFactory) {
+      sectionDirty = false;
+      window.location.href = './verification.html';
+      return;
+    }
+    me = currentUser;
+    factorySwitchPending = false;
+    versionLoadPending = false;
+    if (content) content.inert = wasInert;
+    alert(error.message);
+    renderUserHeader();
+  }
+}
+
 function renderUserHeader() {
   if (!me) return;
   const roleZh = { admin: '管理员', supervisor: '主管', staff: '员工' }[me.role] || me.role;
@@ -301,23 +351,7 @@ function renderUserHeader() {
     factoryChip.classList.add('hidden');
     factorySwitch.classList.remove('hidden');
     factorySwitch.querySelectorAll('.top-factory-btn').forEach(button => {
-      button.onclick = async () => {
-        if (button.classList.contains('active')) return;
-        factorySwitch.querySelectorAll('button').forEach(item => { item.disabled = true; });
-        try {
-          await api('/auth/factory', {
-            method: 'POST',
-            body: JSON.stringify({ factory_code: button.dataset.code }),
-          });
-          versionCache.clear();
-          selectedQuoteId = null;
-          taskState = null;
-          await loadList();
-        } catch (error) {
-          alert(error.message);
-          renderUserHeader();
-        }
-      };
+      button.onclick = () => switchFactory(button.dataset.code);
     });
   } else {
     factorySwitch.classList.add('hidden');
@@ -331,9 +365,9 @@ function openPasswordDialog() {
   overlay.className = 'verification-dialog-overlay';
   overlay.innerHTML = `<div class="verification-dialog" role="dialog" aria-modal="true">
     <h3>修改密码</h3>
-    <label style="display:grid;gap:5px;margin-top:10px">当前密码<input type="password" data-current autocomplete="current-password"></label>
-    <label style="display:grid;gap:5px;margin-top:10px">新密码（≥6 位）<input type="password" data-new autocomplete="new-password"></label>
-    <label style="display:grid;gap:5px;margin-top:10px">确认新密码<input type="password" data-confirm autocomplete="new-password"></label>
+    <label>当前密码<input type="password" data-current autocomplete="current-password"></label>
+    <label>新密码（≥6 位）<input type="password" data-new autocomplete="new-password"></label>
+    <label>确认新密码<input type="password" data-confirm autocomplete="new-password"></label>
     <p class="msg" data-message></p>
     <div><button type="button" data-cancel class="mini">取消</button><button type="button" data-submit>确认</button></div>
   </div>`;
@@ -348,17 +382,9 @@ function openPasswordDialog() {
     if (next !== confirmNext) { message.textContent = '两次输入的新密码不一致'; return; }
     if (next.length < 6) { message.textContent = '新密码至少 6 位'; return; }
     try {
-      await api('/auth/change-password', {
-        method: 'POST',
-        body: JSON.stringify({ current, new: next }),
-      });
-      message.style.color = 'green';
-      message.textContent = '✓ 修改成功';
-      setTimeout(close, 900);
-    } catch (error) {
-      message.style.color = '';
-      message.textContent = error.message;
-    }
+      await api('/auth/change-password', { method: 'POST', body: JSON.stringify({ current, new: next }) });
+      message.style.color = 'green'; message.textContent = '✓ 修改成功'; setTimeout(close, 900);
+    } catch (error) { message.style.color = ''; message.textContent = error.message; }
   };
   document.body.appendChild(overlay);
   overlay.querySelector('[data-current]').focus();
@@ -368,7 +394,7 @@ function costingBasisTable(key, editable) {
   const columns = COSTING_BASIS_COLUMNS[key];
   const rows = costingBasisState?.[key] || [];
   return `<div data-basis-table="${key}"><table class="wb-table verification-basis-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join('')}${editable ? '<th></th>' : ''}</tr></thead>
-    <tbody>${rows.map((row, index) => `<tr data-basis-row="${index}">${columns.map(([field,, type]) => `<td><input data-basis-field="${field}" type="${type || 'text'}" step="any" value="${esc(row[field])}" ${editable ? '' : 'disabled'}></td>`).join('')}${editable ? '<td><button type="button" class="mini danger" data-basis-delete>×</button></td>' : ''}</tr>`).join('')}</tbody></table>
+    <tbody>${rows.map((row, index) => `<tr data-basis-row="${index}">${columns.map(([field, label, type]) => `<td><input data-basis-field="${field}" aria-label="第 ${index + 1} 行 ${esc(label)}" type="${type || 'text'}" step="any" value="${esc(row[field])}" ${editable ? '' : 'disabled'}></td>`).join('')}${editable ? `<td><button type="button" class="mini danger" data-basis-delete aria-label="删除第 ${index + 1} 行">×</button></td>` : ''}</tr>`).join('')}</tbody></table>
     ${editable ? `<button type="button" class="mini" data-basis-add="${key}">＋ 增加</button>` : ''}</div>`;
 }
 
@@ -387,7 +413,7 @@ function renderCostingBasis() {
   const updated = costingBasisMeta.updated_at ? formatDate(costingBasisMeta.updated_at) : '系统预设';
   host.innerHTML = `<details class="card verification-basis-card" ${costingBasisExpanded ? 'open' : ''}>
     <summary>
-      <div><span class="eyebrow">所有客户统一使用</span><h2>核价基准 · ${esc(basis.version)}</h2>
+      <div><h2>核价基准 · ${esc(basis.version)}</h2>
         <p>${esc(basis.title)} · 更新 ${esc(updated)}</p></div>
       <div class="verification-basis-kpis"><span>RMB→HKD <b>${basis.exchange.rmb_hkd}</b></span><span>HKD→USD <b>${basis.exchange.hkd_usd}</b></span><span>ABS 750SW <b>${basis.materials.find(row => row.model === '750SW')?.price ?? '—'}</b></span></div>
     </summary>
@@ -399,14 +425,15 @@ function renderCostingBasis() {
         ${basisInput('vb-rmb-hkd', '人民币折港币', basis.exchange.rmb_hkd, editable)}
         ${basisInput('vb-hkd-usd', '美元兑换港币', basis.exchange.hkd_usd, editable)}
         ${basisInput('vb-assembly-base', '装工基数 HKD/人', basis.assembly.base_rate_hkd, editable)}
-        ${basisInput('vb-hunan-freight', '湖南产品运费 %', basis.assembly.hunan_freight_pct, editable)}
-        ${basisInput('vb-wage-factor', '装工系数 1', basis.assembly.wage_factor, editable)}
-        ${basisInput('vb-social-factor', '装工系数 2', basis.assembly.social_factor, editable)}
-        ${basisInput('vb-overhead-factor', '装工系数 3', basis.assembly.overhead_factor, editable)}
-        ${basisInput('vb-sewing-tax', '车缝不含税起点 %', basis.tax.sewing_exclusion_pct, editable)}
-        ${basisInput('vb-electronic-tax', '电子不含税起点 %', basis.tax.electronic_exclusion_pct, editable)}
+        ${basisInput('vb-hunan-freight', '湖南产品运费 %（参考）', basis.assembly.hunan_freight_pct, false)}
+        ${basisInput('vb-wage-factor', '装工系数 1（参考）', basis.assembly.wage_factor, false)}
+        ${basisInput('vb-social-factor', '装工系数 2（参考）', basis.assembly.social_factor, false)}
+        ${basisInput('vb-overhead-factor', '装工系数 3（参考）', basis.assembly.overhead_factor, false)}
+        ${basisInput('vb-sewing-tax', '车缝不含税起点 %（参考）', basis.tax.sewing_exclusion_pct, false)}
+        ${basisInput('vb-electronic-tax', '电子不含税起点 %（参考）', basis.tax.electronic_exclusion_pct, false)}
         <label>默认纸箱类别<select id="vb-default-carton" ${editable ? '' : 'disabled'}>${basis.cartons.map(row => `<option value="${esc(row.label)}" ${row.label === basis.default_carton_label ? 'selected' : ''}>${esc(row.label)}</option>`).join('')}</select></label>
       </div>
+      <p class="muted">标注“参考”的参数仅供查阅，不参与本次基准同步；工价按装工基数计算，减税按现有分类规则计算。</p>
       <h3>喷油标准（HK$/次）</h3>
       <div class="wb-grid2 verification-basis-fields">
         ${basisInput('vb-paint-pad', '移印', basis.painting.pad, editable)}
@@ -466,15 +493,15 @@ function collectCostingBasis() {
     cartons: collectBasisRows('cartons'),
     default_carton_label: $('vb-default-carton').value,
     exchange: { rmb_hkd: n('vb-rmb-hkd'), hkd_usd: n('vb-hkd-usd') },
-    assembly: { base_rate_hkd: n('vb-assembly-base'), hunan_freight_pct: n('vb-hunan-freight'), wage_factor: n('vb-wage-factor'), social_factor: n('vb-social-factor'), overhead_factor: n('vb-overhead-factor') },
+    assembly: { ...costingBasisState.assembly, base_rate_hkd: n('vb-assembly-base') },
     painting: { pad: n('vb-paint-pad'), edge: n('vb-paint-edge'), clamp: n('vb-paint-clamp') },
-    tax: { sewing_exclusion_pct: n('vb-sewing-tax'), electronic_exclusion_pct: n('vb-electronic-tax') },
+    tax: { ...costingBasisState.tax },
   };
   return costingBasisState;
 }
 
 async function saveCostingBasis() {
-  if (!confirm('确认保存统一核价基准？未完成核价会同步更新，已完成历史版本保持不变。')) return;
+  if (!confirm('确认保存统一核价基准？未冻结报价和未完成核价会同步更新并退回重审，已冻结报价、已完成版本和原表公式版本保持不变。')) return;
   const button = $('verification-basis-save');
   const message = $('verification-basis-msg');
   button.disabled = true;
@@ -493,68 +520,95 @@ async function saveCostingBasis() {
 }
 
 let canAssignWorkshop = false;
+let workshopSavePending = false;
+let listRequestSequence = 0;
 const workshopSelected = new Set();
+const workshopRevisions = new Map();
 const listFilterIds=['verification-search','verification-status-filter','verification-customer-filter',
   'verification-no-filter','verification-product-filter','verification-table-customer-filter',
   'verification-version-filter','verification-progress-filter','verification-table-status-filter',
   'workshop-filter','verification-table-workshop-filter'];
+const pairedListFilters={'verification-status-filter':'verification-table-status-filter','verification-table-status-filter':'verification-status-filter',
+  'verification-customer-filter':'verification-table-customer-filter','verification-table-customer-filter':'verification-customer-filter',
+  'workshop-filter':'verification-table-workshop-filter','verification-table-workshop-filter':'workshop-filter'};
+function updateWorkshopSelection() {
+  const selectable=filteredList().filter(row=>row.current_version_id&&row.workshop_revision);
+  const all=$('workshop-select-visible');
+  all.checked=selectable.length>0&&selectable.every(row=>workshopSelected.has(row.current_version_id));
+  all.indeterminate=!all.checked&&selectable.some(row=>workshopSelected.has(row.current_version_id));
+  all.disabled=workshopSavePending||!selectable.length;
+  $('workshop-target').disabled=workshopSavePending;
+  $('workshop-apply').disabled=workshopSavePending||!workshopSelected.size;
+}
+function applyListFilter(id) {
+  if(pairedListFilters[id])$(pairedListFilters[id]).value=$(id).value;
+  workshopSelected.clear();workshopRevisions.clear();renderList();
+  $('workshop-message').textContent='仅调整车间，不改变核价和完成状态';
+}
 $('workshop-select-visible').onchange = event => {
-  for(const row of filteredList())if(row.current_version_id){if(event.target.checked)workshopSelected.add(row.current_version_id);else workshopSelected.delete(row.current_version_id);}
+  if(workshopSavePending)return;
+  for(const row of filteredList())if(row.current_version_id&&row.workshop_revision){if(event.target.checked){workshopSelected.add(row.current_version_id);workshopRevisions.set(row.current_version_id,row.workshop_revision);}else {workshopSelected.delete(row.current_version_id);workshopRevisions.delete(row.current_version_id);}}
   renderList();$('workshop-message').textContent=`已选 ${workshopSelected.size} 款`;
 };
 $('workshop-apply').onclick = async () => {
+  if(workshopSavePending)return;
   const workshop=$('workshop-target').value;
-  if(!workshop || !workshopSelected.size){$('workshop-message').textContent='请勾选任务并选择车间';return;}
-  if(!confirm(`将选中的 ${workshopSelected.size} 款核价分配至「${workshop}」？核价和完成状态不变。`))return;
-  $('workshop-apply').disabled=true;
+  const selected=filteredList().filter(row=>workshopSelected.has(row.current_version_id)&&row.workshop_revision);
+  if(!workshop || !selected.length){$('workshop-message').textContent='请勾选任务并选择车间';return;}
+  if(!confirm(`将选中的 ${selected.length} 款核价分配至「${workshop}」？核价和完成状态不变。`))return;
+  const ids=selected.map(row=>row.current_version_id);
+  const expected_revisions=Object.fromEntries(selected.map(row=>[row.current_version_id,workshopRevisions.get(row.current_version_id)]));
+  workshopSavePending=true;renderList();$('workshop-message').textContent='正在保存车间分配…';
   try {
-    const result=await api('/verifications/workshops',{method:'PUT',body:JSON.stringify({version_ids:[...workshopSelected],workshop})});
-    workshopSelected.clear();await loadList();$('workshop-message').textContent=`已将 ${result.count} 款分配至 ${result.workshop}，刷新汇总页即可查看`;
-  }catch(error){$('workshop-message').textContent=error.message;}
-  finally{$('workshop-apply').disabled=false;}
+    const result=await api('/verifications/workshops',{method:'PUT',body:JSON.stringify({version_ids:ids,workshop,expected_revisions})});
+    for(const row of selected){row.workshop=workshop;row.workshop_revision=result.revisions?.[row.current_version_id]||null;workshopSelected.delete(row.current_version_id);workshopRevisions.delete(row.current_version_id);}
+    // Refresh the list without selecting a task: an in-flight assignment must
+    // never replace the department form the user has opened or edited meanwhile.
+    try{await loadList({refreshSelection:false});}
+    catch{renderList();$('workshop-message').textContent=`车间已保存；任务清单刷新失败，请刷新页面后核对`;return;}
+    $('workshop-message').textContent=`已将 ${result.count} 款分配至 ${result.workshop}，刷新汇总页即可查看`;
+  }catch(error){$('workshop-message').textContent=`${error.message}；已保留选择，请刷新核对后重试`;}
+  finally{workshopSavePending=false;renderList();}
 };
 function filteredList() {
   const query = ($('verification-search').value || '').trim().toLowerCase();
   const status = $('verification-status-filter').value;
   const customer = $('verification-customer-filter').value;
-  const quoteNo = ($('verification-no-filter').value || '').trim().toLowerCase();
-  const product = ($('verification-product-filter').value || '').trim().toLowerCase();
-  const tableCustomer = $('verification-table-customer-filter').value;
+  const numberQuery = ($('verification-no-filter').value || '').trim().toLowerCase();
+  const productQuery = ($('verification-product-filter').value || '').trim().toLowerCase();
   const version = $('verification-version-filter').value;
   const progress = $('verification-progress-filter').value;
-  const tableStatus = $('verification-table-status-filter').value;
-  const matchesStatus = (rowStatus, filterStatus) => !filterStatus
-    || (filterStatus === 'unfinished' ? rowStatus !== 'completed' : rowStatus === filterStatus);
-  return listState.filter(row => matchesStatus(row.verification_status || 'not_started', status)
-    && (!$('workshop-filter').value || (row.workshop || '待分配车间') === $('workshop-filter').value)
-    && (!customer || row.customer === customer)
-    && (!quoteNo || String(row.quote_no || '').toLowerCase().includes(quoteNo))
-    && (!product || String(row.product_name || '').toLowerCase().includes(product))
-    && (!tableCustomer || row.customer === tableCustomer)
-    && (!version || (row.current_version_label || 'not_started') === version)
-    && matchesStatus(row.verification_status || 'not_started', tableStatus)
-    && (!progress || (() => {
-      const approved = num(row.approved_count);
-      const total = num(row.total_depts);
-      if(progress.startsWith('ratio:'))return `${approved}/${total}`===progress.slice(6);
-      const rowProgress = total > 0 && approved >= total ? 'completed' : approved > 0 ? 'in_progress' : 'not_started';
-      return rowProgress === progress;
-    })())
-    && [row.quote_no, row.product_name, row.customer, row.version, row.current_version_label, row.current_version_category].join(' ').toLowerCase().includes(query));
+  return listState.filter(row => {
+    const rowStatus = row.verification_status || 'not_started';
+    const rowCustomer = window.VerificationCustomers.display(row.customer);
+    const approved = num(row.approved_count), total = num(row.total_depts);
+    const rowProgress = total > 0 && approved >= total ? 'completed' : approved > 0 ? 'in_progress' : 'not_started';
+    const statusMatches = !status || (status === 'unfinished' ? !['completed','cancelled'].includes(rowStatus) : rowStatus === status);
+    const versionMatches = !version || (version === 'not_started'
+      ? !row.current_version_label
+      : [row.current_version_label, row.current_version_category].filter(Boolean).includes(version));
+    const progressMatches = !progress || (progress.startsWith('ratio:')
+      ? progress === `ratio:${approved}/${total}` : progress === rowProgress);
+    return statusMatches
+      && (!customer || rowCustomer === customer)
+      && (!$('workshop-filter').value || (row.workshop || '待分配车间') === $('workshop-filter').value)
+      && (!numberQuery || String(row.quote_no || '').toLowerCase().includes(numberQuery))
+      && (!productQuery || String(row.product_name || '').toLowerCase().includes(productQuery))
+      && versionMatches && progressMatches
+      && [row.quote_no, row.product_name, row.customer, row.version, row.current_version_label, row.current_version_category].join(' ').toLowerCase().includes(query);
+  });
 }
 
 function renderList() {
   const rows = filteredList();
-  if (selectedQuoteId != null && !rows.some(row => Number(row.id) === Number(selectedQuoteId))) {
-    selectedQuoteId = null;
-    taskState = null;
-    $('verification-preview').innerHTML = `<div class="verification-preview-empty">${rows.length ? '选择一张核价任务查看摘要' : '当前筛选条件下没有核价任务'}</div>`;
-  }
-  $('verification-filter-count').textContent=`显示 ${rows.length} / ${listState.length} 款`;
-  $('verification-clear-filters').disabled=!listFilterIds.some(id=>Boolean($(id).value));
-  for(const id of listFilterIds)$(id).classList.toggle('filter-active',Boolean($(id).value));
+  $('verification-filter-count').textContent = `显示 ${rows.length} / ${listState.length} 款`;
+  const hasFilters = listFilterIds.some(id => String($(id).value || '').trim());
+  $('verification-clear-filters').disabled = !hasFilters;
+  for (const id of listFilterIds) $(id).classList?.toggle('filter-active', Boolean(String($(id).value || '').trim()));
+  const visible=new Set(rows.map(row=>row.current_version_id));
+  for(const id of workshopSelected)if(!visible.has(id)){workshopSelected.delete(id);workshopRevisions.delete(id);}
   $('verification-list-body').innerHTML = rows.length ? rows.map(row => `<tr class="verification-list-row ${Number(selectedQuoteId) === Number(row.id) ? 'selected' : ''}" data-id="${row.id}">
-    <td>${canAssignWorkshop && row.current_version_id ? `<input type="checkbox" data-workshop-select="${row.current_version_id}" aria-label="选择 ${esc(row.quote_no)}" ${workshopSelected.has(row.current_version_id)?'checked':''}> ` : ''}<strong>${esc(row.quote_no)}</strong><small>${esc(row.version || 'V1')}</small></td>
+    <td>${canAssignWorkshop && row.current_version_id && row.workshop_revision ? `<input type="checkbox" data-workshop-select="${row.current_version_id}" aria-label="选择 ${esc(row.quote_no)}" ${workshopSelected.has(row.current_version_id)?'checked':''} ${workshopSavePending?'disabled':''}> ` : ''}<strong>${esc(row.quote_no)}</strong><small>${esc(row.version || 'V1')}</small></td>
     <td>${esc(row.product_name)}</td><td>${esc(row.customer || '—')}</td>
     <td><strong>${esc(versionTitle({ label: row.current_version_label || '待创建', category: row.current_version_category }))}</strong><small>共 ${num(row.version_count)} 个版本</small></td>
     <td>${num(row.approved_count)} / ${num(row.total_depts)}</td>
@@ -563,55 +617,48 @@ function renderList() {
   </tr>`).join('') : '<tr><td colspan="7" class="summary-empty">暂无符合条件的核价任务</td></tr>';
   document.querySelectorAll('[data-workshop-select]').forEach(input => {
     input.onclick = event => event.stopPropagation();
-    input.onchange = () => {const id=Number(input.dataset.workshopSelect);if(input.checked)workshopSelected.add(id);else workshopSelected.delete(id);$('workshop-message').textContent=`已选 ${workshopSelected.size} 款`};
+    input.onchange = () => {if(workshopSavePending)return;const id=Number(input.dataset.workshopSelect);if(input.checked){workshopSelected.add(id);workshopRevisions.set(id,listState.find(row=>row.current_version_id===id)?.workshop_revision);}else{workshopSelected.delete(id);workshopRevisions.delete(id);}updateWorkshopSelection();$('workshop-message').textContent=`已选 ${workshopSelected.size} 款`};
   });
-  const selectable=rows.filter(r=>r.current_version_id),selectedCount=selectable.filter(r=>workshopSelected.has(r.current_version_id)).length;
-  $('workshop-select-visible').checked=selectable.length>0&&selectedCount===selectable.length;
-  $('workshop-select-visible').indeterminate=selectedCount>0&&selectedCount<selectable.length;
+  updateWorkshopSelection();
   document.querySelectorAll('.verification-list-row').forEach(row => {
     row.onclick = () => selectTask(row.dataset.id);
   });
 }
 
-function listOptions(id,html){
-  const selected=$(id).value;
-  $(id).innerHTML=html;
-  $(id).value=[...$(id).options].some(option=>option.value===selected)?selected:'';
-}
-
-async function loadList() {
-  const [user, verificationResult, basisResult] = await Promise.all([
-    api('/auth/me'),
-    api('/verifications'),
-    api('/refs/costing_basis').catch(() => ({ data: null })),
-  ]);
-  me = user;
-  if ($('verification-create')) $('verification-create').hidden = !verificationResult.can_create;
-  listState = verificationResult.rows.map(row => ({ ...row, customer: VerificationCustomers.display(row.customer) }));
-  canAssignWorkshop = Boolean(verificationResult.can_assign_workshop);
-  $('workshop-assignment').hidden = !canAssignWorkshop;
-  costingBasisState = basisResult.data;
-  costingBasisMeta = basisResult;
-  window.__costingBasis = costingBasisState || {};
-  renderUserHeader();
+async function loadList({refreshSelection=true}={}) {
+  const sequence=++listRequestSequence;
+  const [user, result, basis] = await Promise.all([api('/auth/me'), api('/verifications'), api('/refs/costing_basis').catch(() => null)]);
+  if(sequence!==listRequestSequence)return;
+  me = user; listState = result.rows;
+  if ($('verification-create')) $('verification-create').hidden = !result.can_create;
+  costingBasisState = basis?.data || null;
+  costingBasisMeta = basis || {};
+  window.__costingBasis = costingBasisState;
   renderCostingBasis();
-  const customers = VerificationCustomers.options(listState.map(row => row.customer));
-  const customerOptions = customers.map(customer => `<option value="${esc(customer)}">${esc(customer)}</option>`).join('');
-  listOptions('verification-customer-filter','<option value="">全部客户</option>'+customerOptions);
-  listOptions('verification-table-customer-filter','<option value="">全部</option>'+customerOptions);
-  const versions = [...new Set(listState.map(row => row.current_version_label).filter(Boolean))]
-    .sort((left, right) => left.localeCompare(right, 'zh-CN', { numeric: true }));
-  listOptions('verification-version-filter','<option value="">全部</option>'
-    + versions.map(version => `<option value="${esc(version)}">${esc(version)}</option>`).join('')
-    + (listState.some(row=>!row.current_version_label)?'<option value="not_started">待创建</option>':''));
-  const progress=[...new Set(listState.map(row=>`${num(row.approved_count)}/${num(row.total_depts)}`))].sort((a,b)=>num(a.split('/')[0])-num(b.split('/')[0])||num(a.split('/')[1])-num(b.split('/')[1]));
-  listOptions('verification-progress-filter','<option value="">全部</option><option value="not_started">未开始</option><option value="in_progress">部分通过</option><option value="completed">全部通过</option>'
-    + progress.map(value=>`<option value="ratio:${value}">${value}</option>`).join(''));
-  const workshops=[...new Set(['兴信A','兴信B','华登',...listState.map(row=>row.workshop||'待分配车间'),'待分配车间'])];
-  listOptions('workshop-filter','<option value="">全部车间</option>'+workshops.map(value=>`<option value="${esc(value)}">${esc(value)}</option>`).join(''));
+  canAssignWorkshop = Boolean(result.can_assign_workshop);
+  $('workshop-assignment').hidden = !canAssignWorkshop;
+  renderUserHeader();
+  const names = listState.map(row => window.VerificationCustomers.display(row.customer));
+  const customers = me.role === 'admin' || me.perms?.['账号管理']?.can_admin ? window.VerificationCustomers.options(names) : [...new Set(names)].sort();
+  const selectedCustomer=$('verification-customer-filter').value;
+  $('verification-customer-filter').innerHTML = '<option value="">全部客户</option>'
+    + customers.map(customer => `<option value="${esc(customer)}">${esc(customer)}</option>`).join('');
+  $('verification-customer-filter').value=customers.includes(selectedCustomer)?selectedCustomer:'';
+  const tableCustomer=$('verification-table-customer-filter').value;
+  $('verification-table-customer-filter').innerHTML = '<option value="">全部</option>'
+    + customers.map(customer => `<option value="${esc(customer)}">${esc(customer)}</option>`).join('');
+  $('verification-table-customer-filter').value=customers.includes(tableCustomer)?tableCustomer:'';
+  const selectedVersion=$('verification-version-filter').value;
+  const versions=[...new Set(listState.flatMap(row=>[row.current_version_label,row.current_version_category]).filter(Boolean))].sort();
+  $('verification-version-filter').innerHTML = '<option value="">全部</option><option value="not_started">待创建</option>'
+    + versions.map(value=>`<option value="${esc(value)}">${esc(value)}</option>`).join('');
+  $('verification-version-filter').value=selectedVersion==='not_started'||versions.includes(selectedVersion)?selectedVersion:'';
+  if(!canAssignWorkshop){workshopSelected.clear();workshopRevisions.clear();}
   renderList();
-  if (listState.length) await selectTask(selectedQuoteId || listState[0].id);
-  if (!$('verification-list').classList.contains('hidden')) window.scrollTo(0, 0);
+  if (refreshSelection&&listState.length) {
+    const target=listState.find(row=>Number(row.id)===Number(selectedQuoteId))||listState[0];
+    await selectTask(target.id);
+  }
 }
 
 function cacheVersion(data) {
@@ -625,21 +672,31 @@ function cacheVersion(data) {
 
 async function fetchTask(quoteId, versionId) {
   const suffix = versionId ? `?version_id=${encodeURIComponent(versionId)}` : '';
-  return cacheVersion(await api(`/verifications/${quoteId}${suffix}`));
+  const data = await api(`/verifications/${quoteId}${suffix}`);
+  if (Number(data?.quote?.id) !== Number(quoteId)
+    || (versionId && Number(data?.selected_version?.id) !== Number(versionId))) {
+    throw new Error('核价任务或版本不匹配，请重新打开任务');
+  }
+  return cacheVersion(data);
 }
 
 async function selectTask(quoteId) {
+  if (sectionSavePending || versionLoadPending) return;
+  const requestSequence = ++taskRequestSequence;
   selectedQuoteId = Number(quoteId);
   renderList();
   $('verification-preview').innerHTML = '<div class="verification-preview-empty">正在读取核价任务…</div>';
   try {
-    taskState = await fetchTask(selectedQuoteId);
+    const data = await fetchTask(quoteId);
+    if (requestSequence !== taskRequestSequence) return;
+    taskState = data;
   } catch (error) {
+    if (requestSequence !== taskRequestSequence) return;
     taskState = null;
     $('verification-preview').innerHTML = `<div class="verification-preview-empty"><strong>核价任务暂时无法打开</strong><br>${esc(error.message)}</div>`;
     return;
   }
-  const latest = taskState.versions[taskState.versions.length - 1];
+  const latest = taskState.versions.filter(version=>version.status!=='cancelled').at(-1);
   const row = listState.find(item => Number(item.id) === selectedQuoteId);
   if (row && latest) {
     Object.assign(row, {
@@ -662,16 +719,14 @@ function createVersionSelector(data, idPrefix) {
   if (!data.can_create_version) return '';
   const completed = data.versions.filter(version => version.status === 'completed');
   const latestCompleted = completed[completed.length - 1];
-  const importedHistory = data.sections?.some(section => section.dept === 'sales'
-    && parseJson(section.payload_json, {}).legacy_import);
   return `<div class="verification-create-version">
     <label>新版本复制来源
       <select id="${idPrefix}-source">
         <option value="quote">${baselineTitle(data)}</option>
-        ${completed.map(version => `<option value="${version.id}" ${version.id === latestCompleted?.id ? 'selected' : ''}>${esc(version.label)}（已完成）</option>`).join('')}
+        ${completed.map(version => `<option value="${version.id}" ${version.id === latestCompleted?.id ? 'selected' : ''}>${esc(versionTitle(version))}（已完成）</option>`).join('')}
       </select>
     </label>
-    <button id="${idPrefix}-create">${importedHistory ? '复制为可调整版本' : '＋ 创建下一核价版本'}</button>
+    <button id="${idPrefix}-create">＋ 创建下一核价版本</button>
   </div>`;
 }
 
@@ -684,7 +739,7 @@ function versionCategoryEditor(data, idPrefix) {
     <label>版本类别
       <input id="${idPrefix}-category" maxlength="40" placeholder="例如：首次核价、试产复核" value="${esc(version.category || '')}">
     </label>
-    <button id="${idPrefix}-category-save" class="mini" type="button">保存类别</button>
+    <button id="${idPrefix}-category-save" class="mini">保存类别</button>
   </div>`;
 }
 
@@ -692,9 +747,10 @@ function bindVersionCategory(data, idPrefix) {
   const button = $(`${idPrefix}-category-save`);
   if (!button) return;
   button.onclick = async () => {
+    if (sectionSavePending || versionLoadPending) return;
     const category = $(`${idPrefix}-category`).value.trim();
-    button.disabled = true;
     try {
+      button.disabled = true;
       const result = await api(`/verifications/versions/${data.selected_version.id}`, {
         method: 'PATCH',
         body: JSON.stringify({ category }),
@@ -706,11 +762,9 @@ function bindVersionCategory(data, idPrefix) {
       const row = listState.find(item => Number(item.id) === Number(data.quote.id));
       if (row && Number(row.current_version_id) === Number(data.selected_version.id)) row.current_version_category = saved;
       versionCache.set(String(data.selected_version.id), data);
+      if (data !== taskState || sectionSavePending || versionLoadPending) return;
       if ($('verification-list').classList.contains('hidden')) renderDetail();
-      else {
-        renderList();
-        renderPreview();
-      }
+      else { renderList(); renderPreview(); }
     } catch (error) {
       alert(error.message);
       button.disabled = false;
@@ -722,8 +776,9 @@ function bindCreateVersion(data, idPrefix) {
   const button = $(`${idPrefix}-create`);
   if (!button) return;
   button.onclick = async () => {
+    if (sectionSavePending || versionLoadPending) return;
     const source = $(`${idPrefix}-source`).value;
-    if (!confirm('新版本会复制所选来源的部门明细，套用当前统一核价基准，并重新进入填写和审核流程。确认创建？')) return;
+    if (!confirm('新版本会复制所选来源的部门明细，并重新进入填写和审核流程。确认创建？')) return;
     try {
       const body = source === 'quote'
         ? { source_type: 'quote' }
@@ -743,58 +798,6 @@ function bindCreateVersion(data, idPrefix) {
   };
 }
 
-function reopenVersionButton(data, idPrefix) {
-  if (!data.can_reopen_version || data.selected_version.status !== 'completed') return '';
-  return `<button id="${idPrefix}" class="mini verification-reopen-version">🔓 解锁修改 ${esc(data.selected_version.label)}</button>`;
-}
-
-function bindReopenVersion(data, idPrefix, afterOpen) {
-  const button = $(idPrefix);
-  if (!button) return;
-  button.onclick = async () => {
-    const reason = await requestText(`请输入重新开启 ${data.selected_version.label} 的原因`);
-    if (!reason?.trim()) return;
-    try {
-      await api(`/verifications/versions/${data.selected_version.id}/reopen`, {
-        method: 'POST',
-        body: JSON.stringify({ reason }),
-      });
-      versionCache.clear();
-      taskState = await fetchTask(data.quote.id, data.selected_version.id);
-      sectionDirty = false;
-      await afterOpen();
-    } catch (error) {
-      alert(error.message);
-    }
-  };
-}
-
-function deleteVersionButton(data, idPrefix) {
-  if (!data.can_delete_version) return '';
-  return `<button id="${idPrefix}" class="danger">删除 ${esc(data.selected_version.label)}</button>`;
-}
-
-function bindDeleteVersion(data, idPrefix) {
-  const button = $(idPrefix);
-  if (!button) return;
-  button.onclick = async () => {
-    if (sectionDirty && !confirm('当前部门有未保存修改，删除版本会一并放弃这些修改。确认继续？')) return;
-    if (!confirm(`确认删除 ${data.selected_version.label}？该版本的全部部门核价明细将一起删除，且无法恢复。`)) return;
-    button.disabled = true;
-    try {
-      const result = await api(`/verifications/versions/${data.selected_version.id}`, { method: 'DELETE' });
-      versionCache.clear();
-      taskState = await fetchTask(data.quote.id, result.selected_version_id);
-      sectionDirty = false;
-      activeDepartment = null;
-      renderDetail();
-    } catch (error) {
-      button.disabled = false;
-      alert(error.message);
-    }
-  };
-}
-
 function calculateFinancial(source) {
   const workbench = window.VerificationWorkbench;
   if (!workbench?.renderSummaryPane) return null;
@@ -804,9 +807,10 @@ function calculateFinancial(source) {
   try {
     window.__data = { quote: taskState.quote, sections: source.sections, me: me || {} };
     const result = workbench.renderSummaryPane(host, source.sections, taskState.quote, { dept: 'verification_readonly', role: 'staff' }) || {};
-    if (result.financial) return result.financial;
+    if (result?.financial) return result.financial;
     const readNumber = selector => {
-      const text = host.querySelector(selector)?.textContent || '';
+      const element = host.querySelector(selector);
+      const text = element && 'value' in element ? element.value : element?.textContent || '';
       const value = Number(text.replace(/[^0-9.-]/g, ''));
       return Number.isFinite(value) ? value : 0;
     };
@@ -839,10 +843,10 @@ function calculateFinancial(source) {
     }));
     return {
       fields,
-      totalCost: num(result.totalCost ?? result.total),
-      totalDeduction: num(result.totalDeduction),
-      afterDeduction: num(result.afterDeduction),
-      noLabor: readNumber('#tk-no-labor'),
+      totalCost: num(result.totalCost ?? result.total ?? readNumber('#tk-total-cost')),
+      totalDeduction: num(result.totalDeduction ?? readNumber('#tk-total-ded')),
+      afterDeduction: num(result.afterDeduction ?? readNumber('#tk-after-ded')),
+      noLabor: num(result.noLabor ?? readNumber('#tk-no-labor')),
       taxRows,
     };
   } finally {
@@ -869,7 +873,7 @@ function normalizedVersion(data) {
   return {
     key: String(data.selected_version.id),
     type: 'version',
-    label: data.selected_version.label,
+    label: versionTitle(data.selected_version),
     status: data.selected_version.status,
     sections: data.sections.map(section => ({ ...section, payload_json: section.payload_json || '{}' })),
   };
@@ -887,20 +891,20 @@ function renderPreview() {
   const version = taskState.selected_version;
   const current = normalizedVersion(taskState);
   const financial = calculateFinancial(current);
-  const salesPayload = parseJson(taskState.sections.find(section => section.dept === 'sales')?.payload_json, {});
-  const confirmedCurrency = salesPayload.legacy_import?.confirmed_currency || 'USD';
-  $('verification-preview').innerHTML = `<div class="verification-preview-compact-head verification-preview-task-head">
+  $('verification-preview').innerHTML = `<div class="verification-preview-title">
       <div><span class="eyebrow">核价任务</span><h2>${esc(quote.quote_no)}</h2></div>
       <span class="verification-status status-${esc(version.status)}">${VERSION_STATUS[version.status]}</span>
     </div>
-    <div class="verification-preview-compact-data verification-preview-task-data">
-      <div><span>产品</span><strong>${esc(quote.product_name || '—')}</strong></div>
-      <div><span>客户 / 报价版本</span><strong>${esc(VerificationCustomers.display(quote.customer) || '—')} · ${esc(quote.version || '历史V1')}</strong></div>
-      ${quote.verification_origin==='direct'?'<div><span>核价来源</span><strong>直接新建</strong></div>':`<div><span>客户确认价</span><strong>${amount(quote.confirmed_price, confirmedCurrency, confirmedCurrency === 'HKD' ? 4 : 2)}</strong></div>`}
+    <dl class="verification-preview-meta">
+      <div><dt>产品</dt><dd>${esc(quote.product_name)}</dd></div>
+      <div><dt>客户 / 报价版本</dt><dd>${esc(quote.customer || '—')} · ${esc(quote.version || 'V1')}</dd></div>
+      ${quote.verification_origin==='direct'?'<div><dt>核价来源</dt><dd>直接新建</dd></div>':`<div><dt>客户确认价</dt><dd>US$ ${num(quote.confirmed_price).toFixed(2)}</dd></div>`}
+    </dl>
+    <div class="verification-version-strip">
+      ${taskState.versions.map(item => `<span class="${item.id === version.id ? 'active' : ''}">${esc(versionTitle(item))} · ${VERSION_STATUS[item.status]}</span>`).join('')}
     </div>
-    <div class="verification-preview-version-badge">${esc(versionTitle(version))} · ${VERSION_STATUS[version.status]}</div>
     ${versionCategoryEditor(taskState, 'preview-version')}
-    <div class="verification-baseline-note"><strong>报价基准已冻结</strong><span>核价版本按部门填写和审核，不允许直接填写最终价格</span></div>
+    <div class="verification-baseline-note"><strong>${quote.verification_origin==='direct'?'直接核价 · 当前基准初始化':'报价基准已冻结'}</strong><span>核价版本按部门填写和审核，不允许直接填写最终价格</span></div>
     <div class="verification-preview-kpis">
       <div><span>当前版本</span><strong>${esc(versionTitle(version))}</strong></div>
       <div><span>部门进度</span><strong>${num(version.approved_count)} / ${num(version.total_count)}</strong></div>
@@ -910,17 +914,9 @@ function renderPreview() {
       <button id="verification-open-detail" class="verification-primary-action">进入部门核价</button>
       <button id="verification-open-compare" class="mini">选择版本对比</button>
     </div>
-    ${reopenVersionButton(taskState, 'preview-version-reopen')}
-    <div class="verification-preview-version-action">${createVersionSelector(taskState, 'preview-version')}</div>`;
+    ${createVersionSelector(taskState, 'preview-version')}`;
   $('verification-open-detail').onclick = () => openDetail('workflow');
   $('verification-open-compare').onclick = () => openDetail('compare');
-  bindReopenVersion(taskState, 'preview-version-reopen', async () => {
-    const latest = taskState.selected_version;
-    const row = listState.find(item => Number(item.id) === Number(taskState.quote.id));
-    if (row) Object.assign(row, { verification_status: latest.status, approved_count: latest.approved_count });
-    renderList();
-    renderPreview();
-  });
   bindCreateVersion(taskState, 'preview-version');
   bindVersionCategory(taskState, 'preview-version');
 }
@@ -935,10 +931,26 @@ function openDetail(mode) {
 }
 
 async function switchVersion(versionId) {
+  if (sectionSavePending || versionLoadPending) return;
   if (sectionDirty && !confirm('当前部门有未保存修改，切换版本会放弃这些修改。确认继续？')) return;
-  taskState = await fetchTask(taskState.quote.id, versionId);
-  sectionDirty = false;
-  renderDetail();
+  const quoteId = taskState.quote.id;
+  const requestSequence = ++taskRequestSequence;
+  versionLoadPending = true;
+  const detail = $('verification-detail');
+  const wasInert = detail.inert;
+  detail.inert = true;
+  try {
+    const data = await fetchTask(quoteId, versionId);
+    if (requestSequence !== taskRequestSequence || Number(taskState.quote.id) !== Number(quoteId) || sectionSavePending) return;
+    taskState = data;
+    sectionDirty = false;
+    renderDetail();
+  } catch (error) {
+    if (requestSequence === taskRequestSequence) alert(error.message);
+  } finally {
+    versionLoadPending = false;
+    detail.inert = wasInert;
+  }
 }
 
 function hasOriginalWorkbook() {
@@ -949,31 +961,36 @@ function hasOriginalWorkbook() {
 function renderDetail() {
   const quote = taskState.quote;
   const version = taskState.selected_version;
+  window.VerificationWorkbench?.cleanupMoldNumberObservers?.($('verification-detail'));
   $('verification-detail').innerHTML = `<header class="verification-detail-head">
       <button id="verification-back" class="mini">← 返回核价任务</button>
       <div><span class="eyebrow">核价明细</span><h1>${esc(quote.quote_no)} · ${esc(quote.product_name)}</h1>
-        <p>${esc(VerificationCustomers.display(quote.customer) || '—')} · ${baselineTitle()}建立于 ${esc(formatDate(taskState.baseline.frozen_at))}</p></div>
-      <span class="verification-status status-${esc(version.status)}">${esc(version.label)} · ${VERSION_STATUS[version.status]}</span>
+        <p>${esc(quote.customer || '—')} · ${baselineTitle()}建立于 ${esc(formatDate(taskState.baseline.frozen_at))}</p></div>
+      <span class="verification-status status-${esc(version.status)}">${esc(versionTitle(version))} · ${VERSION_STATUS[version.status]}</span>
     </header>
     <div class="verification-version-toolbar">
       <div class="verification-version-tabs">
         ${taskState.versions.map(item => `<button data-version-id="${item.id}" class="${item.id === version.id ? 'active' : ''}">
-          ${esc(item.label)}<small>${VERSION_STATUS[item.status]} · ${num(item.approved_count)}/${num(item.total_count)}</small>
+          ${esc(versionTitle(item))}<small>${VERSION_STATUS[item.status]} · ${num(item.approved_count)}/${num(item.total_count)}</small>
         </button>`).join('')}
       </div>
-      <div class="verification-version-actions">
+      <div class="verification-version-tools">
         ${versionCategoryEditor(taskState, 'detail-version')}
-        ${reopenVersionButton(taskState, 'detail-version-reopen')}
         ${createVersionSelector(taskState, 'detail-version')}
-        ${deleteVersionButton(taskState, 'detail-version-delete')}
       </div>
     </div>
-    <nav class="verification-mode-tabs" aria-label="核价工作模式">
-      <button data-detail-mode="compare" class="${detailMode === 'compare' ? 'active' : ''}">${quote.verification_origin==='direct'?'核价版本对比':'报价 / 核价版本对比'}</button>
-    </nav>
+    <div class="verification-sticky-navigation">
+      <nav class="verification-mode-tabs" aria-label="核价工作模式">
+        <button data-detail-mode="workflow" class="${detailMode === 'workflow' ? 'active' : ''}">部门核价流程</button>
+        ${hasOriginalWorkbook() ? `<button data-detail-mode="workbook" class="${detailMode === 'workbook' ? 'active' : ''}">原核价表</button>` : ''}
+        <button data-detail-mode="compare" class="${detailMode === 'compare' ? 'active' : ''}">${quote.verification_origin==='direct'?'核价版本对比':'报价 / 核价版本对比'}</button>
+      </nav>
+      <div id="verification-workflow-navigation"></div>
+    </div>
     <section id="verification-detail-content"></section>`;
 
   $('verification-back').onclick = async () => {
+    if (sectionSavePending || versionLoadPending) return;
     if (sectionDirty && !confirm('当前部门有未保存修改，确认返回？')) return;
     $('verification-detail').classList.add('hidden');
     $('verification-list').classList.remove('hidden');
@@ -982,9 +999,9 @@ function renderDetail() {
   document.querySelectorAll('[data-version-id]').forEach(button => {
     button.onclick = () => switchVersion(button.dataset.versionId);
   });
-  bindVersionCategory(taskState, 'detail-version');
   document.querySelectorAll('[data-detail-mode]').forEach(button => {
     button.onclick = () => {
+      if (sectionSavePending || versionLoadPending) return;
       if (sectionDirty && !confirm('当前部门有未保存修改，切换页面会放弃这些修改。确认继续？')) return;
       sectionDirty = false;
       detailMode = button.dataset.detailMode;
@@ -992,26 +1009,26 @@ function renderDetail() {
     };
   });
   bindCreateVersion(taskState, 'detail-version');
-  bindReopenVersion(taskState, 'detail-version-reopen', async () => renderDetail());
-  bindDeleteVersion(taskState, 'detail-version-delete');
+  bindVersionCategory(taskState, 'detail-version');
   if (detailMode === 'workflow') renderWorkflow();
+  else if (detailMode === 'workbook' && hasOriginalWorkbook()) { $('verification-workflow-navigation').innerHTML=''; renderImportedWorkbook($('verification-detail-content')); }
   else renderComparison();
 }
 
 function renderWorkflow() {
   const host = $('verification-detail-content');
-  if (hasOriginalWorkbook()) { renderImportedWorkbook(host); return; }
+  window.VerificationWorkbench?.cleanupMoldNumberObservers?.(host);
+  const navigationHost = $('verification-workflow-navigation');
   const version = taskState.selected_version;
   const departments = taskState.sections;
-  const importedValuation = departments.some(section => section.dept === 'sales'
-    && parseJson(section.payload_json, {}).legacy_import);
   const approvedCount = departments.filter(section => section.status === 'approved').length;
   const totalCount = departments.length;
-  // “汇总与减税”是系统页签，不属于部门列表；切到汇总时不能被重置回第一个部门。
   if (activeDepartment !== '__summary__'
-    && !departments.some(section => section.dept === activeDepartment)) activeDepartment = departments[0]?.dept;
-  host.innerHTML = `<div class="verification-workflow-intro">
-      <div><strong>${esc(version.label)} 部门核价</strong><span>流程与报价一致：填写明细 → 提交审核 → 主管审核 → 全部通过后锁定版本</span></div>
+    && !departments.some(section => section.dept === activeDepartment)) {
+    activeDepartment = departments[0]?.dept;
+  }
+  navigationHost.innerHTML = `<div class="verification-workflow-intro">
+      <div><strong>${esc(versionTitle(version))} 部门核价</strong><span>流程与报价一致：填写明细 → 提交审核 → 主管审核 → 全部通过后锁定版本</span></div>
       <div class="verification-progress" aria-label="部门审核进度">
         <strong>${approvedCount} / ${totalCount}</strong><span>部门已审核</span>
       </div>
@@ -1020,11 +1037,12 @@ function renderWorkflow() {
       ${departments.map(section => `<button data-verification-dept="${esc(section.dept)}" class="${section.dept === activeDepartment ? 'active' : ''}">
         ${esc(section.dept_name)}<small class="status-${esc(section.status)}">${SECTION_STATUS[section.status]}</small>
       </button>`).join('')}
-      <button data-verification-dept="__summary__" class="${activeDepartment === '__summary__' ? 'active' : ''}">${importedValuation ? '核价汇总' : '汇总与减税'}<small>系统计算</small></button>
-    </div>
-    <div id="verification-department-workbench"></div>`;
+      <button data-verification-dept="__summary__" class="verification-summary-tab ${activeDepartment === '__summary__' ? 'active' : ''}">汇总与减税<small>点击查看</small></button>
+    </div>`;
+  host.innerHTML = '<div id="verification-department-workbench"></div>';
   document.querySelectorAll('[data-verification-dept]').forEach(button => {
     button.onclick = () => {
+      if (sectionSavePending || versionLoadPending) return;
       if (sectionDirty && !confirm('当前部门有未保存修改，确认切换？')) return;
       sectionDirty = false;
       activeDepartment = button.dataset.verificationDept;
@@ -1050,6 +1068,7 @@ function renderImportedWorkbook(host) {
   window.ExcelGrid.render($('verification-original-workbook'), taskState.sections, {
     onDirty: () => { sectionDirty = true; },
     onSave: async (changes, submit) => {
+      if(sectionSavePending)return;sectionSavePending=true;
       const grid = $('verification-original-workbook');
       grid.inert = true;
       try {
@@ -1058,7 +1077,7 @@ function renderImportedWorkbook(host) {
         taskState = await fetchTask(taskState.quote.id, version.id);
         sectionDirty = false;
         if (submit) renderDetail();
-      } finally { grid.inert = false; }
+      } finally { grid.inert = false;sectionSavePending=false; }
     },
   });
   if ($('workbook-review-all')) $('workbook-review-all').onclick = async () => {
@@ -1097,7 +1116,7 @@ function renderImportedWorkbook(host) {
     };
   });
   if ($('workbook-complete-version')) $('workbook-complete-version').onclick = async () => {
-    if (!confirm(`完成后 ${version.label} 将停止编辑；管理员可稍后重新开启。确认继续？`)) return;
+    if (!confirm(`完成后 ${version.label} 将停止编辑；后续可创建新的核价版本。确认继续？`)) return;
     try {
       await api(`/verifications/versions/${version.id}/complete`, { method: 'POST', body: JSON.stringify({ note: version.note || '' }) });
       versionCache.clear();
@@ -1130,6 +1149,7 @@ function currentSectionsForWorkbench() {
 
 function renderDepartmentWorkbench() {
   const host = $('verification-department-workbench');
+  window.VerificationWorkbench?.cleanupMoldNumberObservers?.(host);
   if (activeDepartment === '__summary__') {
     renderVersionSummary(host);
     return;
@@ -1145,7 +1165,7 @@ function renderDepartmentWorkbench() {
   const renderer = rendererForDepartment(section.dept);
   host.innerHTML = `<article class="card verification-department-card">
       <header class="verification-department-head">
-        <div><span class="eyebrow">${esc(version.label)} · 部门核价</span><h2>${esc(section.dept_name)}</h2>
+        <div><span class="eyebrow">${esc(versionTitle(version))} · 部门核价</span><h2>${esc(section.dept_name)}</h2>
           <p>填写材料、用量、人工和加工费等明细；最终核价由系统汇总计算</p></div>
         <span class="badge status-${esc(section.status)}">${SECTION_STATUS[section.status]}</span>
       </header>
@@ -1156,8 +1176,7 @@ function renderDepartmentWorkbench() {
         ${section.can_review && section.status === 'filled' ? '<button id="verification-approve">审核通过</button><button id="verification-reject" class="danger">驳回</button>' : ''}
         ${section.can_review && section.status === 'approved' ? '<button id="verification-reopen" class="mini">解除审核</button>' : ''}
         ${section.review_comment ? `<span class="verification-review-comment">${esc(section.review_comment)}</span>` : ''}
-        ${version.status === 'completed' ? '<span class="verification-lock">该版本已完成；管理员可重新开启修改</span>' : ''}
-        ${version.status === 'cancelled' ? '<span class="verification-lock">该版本已取消</span>' : ''}
+        ${['completed', 'cancelled'].includes(version.status) ? '<span class="verification-lock">该版本已锁定</span>' : ''}
       </div>
     </article>`;
 
@@ -1168,9 +1187,8 @@ function renderDepartmentWorkbench() {
   const fxRmbHkd = num(salesPayload.header?.fx_rmb_hkd) || 0.85;
   const fxHkdUsd = num(salesPayload.header?.fx_hkd_usd) || 7.8;
   const onChange = () => { sectionDirty = true; };
-  if (salesPayload.legacy_import?.excel_model && section._draft.excel_native) {
-    window.ExcelValuation.renderDepartment(body, section._draft, sections, editable, onChange);
-  } else if (!renderer) {
+  if(salesPayload.legacy_import?.excel_model && section._draft.excel_native){window.ExcelValuation.renderDepartment(body,section._draft,sections,editable,onChange);}
+  else if (!renderer) {
     body.innerHTML = '<div class="summary-empty">该部门暂未配置核价表单</div>';
   } else if (section.dept === 'sales') {
     renderer(body, section._draft, taskState.quote, false, editable, sections, onChange, async () => {});
@@ -1184,30 +1202,50 @@ function renderDepartmentWorkbench() {
     renderer(body, section._draft, editable, onChange, fxRmbHkd);
   }
 
-  let savePending = false;
   const save = async submit => {
-    if (savePending) return;
-    const invalid = body.querySelector('input:invalid');
-    if (invalid) { invalid.reportValidity(); return; }
-    if (submit && !confirm(`确认提交 ${section.dept_name} 的 ${version.label} 核价明细审核？`)) return;
-    savePending = true;
+    if (sectionSavePending || versionLoadPending) return;
+    if (!section.revision) { alert('核价服务版本未同步，请刷新页面后再保存'); return; }
+    if (submit && !confirm(`确认提交 ${section.dept_name} 的 ${versionTitle(version)} 核价明细审核？`)) return;
+    const sourceTask = taskState;
+    const quoteId = sourceTask.quote.id;
+    const submitted = JSON.stringify(section._draft);
+    const wasInert = body.inert;
+    sectionSavePending = true;
+    ++taskRequestSequence;
     body.inert = true;
-    const saveButtons = [$('verification-save-draft'), $('verification-submit')].filter(Boolean);
-    saveButtons.forEach(button => { button.disabled = true; });
+    const lockedControls = [...$('verification-detail').querySelectorAll('button,select,input,textarea')]
+      .filter(control => !body.contains(control))
+      .map(control => ({ control, disabled: control.disabled }));
+    lockedControls.forEach(({ control }) => { control.disabled = true; });
     try {
-      await api(`/verifications/versions/${version.id}/sections/${section.id}`, {
+      const saved = await api(`/verifications/versions/${version.id}/sections/${section.id}`, {
         method: 'PUT',
-        body: JSON.stringify({ payload: section._draft, submit, base_revision: section.revision }),
+        body: JSON.stringify({ payload: JSON.parse(submitted), submit, base_revision: section.revision }),
       });
-      taskState = await fetchTask(taskState.quote.id, version.id);
-      sectionDirty = false;
-      renderDetail();
+      section.payload_json = submitted;
+      section.revision = saved.revision || section.revision;
+      section.status = saved.section_status || (submit ? 'filled' : section.status);
+      section.filled_at = saved.filled_at;
+      const hasLaterEdits = JSON.stringify(section._draft) !== submitted;
+      if (taskState === sourceTask) sectionDirty = hasLaterEdits;
+      try {
+        const refreshed = await fetchTask(quoteId, version.id);
+        if (taskState !== sourceTask || !body.isConnected) return;
+        if (hasLaterEdits) {
+          const currentSection = refreshed.sections.find(item => Number(item.id) === Number(section.id));
+          if (currentSection) currentSection._draft = section._draft;
+        }
+        taskState = refreshed;
+        renderDetail();
+      } catch (error) {
+        if (taskState === sourceTask && body.isConnected) alert(`本部门已保存，核价刷新失败：${error.message}。可稍后重试刷新。`);
+      }
     } catch (error) {
       alert(error.message);
     } finally {
-      savePending = false;
-      body.inert = false;
-      saveButtons.forEach(button => { button.disabled = false; });
+      sectionSavePending = false;
+      body.inert = wasInert;
+      lockedControls.forEach(({ control, disabled }) => { control.disabled = disabled; });
     }
   };
   if ($('verification-save-draft')) $('verification-save-draft').onclick = () => save(false);
@@ -1249,21 +1287,17 @@ async function reviewSection(section, action, comment = '') {
 
 function renderVersionSummary(host) {
   const version = taskState.selected_version;
-  const importedHistory = taskState.sections.some(section => section.dept === 'sales'
-    && parseJson(section.payload_json, {}).legacy_import?.summary_only);
-  const importedValuation = taskState.sections.some(section => section.dept === 'sales'
-    && parseJson(section.payload_json, {}).legacy_import);
   host.innerHTML = `<article class="card verification-version-summary">
-      <header class="verification-department-head"><div><span class="eyebrow">${esc(version.label)}</span><h2>${importedValuation ? '核价汇总' : '核价汇总与减税'}</h2>
-        <p>${importedValuation ? '按原核价表的汇总格式显示，金额随部门明细自动计算' : '汇总由各部门核价明细自动计算，不能直接填写最终价格'}</p></div>
+      <header class="verification-department-head"><div><span class="eyebrow">${esc(versionTitle(version))}</span><h2>核价汇总与减税</h2>
+        <p>汇总由各部门核价明细自动计算，不能直接填写最终价格</p></div>
         <span class="verification-status status-${esc(version.status)}">${VERSION_STATUS[version.status]}</span>
       </header>
       <div id="verification-summary-workbench"></div>
       <div class="verification-complete-panel">
         <label>版本说明 <textarea id="verification-version-note" placeholder="填写本版本主要调整原因">${esc(version.note || '')}</textarea></label>
-        ${taskState.can_complete ? '<button id="verification-complete-version">完成当前版本</button>' : ''}
-        ${version.status === 'ready' ? '<span>全部部门已审核，可以标记完成。</span>' : ''}
-        ${version.status === 'completed' ? `<span class="verification-lock">${importedHistory ? '历史原版已完成；管理员可直接重新开启修改，系统会带入计算公式；也可复制为新版本。' : '该版本已完成；管理员可重新开启修改，也可创建下一版本。'}</span>` : ''}
+        ${taskState.can_complete ? '<button id="verification-complete-version">完成并锁定当前版本</button>' : ''}
+        ${version.status === 'ready' ? '<span>全部部门已审核，可以完成锁定。</span>' : ''}
+        ${version.status === 'completed' ? '<span class="verification-lock">该版本已完成并锁定，可创建下一版本。</span>' : ''}
       </div>
     </article>`;
   const summaryHost = $('verification-summary-workbench');
@@ -1271,7 +1305,7 @@ function renderVersionSummary(host) {
   window.__data = { quote: taskState.quote, sections, me };
   window.VerificationWorkbench?.renderSummaryPane(summaryHost, sections, taskState.quote, { dept: 'verification_readonly', role: 'staff' });
   if ($('verification-complete-version')) $('verification-complete-version').onclick = async () => {
-    if (!confirm(`完成后 ${version.label} 将停止编辑；管理员可稍后重新开启。确认继续？`)) return;
+    if (!confirm(`完成后 ${versionTitle(version)} 将永久锁定，确认继续？`)) return;
     try {
       await api(`/verifications/versions/${version.id}/complete`, {
         method: 'POST',
@@ -1286,20 +1320,20 @@ function renderVersionSummary(host) {
   };
 }
 
-function comparisonChoices() {
-  return [{ key: 'quote', label: `${baselineTitle()} ${taskState.quote.version || ''}`.trim(), status: '已冻结' }]
-    .concat(taskState.versions.map(version => ({ key: String(version.id), label: version.label, status: VERSION_STATUS[version.status] })));
+function comparisonOptions(selected) {
+  const options = [{ key: 'quote', label: `${baselineTitle()} ${taskState.quote.version || ''}`.trim(), status: '已冻结' }]
+    .concat(taskState.versions.map(version => ({ key: String(version.id), label: versionTitle(version), status: VERSION_STATUS[version.status] })));
+  return options.map(option => `<option value="${esc(option.key)}" ${String(selected) === String(option.key) ? 'selected' : ''}>${esc(option.label)} · ${esc(option.status)}</option>`).join('');
 }
 
-function ensureComparisonSelection() {
-  const choices = comparisonChoices();
-  const valid = new Set(choices.map(choice => choice.key));
-  comparisonState.selected = [...new Set(comparisonState.selected.map(String))].filter(key => valid.has(key));
-  if (comparisonState.selected.length < 2) {
-    const latest = choices[choices.length - 1]?.key;
-    comparisonState.selected = ['quote', latest].filter((key, index, values) => key && values.indexOf(key) === index);
-  }
-  return choices;
+function comparisonTargetOptions(selected, baseline) {
+  const selectedKeys = new Set((selected || []).map(String));
+  const options = [{ key: 'quote', label: `${baselineTitle()} ${taskState.quote.version || ''}`.trim(), status: '已冻结' }]
+    .concat(taskState.versions.map(version => ({ key: String(version.id), label: versionTitle(version), status: VERSION_STATUS[version.status] })));
+  return options.filter(option => option.key !== String(baseline)).map(option => `<label class="verification-target-option">
+    <input type="checkbox" data-compare-target value="${esc(option.key)}" ${selectedKeys.has(option.key) ? 'checked' : ''}>
+    <span><strong>${esc(option.label)}</strong><small>${esc(option.status)}</small></span>
+  </label>`).join('');
 }
 
 function comparisonRows(source) {
@@ -1318,18 +1352,26 @@ function comparisonRows(source) {
 
 function renderComparison() {
   const host = $('verification-detail-content');
-  const choices = ensureComparisonSelection();
+  const versionKeys = taskState.versions.map(version => String(version.id));
+  const validKeys = new Set(['quote', ...versionKeys]);
+  if (Number(comparisonState.quoteId) !== Number(taskState.quote.id)) {
+    comparisonState = { quoteId: taskState.quote.id, baseline: 'quote', targets: null, dept: 'all', changedOnly: true, query: '' };
+  }
+  if (!validKeys.has(String(comparisonState.baseline))) comparisonState.baseline = 'quote';
+  if (comparisonState.targets === null) comparisonState.targets = versionKeys.filter(key => key !== comparisonState.baseline);
+  comparisonState.targets = comparisonState.targets.map(String)
+    .filter((key, index, keys) => validKeys.has(key) && key !== comparisonState.baseline && keys.indexOf(key) === index);
   host.innerHTML = `<article class="card verification-comparison-card">
-      <header class="verification-section-head"><div><span class="eyebrow">多版本选择</span><h2>报价 / 多版本核价对比</h2>
-        <p>可同时选择原报价和多个核价版本；最左侧所选项作为差异基准</p></div></header>
+      <header class="verification-section-head"><div><span class="eyebrow">自定义选择</span><h2>报价 / 核价版本对比</h2>
+        <p>选择一个对比基准，可同时勾选多个核价版本横向对比</p></div></header>
       <div class="verification-source-picker verification-source-picker-multi">
-        <div class="verification-source-picker-head"><strong>选择对比版本（至少 2 项）</strong>
-          <div><button id="verification-select-all-versions" class="mini">全选</button><button id="verification-select-latest" class="mini">原报价 + 最新版</button></div>
-        </div>
-        <div class="verification-source-options">
-          ${choices.map(choice => `<label><input type="checkbox" data-comparison-source="${esc(choice.key)}" ${comparisonState.selected.includes(choice.key) ? 'checked' : ''}>
-            <span>${esc(choice.label)}</span><small>${esc(choice.status)}</small></label>`).join('')}
-        </div>
+        <label>对比基准<select id="verification-source-baseline">${comparisonOptions(comparisonState.baseline)}</select></label>
+        <fieldset class="verification-target-picker">
+          <legend>参与对比的版本（可多选）</legend>
+          <div class="verification-target-options">${comparisonTargetOptions(comparisonState.targets, comparisonState.baseline)}</div>
+          <div class="verification-target-actions"><button id="verification-select-all-targets" type="button" class="mini">全选核价版本</button>
+            <button id="verification-clear-targets" type="button" class="mini">清空</button></div>
+        </fieldset>
       </div>
       <div class="verification-compare-filters">
         <select id="verification-compare-dept"><option value="all">全部部门</option>
@@ -1340,22 +1382,24 @@ function renderComparison() {
       </div>
       <div id="verification-comparison-result"><div class="verification-preview-empty">正在计算所选版本…</div></div>
     </article>`;
-  const updateSelection = () => {
-    comparisonState.selected = [...document.querySelectorAll('[data-comparison-source]:checked')]
-      .map(input => input.dataset.comparisonSource);
+  $('verification-source-baseline').onchange = event => {
+    comparisonState.baseline = event.target.value;
+    comparisonState.targets = comparisonState.targets.filter(key => key !== comparisonState.baseline);
+    renderComparison();
+  };
+  const updateTargets = () => {
+    comparisonState.targets = [...document.querySelectorAll('[data-compare-target]:checked')].map(input => input.value);
     refreshComparison();
   };
-  document.querySelectorAll('[data-comparison-source]').forEach(input => { input.onchange = updateSelection; });
-  $('verification-select-all-versions').onclick = () => {
-    document.querySelectorAll('[data-comparison-source]').forEach(input => { input.checked = true; });
-    updateSelection();
+  document.querySelectorAll('[data-compare-target]').forEach(input => { input.onchange = updateTargets; });
+  $('verification-select-all-targets').onclick = () => {
+    const selectableVersions = new Set(versionKeys.filter(key => key !== comparisonState.baseline));
+    document.querySelectorAll('[data-compare-target]').forEach(input => { input.checked = selectableVersions.has(input.value); });
+    updateTargets();
   };
-  $('verification-select-latest').onclick = () => {
-    const latest = choices[choices.length - 1]?.key;
-    document.querySelectorAll('[data-comparison-source]').forEach(input => {
-      input.checked = input.dataset.comparisonSource === 'quote' || input.dataset.comparisonSource === latest;
-    });
-    updateSelection();
+  $('verification-clear-targets').onclick = () => {
+    document.querySelectorAll('[data-compare-target]').forEach(input => { input.checked = false; });
+    updateTargets();
   };
   $('verification-compare-dept').onchange = event => {
     comparisonState.dept = event.target.value;
@@ -1372,40 +1416,46 @@ function renderComparison() {
   refreshComparison();
 }
 
-function multiComparisonCell(value, baseline, currency = 'HKD', decimals = 2, isBaseline = false, exists = true) {
-  if (!exists) return '<td class="verification-missing-value">—<small>该版本无此项</small></td>';
-  const difference = num(value) - num(baseline);
+function comparisonTargetCells(baselineValue, targetValue, currency = 'HKD', decimals = 2) {
+  const difference = num(targetValue) - num(baselineValue);
+  const rate = nearZero(baselineValue) ? null : difference / num(baselineValue);
   const klass = difference > 0.00001 ? 'delta-up' : difference < -0.00001 ? 'delta-down' : 'delta-flat';
-  return `<td class="verification-version-value ${klass}"><strong>${amount(value, currency, decimals)}</strong>
-    <small>${isBaseline ? '对比基准' : nearZero(difference) ? '无变化' : `较基准 ${difference > 0 ? '+' : ''}${amount(difference, currency, decimals)}`}</small></td>`;
+  return `<td>${amount(targetValue, currency, decimals)}</td>
+    <td class="${klass}">${nearZero(difference) ? '—' : `${difference > 0 ? '+' : ''}${amount(difference, currency, decimals)}`}</td>
+    <td class="${klass}">${rate == null || nearZero(difference) ? '—' : `${rate > 0 ? '+' : ''}${(rate * 100).toFixed(1)}%`}</td>`;
 }
 
 async function refreshComparison() {
   const resultHost = $('verification-comparison-result');
   if (!resultHost) return;
-  const selected = comparisonState.selected || [];
-  if (selected.length < 2) {
-    resultHost.innerHTML = '<div class="summary-empty">请至少选择两个不同的对比对象</div>';
+  const refreshToken = ++comparisonRefreshToken;
+  if (!comparisonState.targets.length) {
+    resultHost.innerHTML = '<div class="summary-empty">请至少勾选一个参与对比的版本</div>';
     return;
   }
   resultHost.innerHTML = '<div class="verification-preview-empty">正在计算所选版本…</div>';
   try {
-    const sources = await Promise.all(selected.map(loadComparisonSource));
+    const sources = await Promise.all([comparisonState.baseline, ...comparisonState.targets].map(loadComparisonSource));
+    if (refreshToken !== comparisonRefreshToken) return;
+    const [baseline, ...targets] = sources;
     const summaries = sources.map(calculateFinancial);
     const rowMaps = sources.map(source => new Map(comparisonRows(source).map(row => [row.storageKey, row])));
-    const keys = [...new Set(rowMaps.flatMap(map => [...map.keys()]))];
+    const keys = [...new Set(rowMaps.flatMap(rows => [...rows.keys()]))];
     const query = comparisonState.query.toLowerCase();
     const rows = keys.map(key => {
-      const versionRows = rowMaps.map(map => map.get(key));
-      const row = versionRows.find(Boolean);
-      const values = versionRows.map(item => item?.value ?? 0);
-      const presentCount = versionRows.filter(Boolean).length;
-      const changed = presentCount !== sources.length || values.some(value => !nearZero(value - values[0]));
+      const sourceRows = rowMaps.map(rowsMap => rowsMap.get(key));
+      const row = sourceRows.find(Boolean);
+      const baselineRow = sourceRows[0];
+      const baselineValue = baselineRow?.value ?? 0;
+      const targetValues = sourceRows.slice(1).map(targetRow => targetRow?.value ?? 0);
+      const changedTargets = sourceRows.slice(1).filter((targetRow, index) => Boolean(baselineRow) !== Boolean(targetRow)
+        || !nearZero(targetValues[index] - baselineValue)).length;
       return {
         ...row,
-        versionRows,
-        values,
-        changeType: presentCount !== sources.length ? '版本缺项' : changed ? '有差异' : '一致',
+        baselineValue,
+        targetValues,
+        changedTargets,
+        changeType: changedTargets ? `${changedTargets}/${targets.length} 有变化` : '一致',
       };
     }).filter(row => (comparisonState.dept === 'all' || row.dept === comparisonState.dept)
       && (!comparisonState.changedOnly || row.changeType !== '一致')
@@ -1421,71 +1471,91 @@ async function refreshComparison() {
     const draftWarning = sources.some(source => source.type === 'version' && source.status !== 'completed')
       ? '<div class="verification-draft-warning">当前对比包含未完成核价版本，结果会随部门填写和审核继续变化。</div>' : '';
     resultHost.innerHTML = `${draftWarning}
-      <div class="verification-comparison-labels verification-comparison-labels-multi">${sources.map((source, index) => `<strong>${esc(source.label)}${index === 0 ? '<small>差异基准</small>' : ''}</strong>`).join('')}</div>
+      <div class="verification-comparison-labels verification-comparison-labels-multi"><strong>${esc(baseline.label)}（基准）</strong><span>对比</span>
+        ${targets.map(target => `<strong>${esc(target.label)}</strong>`).join('')}</div>
       <section class="verification-comparison-section"><h3>成本汇总对比</h3>
         <div class="verification-table-scroll"><table class="verification-financial-table">
-          <thead><tr><th>项目</th>${sources.map(source => `<th>${esc(source.label)}</th>`).join('')}</tr></thead>
+          <thead><tr><th rowspan="2">项目</th><th rowspan="2">${esc(baseline.label)}（基准）</th>
+            ${targets.map(target => `<th colspan="3">${esc(target.label)}</th>`).join('')}</tr>
+            <tr>${targets.map(() => '<th>数值</th><th>差额</th><th>差异率</th>').join('')}</tr></thead>
           <tbody>${summaryRows.map(([label, key]) => {
-            const values = summaries.map(summary => summaryValue(summary, key));
-            return `<tr><td>${label}</td>${values.map((value, index) => multiComparisonCell(value, values[0], 'HKD', 2, index === 0)).join('')}</tr>`;
+            const baselineValue = summaryValue(summaries[0], key);
+            return `<tr><td>${label}</td><td>${amount(baselineValue)}</td>${summaries.slice(1).map(summary => comparisonTargetCells(baselineValue, summaryValue(summary, key))).join('')}</tr>`;
           }).join('')}</tbody>
         </table></div>
       </section>
       <section class="verification-comparison-section"><h3>部门明细变化</h3>
         <div class="verification-table-scroll"><table class="verification-comparison-table">
-          <thead><tr><th>部门 / 核价项目</th><th>用量</th><th>币种</th>${sources.map(source => `<th>${esc(source.label)}</th>`).join('')}<th>状态</th></tr></thead>
+          <thead><tr><th rowspan="2">部门 / 核价项目</th><th rowspan="2">用量</th><th rowspan="2">币种</th><th rowspan="2">${esc(baseline.label)}（基准）</th>
+            ${targets.map(target => `<th colspan="3">${esc(target.label)}</th>`).join('')}<th rowspan="2">状态</th></tr>
+            <tr>${targets.map(() => '<th>数值</th><th>差额</th><th>差异率</th>').join('')}</tr></thead>
           <tbody>${rows.length ? rows.map(row => {
             return `<tr><td><small>${esc(row.deptName)}</small><strong>${esc(row.label)}</strong></td><td>${esc(row.quantity)}</td><td>${esc(row.currency === 'NUMBER' ? '数值' : row.currency)}</td>
-              ${row.values.map((value, index) => multiComparisonCell(value, row.values[0], row.currency, 4, index === 0, Boolean(row.versionRows[index]))).join('')}
+              <td>${amount(row.baselineValue, row.currency, 4)}</td>${row.targetValues.map(value => comparisonTargetCells(row.baselineValue, value, row.currency, 4)).join('')}
               <td><span class="verification-row-state ${row.changeType !== '一致' ? 'changed' : ''}">${row.changeType}</span></td></tr>`;
-          }).join('') : `<tr><td colspan="${sources.length + 4}" class="summary-empty">没有符合条件的变化项目</td></tr>`}</tbody>
+          }).join('') : `<tr><td colspan="${5 + targets.length * 3}" class="summary-empty">没有符合条件的变化项目</td></tr>`}</tbody>
         </table></div>
       </section>
       ${renderTaxComparison(sources, summaries)}`;
   } catch (error) {
+    if (refreshToken !== comparisonRefreshToken) return;
     resultHost.innerHTML = `<div class="summary-empty">${esc(error.message)}</div>`;
   }
 }
 
 function renderTaxComparison(sources, summaries) {
-  const verificationSources = sources.map((source, index) => source.type === 'version'
-    ? { source, summary: summaries[index] } : null).filter(Boolean);
+  const verificationSources = sources.map((source, index) => source.type === 'version' ? { source, summary: summaries[index] } : null).filter(Boolean);
   if (!verificationSources.length) return '';
+  if (verificationSources.length === 1) {
+    const { source, summary } = verificationSources[0];
+    const rows = summary.taxRows.filter(row => row.base || row.deduction);
+    return `<section class="verification-tax-card">
+      <div class="verification-section-head"><div><span class="eyebrow">仅显示核价</span><h3>${esc(source.label)} 减税</h3>
+        <p>${baselineTitle()}不展示减税，只显示所选核价版本的减税结果</p></div></div>
+      <div class="verification-tax-kpis"><div><span>核价总成本</span><strong>${amount(summary.totalCost)}</strong></div>
+        <div><span>合计减税</span><strong>${amount(summary.totalDeduction)}</strong></div>
+        <div><span>减税后成本</span><strong>${amount(summary.afterDeduction)}</strong></div></div>
+      <table class="verification-tax-table"><thead><tr><th>核价减税项目</th><th>核价金额</th><th>减税率</th><th>减税额</th></tr></thead>
+        <tbody>${rows.map(row => `<tr><td>${esc(row.label)}</td><td>${amount(row.base)}</td><td>${num(row.rate).toFixed(2)}%</td><td>${amount(row.deduction)}</td></tr>`).join('')}</tbody></table>
+    </section>`;
+  }
   const taxMaps = verificationSources.map(item => new Map(item.summary.taxRows.map(row => [row.key, row])));
-  const keys = [...new Set(taxMaps.flatMap(map => [...map.keys()]))]
-    .filter(key => taxMaps.some(map => num(map.get(key)?.deduction)));
+  const keys = [...new Set(taxMaps.flatMap(rows => [...rows.keys()]))]
+    .filter(key => taxMaps.some(rows => num(rows.get(key)?.base) || num(rows.get(key)?.deduction)));
   return `<section class="verification-tax-card">
-    <div class="verification-section-head"><div><span class="eyebrow">多版本核价</span><h3>减税结果对比</h3>
-      <p>原报价不展示减税；所选核价版本的减税结果按版本并排列示</p></div></div>
-    <table class="verification-tax-table"><thead><tr><th>减税项目</th>${verificationSources.map(item => `<th>${esc(item.source.label)}</th>`).join('')}</tr></thead>
-      <tbody>${keys.map(key => {
-        const label = taxMaps.map(map => map.get(key)?.label).find(Boolean) || key;
-        return `<tr><td>${esc(label)}</td>${taxMaps.map(map => `<td>${amount(map.get(key)?.deduction)}</td>`).join('')}</tr>`;
-      }).join('')}
+    <div class="verification-section-head"><div><span class="eyebrow">多核价版本对比</span><h3>减税汇总</h3>
+      <p>${baselineTitle()}不计算减税；所有已选核价版本在同一张表内并列显示</p></div></div>
+    <div class="verification-table-scroll"><table class="verification-tax-table"><thead><tr><th>减税项目</th>${verificationSources.map(item => `<th>${esc(item.source.label)}</th>`).join('')}</tr></thead>
+      <tbody><tr><td><strong>核价总成本</strong></td>${verificationSources.map(item => `<td>${amount(item.summary.totalCost)}</td>`).join('')}</tr>
       <tr><td><strong>合计减税</strong></td>${verificationSources.map(item => `<td>${amount(item.summary.totalDeduction)}</td>`).join('')}</tr>
-      <tr><td><strong>减税后成本</strong></td>${verificationSources.map(item => `<td>${amount(item.summary.afterDeduction)}</td>`).join('')}</tr></tbody>
-    </table>
+      <tr><td><strong>减税后成本</strong></td>${verificationSources.map(item => `<td>${amount(item.summary.afterDeduction)}</td>`).join('')}</tr>
+      ${keys.map(key => {
+        const label = taxMaps.map(rows => rows.get(key)?.label).find(Boolean) || key;
+        return `<tr><td>${esc(label)}</td>${taxMaps.map(rows => `<td>${amount(rows.get(key)?.deduction || 0)}</td>`).join('')}</tr>`;
+      }).join('')}</tbody>
+    </table></div>
   </section>`;
 }
 
-const pairedListFilters={'verification-status-filter':'verification-table-status-filter','verification-table-status-filter':'verification-status-filter',
-  'verification-customer-filter':'verification-table-customer-filter','verification-table-customer-filter':'verification-customer-filter',
-  'workshop-filter':'verification-table-workshop-filter','verification-table-workshop-filter':'workshop-filter'};
-function applyListFilter(id){
-  if(pairedListFilters[id])$(pairedListFilters[id]).value=$(id).value;
-  workshopSelected.clear();renderList();
-  $('workshop-message').textContent='仅调整车间，不改变核价和完成状态';
+for (const id of listFilterIds) {
+  const eventName = ['verification-search', 'verification-no-filter', 'verification-product-filter'].includes(id)
+    ? 'oninput'
+    : 'onchange';
+  $(id)[eventName] = () => applyListFilter(id);
 }
-for(const id of listFilterIds)$(id)[['verification-search','verification-no-filter','verification-product-filter'].includes(id)?'oninput':'onchange']=()=>applyListFilter(id);
-$('verification-clear-filters').onclick=()=>{
-  for(const id of listFilterIds)$(id).value='';
-  workshopSelected.clear();renderList();
-  $('workshop-message').textContent='仅调整车间，不改变核价和完成状态';
+$('verification-clear-filters').onclick = () => {
+  for (const id of listFilterIds) $(id).value = '';
+  workshopSelected.clear();
+  workshopRevisions.clear();
+  renderList();
+  $('workshop-message').textContent = '仅调整车间，不改变核价和完成状态';
 };
 $('verification-preview').addEventListener('click', event => {
   if (event.target.closest('#verification-open-detail')) openDetail('workflow');
   if (event.target.closest('#verification-open-compare')) openDetail('compare');
 });
+const linkedQuoteId=Number(new URLSearchParams(window.location.search).get('quote_id'));
+if(Number.isSafeInteger(linkedQuoteId)&&linkedQuoteId>0)selectedQuoteId=linkedQuoteId;
 $('btn-change-pwd').onclick = event => {
   event.preventDefault();
   openPasswordDialog();
@@ -1498,22 +1568,14 @@ $('btn-logout').onclick = async event => {
     window.location.href = './index.html';
   }
 };
+loadList().catch(error => {
+  $('verification-list-body').innerHTML = `<tr><td colspan="7" class="summary-empty">${esc(error.message)}</td></tr>`;
+});
 
-loadList().then(async () => {
-  const urlParams = new URLSearchParams(location.search);
-  const requestedStatus = urlParams.get('status');
-  if (requestedStatus && [...$('verification-status-filter').options].some(option => option.value === requestedStatus)) {
-    $('verification-status-filter').value = requestedStatus;
-    $('verification-table-status-filter').value = requestedStatus;
-    renderList();
-  }
-  const quoteId=Number(urlParams.get('quote_id'));
-  if(quoteId && listState.some(row=>Number(row.id)===quoteId)) {
-    await selectTask(quoteId);
-    openDetail('workflow');
-  }
-}).catch(error => {
-  $('verification-list-body').innerHTML = `<tr><td colspan="6" class="summary-empty">${esc(error.message)}</td></tr>`;
+window.addEventListener('beforeunload', event => {
+  if (!sectionDirty && !sectionSavePending) return;
+  event.preventDefault();
+  event.returnValue = '';
 });
 
 $('verification-create').onclick = openCreateVerification;

@@ -10,13 +10,10 @@ const consolidatedSheets=new Set(['总表不分车间','不分车间 打印']);
 const customerDetailSheet='不分车间核价明细';
 const workshopOrder=['华登','兴信A','兴信B','河源',G.pending];
 function reportBasis(now=new Date()){
-  const source=String(layout.source||'');
   const dateParts=Object.fromEntries(new Intl.DateTimeFormat('en',{timeZone:'Asia/Shanghai',year:'numeric',month:'numeric'}).formatToParts(now).map(part=>[part.type,part.value]));
   return {
     year:dateParts.year,
-    month:dateParts.month,
-    fx:source.match(/汇率\s*([\d.]+)/)?.[1]||'',
-    abs:source.match(/ABS\s*([\d.]+)/i)?.[1]||''
+    month:dateParts.month
   };
 }
 function workshopSections(items){
@@ -116,6 +113,10 @@ function buildWorkbook(rows,columns,{now=new Date(),factoryName=''}={}){
     return localFormula(mapped,row);
   };
   const basis=reportBasis(now),year=basis.year;
+  // A layout filename is historical provenance, never evidence of the active
+  // versions' exchange rate or material price. Mixed versions may differ.
+  const factory=String(factoryName||'').trim().replace(/厂区$/,'');
+  const factoryPrefix=factory?`${factory}厂区---`:'';
   for(const [planIndex,[name,items]] of plans.entries()){
     const profile=profiles.get(name),summary=planIndex<5,isCustomer=planIndex>=6,sectioned=sectionedWorkshopSheets.has(name),consolidated=consolidatedSheets.has(name),detailed=name===customerDetailSheet;
     const ws=wb.addWorksheet(name,{properties:{tabColor:profile.tabColor||{argb:isCustomer?'FF4472C4':'FF83D32D'}}});
@@ -150,7 +151,10 @@ function buildWorkbook(rows,columns,{now=new Date(),factoryName=''}={}){
           // Ratios are recalculated from the corresponding display columns.
           // Both monetary numerator and denominator share the same 10,000 scale.
           if(G.ratios[key])return {formula:mappedFormula(r.formulas[key],name,n),result};
-          const subtotal=subtotalRefs.get(`${r.values.A}\u0000${r.workshop}`);
+          // Synthetic workshop/grand totals are not customer identities, even
+          // when a real customer's name happens to be “全部客户”.
+          const customerTotal=['客户小计','客户合计'].includes(r.values.C);
+          const subtotal=customerTotal?subtotalRefs.get(`${r.values.A}\u0000${r.workshop}`):null;
           let refs;
           if(subtotal&&summary)refs=[reference(subtotal.name,key,subtotal.row,true)];
           else if(summary)refs=[...new Set(r.members.map(m=>{const s=subtotalRefs.get(`${m.values.A}\u0000${G.workshop(m)}`);return reference(s.name,key,s.row,true);}))];
@@ -167,21 +171,18 @@ function buildWorkbook(rows,columns,{now=new Date(),factoryName=''}={}){
       const grouped=workshopSections(items);
       for(const section of grouped.sections){
         const month=basis.month?`${basis.month}月份`:'';
-        const suffix=[basis.abs&&`ABS ${basis.abs}`,basis.fx&&`汇率 ${basis.fx}`].filter(Boolean).join('；');
-        addTitle(`${year}年${month}${section.workshop}各客实际生意核价总表${suffix?`（${suffix}）`:''}`,'EE');
+        addTitle(`${factoryPrefix}${year}年${month}${section.workshop}各客实际生意核价总表`,'EE');
         addOwners();addHeaders();section.items.forEach(addItem);
       }
       if(grouped.grandTotal){const spacer=ws.addRow([]);rowMeta.set(spacer.number,{kind:'blank'});addItem(grouped.grandTotal);}
     }else if(detailed){
-      addTitle(`${year}年`);
+      addTitle(`${factoryPrefix}${year}年${basis.month}月份核价明细`);
       for(const section of customerDetailSections(items)){
         addOwners();addHeaders();section.items.forEach(addItem);
       }
     }else if(isCustomer){
       const grouped=customerWorkshopSections(items);
-      const workshopTitle=grouped.sections[0]?.workshop||'';
-      const suffix=[basis.abs&&`ABS ${basis.abs}`,basis.fx&&`汇率 ${basis.fx}`].filter(Boolean).join('；');
-      addTitle(`${year}年 ${workshopTitle}各客产品核价总表${suffix?`（${suffix}）`:''}`,'EE');
+      addTitle(`${factoryPrefix}${year}年${basis.month}月份 ${name}产品核价总表`,'EE');
       for(const section of grouped.sections){
         const label=section.workshop==='兴信A'?'A':section.workshop==='兴信B'?'B':section.workshop;
         addSectionOwners(label);addHeaders();section.items.forEach(addItem);
@@ -190,9 +191,7 @@ function buildWorkbook(rows,columns,{now=new Date(),factoryName=''}={}){
     }else{
       if(consolidated){
         const month=basis.month?`${basis.month}月份`:'';
-        const factory=String(factoryName||'').trim().replace(/厂区$/,'');
-        const suffix=[basis.abs&&`ABS ${basis.abs}`,basis.fx&&`汇率 ${basis.fx}`].filter(Boolean).join('；');
-        addTitle(`${factory?`${factory}厂区---`:''}${year}年${month}各客实际生意核价总表${suffix?`（${suffix}）`:''}`,'EE');
+        addTitle(`${factoryPrefix}${year}年${month}各客实际生意核价总表`,'EE');
       }else addTitle(`${year}年 各客产品核价汇总表 · ${name}${summary?'（金额单位：万港币；单价：港币）':'（金额及单价：港币）'}`);
       addOwners();addHeaders();items.forEach(addItem);
     }

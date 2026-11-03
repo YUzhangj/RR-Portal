@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { calculateAutoScore, filterMonthlyScoringData, mergeAutomaticScores } from '../src/utils/monthlyAutoScoring'
+import {
+  calculateAutoScore,
+  factoryIdsWithOrdersInRange,
+  filterMonthlyScoringData,
+  mergeAutomaticScores,
+} from '../src/utils/monthlyAutoScoring'
 import type { Factory } from '../src/types/factory'
 import type { ScoreTemplate } from '../src/types/score'
 
@@ -9,6 +14,21 @@ const factory = {
 } as Factory
 
 describe('monthly automatic scoring', () => {
+  it('只返回评分范围内有订单的工厂', () => {
+    const orders = [
+      { id: 'july', factory: 'factory-july', product: '甲', delivery_date: '2026-07-31' },
+      { id: 'august', factory: 'factory-august', product: '乙', delivery_date: '2026-08-15' },
+      { id: 'september', factory: 'factory-september', product: '丙', delivery_date: '2026-09-01' },
+      { id: 'august-2', factory: 'factory-august', product: '丁', delivery_date: '2026-08-20' },
+    ]
+
+    expect([...factoryIdsWithOrdersInRange(orders, '2026-08', '2026-08')]).toEqual(['factory-august'])
+    expect([...factoryIdsWithOrdersInRange(orders, '2026-08', '2026-09')]).toEqual([
+      'factory-august',
+      'factory-september',
+    ])
+  })
+
   it('scores qualification and IP control as separate five-point items', () => {
     const emptyData = { orders: [], inspections: [], checks: [] }
     expect(calculateAutoScore('qualification', 5, factory, emptyData)?.score).toBe(5)
@@ -52,6 +72,16 @@ describe('monthly automatic scoring', () => {
     const merged = mergeAutomaticScores(templates, [{ template_id: 'manual', score: 8, notes: '人工评价' }], factory, { orders: [], inspections: [], checks })
     expect(merged[0].score).toBe(5)
     expect(merged[1]).toMatchObject({ score: 8, notes: '人工评价' })
+  })
+
+  it('defaults cooperation to 10 and preserves saved manual scores including zero', () => {
+    const templates = [{ id: 'manual', module: 'cooperation', max_score: 10 }] as ScoreTemplate[]
+    const data = { orders: [], inspections: [], checks: [] }
+    expect(mergeAutomaticScores(templates, [], factory, data)[0]?.score).toBe(10)
+    for (const score of [0, 7, 10]) {
+      expect(mergeAutomaticScores(templates, [{ template_id: 'manual', score }], factory, data)[0]?.score).toBe(score)
+    }
+    expect(calculateAutoScore('cooperation', 10, factory, data)).toBeNull()
   })
 
   it('scores craft-specific items from defect rate and 5S scores', () => {

@@ -46,7 +46,7 @@ const ORDER_COLUMNS = [
   'product_name','version','quantity','work_type',
   'production_count','production_progress','special_notes',
   'plastic_due','material_due','carton_due','packaging_due','sticker',
-  'start_date','complete_date','ship_date',
+  'start_date','complete_date','ship_date','inspect_date',
   'target_time','daily_target','days','unit_price','process_value',
   'inspection_date','month','warehouse_record','output_value','process_price','remark',
   'cell_format','row_color','sort_order',
@@ -75,7 +75,7 @@ router.get('/', (req, res) => {
 
 // 车间拉配置（2026-05-22 更新：key=拉名/编号，name=拉长，worker_count=人数）
 const WORKSHOP_CONFIG = {
-  A: { supervisor: '吴其雄', factory_area: '兴信A', worker_count: 50,
+  A: { supervisor: '刘荣华', factory_area: '兴信A', worker_count: 50,
     lines: [
       { key: 'A1', name: '杨胜去', worker_count: 70 },
       { key: 'A2', name: '贾帅傅', worker_count: 55 },
@@ -211,6 +211,7 @@ router.get('/work-type-map', (req, res) => {
 
 // PUT /api/orders/work-type-map — 批量保存货号→做工映射
 // body: { entries: [{ item_no, work_type }, ...] }
+// work_type 支持字符串（老格式）或数组（多步骤，如 ["半成品","包装","混装"]）
 router.put('/work-type-map', (req, res) => {
   const { entries } = req.body;
   if (!Array.isArray(entries)) return res.status(400).json({ message: 'entries must be array' });
@@ -220,7 +221,13 @@ router.put('/work-type-map', (req, res) => {
     if (!e || !e.item_no || !e.work_type) continue;
     const key = String(e.item_no).trim();
     if (!key) continue;
-    map[key] = String(e.work_type).trim();
+    if (Array.isArray(e.work_type)) {
+      const arr = [...new Set(e.work_type.map(w => String(w).trim()).filter(Boolean))];
+      if (arr.length === 0) continue;
+      map[key] = arr;
+    } else {
+      map[key] = String(e.work_type).trim();
+    }
     n++;
   }
   saveWorkTypeMap(map);

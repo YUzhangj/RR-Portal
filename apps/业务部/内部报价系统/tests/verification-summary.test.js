@@ -20,6 +20,12 @@ function fixture(){
   return [{dept:'sales',payload_json:JSON.stringify({header:{fx_hkd_usd:6.9},legacy_import:{excel_model:model},excel_native:{inputs:{}}})}];
 }
 const quote={id:1,customer:'ZURU',quote_no:'92125',product_name:'猫蛋'},version={id:2,label:'V1',status:'completed'};
+function detailRow(ws){
+  const matches=[];
+  ws.eachRow(row=>{if(row.getCell('B').value===quote.quote_no&&row.getCell('C').value===quote.product_name)matches.push(row.number);});
+  assert.equal(matches.length,1,`${ws.name}: 唯一真实货号明细`);
+  return matches[0];
+}
 test('detail fallback retains unit costs without inventing order quantity or weighted totals',()=>{
   const r=buildVerificationRow({...quote,customer:'Sky Castle',quote_no:'JS100CDU-12'},version,fixture(),[]);
   assert.equal(r.values.E,20);assert.equal(r.values.F,13);assert.equal(r.values.T,4.5);
@@ -51,11 +57,11 @@ test('carton rebate uses divisor 1.1 in report and exported formulas with matchi
   assert.equal(r.values.AQ,r.values.AP/r.values.DI);
   const workbook=buildVerificationWorkbook([r]);
   const saved=new ExcelJS.Workbook();await saved.xlsx.load(await workbook.xlsx.writeBuffer());
-  const sheet=saved.getWorksheet('ZURU');
-  assert.equal(sheet.getCell('AO4').formula,'IF(COUNT(AN4)=1,AN4-AN4/1.1*11.5%,"")');
-  assert.equal(sheet.getCell('AO4').result,r.values.AO);
-  assert.equal(sheet.getCell('AP4').result,r.values.AP);
-  assert.equal(sheet.getCell('AQ4').result,r.values.AQ);
+  const sheet=saved.getWorksheet('ZURU'),n=detailRow(sheet);
+  assert.equal(sheet.getCell(`AO${n}`).formula,`IF(COUNT(AN${n})=1,AN${n}-AN${n}/1.1*11.5%,"")`);
+  assert.equal(sheet.getCell(`AO${n}`).result,r.values.AO);
+  assert.equal(sheet.getCell(`AP${n}`).result,r.values.AP);
+  assert.equal(sheet.getCell(`AQ${n}`).result,r.values.AQ);
   for(const value of [0,4]){
     p.excel_native.inputs['s!B5']={v:value,f:null,t:'n'};
     sections[0].payload_json=JSON.stringify(p);
@@ -146,13 +152,13 @@ test('XLSX contains template columns, customer sheets, formulas, frozen panes an
   const r=buildVerificationRow(quote,version,fixture(),qty),wb=buildVerificationWorkbook([r]);
   const reopened=new ExcelJS.Workbook();await reopened.xlsx.load(await wb.xlsx.writeBuffer());
   assert.equal(columns.length,135);assert.deepEqual(reopened.worksheets.map(s=>s.name),['总表分车间','打印','截图','总表不分车间','不分车间 打印','不分车间核价明细','ZURU','生成提示']);
-  const ws=reopened.getWorksheet('ZURU');assert.equal(ws.getCell('D4').value,100);
-  assert.equal(reopened.getWorksheet('不分车间核价明细').getCell('D4').formula,`IF(ISNUMBER('ZURU'!D4),'ZURU'!D4,"")`);
-  assert.equal(ws.getCell('DQ4').formula,'IF(COUNT(H4,L4,P4,D4)=4,(H4+L4+P4)*D4,"")');assert.equal(ws.getCell('DI4').result,2000);
+  const ws=reopened.getWorksheet('ZURU'),n=detailRow(ws);assert.equal(ws.getCell(`D${n}`).value,100);
+  const details=reopened.getWorksheet('不分车间核价明细'),m=detailRow(details);
+  assert.equal(details.getCell(`D${m}`).formula,`IF(ISNUMBER('ZURU'!D${n}),'ZURU'!D${n},"")`);
+  assert.equal(ws.getCell(`DQ${n}`).formula,`IF(COUNT(H${n},L${n},P${n},D${n})=4,(H${n}+L${n}+P${n})*D${n},"")`);assert.equal(ws.getCell(`DI${n}`).result,2000);
   assert.equal(ws.views[0].xSplit,3);assert.equal(ws.views[0].ySplit,3);assert.equal(ws.getCell('EE3').value,columns[134].label);
-  assert.equal(ws.getCell('Y4').value,null);assert.equal(ws.getCell('T4').value,4.5);
-  const profile=require('../backend/services/verificationExportLayout.json').profiles.customer;
-  assert.equal(ws.getColumn('I').hidden,profile.columns[8].hidden);assert.equal(ws.getColumn('H').hidden,profile.columns[7].hidden);
+  assert.equal(ws.getCell(`Y${n}`).value,null);assert.equal(ws.getCell(`T${n}`).value,4.5);
+  assert.equal(ws.getColumn('I').hidden,require('../backend/services/verificationExportLayout.json').profiles.customer.columns[8].hidden);assert.equal(ws.getColumn('H').hidden,false);
 });
 test('summary and export share latest-version, customer and factory scope',async()=>{
   const {DatabaseSync}=require('node:sqlite'),db=new DatabaseSync(':memory:');
@@ -164,9 +170,9 @@ test('summary and export share latest-version, customer and factory scope',async
     INSERT INTO quote_verification_versions VALUES(1,1,'V1','completed',1),(2,1,'V2','drafting',2),(3,1,'V3','cancelled',3),(4,2,'V1','completed',1),(5,3,'V1','completed',1),(6,4,'V1','completed',1);
     INSERT INTO user_customers VALUES(7,'A');`);
   const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path'),mod={exports:{}};
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../backend/routes/verificationSummary.js'),'utf8'),{module:mod,require:id=>id==='../db'?db:id==='../middleware/auth'?{requireAuth:()=>{}}:id==='../services/sourceSummary'?require('../backend/services/sourceSummary'):id==='../services/verificationSummary'?{buildVerificationRow:(q,v)=>({id:q.id,version:v.label})}:id==='../../frontend/verification-customers'?require('../frontend/verification-customers'):require(id)});
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../backend/routes/verificationSummary.js'),'utf8'),{module:mod,require:id=>id==='../../frontend/verification-customers'?require('../frontend/verification-customers'):id==='../db'?db:id==='../middleware/auth'?{requireAuth:()=>{}}:id==='../services/verificationMetadata'?require('../backend/services/verificationMetadata'):id==='../services/sourceSummary'?require('../backend/services/sourceSummary'):id==='../services/verificationSummary'?{buildVerificationRow:(q,v)=>({id:q.id,version:v.label})}:require(id)});
   const load=mod.exports.loadRows,user={id:7,active_factory_code:'qingxi',perms:{}};
-  assert.equal(JSON.stringify(await load(user)),JSON.stringify([{id:1,version:'V2'}]));
+  assert.equal(JSON.stringify(await load(user)),JSON.stringify([{id:1,version:'V2',quantity_revision:null}]));
   assert.equal((await load(user,{customer:'B'})).length,0);
   assert.equal((await load({...user,perms:{'账号管理':{can_admin:1}}})).length,2);
   assert.equal((await load(user,{status:'completed'})).length,0);
@@ -187,8 +193,8 @@ test('confirmed quote-summary relationships drive verification values and export
     assert.equal(r.values[rate],r.values[amount]/r.values.DI);
     assert.equal(r.formulas[rate],`IF(DI1=0,0,${amount}1/DI1)`);
   }
-  const ws=buildVerificationWorkbook([r]).getWorksheet('ZURU');
-  assert.match(ws.getCell('EA5').formula,/DZ5\/DI5/);
+  const ws=buildVerificationWorkbook([r]).getWorksheet('ZURU'),n=detailRow(ws);
+  assert.ok(ws.getCell(`EA${n}`).formula.includes(`DZ${n}/DI${n}`));
   p.summary_order_quantity={value:0};sections[0].payload_json=JSON.stringify(p);
   const zero=buildVerificationRow(quote,version,sections,qty);
   for(const rate of ['DL','DN','DY','EA'])assert.equal(zero.values[rate],0);

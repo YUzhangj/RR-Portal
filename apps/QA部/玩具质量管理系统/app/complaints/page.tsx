@@ -10,7 +10,6 @@ import {
 } from "@heroicons/react/24/outline";
 import { useComplaintData } from "@/components/data-provider";
 import { useAuth } from "@/components/auth-provider";
-import { randomId } from "@/lib/crypto-fallback";
 import { DataTable, Filters, KpiCard, PageTitle } from "@/components/ui";
 import {
   customerOf,
@@ -22,6 +21,7 @@ import {
   type ComplaintFilters,
 } from "@/lib/stats";
 import { duplicateKeyOf, translationSourceHashOf } from "@/lib/excel";
+import { randomId } from "@/lib/crypto-fallback";
 import type {
   ComplaintRecord,
   ComplaintUpdate,

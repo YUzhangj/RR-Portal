@@ -9,6 +9,8 @@ var builder = WebApplication.CreateBuilder(args);
 
 // --- 服务注册 ---
 builder.Services.AddControllers();
+builder.Services.AddHostedService<MaterialReflowWorker>();
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<JwtService>();
 builder.Services.AddScoped<SprayPlan.Api.Features.Inventory.InventoryService>();
 // PDF 暂存：单例，落盘目录默认 <ContentRoot>/storage/pdf
@@ -42,7 +44,26 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             {
                 ctx.Token = ctx.Request.Cookies["sprayplan_session"];
                 return Task.CompletedTask;
-            }
+            },
+            OnTokenValidated = async ctx =>
+            {
+                var userIdText = ctx.Principal?.FindFirst("userId")?.Value;
+                if (!int.TryParse(userIdText, out var userId))
+                {
+                    ctx.Fail("登录状态无效");
+                    return;
+                }
+
+                var db = ctx.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
+                var current = await db.Users.IgnoreQueryFilters().AsNoTracking()
+                    .Where(user => user.Id == userId)
+                    .Select(user => new { user.IsActive, user.Role, user.FactoryId })
+                    .FirstOrDefaultAsync();
+                var tokenRole = ctx.Principal?.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
+                var tokenFactory = ctx.Principal?.FindFirst("factoryId")?.Value;
+                if (current is null || !current.IsActive || current.Role != tokenRole || current.FactoryId != tokenFactory)
+                    ctx.Fail("账号权限已变更，请重新登录");
+            },
         };
     });
 
@@ -51,6 +72,15 @@ builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
     p.WithOrigins("http://localhost:8400").AllowCredentials().AllowAnyHeader().AllowAnyMethod()));
 
 var app = builder.Build();
+
+using (var scope = app.Services.CreateScope())
+    await DailyLineNoteSchema.Ensure(scope.ServiceProvider.GetRequiredService<AppDbContext>());
+using (var scope = app.Services.CreateScope())
+    await MaterialSchema.Ensure(scope.ServiceProvider.GetRequiredService<AppDbContext>());
+
+// 持久化 SQLite 卷也需要更新旧拉别名称；只改名称，保留排期和机台关联。
+using (var scope = app.Services.CreateScope())
+    await LineNamesUpgrade.Ensure(scope.ServiceProvider.GetRequiredService<AppDbContext>());
 
 // --- 中间件管道 ---
 if (app.Environment.IsDevelopment())

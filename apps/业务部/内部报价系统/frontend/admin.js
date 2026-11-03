@@ -12,7 +12,6 @@ async function api(path, opts = {}) {
 
 const ROLE_ZH = { admin: '管理员', supervisor: '主管', staff: '员工' };
 let __materialManagerUsers = [];
-let __costingBasis = null;
 
 // HTML 转义：用户可控字段(用户名/姓名/客户名)插入 innerHTML 前必须过它，防 XSS
 function esc(s) {
@@ -53,128 +52,6 @@ async function init() {
   await loadUsers();
   await loadMaterialPriceManager();
 }
-
-const basisColumns = {
-  materials: [['name', '料名'], ['model', '型号'], ['price', 'HK$/Lb', 'number']],
-  machines: [['model', '机型'], ['normal', '普通机'], ['price', 'HK$/台班', 'number']],
-  cartons: [['label', '类别'], ['rate', '系数', 'number']],
-};
-
-function renderBasisRows(key) {
-  const host = $('cb-' + key);
-  const columns = basisColumns[key];
-  const rows = __costingBasis[key] || [];
-  host.innerHTML = `<table class="wb-table" style="font-size:13px"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join('')}<th></th></tr></thead>
-    <tbody>${rows.map((row, index) => `<tr data-index="${index}">${columns.map(([field,, type]) => `<td><input data-field="${field}" type="${type || 'text'}" step="any" value="${esc(row[field])}" style="min-width:70px;width:100%" /></td>`).join('')}<td><button class="mini danger cb-row-del" type="button">×</button></td></tr>`).join('')}</tbody></table>
-    <button class="mini cb-row-add" type="button" style="margin-top:6px">＋ 增加</button>`;
-  host.querySelectorAll('.cb-row-del').forEach(button => button.onclick = () => {
-    rows.splice(Number(button.closest('tr').dataset.index), 1);
-    renderBasisRows(key);
-    refreshCartonOptions();
-  });
-  host.querySelector('.cb-row-add').onclick = () => {
-    rows.push(Object.fromEntries(columns.map(([field,, type]) => [field, type === 'number' ? 0 : ''])));
-    renderBasisRows(key);
-    refreshCartonOptions();
-  };
-}
-
-function refreshCartonOptions() {
-  const select = $('cb-default-carton');
-  if (!select || !__costingBasis) return;
-  const current = select.value || __costingBasis.default_carton_label;
-  select.innerHTML = (__costingBasis.cartons || []).map(row =>
-    `<option value="${esc(row.label)}" ${row.label === current ? 'selected' : ''}>${esc(row.label)}</option>`
-  ).join('');
-}
-
-function setBasisInput(id, value) {
-  const input = $(id);
-  if (input) input.value = value == null ? '' : value;
-}
-
-async function loadCostingBasis() {
-  try {
-    const result = await api('/admin/costing-basis');
-    __costingBasis = result.data;
-    setBasisInput('cb-version', __costingBasis.version);
-    setBasisInput('cb-title', __costingBasis.title);
-    setBasisInput('cb-rmb-hkd', __costingBasis.exchange.rmb_hkd);
-    setBasisInput('cb-hkd-usd', __costingBasis.exchange.hkd_usd);
-    setBasisInput('cb-assembly-base', __costingBasis.assembly.base_rate_hkd);
-    setBasisInput('cb-hunan-freight', __costingBasis.assembly.hunan_freight_pct);
-    setBasisInput('cb-wage-factor', __costingBasis.assembly.wage_factor);
-    setBasisInput('cb-social-factor', __costingBasis.assembly.social_factor);
-    setBasisInput('cb-overhead-factor', __costingBasis.assembly.overhead_factor);
-    setBasisInput('cb-sewing-tax', __costingBasis.tax.sewing_exclusion_pct);
-    setBasisInput('cb-electronic-tax', __costingBasis.tax.electronic_exclusion_pct);
-    setBasisInput('cb-paint-pad', __costingBasis.painting.pad);
-    setBasisInput('cb-paint-edge', __costingBasis.painting.edge);
-    setBasisInput('cb-paint-clamp', __costingBasis.painting.clamp);
-    Object.keys(basisColumns).forEach(renderBasisRows);
-    refreshCartonOptions();
-    const updated = result.updated_at ? new Date(result.updated_at).toLocaleString() : '系统预设';
-    $('costing-basis-meta').textContent = `当前版本：${__costingBasis.version}；更新：${updated}${result.updated_by ? `；操作人：${result.updated_by}` : ''}`;
-  } catch (error) {
-    $('costing-basis-meta').textContent = `核价基准读取失败：${error.message}`;
-  }
-}
-
-function collectBasisRows(key) {
-  return [...$('cb-' + key).querySelectorAll('tbody tr')].map(row => {
-    const result = {};
-    row.querySelectorAll('input').forEach(input => {
-      result[input.dataset.field] = input.type === 'number' ? Number(input.value) : input.value.trim();
-    });
-    return result;
-  });
-}
-
-function collectCostingBasis() {
-  const n = id => Number($(id).value);
-  return {
-    version: $('cb-version').value,
-    title: $('cb-title').value.trim(),
-    materials: collectBasisRows('materials'),
-    machines: collectBasisRows('machines'),
-    cartons: collectBasisRows('cartons'),
-    default_carton_label: $('cb-default-carton').value,
-    exchange: { rmb_hkd: n('cb-rmb-hkd'), hkd_usd: n('cb-hkd-usd') },
-    assembly: {
-      base_rate_hkd: n('cb-assembly-base'),
-      hunan_freight_pct: n('cb-hunan-freight'),
-      wage_factor: n('cb-wage-factor'),
-      social_factor: n('cb-social-factor'),
-      overhead_factor: n('cb-overhead-factor'),
-    },
-    painting: { pad: n('cb-paint-pad'), edge: n('cb-paint-edge'), clamp: n('cb-paint-clamp') },
-    tax: { sewing_exclusion_pct: n('cb-sewing-tax'), electronic_exclusion_pct: n('cb-electronic-tax') },
-  };
-}
-
-async function saveCostingBasis() {
-  if (!confirm('确认保存统一核价基准？未全部确认的报价会同步更新，已确认和已导出的历史版本保持不变。')) return;
-  const buttons = [$('btn-save-costing-basis'), $('btn-save-costing-basis-bottom')];
-  buttons.forEach(button => { button.disabled = true; });
-  const message = $('costing-basis-msg');
-  message.textContent = '';
-  try {
-    const result = await api('/admin/costing-basis', {
-      method: 'PUT', body: JSON.stringify({ data: collectCostingBasis() }),
-    });
-    message.style.color = 'green';
-    message.textContent = `✓ 已保存；同步 ${result.synced} 个部门，退回重审 ${result.reopened} 个`;
-    await loadCostingBasis();
-  } catch (error) {
-    message.style.color = '';
-    message.textContent = error.message;
-  } finally {
-    buttons.forEach(button => { button.disabled = false; });
-  }
-}
-
-if ($('btn-save-costing-basis')) $('btn-save-costing-basis').onclick = saveCostingBasis;
-if ($('btn-save-costing-basis-bottom')) $('btn-save-costing-basis-bottom').onclick = saveCostingBasis;
 
 async function loadMaterialPriceManager() {
   try {

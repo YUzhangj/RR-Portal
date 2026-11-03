@@ -6,9 +6,9 @@ set -euo pipefail
 # 策略：根据本次 push 变动的文件路径，只 rebuild 影响到的服务。
 # 对比老版本（全量 docker compose up --build）的优势：
 #   - 改 paiji 不会把其他 16 个服务也 recreate / IP 重洗
-#   - 改 nginx.conf 只 hot reload，零停机（而非 restart nginx）
+#   - 改 nginx.conf 只 recreate nginx 容器刷新 bind mount（约 3s 停机），不动其他服务
 #   - 改非部署文件（docs/scripts/markdown）跳过 deploy
-#   - fallback：docker-compose.cloud.yml 变动时仍走全量
+#   - fallback：docker-compose.cloud.yml 变动时走全量，白名单单行环境传递新增可精确增量
 #
 # 使用：
 #   bash /opt/rr-portal/deploy/update-server.sh
@@ -16,13 +16,25 @@ set -euo pipefail
 # 强制全量部署（调试用）：
 #   FORCE_FULL_REBUILD=1 bash /opt/rr-portal/deploy/update-server.sh
 
+# 禁用 compose bake，强制走经典逐服务构建。
+# 2026-09-15 #707 部署踩坑：compose v2.29+ 默认用 bake 做多目标并行构建，
+# 一次构建多个缺失镜像时 buildx session 报错：
+#   failed to dial gRPC: ... header key "x-docker-expose-session-sharedkey"
+#   contains value with non-printable ASCII characters
+# 单镜像增量构建不触发，多镜像（新服务首次构建/全量）必现。COMPOSE_BAKE=false 回退经典构建。
+export COMPOSE_BAKE=false
+
 INSTALL_DIR="/opt/rr-portal"
 ENV_FILE="${INSTALL_DIR}/.env.cloud.production"
 COMPOSE_FILE="docker-compose.cloud.yml"
 STATE_FILE="${INSTALL_DIR}/deploy/.deploy-state"
 BACKUP_DIR="${INSTALL_DIR}/deploy/backups"
+# 维护模式按系统分组，门户首页不受业务系统部署影响。
+MAINT_FLAG_DIR="${INSTALL_DIR}/deploy/maintenance"
 
 cd "$INSTALL_DIR"
+# bind mount 进 nginx 容器，必须保证目录存在（ro mount，容器内只检测不写入）
+mkdir -p "$MAINT_FLAG_DIR"
 
 # ─── State tracking (supports resume) ───
 save_state() { echo "$1" > "$STATE_FILE"; }
@@ -84,6 +96,13 @@ fi
 echo "  Changed files (${BEFORE_HEAD:0:7} → ${AFTER_HEAD:0:7}):"
 echo "$CHANGED_FILES" | sed 's/^/    /'
 
+source "$INSTALL_DIR/deploy/service-maintenance.sh"
+# 升级旧版本时撤掉全站标志；新的 nginx 配置也会忽略它。
+rm -f "$MAINT_FLAG_DIR/ON"
+MAINT_COMPOSE_SERVICES=$(docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" config --services)
+# 重试无代码改动的部署也能清掉已恢复健康的单系统遗留标志。
+recover_maintenance_flags
+
 # ─── Step 3: 算出影响的服务 ───
 save_state "analyze"
 echo "[3/6] Analyzing affected services..."
@@ -102,23 +121,31 @@ declare -A PATH_TO_SERVICE=(
   ["apps/PMC跟仓管/采购订单管理系统/"]="jiangping"
   ["apps/PMC跟仓管/成品核对系统/"]="liwenjuan"
   ["apps/PMC跟仓管/加工管理/"]="cpg"
+  ["apps/PMC跟仓管/华登C仓库/"]="c-store"
   ["apps/PMC跟仓管/加工厂月度评审管理制度/"]="factory-review factory-review-test"
   ["apps/业务部/报价系统/"]="baojia"
   ["apps/业务部/TOMY排期核对系统/"]="tomy-paiqi"
+  ["apps/业务部/兴信大陆发票系统/"]="xingxin-invoice"
   ["apps/业务部/ZURU接单表入单系统/"]="zuru-order-system"
   ["apps/业务部/ZURU总排期入单/"]="zuru-master-schedule"
   ["apps/业务部/ZURU河源排期入单/"]="hy-schedule-system"
   ["apps/业务部/内部报价系统/"]="internal-quote"
   ["apps/工程部/A-doc生成系統/"]="zouhuo"
+  ["apps/工程部/工程资料管理系统/"]="gongcheng-ziliao"
   ["apps/工程部/工程啤办单/"]="rr-production"
   ["apps/工程部/模具手办采购订单系统/"]="figure-mold-cost-system"
   ["apps/工程部/自动化设备统计/"]="automation-equipment"
+  ["apps/工程部/3D打印协同平台/"]="printlink"
   ["apps/船务部/船务管理系统/"]="shipping-management"
+  ["apps/船务部/VoyagePlex船务协同系统/"]="voyageplex-web voyageplex-api voyageplex-parser"
   ["apps/喷油部/喷油排期系统/"]="sprayplan sprayplan-test"
   ["apps/印尼小组/印尼走货明细/"]="indo-shipping"
   ["apps/QA部/QA测试报告周结系统/"]="qa-weekly-report"
   ["apps/QA部/QC成品报告系统/"]="qc-report qc-report-worker"
   ["apps/QA部/玩具质量管理系统/"]="toyqms"
+  ["apps/品制管理部/品质集中门户/"]="quality-portal"
+  ["apps/QA部/QC验货计划系统/"]="qc-plan-api qc-plan-web"
+  ["apps/ERP/"]="erp-sqlserver erp-db-init erp-api"
   ["apps/task-api/"]="task-api"
 )
 
@@ -126,6 +153,7 @@ AFFECTED_SERVICES=()
 NGINX_CHANGED=0
 FRONTEND_CHANGED=0
 COMPOSE_CHANGED=0
+COMPOSE_INCREMENTAL_SERVICE=""
 DB_INIT_CHANGED=0
 PLUGIN_SDK_CHANGED=0
 NONRUNTIME_ONLY=1  # 默认假设只改了非运行时文件，遇到需部署的就翻转
@@ -139,21 +167,31 @@ while IFS= read -r file; do
       continue ;;
   esac
 
-  # docker-compose.cloud.yml 变动 = 触发全量（服务定义/网络/volume 可能变）
+  # 只豁免指定的邮箱/station 新增或 peise OCR 模型更新；其他字节必须完全一致。
+  # helper 直接读取两个 Git blob，不解析/展开生产 .env，也不输出 compose 内容。
+  # helper 缺失、读取失败或任意其他 compose 变动都回到保守全量。
   if [[ "$file" == "docker-compose.cloud.yml" ]]; then
-    COMPOSE_CHANGED=1
+    if COMPOSE_INCREMENTAL_SERVICE=$(python3 "$INSTALL_DIR/deploy/compose-mailbox-only-change.py" --service "$BEFORE_HEAD" "$AFTER_HEAD") &&
+       [[ "$COMPOSE_INCREMENTAL_SERVICE" == voyageplex-api || "$COMPOSE_INCREMENTAL_SERVICE" == printlink || "$COMPOSE_INCREMENTAL_SERVICE" == peise || "$COMPOSE_INCREMENTAL_SERVICE" == paiji ]]; then
+      if [[ ! " ${AFFECTED_SERVICES[*]} " =~ " $COMPOSE_INCREMENTAL_SERVICE " ]]; then
+        AFFECTED_SERVICES+=("$COMPOSE_INCREMENTAL_SERVICE")
+      fi
+    else
+      COMPOSE_INCREMENTAL_SERVICE=""
+      COMPOSE_CHANGED=1
+    fi
     NONRUNTIME_ONLY=0
     continue
   fi
 
-  # nginx 配置 = hot reload，不 rebuild
+  # nginx 配置 = recreate nginx 容器刷新 bind mount，不 rebuild
   if [[ "$file" == nginx/* ]]; then
     NGINX_CHANGED=1
     NONRUNTIME_ONLY=0
     continue
   fi
 
-  # frontend 静态文件 = nginx 会重新读（bind mount），reload 触发
+  # frontend 静态文件 = recreate nginx 容器刷新 bind mount inode
   if [[ "$file" == frontend/* ]]; then
     FRONTEND_CHANGED=1
     NONRUNTIME_ONLY=0
@@ -200,20 +238,40 @@ done <<< "$CHANGED_FILES"
 # 强制全量（环境变量覆盖）
 if [[ "${FORCE_FULL_REBUILD:-0}" == "1" ]]; then
   COMPOSE_CHANGED=1
-  echo "  [FORCED] FORCE_FULL_REBUILD=1，走全量"
+  # 强制全量时一并刷新 nginx：若此前部署在 nginx 配置/前端文件变动后中途失败，
+  # 运行中的 nginx 可能仍挂着旧 inode 的旧配置（#707 三连败后 /voyageplex 路由 401 即此情况），
+  # 而 up -d 不会 recreate 配置不变的 nginx 容器
+  NGINX_CHANGED=1
+  # 无代码变动时 AFFECTED_SERVICES 为空，下面的 compose 分支只会 recreate 旧镜像，
+  # 被跳过构建的服务（如 #800 部署中途失败后的 voyageplex）永远补不上。
+  # 把所有 build 服务纳入构建列表，让强制全量真正重建镜像。
+  mapfile -t AFFECTED_SERVICES < <(docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" config --format json 2>/dev/null | python3 -c "
+import json, sys
+cfg = json.load(sys.stdin)
+for name, svc in sorted((cfg.get('services') or {}).items()):
+    if isinstance(svc, dict) and svc.get('build'):
+        print(name)
+")
+  echo "  [FORCED] FORCE_FULL_REBUILD=1，走全量（重建全部 build 服务 + nginx recreate）"
 fi
 
 # 打印决策
 echo "  Decision:"
 echo "    Affected services: ${AFFECTED_SERVICES[*]:-<none>}"
-echo "    Nginx config:      $([ $NGINX_CHANGED -eq 1 ] && echo 'changed → will reload' || echo 'unchanged')"
-echo "    Frontend static:   $([ $FRONTEND_CHANGED -eq 1 ] && echo 'changed → will trigger nginx reload' || echo 'unchanged')"
-echo "    Compose:           $([ $COMPOSE_CHANGED -eq 1 ] && echo 'changed → FULL RECREATE' || echo 'unchanged')"
+echo "    Nginx config:      $([ $NGINX_CHANGED -eq 1 ] && echo 'changed → will recreate nginx' || echo 'unchanged')"
+echo "    Frontend static:   $([ $FRONTEND_CHANGED -eq 1 ] && echo 'changed → will recreate nginx' || echo 'unchanged')"
+if [[ "$COMPOSE_CHANGED" -eq 1 ]]; then
+  echo '    Compose:           changed → FULL RECREATE'
+elif [[ -n "$COMPOSE_INCREMENTAL_SERVICE" ]]; then
+  echo "    Compose:           environment addition → incremental $COMPOSE_INCREMENTAL_SERVICE"
+else
+  echo '    Compose:           unchanged'
+fi
 echo "    DB init script:    $([ $DB_INIT_CHANGED -eq 1 ] && echo 'changed (manual action may be needed)' || echo 'unchanged')"
 echo "    Plugin SDK:        $([ $PLUGIN_SDK_CHANGED -eq 1 ] && echo 'changed → all SDK plugins would rebuild' || echo 'unchanged')"
 
-# 没有运行时变动，跳过 deploy
-if [[ "$NONRUNTIME_ONLY" -eq 1 ]] && [[ "${#AFFECTED_SERVICES[@]}" -eq 0 ]]; then
+# 没有运行时变动，跳过 deploy（FORCE_FULL_REBUILD=1 除外——手动强制全量时即使无代码变动也要执行）
+if [[ "$NONRUNTIME_ONLY" -eq 1 ]] && [[ "${#AFFECTED_SERVICES[@]}" -eq 0 ]] && [[ "${FORCE_FULL_REBUILD:-0}" != "1" ]]; then
   echo "  [SKIP] 只改了文档/脚本/workflow/*.md，不触发部署。"
   exit 0
 fi
@@ -289,7 +347,7 @@ for match in re.findall(r'^\s*-\s+\./([^:]+):', content, re.MULTILINE):
 " || true
 
 # ─── Step 5: 备份数据库（只在影响 db 或全量时）───
-if [[ "$COMPOSE_CHANGED" -eq 1 ]] || [[ " ${AFFECTED_SERVICES[*]} " =~ " core " ]] || [[ " ${AFFECTED_SERVICES[*]} " =~ " qc-report " ]] || [[ " ${AFFECTED_SERVICES[*]} " =~ " qc-report-worker " ]] || [[ "$DB_INIT_CHANGED" -eq 1 ]]; then
+if [[ "$COMPOSE_CHANGED" -eq 1 ]] || [[ " ${AFFECTED_SERVICES[*]} " =~ " core " ]] || [[ " ${AFFECTED_SERVICES[*]} " =~ " qc-report " ]] || [[ " ${AFFECTED_SERVICES[*]} " =~ " qc-report-worker " ]] || [[ " ${AFFECTED_SERVICES[*]} " =~ " voyageplex-api " ]] || [[ " ${AFFECTED_SERVICES[*]} " =~ " voyageplex-parser " ]] || [[ "$DB_INIT_CHANGED" -eq 1 ]]; then
   save_state "backup"
   echo "[5/6] Backing up databases (core/db 会被动到)..."
   mkdir -p "$BACKUP_DIR"
@@ -326,10 +384,33 @@ PY
       && echo "  [OK] ${QC_REPORT_STORAGE} → ${QC_STORAGE_BACKUP}" \
       || echo "  [WARN] QC report storage backup failed"
   fi
-  find apps/ plugins/ -path '*/data/*.db' -type f 2>/dev/null | while read -r db_file; do
+  find apps/ plugins/ \( -path '*/data/*.db' -o -path '*/data-runtime/*.db' \) -type f 2>/dev/null | while read -r db_file; do
     [[ "$db_file" == "$QC_REPORT_DB" ]] && continue
     backup_name="$(echo "$db_file" | tr '/' '-')-${BACKUP_TS}"
-    cp "$db_file" "${BACKUP_DIR}/${backup_name}" && echo "  [OK] ${db_file}"
+    # SQLite 在线备份：cp 直接拷贝读写中的库可能得到撕裂副本
+    # （voyageplex.db 每 5 分钟有邮箱同步写入，必须走 backup API）。
+    # 个别 *.db 不是 SQLite 格式（如 JSON/空文件），备份失败不能打挂部署：
+    # 回退 cp 原样拷贝，再失败只告警跳过。
+    if python3 - "$db_file" "${BACKUP_DIR}/${backup_name}" <<'PY'
+import sqlite3
+import sys
+
+source = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+destination = sqlite3.connect(sys.argv[2])
+try:
+    source.backup(destination)
+finally:
+    destination.close()
+    source.close()
+PY
+    then
+      echo "  [OK] ${db_file}"
+    else
+      rm -f "${BACKUP_DIR}/${backup_name}"
+      cp "$db_file" "${BACKUP_DIR}/${backup_name}" \
+        && echo "  [OK] ${db_file}（非 SQLite，原样拷贝）" \
+        || echo "  [WARN] 备份失败（已跳过，不影响部署）: ${db_file}"
+    fi
   done
   ls -t "$BACKUP_DIR"/postgres-*.sql.gz 2>/dev/null | tail -n +6 | xargs rm -f 2>/dev/null || true
   ls -t "$BACKUP_DIR"/*.db-* 2>/dev/null | tail -n +11 | xargs rm -f 2>/dev/null || true
@@ -389,52 +470,102 @@ ensure_service_base_images() {
 }
 
 # ─── Step 6: 执行部署 ───
+# Paiji starts schema migrations inside its new process. Back up the old live
+# database immediately before any Paiji recreate, including full Compose deploys.
+# Failure is fatal; never replace a WAL database with a raw-file copy or restore.
+if [[ "$COMPOSE_CHANGED" -eq 1 ]] || [[ " ${AFFECTED_SERVICES[*]} " == *" paiji "* ]]; then
+  bash "$INSTALL_DIR/deploy/paiji-online-backup.sh"
+fi
 save_state "deploy"
 echo "[6/6] Deploying..."
+docker compose version | sed 's/^/  /' || true
 
 if [[ "$COMPOSE_CHANGED" -eq 1 ]]; then
   # Compose 变动：可能只是 context path 改了（代码没变），也可能加新服务
   # 策略：先 up -d（无 --build），让 docker 用现有 image 只 recreate 容器
   # 这样纯 rename 几乎零成本；如果有新服务或 Dockerfile 变了再用 AFFECTED_SERVICES 做增量 build
   echo "  [COMPOSE] Compose 变动，recreate 容器（不强制 rebuild，避免 OOM 风险）"
-  # --remove-orphans: 删除已从 compose 移除的服务遗留的孤儿容器，
-  # 否则被下线/重命名的服务容器会继续运行（crash-loop 时甚至拖垮内存导致全站 OOM）
-  docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --remove-orphans
-  # 还要 rebuild 那些真的动了源码的服务（incremental）
-  for svc in "${AFFECTED_SERVICES[@]}"; do
-    echo "  [INCR] Rebuilding $svc (--no-deps)..."
-    ensure_service_base_images "$svc"
-    docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --build --no-deps "$svc"
+  # 缺失镜像逐服务预构建：compose 新版默认 bake 多目标并行构建，构建上下文含非 ASCII
+  # 路径（如 apps/船务部/VoyagePlex船务协同系统）时必现 buildx session 报错：
+  #   x-docker-expose-session-sharedkey contains value with non-printable ASCII characters
+  # （#707 部署因此三连败）。单目标构建不触发该 bug，故在 up -d 之前把缺失镜像逐个建好，
+  # 让 up -d 的隐式构建无事可做，绕开多目标 bake。
+  # 2026-09-17 修复配对 bug：config --services 与 config --images 是两个独立排序的
+  # 列表，服务名 ≠ 镜像名后缀（如 cpg→rr-portal-c-store）时下标错位，曾把
+  # hy-schedule-system 误判为缺失 (rr-portal-qc-plan-web) 白建 37 分钟，真正的
+  # qc-plan-api/qc-plan-web 反而没建 → up -d 隐式多目标 bake → 又踩 sharedkey bug。
+  # 改用 config --format json 按服务名精确配对（只处理有 build 的服务）。
+  mapfile -t BUILD_PAIRS < <(docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" config --format json 2>/dev/null | python3 -c "
+import json, sys
+cfg = json.load(sys.stdin)
+for name, svc in sorted((cfg.get('services') or {}).items()):
+    if isinstance(svc, dict) and svc.get('build'):
+        print(name + ' ' + str(svc.get('image') or ''))
+")
+  for pair in "${BUILD_PAIRS[@]}"; do
+    svc="${pair%% *}"
+    img="${pair#* }"
+    # build-only 服务 compose 不会显式给 image 名，按默认 <project>-<service> 兜底
+    [[ -n "$img" ]] || img="$(docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" config --images 2>/dev/null | grep -E -- "-${svc}$" | head -1)"
+    [[ -n "$img" ]] || continue
+    if ! docker image inspect "$img" >/dev/null 2>&1; then
+      echo "  [COMPOSE] 镜像缺失 → 逐服务构建 $svc ($img)"
+      ensure_service_base_images "$svc"
+      docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" build "$svc"
+    fi
   done
-  # 容器 IP 全变，但 nginx 用动态 resolver 10 秒自动感知
+  # 按依赖顺序逐服务应用 compose，避免一次性让所有业务系统进入维护。
+  # 输出只有服务名；不把包含生产 secrets 的 compose 配置写入磁盘或日志。
+  COMPOSE_ORDER=$(docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" config --format json | python3 -c "
+import json, sys
+from graphlib import TopologicalSorter
+services = json.load(sys.stdin)['services']
+graph = {name: [dep for dep in (svc.get('depends_on') or {}) if dep in services]
+         for name, svc in services.items()}
+print('\n'.join(TopologicalSorter(graph).static_order()))
+")
+  while IFS= read -r svc; do
+    # nginx 配置/文件变动时由下方专用逻辑 recreate，避免重复切换门户。
+    [[ "$svc" == nginx ]] && continue
+    REBUILD=0
+    if [[ " ${AFFECTED_SERVICES[*]} " == *" $svc "* ]]; then REBUILD=1; fi
+    deploy_service "$svc" "$REBUILD"
+  done <<< "$COMPOSE_ORDER"
+  # 单独应用 nginx 定义，并清理已从 compose 删除的孤儿服务；不启动依赖。
+  if [[ "$NGINX_CHANGED" -eq 0 ]] && [[ "$FRONTEND_CHANGED" -eq 0 ]]; then
+    docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --no-build --no-deps --remove-orphans nginx
+  fi
 elif [[ "${#AFFECTED_SERVICES[@]}" -gt 0 ]]; then
-  # 增量：只 rebuild 影响的服务，带 --no-deps 不触发依赖链
   for svc in "${AFFECTED_SERVICES[@]}"; do
-    echo "  [INCR] Rebuilding $svc (--no-deps)..."
-    ensure_service_base_images "$svc"
-    docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --build --no-deps "$svc"
+    echo "  [INCR] Building and deploying $svc (--no-deps)..."
+    deploy_service "$svc" 1
   done
-  # 容器 recreate 后 Docker bridge IP 会变，但因为 nginx 现在用动态 resolver
-  # （resolver 127.0.0.11 valid=10s），10 秒内就重新解析了。不需要 restart nginx。
   echo "  [INFO] nginx 用动态 resolver，无需 restart（10 秒内自动感知新 IP）"
 fi
 
-# nginx 配置/前端文件变动 → recreate 容器（文件级 bind mount inode 必换）+ reload
+# nginx 配置/前端文件变动 → recreate 容器（文件级 bind mount inode 必换）
 # nginx.cloud.conf / frontend/*.html / logo.png 都是文件级 bind mount，绑定的是 inode。
 # git pull 会删旧文件新建（新 inode），容器内 mount 仍指向旧 inode，
-# nginx -s reload 读的是旧内容 → 必须 recreate 容器刷新 mount 再 reload。
+# nginx -s reload 读的是旧内容 → 必须 recreate 容器刷新 mount。
 if [[ "$NGINX_CHANGED" -eq 1 ]] || [[ "$FRONTEND_CHANGED" -eq 1 ]]; then
   echo "  [NGINX] config/frontend 文件变动，recreate 容器以刷新 bind mount inode（约 3s 停机）"
-  docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --force-recreate --no-deps nginx
+  docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d --no-build --force-recreate --no-deps --remove-orphans nginx
 
-  echo "  [NGINX] hot reload（零停机）"
-  _NGINX_TEST=$(docker exec rr-portal-nginx-1 nginx -t 2>&1 || true)
-  if echo "$_NGINX_TEST" | grep -q "syntax is ok"; then
-    docker exec rr-portal-nginx-1 nginx -s reload
-    echo "  [OK] nginx reloaded"
-  else
-    echo "  [ERROR] nginx -t 失败，拒绝 reload（保持旧配置运行）"
-    echo "$_NGINX_TEST"
+  echo "  [NGINX] 等待新容器就绪..."
+  # 刚 recreate 的容器启动时已加载新配置，无需再 reload。旧实现 recreate 后立刻
+  # nginx -s reload，会踩 master 进程 PID 文件尚未写好的竞态（invalid PID number ""），
+  # 把部署打挂在最后一步并遗留维护模式（#802 后手动全量重建即此情况）。改为等就绪。
+  NGINX_READY=0
+  for i in $(seq 1 15); do
+    if curl -sf http://localhost/nginx-health > /dev/null 2>&1; then
+      NGINX_READY=1
+      echo "  [OK] nginx ready (${i}x2s)"
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$NGINX_READY" -eq 0 ]]; then
+    echo "  [ERROR] nginx recreate 后 30s 未就绪，请检查 nginx 配置与容器日志"
     exit 1
   fi
 fi
@@ -458,6 +589,18 @@ for i in $(seq 1 15); do
   fi
   sleep 2
 done
+
+# 多容器系统可能在中途保留标志等待下一服务；全部部署后仍有标志必须报失败。
+# 只检查本次部署的系统，不扩大为其他系统的维护。
+if [[ "$COMPOSE_CHANGED" -eq 1 ]]; then
+  while IFS= read -r svc; do
+    require_maintenance_cleared "$svc"
+  done <<< "$MAINT_COMPOSE_SERVICES"
+else
+  for svc in "${AFFECTED_SERVICES[@]}"; do
+    require_maintenance_cleared "$svc"
+  done
+fi
 
 echo "[OK] Update complete."
 echo "=== Container Status ==="

@@ -53,6 +53,7 @@ const STORAGE_KEYS = {
   users:        STORAGE_PREFIX + 'users',         /* 账号列表 */
   session:      STORAGE_PREFIX + 'session',        /* 当前登录会话 */
   defectLib:    STORAGE_PREFIX + 'defect_library', /* 不良描述内容库 */
+  partners:     STORAGE_PREFIX + 'partners',       /* 供应商&客户名单 */
 };
 const LS_KEY = STORAGE_KEYS.records;   /* 主数据 key */
 let state        = { records: [], nextId: 31 };
@@ -86,7 +87,7 @@ const PERM_GROUPS = [
     { k: 'records',   label: '验货明细' },
     { k: 'review',    label: '审核中心' },
     { k: 'analysis',  label: '统计分析' },
-    { k: 'suppliers', label: '供应商管理' },
+    { k: 'suppliers', label: '供应商&客户管理' },
   ]},
   { group: '报告', menus: [
     { k: 'daily',           label: '品质日报' },
@@ -134,6 +135,7 @@ const ACTION_PERM_MAP = {
   importData:      ['import', 'v'],
   manageUsers:     ['users', 'm'],
   manageDefectLib: ['defectlib', 'm'],
+  managePartners:  ['suppliers', 'e'],
   reviewRecord:    ['review', 'a'],
   /* exportData / exportPdf：能查看即可导出，不单独设卡 */
 };
@@ -149,54 +151,37 @@ function effPerms(user) {
   return base;
 }
 
-/* 当前登录账号的实时记录（权限改了立即生效） */
-function _liveUser() {
-  const sess = getCurrentUser();
-  if (!sess) return null;
-  return _getUsers().find(x => x.username === sess.username) || sess;
-}
+/* 权限只来自服务器已验证的当前公司会话，本地账号列表仅用于显示。 */
+function _liveUser() { return getCurrentUser(); }
 
-/* ── 初始化账号数据（首次启动自动创建默认主账号 jc / qqwwee）── */
 function initUsers() {
-  const raw = localStorage.getItem(STORAGE_KEYS.users);
-  if (!raw) {
-    const defaultUsers = [{
-      username:    'jc',
-      password:    _hashPwd('qqwwee'),
-      role:        'admin',
-      enabled:     true,
-      createdAt:   new Date().toISOString(),
-      lastLoginAt: null,
-    }];
-    localStorage.setItem(STORAGE_KEYS.users, JSON.stringify(defaultUsers));
-  }
-}
-
-function _getUsers() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.users)) || []; }
-  catch(e) { return []; }
-}
-function _saveUsers(users) {
+  const users = _getUsers().map(u => { const copy = { ...u }; delete copy.password; delete copy.newPassword; return copy; });
   localStorage.setItem(STORAGE_KEYS.users, JSON.stringify(users));
 }
-
-/* ── 会话操作 ── */
+function _getUsers() {
+  try { const users = JSON.parse(localStorage.getItem(STORAGE_KEYS.users)); return Array.isArray(users) ? users : []; }
+  catch(e) { return []; }
+}
+async function _saveUsers(users) {
+  if (!can('manageUsers') || typeof window.__QC_SAVE_USERS !== 'function') {
+    showToast('账号未保存：请登录有账号管理权限的品质账号', 'error'); return false;
+  }
+  const ok = await window.__QC_SAVE_USERS(users);
+  if (!ok) showToast('账号未保存成功，请检查连接和权限后重试', 'error');
+  return ok;
+}
 function getCurrentUser() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.session)); }
-  catch(e) { return null; }
+  const auth = window.__QC_AUTH;
+  return auth && auth.company === getCompany() && auth.user && auth.user.enabled === true ? auth.user : null;
 }
-
-function _saveSession(user) {
-  const sess = { username: user.username, role: user.role, loginTime: new Date().toISOString() };
-  localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(sess));
-}
-
 function _clearSession() {
-  localStorage.removeItem(STORAGE_KEYS.session);
+  if (typeof window.__QC_CLEAR_AUTH === 'function') window.__QC_CLEAR_AUTH();
+  else { window.__QC_AUTH = null; localStorage.removeItem(STORAGE_KEYS.session); }
 }
 
 /* ── 权限判断（基于权限矩阵；jc 主账号保底全权）── */
 function can(action) {
+  if (window.__QC_DRAFT_RECOVERY_BLOCKED && ['createRecord','editRecord','deleteRecord','batchDelete','importData','reviewRecord'].includes(action)) return false;
   const u = _liveUser();
   if (!u) return false;
   if (u.username === 'jc' && u.role === 'admin') return true;
@@ -307,50 +292,90 @@ function renderCompanySelector() {
       <a href="javascript:backToSites()" class="company-back" style="float:right">切换厂区/子公司</a></div>`;
 }
 
+/* ── 登录后切换厂区/子公司（头部徽章点击）── */
+let _swSite = null;
+let _swView = 'subs';
+function openCompanySwitch() {
+  const ov = document.getElementById('companySwitchOverlay');
+  if (!ov) return;
+  _swSite = getCompanyObj().site;
+  _swView = 'subs';   /* 默认直接展开当前厂区的子公司列表 */
+  renderCompanySwitch();
+  ov.classList.add('show');
+}
+function closeCompanySwitch() {
+  const ov = document.getElementById('companySwitchOverlay');
+  if (ov) ov.classList.remove('show');
+}
+function swBackToSites()           { _swView = 'sites'; renderCompanySwitch(); }
+function swSelectSite(siteId)      { _swSite = siteId;  _swView = 'subs'; renderCompanySwitch(); }
+/* 各公司使用独立的 HttpOnly 会话；切换时仅改变公司，不传递凭据。 */
+const SWITCH_TICKET_KEY = 'xingxin_qms_switch_ticket';
+function swPickCompany(id) {
+  if (id === getCompany()) { closeCompanySwitch(); return; }
+  try { localStorage.removeItem(SWITCH_TICKET_KEY); } catch(e) {}
+  pickCompany(id);
+}
+function renderCompanySwitch() {
+  const box = document.getElementById('companySwitchBox');
+  if (!box) return;
+  if (_swView === 'sites') {
+    box.innerHTML =
+      `<div class="company-hint">选择厂区</div>` +
+      `<div class="company-cards">` + QC_SITES.map(s =>
+        _companyCardHtml({ name: s.name, onclick: `swSelectSite('${s.id}')` }, s.color,
+          companiesOf(s.id).length + ' 家子公司')
+      ).join('') + `</div>`;
+    return;
+  }
+  const site = getSiteObj(_swSite || getCompanyObj().site);
+  box.innerHTML =
+    `<div class="company-hint"><a href="javascript:swBackToSites()" class="company-back">‹ 厂区</a> ${site.name} · 选择子公司（切换后自动刷新，数据相互独立）</div>` +
+    `<div class="company-cards">` + companiesOf(site.id).map(c =>
+      _companyCardHtml({ name: c.name, onclick: `swPickCompany('${c.id}')` }, site.color,
+        c.id === getCompany() ? '当前公司' : '')
+    ).join('') + `</div>`;
+}
+
 /* ── 登录 ── */
-function login() {
+let _loginPending = false;
+async function login() {
+  if (_loginPending) return;
   const unameEl = document.getElementById('loginUsername');
-  const pwdEl   = document.getElementById('loginPassword');
-  const errEl   = document.getElementById('loginError');
+  const pwdEl = document.getElementById('loginPassword');
+  const errEl = document.getElementById('loginError');
   const username = (unameEl?.value || '').trim();
-  const password = (pwdEl?.value || '').trim();
-
-  if (!username || !password) {
-    if (errEl) { errEl.textContent = '请输入用户名和密码'; errEl.style.display = ''; }
-    return;
-  }
-
-  const users = _getUsers();
-  const user  = users.find(u => u.username === username);
-
-  if (!user || user.password !== _hashPwd(password)) {
-    if (errEl) { errEl.textContent = '用户名或密码错误'; errEl.style.display = ''; }
+  const password = pwdEl?.value || '';
+  const showError = msg => { if (errEl) { errEl.textContent = msg; errEl.style.display = ''; errEl.setAttribute('role', 'alert'); } };
+  if (!username || !password) { showError('请输入用户名和密码'); return; }
+  const button = document.querySelector('#loginFields button');
+  _loginPending = true;
+  if (button) { button.disabled = true; button.textContent = '登录中…'; }
+  if (errEl) errEl.style.display = 'none';
+  try {
+    if (typeof window.__QC_LOGIN !== 'function') throw new Error('登录服务未加载，请刷新页面后重试');
+    await window.__QC_LOGIN(username, password);
+    initUsers();
+    initData();
+    _partners = null;
+    if (pwdEl) pwdEl.value = '';
+    _showApp();
+  } catch (err) {
+    showError(err.message || '登录失败，请检查连接后重试');
+    if (unameEl) unameEl.value = username;
     if (pwdEl) { pwdEl.value = ''; pwdEl.focus(); }
-    return;
+  } finally {
+    _loginPending = false;
+    if (button) { button.disabled = false; button.textContent = '登 录'; }
   }
-  if (!user.enabled) {
-    if (errEl) { errEl.textContent = '账号已停用，请联系管理员'; errEl.style.display = ''; }
-    return;
-  }
-
-  /* 更新最后登录时间 */
-  user.lastLoginAt = new Date().toISOString();
-  _saveUsers(users);
-  _saveSession(user);
-
-  /* 进入系统 */
-  _showApp();
 }
-
-/* 按 Enter 键登录 */
-function loginOnEnter(e) {
-  if (e.key === 'Enter') login();
-}
-
-/* ── 退出登录 ── */
-function logout() {
-  _clearSession();
-  _showLogin();
+function loginOnEnter(e) { if (e.key === 'Enter') login(); }
+async function logout() {
+  try {
+    if (typeof window.__QC_LOGOUT !== 'function') throw new Error('退出服务未加载，请刷新后重试');
+    await window.__QC_LOGOUT();
+    _showLogin();
+  } catch (err) { showToast(err.message || '退出未完成，请检查连接后重试', 'error'); }
 }
 
 /* ── 显示 / 隐藏登录页 ── */
@@ -364,7 +389,8 @@ function _showLogin() {
   const e = document.getElementById('loginError');
   if (u) u.value = '';
   if (p) p.value = '';
-  if (e) { e.textContent = ''; e.style.display = 'none'; }
+  const notice = window.__QC_AUTH_NOTICE || window.__QC_LEGACY_SSO_NOTICE || '';
+  if (e) { e.textContent = notice; e.style.display = notice ? '' : 'none'; e.setAttribute('role', 'alert'); }
 }
 
 function _showApp() {
@@ -392,7 +418,7 @@ function _renderUserBadge() {
   const el = document.getElementById('userBadge');
   if (!el || !u) return;
   el.innerHTML =
-    `<span class="user-badge-company">${getSiteObj(getCompanyObj().site).name} · ${getCompanyName()}</span>` +
+    `<span class="user-badge-company" onclick="openCompanySwitch()" style="cursor:pointer" title="点击切换厂区/子公司">${getSiteObj(getCompanyObj().site).name} · ${getCompanyName()}</span>` +
     `<span class="user-badge-name">${u.name || u.username}</span>` +
     `<span class="user-badge-role">${ROLE_LABELS[u.role] || u.role}</span>` +
     `<button class="user-badge-logout" onclick="logout()">退出</button>`;
@@ -428,14 +454,8 @@ function applyPermissions() {
 /* ── requireLogin：启动时鉴权 ── */
 function requireLogin() {
   initUsers();
-  const sess = getCurrentUser();
-  if (!sess) { _showLogin(); return; }
-
-  /* 验证 session 中的用户是否仍有效且未被停用 */
-  const users = _getUsers();
-  const user  = users.find(u => u.username === sess.username);
-  if (!user || !user.enabled) { _clearSession(); _showLogin(); return; }
-
+  try { localStorage.removeItem(SWITCH_TICKET_KEY); localStorage.removeItem(STORAGE_KEYS.session); } catch(e) {}
+  if (!getCurrentUser()) { _showLogin(); return; }
   _showApp();
 }
 
@@ -616,13 +636,13 @@ function _closeUserModal() {
   _editingUsername = null;
 }
 
-function _saveUser() {
+async function _saveUser() {
   const errEl  = document.getElementById('userModalErr');
   const show   = msg => { if(errEl){ errEl.textContent=msg; errEl.style.display=''; } };
 
   const uname  = (document.getElementById('umUsername')?.value||'').trim();
-  const pwd    = (document.getElementById('umPassword')?.value||'').trim();
-  const pwd2   = (document.getElementById('umPassword2')?.value||'').trim();
+  const pwd    = document.getElementById('umPassword')?.value || '';
+  const pwd2   = document.getElementById('umPassword2')?.value || '';
   const role   = document.getElementById('umRole')?.value || 'viewer';
   const name   = (document.getElementById('umName')?.value||'').trim();
   const dept   = document.getElementById('umDept')?.value || '';
@@ -639,7 +659,7 @@ function _saveUser() {
     if (pwd) {
       if (pwd.length < 6) { show('密码至少6位'); return; }
       if (pwd !== pwd2)   { show('两次密码不一致'); return; }
-      u.password = _hashPwd(pwd);
+      u.newPassword = pwd;
     }
     u.role = role;
     u.name = name;
@@ -657,7 +677,7 @@ function _saveUser() {
       username:    uname,
       name,
       dept,
-      password:    _hashPwd(pwd),
+      newPassword: pwd,
       role,
       enabled:     true,
       createdAt:   new Date().toISOString(),
@@ -665,7 +685,7 @@ function _saveUser() {
     });
   }
 
-  _saveUsers(users);
+  if (!await _saveUsers(users)) { show('账号未保存成功，请重试'); return; }
   _closeUserModal();
   showToast('✓ 账号已保存', 'success');
   renderUsersPage();
@@ -728,12 +748,12 @@ function _permResetRole() {
   _renderPermMatrix();
   showToast('已按角色预设重置，保存后生效', 'info');
 }
-function _savePerms() {
+async function _savePerms() {
   const users = _getUsers();
   const u = users.find(x => x.username === _permEditing);
   if (u) {
     u.perms = _permMatrix;
-    _saveUsers(users);
+    if (!await _saveUsers(users)) return;
     showToast('✓ 权限已保存', 'success');
   }
   _closePermModal();
@@ -741,7 +761,7 @@ function _savePerms() {
   renderUsersPage();
 }
 
-function _toggleUser(username) {
+async function _toggleUser(username) {
   const users = _getUsers();
   const u     = users.find(x => x.username === username);
   if (!u) return;
@@ -755,12 +775,12 @@ function _toggleUser(username) {
   }
 
   u.enabled = !u.enabled;
-  _saveUsers(users);
+  if (!await _saveUsers(users)) return;
   showToast(u.enabled ? '✓ 账号已启用' : '账号已停用', u.enabled ? 'success' : 'info');
   renderUsersPage();
 }
 
-function _deleteUser(username) {
+async function _deleteUser(username) {
   const me = getCurrentUser();
   if (username === me?.username) { showToast('不能删除当前登录账号', 'error'); return; }
   if (!confirm(`确认删除账号「${username}」？此操作不可撤销。`)) return;
@@ -773,7 +793,7 @@ function _deleteUser(username) {
   }
 
   const newUsers = users.filter(x => x.username !== username);
-  _saveUsers(newUsers);
+  if (!await _saveUsers(newUsers)) return;
   showToast('✓ 账号已删除', 'success');
   renderUsersPage();
 }
@@ -784,19 +804,18 @@ function initData() {
     const raw = localStorage.getItem(LS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed && Array.isArray(parsed.records) && parsed.records.length > 0) {
+      if (parsed && Array.isArray(parsed.records) && parsed.records.length >= 0) {
         state = parsed;
         return;
       }
     }
   } catch (e) { /* ignore */ }
-  /* 没有或损坏时加载种子数据 */
-  state = { records: SEED_RECORDS.map(r => Object.assign({}, r)), nextId: 31 };
-  persist();
+  /* 缓存缺失时保持空表，登录后的 bootstrap 提供真实数据。 */
+  state = { records: [], nextId: 31 };
 }
 
 function persist() {
-  try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch(e) {}
+  try { localStorage.setItem(LS_KEY, JSON.stringify(state)); return true; } catch(e) { return false; }
 }
 
 function recStatus(r) { return r.status || 'approved'; }
@@ -951,7 +970,7 @@ const PAGE_TITLES = {
   records:          '验货明细',
   review:           '审核中心',
   analysis:         '统计分析',
-  suppliers:        '供应商管理',
+  suppliers:        '供应商&客户管理',
   daily:            '品质日报',
   weekly:           '品质周报',
   monthly:          '品质月报',
@@ -1990,6 +2009,9 @@ function renderAnalysis() {
    §10  SUPPLIERS PAGE
 ════════════════════════════════════════ */
 function renderSuppliers() {
+  renderPartners('supplier');
+  renderPartners('customer');
+  renderPartners('processType');
   const data = recs();
   const byS  = groupBy(data, 'supplier');
   const el   = document.getElementById('supplierCards');
@@ -2005,12 +2027,18 @@ function renderSuppliers() {
     return { name, total:arr.length, fail, pass:arr.length-fail, rate, risk, qty, prods, last };
   }).sort((a,b)=>b.rate-a.rate);
 
+  /* 名单内但还没有验货记录的供应商：直接出卡片（0 批次），排在有记录的后面 */
+  const recorded = new Set(Object.keys(byS));
+  managedNames('supplier').filter(n => !recorded.has(n)).forEach(n => {
+    list.push({ name:n, total:0, fail:0, pass:0, rate:0, risk:'low', qty:0, prods:'', last:'-', fresh:true });
+  });
+
   const RL = { low:'正常', mid:'风险', high:'高风险' };
   el.innerHTML = '<div class="supplier-grid">' + list.map(s => `
     <div class="supplier-card risk-${s.risk}">
-      <span class="risk-badge ${s.risk}">${RL[s.risk]}</span>
+      <span class="risk-badge ${s.risk}">${s.fresh ? '新录入' : RL[s.risk]}</span>
       <div class="supplier-name">${s.name}</div>
-      <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">${s.prods||'多品类'}</div>
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">${s.fresh ? '暂无验货记录' : (s.prods||'多品类')}</div>
       <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:8px">
         <span>来料 ${s.qty.toLocaleString()} 件</span>
         <span>最近: ${s.last}</span>
@@ -2018,7 +2046,7 @@ function renderSuppliers() {
       <div class="supplier-stats">
         <div class="stat-item"><div class="stat-num">${s.total}</div><div class="stat-lbl">验货批次</div></div>
         <div class="stat-item"><div class="stat-num" style="color:${s.fail>0?'var(--red)':'var(--green)'}">${s.fail}</div><div class="stat-lbl">FAIL批次</div></div>
-        <div class="stat-item"><div class="stat-num" style="color:${s.risk==='high'?'var(--red)':s.risk==='mid'?'var(--yellow)':'var(--green)'}">${(s.rate*100).toFixed(0)}%</div><div class="stat-lbl">退货率</div></div>
+        <div class="stat-item"><div class="stat-num" style="color:${s.fresh?'var(--text-dim)':s.risk==='high'?'var(--red)':s.risk==='mid'?'var(--yellow)':'var(--green)'}">${s.fresh ? '—' : (s.rate*100).toFixed(0)+'%'}</div><div class="stat-lbl">退货率</div></div>
       </div>
     </div>`).join('') + '</div>';
 }
@@ -2048,10 +2076,12 @@ async function refreshRecordsPage() {
   }
 
   try {
-    const apiBase = (location.pathname.replace(/[^/]*$/, '') || '/').replace(/\/$/, '');
-    const res = await fetch(apiBase + '/api/bootstrap?company=' + getCompany(), { cache: 'no-store' });
+    const authAtStart = window.__QC_AUTH;
+    const res = await window.__QC_REQUEST('/api/bootstrap');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
+    if (window.__QC_AUTH !== authAtStart) throw new Error('会话已变化，请重新刷新');
+    window.__QC_ACCEPT_AUTH(data);
     if (!Array.isArray(data.records)) throw new Error('服务器返回数据格式不正确');
     if (_recordsSnapshotsDiffer(state.records, data.records)) {
       const syncFailed = window.__QC_BACKEND_OK !== true || (window.__QC_LAST_SYNC && window.__QC_LAST_SYNC.ok === false);
@@ -2071,8 +2101,11 @@ async function refreshRecordsPage() {
     localStorage.setItem(LS_KEY, JSON.stringify(state));
     if (Array.isArray(data.users)) localStorage.setItem(STORAGE_KEYS.users, JSON.stringify(data.users));
     if (Array.isArray(data.defectLib)) localStorage.setItem(STORAGE_KEYS.defectLib, JSON.stringify(data.defectLib));
+    if (Array.isArray(data.partners))  localStorage.setItem(STORAGE_KEYS.partners,  JSON.stringify(data.partners));
 
+    _partners = null;
     _selectedIds.clear();
+    applyPermissions();
     filterRecords();
     updateTopKpis();
     showToast('✓ 验货明细已刷新，共 ' + state.records.length + ' 条', 'success');
@@ -2098,7 +2131,7 @@ function filterRecords() {
     filteredRecs = data.filter(r => {
       if (search) {
         const haystack = [
-          r.supplier, r.productNo, r.productName, r.client, r.orderNo, r.deliveryNo,
+          r.supplier, r.productNo, r.productName, r.client, r.processType, r.orderNo, r.deliveryNo,
           r.defect, r.updatedAt, formatModifiedDate(r.updatedAt),
         ]
           .filter(Boolean).join(' ').toLowerCase();
@@ -2122,6 +2155,9 @@ function filterRecords() {
 
     setText('recordCount', `共 ${filteredRecs.length} 条`);
 
+    /* 渲染上限：数据量大时只渲染前 300 行，避免整表 innerHTML 卡死页面 */
+    const renderRows = _renderedRecordRows();
+
     const wrap = document.getElementById('recordsTableWrap');
     if (!wrap) return;
 
@@ -2135,12 +2171,22 @@ function filterRecords() {
     }
 
     /* 过滤后清掉在当前结果集中不存在的选中 id */
-    const visibleIds = new Set(filteredRecs.map(r => r.id));
+    const visibleIds = new Set(renderRows.map(r => r.id));
     for (const id of [..._selectedIds]) {
       if (!visibleIds.has(id)) _selectedIds.delete(id);
     }
 
-    wrap.innerHTML = `<table id="recordsTable" style="table-layout:fixed;width:100%;min-width:1590px">
+    const capBar = (!_recordsShowAll && filteredRecs.length > RECORDS_PAGE_SIZE)
+      ? `<div style="display:flex;align-items:center;gap:10px;padding:6px 4px;font-size:12px;color:var(--text-dim)">
+           已显示前 ${RECORDS_PAGE_SIZE} 条（共 ${filteredRecs.length} 条）
+           <button class="action-btn" onclick="_recordsShowAll=true;filterRecords()">显示全部</button>
+         </div>`
+      : (_recordsShowAll && filteredRecs.length > RECORDS_PAGE_SIZE
+          ? `<div style="display:flex;align-items:center;gap:10px;padding:6px 4px;font-size:12px;color:var(--text-dim)">
+               全部 ${filteredRecs.length} 条（数据量大时可能卡顿）
+               <button class="action-btn" onclick="_recordsShowAll=false;filterRecords()">只显示前 ${RECORDS_PAGE_SIZE} 条</button>
+             </div>` : '');
+    wrap.innerHTML = capBar + `<table id="recordsTable" style="table-layout:fixed;width:100%;min-width:1778px">
       <colgroup>
         <col style="width:36px"/>   <!-- 复选框 -->
         <col style="width:44px"/>   <!-- # -->
@@ -2148,6 +2194,8 @@ function filterRecords() {
         <col style="width:98px"/>   <!-- 修改日期 -->
         <col style="width:110px"/>  <!-- 供应商 -->
         <col style="width:80px"/>   <!-- 客户 -->
+        <col style="width:88px"/>   <!-- 加工类型 -->
+        <col style="width:100px"/>  <!-- 送货单号 -->
         <col style="width:92px"/>   <!-- 货号 -->
         <col style="width:160px"/>  <!-- 款式名称 -->
         <col style="width:102px"/>  <!-- PO号 -->
@@ -2164,13 +2212,15 @@ function filterRecords() {
       <thead><tr>
         <th class="col-check">
           <input type="checkbox" class="check-all" id="checkAll"
-                 onchange="_onCheckAll(this)" title="全选/取消全选" />
+                 onchange="_onCheckAll(this)" title="全选/取消当前显示记录" />
         </th>
         <th style="text-align:right">#</th>
         <th style="text-align:left">来料日期</th>
         <th style="text-align:left">修改日期</th>
         <th style="text-align:left">供应商</th>
         <th style="text-align:left">客户</th>
+        <th style="text-align:left">加工类型</th>
+        <th style="text-align:left">送货单号</th>
         <th style="text-align:left">货号</th>
         <th style="text-align:left">款式名称</th>
         <th style="text-align:left">PO号</th>
@@ -2184,14 +2234,15 @@ function filterRecords() {
         <th style="text-align:center">检验员</th>
         <th style="text-align:center">操作</th>
       </tr></thead>
-      <tbody>${filteredRecs.map(r => {
+      <tbody>${renderRows.map(r => {
         const bc       = isPass(r) ? 'badge-pass' : isFail(r) ? 'badge-rej' : r.result==='COND' ? 'badge-cond' : 'badge-hold';
         const rt       = parseRate(r.defectRate) ?? 0;
         const checked  = _selectedIds.has(r.id) ? 'checked' : '';
         const selCls   = _selectedIds.has(r.id) ? 'row-selected' : '';
         const isApproved = recStatus(r) === 'approved';
         const isRejected = recStatus(r) === 'rejected';
-        const editBtn = (can('editRecord') || (isRejected && can('createRecord'))) && !isApproved
+        /* 未审核通过的记录由有录入权限的账号编辑；已审核锁定 */
+        const editBtn = can('createRecord') && !isApproved
           ? `<button class="action-btn" onclick="openEditModal(${r.id})">编辑</button>`
           : '';
         const rejBadge = isRejected
@@ -2215,6 +2266,8 @@ function filterRecords() {
           <td style="font-family:var(--font-mono);font-size:11px;white-space:nowrap">${formatModifiedDate(r.updatedAt) || '-'}</td>
           <td style="font-weight:500;color:#e8edf5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${r.supplier}">${r.supplier}</td>
           <td style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${r.client||''}">${r.client||'-'}</td>
+          <td style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${r.processType||''}">${r.processType||'-'}</td>
+          <td style="font-family:var(--font-mono);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${r.deliveryNo||''}">${r.deliveryNo||'-'}</td>
           <td style="font-family:var(--font-mono);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${r.productNo||''}">${r.productNo||'-'}</td>
           <td style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.productName||''}">${r.productName||'-'}</td>
           <td style="font-family:var(--font-mono);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${r.orderNo||''}">${r.orderNo||'-'}</td>
@@ -2243,7 +2296,7 @@ function filterRecords() {
 }
 
 /* ════════════════════════════════════════
-   验货明细：手动锁定列（列数用户可选）
+   验货明细：手动锁定列（冻结前 N 列）
 ════════════════════════════════════════ */
 const COLLOCK_KEY       = 'xingxin_qms_records_col_lock';
 const COLLOCK_DEPTH_KEY = 'xingxin_qms_records_col_lock_depth';
@@ -2253,7 +2306,7 @@ let colLockCount = COLLOCK_DEFAULT;
 try {
   colLockOn = localStorage.getItem(COLLOCK_KEY) === '1';
   const d = parseInt(localStorage.getItem(COLLOCK_DEPTH_KEY), 10);
-  if (d >= 2 && d <= 8) colLockCount = d;
+  if (d >= 2 && d <= 10) colLockCount = d;
 } catch(e) {}
 
 /* 用户自选锁定深度（锁到第几列） */
@@ -2308,10 +2361,14 @@ function applyColLock() {
 /* 窗口尺寸变化后表格列宽会变，需要重算冻结位置 */
 window.addEventListener('resize', () => { if (colLockOn) applyColLock(); });
 
-/* ── 全选 checkbox 变化 ── */
+function _renderedRecordRows() {
+  return _recordsShowAll ? filteredRecs : filteredRecs.slice(0, RECORDS_PAGE_SIZE);
+}
+
+/* ── 全选 checkbox 变化：仅操作当前实际显示的记录 ── */
 function _onCheckAll(el) {
   const checked = el.checked;
-  filteredRecs.forEach(r => {
+  _renderedRecordRows().forEach(r => {
     if (checked) _selectedIds.add(r.id);
     else         _selectedIds.delete(r.id);
   });
@@ -2340,8 +2397,9 @@ function _onRowCheck(el, id) {
 function _syncCheckAllState() {
   const ca = document.getElementById('checkAll');
   if (!ca) return;
-  const total    = filteredRecs.length;
-  const selCount = filteredRecs.filter(r => _selectedIds.has(r.id)).length;
+  const displayed = _renderedRecordRows();
+  const total    = displayed.length;
+  const selCount = displayed.filter(r => _selectedIds.has(r.id)).length;
   if (selCount === 0) {
     ca.checked = false;
     ca.classList.remove('indeterminate');
@@ -2394,13 +2452,14 @@ function batchDelete() {
     }
   }
   const idsToDelete = new Set(_selectedIds);
+  if (window.__QC_MARK_DELETED) window.__QC_MARK_DELETED([...idsToDelete]);
   state.records = state.records.filter(r => !idsToDelete.has(r.id));
   persist();
 
   /* 清空选中状态 */
   _selectedIds.clear();
 
-  showToast(`✓ 已删除 ${selCount} 条记录`, 'success');
+  showToast(`删除 ${selCount} 条记录的操作已在本地暂存，等待服务器同步`, 'info');
 
   /* 刷新所有相关视图 */
   filterRecords();
@@ -2418,6 +2477,142 @@ function batchDelete() {
 ════════════════════════════════════════ */
 
 /* 默认供应商列表 */
+/* ── 供应商&客户名单（「供应商&客户管理」页维护，写穿透到服务端）── */
+let _partners = null;
+function _loadPartners() {
+  if (_partners === null) {
+    try { _partners = JSON.parse(localStorage.getItem(STORAGE_KEYS.partners) || '[]'); } catch(e) { _partners = []; }
+    if (!Array.isArray(_partners)) _partners = [];
+  }
+  return _partners;
+}
+function _savePartners(p) {
+  _partners = Array.isArray(p) ? p : [];
+  try { localStorage.setItem(STORAGE_KEYS.partners, JSON.stringify(_partners)); } catch(e) {}
+}
+function managedNames(type) {
+  return _loadPartners().filter(p => p.type === type).map(p => p.name).filter(Boolean);
+}
+
+/* 全称→名单简称匹配：送货单上通常是公司全称（如「东莞市鸿誉包装制品有限公司」），
+   名单里登记的是简称（如「鸿誉」）。识别结果应用前自动归一到名单名称；
+   匹配不到则原样返回（仍会触发名单外警示）。 */
+function matchManagedName(type, raw) {
+  const v = String(raw || '').trim();
+  if (!v) return v;
+  const names = managedNames(type);
+  if (!names.length) return v;
+  const norm  = s => String(s || '').replace(/[\s　()（）【】\[\],，.。·\-—_]/g, '').toLowerCase();
+  const strip = s => norm(s).replace(/(有限责任公司|股份有限公司|有限公司|分公司|公司|工厂|厂)$/g, '');
+  const nv = norm(v), sv = strip(v);
+  /* 1. 完全相等 */
+  for (const n of names) if (norm(n) === nv) return n;
+  /* 2. 去掉公司后缀后相等 */
+  for (const n of names) { const sn = strip(n); if (sn && sn === sv) return n; }
+  /* 3. 包含匹配（取名单中最长的命中，避免短名误匹配） */
+  let best = '';
+  for (const n of names) {
+    const nn = norm(n), sn = strip(n);
+    const hit = (nn.length >= 2 && (nv.includes(nn) || nn.includes(nv)))
+             || (sn.length >= 2 && sn !== sv && (sv.includes(sn) || sn.includes(sv)));
+    if (hit && n.length > best.length) best = n;
+  }
+  return best || v;
+}
+window.matchManagedName = matchManagedName;
+function canManagePartners() { return can('managePartners'); }
+
+/* 名单维护面板：供应商管理 / 客户管理 两个页面各自调用 */
+function renderPartners(type) {
+  const wrap = document.getElementById('partnerMgr_' + type);
+  if (!wrap) return;
+  const label  = { supplier:'供应商名单', customer:'客户名单', processType:'加工类型名单' }[type] || type;
+  const manage = canManagePartners();
+  const names  = managedNames(type);
+  wrap.innerHTML = `<div style="flex:1;min-width:280px;border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg-card)">
+    <div style="font-weight:600;margin-bottom:8px">${label} <span style="font-size:11px;color:var(--text-dim)">（${names.length} 个）</span></div>
+    ${manage ? `<div style="display:flex;gap:6px;margin-bottom:10px">
+      <input type="text" class="form-input" id="partnerInput_${type}" placeholder="输入名称，回车或点添加" style="flex:1"
+             onkeydown="if(event.key==='Enter'){event.preventDefault();addPartner('${type}')}" />
+      <button class="btn-primary btn-sm" onclick="addPartner('${type}')">＋ 添加</button>
+    </div>` : ''}
+    <div style="max-height:480px;overflow-y:auto;display:flex;flex-wrap:wrap;gap:6px;align-content:flex-start">
+      ${names.length ? names.map(n => `<span class="badge badge-hold" style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px">${_esc(n)}${manage ? `<button data-name="${_esc(n)}" onclick="delPartner('${type}', this.dataset.name)" style="border:none;background:none;color:var(--red);cursor:pointer;padding:0;font-size:12px;line-height:1" title="从名单删除">✕</button>` : ''}</span>`).join('') : '<span style="color:var(--text-muted);font-size:12px">暂无，请在上方添加</span>'}
+    </div>
+  </div>`;
+  renderPartnerCards(type);
+}
+
+/* 客户/加工类型档案卡片：名称 + 验货记录数 + 最近日期；名单新加的显示「新录入」 */
+function renderPartnerCards(type) {
+  const conf = { customer:{ el:'customerCards', field:'client' }, processType:{ el:'processTypeCards', field:'processType' } }[type];
+  if (!conf) return;
+  const el = document.getElementById(conf.el);
+  if (!el) return;
+  const list = managedNames(type).map(n => {
+    const arr  = state.records.filter(r => r[conf.field] === n);
+    const last = arr.map(r => r.date).filter(Boolean).sort().reverse()[0] || '-';
+    return { name:n, total:arr.length, last, fresh:arr.length === 0 };
+  }).sort((a,b) => (a.fresh?1:0)-(b.fresh?1:0) || b.total-a.total || a.name.localeCompare(b.name));
+  if (!list.length) {
+    el.innerHTML = '<div style="color:var(--text-muted);font-size:12px">暂无，请先在上方名单添加</div>';
+    return;
+  }
+  el.innerHTML = '<div class="supplier-grid">' + list.map(s => `
+    <div class="supplier-card risk-low">
+      <span class="risk-badge low">${s.fresh ? '新录入' : '正常'}</span>
+      <div class="supplier-name">${s.name}</div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-top:6px">
+        <span>${s.total} 条验货记录</span>
+        <span>最近: ${s.last}</span>
+      </div>
+    </div>`).join('') + '</div>';
+}
+
+/* 页签切换：供应商（名单+质量档案）/ 客户（仅名单）/ 加工类型（仅名单） */
+function setPartnerTab(tab) {
+  const views = { supplier:'partnerViewSupplier', customer:'partnerViewCustomer', processType:'partnerViewProcess' };
+  const tabs  = { supplier:'partnerTabSupplier',  customer:'partnerTabCustomer',  processType:'partnerTabProcess'  };
+  Object.keys(views).forEach(k => {
+    const v = document.getElementById(views[k]);
+    const t = document.getElementById(tabs[k]);
+    if (v) v.style.display = (k === tab) ? '' : 'none';
+    if (t) t.classList.toggle('active', k === tab);
+  });
+}
+
+function addPartner(type) {
+  if (!canManagePartners()) { showToast('当前账号无权限执行此操作', 'error'); return; }
+  const label = { supplier:'供应商', customer:'客户', processType:'加工类型' }[type] || type;
+  const inp   = document.getElementById('partnerInput_' + type);
+  const name  = (inp && inp.value || '').trim();
+  if (!name) { showToast('请输入' + label + '名称', 'error'); return; }
+  const known = managedNames(type);
+  if (known.includes(name)) { showToast(label + '「' + name + '」已在名单中', 'info'); return; }
+  const list = _loadPartners().slice();
+  list.push({ name, type, createdAt: nowIso() });
+  _savePartners(list);
+  if (inp) inp.value = '';
+  renderPartners(type);
+  renderSupplierDatalist();
+  renderCustomerDatalist();
+  renderProcessTypeDatalist();
+  if (typeof recheckNameWhitelist === 'function') recheckNameWhitelist();
+  showToast(label + '「' + name + '」已在本地暂存，等待服务器同步', 'info');
+}
+
+function delPartner(type, name) {
+  if (!canManagePartners()) { showToast('当前账号无权限执行此操作', 'error'); return; }
+  const label = { supplier:'供应商', customer:'客户', processType:'加工类型' }[type] || type;
+  if (!confirm('确认从名单删除' + label + '「' + name + '」？\n（不影响已有的验货记录；若历史记录里用过该名称，下拉候选中仍可能出现）')) return;
+  _savePartners(_loadPartners().filter(p => !(p.type === type && p.name === name)));
+  renderPartners(type);
+  renderSupplierDatalist();
+  renderCustomerDatalist();
+  renderProcessTypeDatalist();
+  showToast(label + '「' + name + '」的删除已在本地暂存，等待服务器同步', 'info');
+}
+
 const DEFAULT_SUPPLIERS = [
   '天一','顺景','邵阳厂','邵阳兴信','嘉乐','泰业','美福','华升','瑞升',
   '金麒麟','丰业','方升','鑫鸿','新万利','优可','德雅欣','兴荣','浩鑫',
@@ -2463,17 +2658,17 @@ function aqlJudge(qty, sampleQty, failQty) {
   return n <= row.m065 ? 'PASS' : 'REJ';
 }
 
-/* 生成供应商选项（历史数据 + 默认列表去重排序） */
+/* 校验池：名单 + 历史记录已用值（旧记录编辑不受影响）；下拉候选只用名单，见 renderSupplierDatalist */
 function getSupplierOptions() {
-  const fromData = recs().map(r => r.supplier).filter(Boolean);
-  return [...new Set([...DEFAULT_SUPPLIERS, ...fromData])].sort();
+  const fromData = state.records.map(r => r.supplier).filter(Boolean);
+  return [...new Set([...managedNames('supplier'), ...fromData])].sort();
 }
 
 /* 渲染 datalist */
 function renderSupplierDatalist() {
   const list = document.getElementById('supplierList');
   if (!list) return;
-  list.innerHTML = getSupplierOptions()
+  list.innerHTML = managedNames('supplier')
     .map(n => `<option value="${n}"></option>`).join('');
 }
 
@@ -2488,15 +2683,68 @@ const DEFAULT_CUSTOMERS = [
 ];
 
 function getCustomerOptions() {
-  const fromData = recs().map(r => r.client).filter(Boolean);
-  return [...new Set([...DEFAULT_CUSTOMERS, ...fromData])].sort();
+  const fromData = state.records.map(r => r.client).filter(Boolean);
+  return [...new Set([...managedNames('customer'), ...fromData])].sort();
 }
 
 function renderCustomerDatalist() {
   const list = document.getElementById('customerList');
   if (!list) return;
-  list.innerHTML = getCustomerOptions()
+  list.innerHTML = managedNames('customer')
     .map(n => `<option value="${n}"></option>`).join('');
+}
+
+/* 加工类型校验池：名单 + 历史记录已用值；下拉候选只用名单，见 renderProcessTypeDatalist */
+const DEFAULT_PROCESS_TYPES = ['啤机','印刷','UV','过油','裱纸','烫金','击凸','粘盒'];
+function getProcessTypeOptions() {
+  const fromData = state.records.map(r => r.processType).filter(Boolean);
+  return [...new Set([...managedNames('processType'), ...fromData])].sort();
+}
+function renderProcessTypeDatalist() {
+  const list = document.getElementById('processTypeList');
+  if (!list) return;
+  list.innerHTML = managedNames('processType')
+    .map(n => `<option value="${n}"></option>`).join('');
+}
+
+/* ── 录入即时校验：供应商/客户/加工类型输入名单外名称时立即提示，不等保存 ── */
+const _NAME_CHECK_FIELDS = {
+  f_supplier:    { label:'供应商',  opts: () => getSupplierOptions() },
+  f_client:      { label:'客户',    opts: () => getCustomerOptions() },
+  f_processType: { label:'加工类型', opts: () => getProcessTypeOptions() },
+};
+function checkNameWhitelist(fieldId, withToast) {
+  const cfg = _NAME_CHECK_FIELDS[fieldId];
+  const inp = document.getElementById(fieldId);
+  if (!cfg || !inp) return true;
+  let hint = inp.parentElement.querySelector('.name-warn');
+  if (!hint) {
+    hint = document.createElement('div');
+    hint.className = 'name-warn';
+    hint.style.cssText = 'color:var(--red);font-size:11px;margin-top:4px;display:none';
+    inp.parentElement.appendChild(hint);
+  }
+  const v   = (inp.value || '').trim();
+  const bad = v && !cfg.opts().includes(v);
+  inp.style.borderColor = bad ? 'var(--red)' : '';
+  hint.style.display    = bad ? '' : 'none';
+  if (bad) {
+    hint.textContent = '⚠ ' + cfg.label + '「' + v + '」不在名单中，请先到「供应商&客户管理」添加';
+    if (withToast) showToast(cfg.label + '「' + v + '」不在名单中，请先到「供应商&客户管理」添加后再录入', 'error');
+  }
+  return !bad;
+}
+function bindNameWhitelistCheck() {
+  Object.keys(_NAME_CHECK_FIELDS).forEach(id => {
+    const inp = document.getElementById(id);
+    if (!inp || inp.dataset.nameCheckBound) return;
+    inp.dataset.nameCheckBound = '1';
+    inp.addEventListener('input',  () => checkNameWhitelist(id, false));
+    inp.addEventListener('change', () => checkNameWhitelist(id, true));
+  });
+}
+function recheckNameWhitelist() {
+  Object.keys(_NAME_CHECK_FIELDS).forEach(id => checkNameWhitelist(id, false));
 }
 
 /* 模式切换（单条 / 批量） */
@@ -2507,6 +2755,59 @@ function renderCustomerDatalist() {
 
 let _ocrImageFile = null;
 let _ocrWorkerBusy = false;
+let _ocrImageRevision = 0;
+let _ocrOriginalImage = '';
+let _ocrImageAngle = 0;
+
+function _ocrActorSnapshot() {
+  const auth = window.__QC_AUTH;
+  return { authenticated: !!auth, username: auth?.user?.username, csrfToken: auth?.csrfToken,
+    authCompany: auth?.company, company: window.__QC_COMPANY };
+}
+function _sameOcrActor(before, after = _ocrActorSnapshot()) {
+  return !!(before && after && ['authenticated','username','csrfToken','authCompany','company'].every(key => before[key] === after[key]));
+}
+
+/* 图片与登录上下文一起核对。上传/清空/关窗会使旧异步回调失效。 */
+function _cancelOcrWork() {
+  _ocrImageRevision++;
+  if (typeof window.__QC_OCR_CANCEL === 'function') window.__QC_OCR_CANCEL();
+}
+function _ocrImageSnapshot() {
+  const src = document.getElementById('ocrPreview')?.src || '';
+  if (!_ocrImageFile || !_ocrOriginalImage || !src.startsWith('data:image/')) return null;
+  return { revision: _ocrImageRevision, original: _ocrOriginalImage, dataUrl: src,
+    angle: _ocrImageAngle, input: _ocrImageFile, actor: _ocrActorSnapshot() };
+}
+function _sameOcrImage(snapshot) {
+  const current = _ocrImageSnapshot();
+  return !!(snapshot && current && snapshot.revision === current.revision &&
+    snapshot.dataUrl === current.dataUrl && snapshot.original === current.original &&
+    snapshot.input === current.input && _sameOcrActor(snapshot.actor, current.actor));
+}
+function _clearOcrPreviewFields() {
+  window.__qcAiResult = null;
+  window.__qcOcrResultContext = null;
+  const applyButton = document.getElementById('btnApplyOcrToForm');
+  if (applyButton) applyButton.textContent = '应用到单条录入';
+  setVal('ocrRawText', '');
+  ['ocrDate','ocrInspDate','ocrSupplier','ocrClient','ocrProductNo',
+   'ocrProductName','ocrDeliveryNo','ocrOrderNo','ocrQty','ocrType','ocrRemark']
+    .forEach(id => setVal(id, ''));
+}
+window.__QC_OCR_IMAGE = {
+  snapshot: _ocrImageSnapshot,
+  current: _sameOcrImage,
+  cancel: _cancelOcrWork,
+  commit(snapshot, dataUrl, angle) {
+    if (!_sameOcrImage(snapshot)) return null;
+    _ocrImageRevision++;
+    _ocrImageAngle = angle;
+    _ocrImageFile = dataUrl; // Tesseract 和 AI 均读取已经提交到预览的同一图片。
+    document.getElementById('ocrPreview').src = dataUrl;
+    return _ocrImageSnapshot();
+  },
+};
 
 /* 初始化上传区域：点击/拖拽绑定 */
 function initOcrUpload() {
@@ -2545,47 +2846,72 @@ function handleOcrFile(file) {
     showToast('图片过大，请上传小于 10MB 的图片', 'error');
     return;
   }
-  _ocrImageFile = file;
+  _cancelOcrWork();
+  const revision = _ocrImageRevision;
+  const actor = _ocrActorSnapshot();
+  _ocrImageFile = null;
+  _ocrOriginalImage = '';
+  _ocrImageAngle = 0;
+  _clearOcrPreviewFields();
+  const preview = document.getElementById('ocrPreview');
+  if (preview) { preview.src = ''; preview.style.display = 'none'; }
   const reader = new FileReader();
   reader.onload = e => {
+    if (revision !== _ocrImageRevision || !_sameOcrActor(actor)) return;
+    if (typeof e.target.result !== 'string' || !e.target.result.startsWith('data:image/')) {
+      setText('ocrStatus', '图片读取失败，请重新上传');
+      return;
+    }
+    _ocrImageFile = file;
+    _ocrOriginalImage = e.target.result;
     const img = document.getElementById('ocrPreview');
     const hint = document.querySelector('#ocrDropZone .ocr-drop-hint');
     if (img) { img.src = e.target.result; img.style.display = ''; }
     if (hint) hint.style.display = 'none';
+    setText('ocrStatus', '图片已上传，点击"开始识别"');
   };
+  reader.onerror = () => {
+    if (revision === _ocrImageRevision && _sameOcrActor(actor))
+      setText('ocrStatus', '图片读取失败，请重新上传');
+  };
+  setText('ocrStatus', '正在读取图片...');
   reader.readAsDataURL(file);
-  setText('ocrStatus', '图片已上传，点击"开始识别"');
 }
 
 /* 清空图片和识别结果 */
 function clearOcr() {
+  _cancelOcrWork();
   _ocrImageFile = null;
+  _ocrOriginalImage = '';
+  _ocrImageAngle = 0;
   const img   = document.getElementById('ocrPreview');
   const hint  = document.querySelector('#ocrDropZone .ocr-drop-hint');
   const input = document.getElementById('ocrImageInput');
   if (img)   { img.src = ''; img.style.display = 'none'; }
   if (hint)  hint.style.display = '';
   if (input) input.value = '';
-  setVal('ocrRawText', '');
-  ['ocrDate','ocrInspDate','ocrSupplier','ocrClient','ocrProductNo',
-   'ocrProductName','ocrDeliveryNo','ocrOrderNo','ocrQty','ocrType','ocrRemark']
-    .forEach(id => setVal(id, ''));
+  _clearOcrPreviewFields();
   setText('ocrStatus', '未上传图片');
 }
 
 
-/* ── 图片预处理：放大2倍+灰度+对比度增强，提高OCR准确率 ── */
+/* 小图放大，大图限定 2000px；旋转后直接使用已提交的 data URL。 */
 function preprocessImageForOcr(file) {
   return new Promise((resolve) => {
     try {
       const img = new Image();
-      const url = URL.createObjectURL(file);
+      const isDataUrl = typeof file === 'string';
+      const url = isDataUrl ? file : URL.createObjectURL(file);
+      const release = () => { if (!isDataUrl) URL.revokeObjectURL(url); };
       img.onload = () => {
         try {
-          const scale = 2;
+          const width = img.naturalWidth === undefined ? img.width : img.naturalWidth;
+          const height = img.naturalHeight === undefined ? img.height : img.naturalHeight;
+          if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new Error('图片尺寸无效');
+          const scale = Math.min(2, 2000 / Math.max(width, height));
           const canvas = document.createElement('canvas');
-          canvas.width  = img.width  * scale;
-          canvas.height = img.height * scale;
+          canvas.width  = Math.max(1, Math.round(width * scale));
+          canvas.height = Math.max(1, Math.round(height * scale));
           const ctx = canvas.getContext('2d');
           ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
@@ -2601,14 +2927,14 @@ function preprocessImageForOcr(file) {
             d[i] = d[i+1] = d[i+2] = v;
           }
           ctx.putImageData(imgData, 0, 0);
-          URL.revokeObjectURL(url);
+          release();
           canvasToBlob(canvas).then(blob => resolve(blob || file)).catch(() => resolve(file));
         } catch (e) {
-          URL.revokeObjectURL(url);
+          release();
           resolve(file); /* 预处理失败回退原图 */
         }
       };
-      img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+      img.onerror = () => { release(); resolve(file); };
       img.src = url;
     } catch (e) {
       resolve(file);
@@ -2637,38 +2963,50 @@ async function startOcr() {
     showToast('OCR 引擎未加载成功，请检查网络后重试', 'error');
     return;
   }
-  if (_ocrWorkerBusy) return;
+  if (_ocrWorkerBusy) {
+    setText('ocrStatus', '上一张图片的本地识别尚未结束，请稍后重试');
+    showToast('本地识别仍在处理上一张图片，请稍后重试', 'info');
+    return;
+  }
+  const snapshot = _ocrImageSnapshot();
   _ocrWorkerBusy = true;
   setText('ocrStatus', '正在识别，请稍候...');
   const btn = document.getElementById('btnStartOcr');
   if (btn) btn.disabled = true;
 
   try {
-    /* 图片预处理：放大2倍+灰度+对比度增强，提高识别准确率（不改变预览，只改变OCR输入）*/
+    /* 有界灰度/对比度预处理，保持已提交图片的方向。 */
     const ocrInput = await preprocessImageForOcr(_ocrImageFile);
+    if (!_sameOcrImage(snapshot)) return;
+    /* Worker 内 importScripts 不识别相对路径，必须给绝对 URL */
+    const _ocrBase = location.href.replace(/[^/]*$/, '');
     const result = await Tesseract.recognize(ocrInput, 'chi_sim+eng', {
-      workerPath: 'vendor/tesseract/worker.min.js',
-      corePath: 'vendor/tesseract/core/tesseract-core-simd-lstm.wasm.js',
-      langPath: 'vendor/tesseract/lang',
+      workerPath: _ocrBase + 'vendor/tesseract/worker.min.js',
+      corePath: _ocrBase + 'vendor/tesseract/core/tesseract-core-simd-lstm.wasm.js',
+      langPath: _ocrBase + 'vendor/tesseract/lang',
       logger: () => {} /* 静默，不输出进度日志 */
     });
     const text = (result?.data?.text || '').trim();
+    if (!_sameOcrImage(snapshot)) return;
     if (!text) {
       setText('ocrStatus', '识别失败，请重新上传清晰图片');
       showToast('未识别到文字，请上传更清晰的图片', 'error');
     } else {
+      window.__qcAiResult = null;
+      window.__qcOcrResultContext = snapshot;
       setVal('ocrRawText', text);
       extractFieldsFromOcrText(text);
       setText('ocrStatus', '识别完成');
       showToast('✓ 识别完成，请核对字段', 'success');
     }
   } catch (err) {
+    if (!_sameOcrImage(snapshot)) return;
     console.error('[OCR]', err);
     setText('ocrStatus', '识别失败，请重新上传清晰图片');
     showToast('识别失败：' + (err.message || '未知错误'), 'error');
   } finally {
     _ocrWorkerBusy = false;
-    if (btn) btn.disabled = false;
+    if (btn && _sameOcrImage(snapshot)) btn.disabled = false;
   }
 }
 
@@ -2904,6 +3242,26 @@ function extractFieldsFromOcrText(text) {
   }
 }
 
+/* 验货记录按整数计数；OCR 的小数/多点数量必须人工核对，不能由 parseInt 截断。 */
+function _isIntegerCountText(value) {
+  return /^\d+(?:\.0*)?$/.test(value) && Number.isInteger(Number(value));
+}
+function _markOcrQuantity(raw) {
+  const el = document.getElementById('f_qty');
+  if (!el) return;
+  const source = String(raw == null ? '' : raw).trim();
+  el.dataset.ocrApplied = '1';
+  el.dataset.ocrNeedsReview = source && !_isIntegerCountText(source) ? '1' : '';
+  if (el.dataset.ocrNeedsReview === '1') {
+    showToast('OCR 数量「' + source + '」含小数或格式不明确；当前记录按整数计数，请核对单位并换算为明确整数后保存', 'error');
+  }
+}
+function _clearOcrQuantityReview() {
+  window.__qcOcrFormContext = null;
+  const el = document.getElementById('f_qty');
+  if (el) { delete el.dataset.ocrApplied; delete el.dataset.ocrNeedsReview; }
+}
+
 /* 应用 OCR 字段到单条录入表单 */
 function applyOcrToForm() {
   const ocrDate        = document.getElementById('ocrDate')?.value || '';
@@ -2917,16 +3275,18 @@ function applyOcrToForm() {
   const ocrRemark      = document.getElementById('ocrRemark')?.value || '';
   /* f_client、f_inspDate 不写入，由用户手动填写 */
 
-  if (ocrDate)        setVal('f_date', ocrDate);
-  if (ocrSupplier)    setVal('f_supplier', ocrSupplier);
-  if (ocrProductNo)   setVal('f_productNo', ocrProductNo);
-  if (ocrProductName) setVal('f_productName', ocrProductName);
-  if (ocrDeliveryNo)  setVal('f_deliveryNo', ocrDeliveryNo);
-  if (ocrOrderNo)     setVal('f_orderNo', ocrOrderNo);
+  /* 显式应用当前来源整组字段；空值不能沿用上一张图片已经带入的单据身份。 */
+  setVal('f_date', ocrDate || todayStr());
+  setVal('f_supplier', ocrSupplier ? matchManagedName('supplier', ocrSupplier) : '');
+  setVal('f_productNo', ocrProductNo);
+  setVal('f_productName', ocrProductName);
+  setVal('f_deliveryNo', ocrDeliveryNo);
+  setVal('f_orderNo', ocrOrderNo);
   _syncOrderNoNA();
-  if (ocrQty)         setVal('f_qty', ocrQty);
-  if (ocrType)        setVal('f_type', ocrType);
-  if (ocrRemark)      setVal('f_remark', ocrRemark);
+  setVal('f_qty', ocrQty);
+  _markOcrQuantity(ocrQty);
+  setVal('f_type', ocrType || '来料');
+  setVal('f_remark', ocrRemark);
 
   /* 切换到单条录入 */
   switchModalMode('single');
@@ -3092,7 +3452,7 @@ function confirmBatchImport() {
   const n = _batchRows.length;
   _batchRows = [];
   closeModalDirect();
-  showToast(`✓ 成功导入 ${n} 条验货记录`, 'success');
+  showToast(`${n} 条验货记录已在本地暂存，等待服务器同步`, 'info');
 
   /* 刷新所有相关视图 */
   renderRecordsTable();
@@ -3213,17 +3573,24 @@ function openAddModal() {
   if (inspDateEl) inspDateEl.value = todayStr();
   renderSupplierDatalist();
   renderCustomerDatalist();
+  renderProcessTypeDatalist();
   renderInspectorDatalist();
   initDefectLib();
   refreshDefectDescDatalist();
   initOcrUpload();
+  bindNameWhitelistCheck();
+  recheckNameWhitelist();
 }
 
 function openEditModal(id) {
-  if (!can('editRecord')) { showToast('当前账号无权限执行此操作', 'error'); return; }
   const r = state.records.find(x => x.id === id);
   if (!r) return;
+  const approved = recStatus(r) === 'approved';
+  if (!can(approved ? 'reviewRecord' : 'createRecord')) {
+    showToast(approved ? '该记录已通过审核并锁定，需由审核人修改或反审核退回' : '当前账号无权限执行此操作', 'error'); return;
+  }
   editingId = id;
+  _clearOcrQuantityReview();
   setText('modalTitle', '编辑验货记录');
   /* 编辑时隐藏模式切换，始终显示单条面板 */
   const tabs = document.getElementById('modalModeTabs');
@@ -3235,6 +3602,7 @@ function openEditModal(id) {
   setVal('f_inspDate',    r.inspDate || '');
   setVal('f_supplier',    r.supplier || '');
   setVal('f_client',      r.client || '');
+  setVal('f_processType', r.processType || '');
   setVal('f_productNo',   r.productNo || '');
   setVal('f_productName', r.productName || '');
   setVal('f_deliveryNo',  r.deliveryNo || '');
@@ -3250,13 +3618,18 @@ function openEditModal(id) {
   setVal('f_fail',        r.fail || '');
   setVal('f_defectRate',  r.defectRate || '');
   setVal('f_result',      r.result || 'PASS');
+  setVal('f_aqlLevel',    r.aqlLevel || 'MAJ 0.65');
+  syncAqlLevelPills();
   setVal('f_defect',      r.defect || '');
   setVal('f_qc',          r.qc || '');
   setVal('f_remark',      r.remark || '');
+  bindNameWhitelistCheck();
+  _measRows = [];  /* 先清理上一次编辑的测量，避免其 FAIL 影响本条判定 */
   _loadDefectRows(r.defects || []);   /* 加载已有不良明细 */
   _loadMeasRows(r.measurements || []); /* 加载已有测量数据 */
   renderSupplierDatalist();
   renderCustomerDatalist();
+  renderProcessTypeDatalist();
   renderInspectorDatalist();
   initDefectLib();
   refreshDefectDescDatalist();
@@ -3268,7 +3641,8 @@ function setVal(id, v) { const el=document.getElementById(id); if(el) el.value=v
 function getVal(id)     { return (document.getElementById(id)?.value || '').trim(); }
 
 function clearForm() {
-  ['f_date','f_inspDate','f_supplier','f_client','f_productNo','f_productName',
+  _clearOcrQuantityReview();
+  ['f_date','f_inspDate','f_supplier','f_client','f_processType','f_productNo','f_productName',
    'f_deliveryNo','f_orderNo','f_qty','f_sampleQty','f_pass','f_fail','f_defectRate','f_defect','f_qc','f_remark']
     .forEach(id => setVal(id, ''));
   /* 检验员：默认当前登录账号（姓名优先，没有再退回用户名），仍可手动改 */
@@ -3276,6 +3650,8 @@ function clearForm() {
   if (_meQc) setVal('f_qc', _meQc.name || _meQc.username || '');
   setVal('f_type',   '成品');
   setVal('f_result', 'PASS');
+  setVal('f_aqlLevel', 'MAJ 1.0,MIN 2.5');   /* AQL档位默认 MAJ 1.0 + MIN 2.5（无不良时报告也高亮表头） */
+  syncAqlLevelPills();
   _loadDefectRows([]);   /* 清空不良明细 */
   _loadMeasRows([]);     /* 清空测量数据 */
   _syncOrderNoNA();      /* PO号 NA 勾选复位 */
@@ -3424,7 +3800,7 @@ function refreshDefectDescDatalist() {
   const dl = document.getElementById('defectDescList');
   if (!dl) return;
   dl.innerHTML = getEnabledDefectLib()
-    .map(d=>`<option value="${d.name}" data-level="${d.defaultLevel}" data-cat="${d.category}">`)
+    .map(d=>`<option value="${_esc(d.name)}" data-level="${_esc(d.defaultLevel)}" data-cat="${_esc(d.category)}">`)
     .join('');
 }
 
@@ -3436,10 +3812,15 @@ function onDefectDescSelect(rowIdx, inputEl) {
     _defectRows[rowIdx].desc     = item.name;
     _defectRows[rowIdx].level    = item.defaultLevel || _defectRows[rowIdx].level;
     _defectRows[rowIdx].category = item.category     || _defectRows[rowIdx].category;
-    _renderDefectRows();
+    /* change 在焦点移到数量框时触发；原地更新下拉，避免重建 DOM 丢失焦点/首次数量输入。 */
+    inputEl.value = item.name;
+    const selects = inputEl.parentElement?.querySelectorAll('select');
+    if (selects?.[0]) selects[0].value = _defectRows[rowIdx].level;
+    if (selects?.[1]) selects[1].value = _defectRows[rowIdx].category;
   } else {
     _defectRows[rowIdx].desc = val;
   }
+  _updateDefectSummary();
 }
 
 /* saveRecord 前检查未知描述 */
@@ -3548,12 +3929,31 @@ function autoJudgeByAql(lotQty, defects) {
 
 let _measRows = [];
 
+function _hasMeasValue(value) { return value != null && String(value).trim() !== ''; }
+function _measNumber(value) {
+  if (!_hasMeasValue(value) || !['string','number'].includes(typeof value)) return null;
+  const text = String(value).trim();
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text)) return null;
+  const number = Number(text);
+  return Number.isFinite(number) ? number : null;
+}
+function _invalidMeasNumbers(row) {
+  if (!['single','LW','LWH'].includes(row.measureType||'single')) return false;
+  const axes=row.measureType==='LW' ? ['L','W'] : row.measureType==='LWH' ? ['L','W','H'] : [''];
+  return axes.some(axis=> {
+    const standard=row['standard'+axis], tolerance=row['tolerance'+axis];
+    return (_hasMeasValue(standard)&&_measNumber(standard)===null) ||
+      (_hasMeasValue(tolerance)&&(_measNumber(tolerance)===null||_measNumber(tolerance)<0)) ||
+      (row[axis ? axis.toLowerCase()+'Values' : 'values']||[]).some(value=>_hasMeasValue(value)&&_measNumber(value)===null);
+  });
+}
+
 /* ── 辅助：从数组计算平均值（纯数字）──  */
 function _numAvg(arr) {
-  const nums = arr.filter(v=>v!=='').map(Number).filter(n=>!isNaN(n));
-  return nums.length > 0 && nums.length === arr.filter(v=>v!=='').length
-    ? (nums.reduce((a,b)=>a+b,0)/nums.length).toFixed(2)
-    : null;
+  const nums = arr.filter(_hasMeasValue).map(_measNumber);
+  if (!nums.length || nums.some(n=>n===null)) return null;
+  const average = nums.reduce((a,b)=>a+b,0)/nums.length;
+  return Number.isFinite(average) ? average.toFixed(2) : null;
 }
 
 /* ── 旧 standard 拆分（兼容 × * X 分隔符）── */
@@ -3580,12 +3980,12 @@ function _normalizeMeasRow(row) {
   if (row.toleranceH === undefined) row.toleranceH = '';
   /* 旧 standard 拆分到 standardL/W/H */
   const mt = row.measureType;
-  if ((mt === 'LW' || mt === 'LWH') && !row.standardL && row.standard) {
+  if ((mt === 'LW' || mt === 'LWH') && !_hasMeasValue(row.standardL) && _hasMeasValue(row.standard)) {
     const parts = _splitStandard(row.standard);
     if (parts.length >= 2) {
-      row.standardL = row.standardL || parts[0] || '';
-      row.standardW = row.standardW || parts[1] || '';
-      if (mt === 'LWH') row.standardH = row.standardH || parts[2] || '';
+      if (!_hasMeasValue(row.standardL)) row.standardL = parts[0] || '';
+      if (!_hasMeasValue(row.standardW)) row.standardW = parts[1] || '';
+      if (mt === 'LWH' && !_hasMeasValue(row.standardH)) row.standardH = parts[2] || '';
     }
   }
   return row;
@@ -3595,22 +3995,30 @@ function _normalizeMeasRow(row) {
 function _combineMeasStandard(row) {
   const mt = row.measureType || 'single';
   if (mt === 'LW') {
-    const L=(row.standardL||'').trim(), W=(row.standardW||'').trim();
+    const L=String(row.standardL??'').trim(), W=String(row.standardW??'').trim();
     return [L,W].filter(Boolean).join('×') || row.standard || '';
   }
   if (mt === 'LWH') {
-    const L=(row.standardL||'').trim(),W=(row.standardW||'').trim(),H=(row.standardH||'').trim();
+    const L=String(row.standardL??'').trim(),W=String(row.standardW??'').trim(),H=String(row.standardH??'').trim();
     return [L,W,H].filter(Boolean).join('×') || row.standard || '';
   }
-  return row.standard || '';
+  return row.standard ?? '';
 }
 
 /* ── 判断单值是否在 标准±公差 内 ── */
-function _inTol(valStr, stdStr, tolStr) {
-  const v=parseFloat(valStr), std=parseFloat(stdStr), tol=parseFloat(tolStr);
-  if (isNaN(v)||isNaN(std)) return null;
-  if (isNaN(tol)||!tolStr) return null;
-  return v >= std-tol && v <= std+tol;
+function _inTol(valStr, stdStr, tolStr, dir) {
+  const v=_measNumber(valStr), std=_measNumber(stdStr), tol=_measNumber(tolStr);
+  if (v===null||std===null||tol===null) return null;
+  if (tol < 0) return false;
+  if (tol === 0) return v === std;
+  /* 只容纳二进制浮点在当前数量级的舍入误差，不额外放宽实际公差。
+     例如 2.3 + 0.05 的浮点边界略低于 2.35；1e-9 固定余量会放行真实超差。 */
+  const eps = Number.EPSILON * Math.max(Math.abs(v), Math.abs(std), Math.abs(tol));
+  /* dir：'+' 只正差（标准值~标准+公差）；'-' 只负差（标准-公差~标准值）；默认正负差 */
+  const lo = dir === '+' ? std : std - tol;
+  const hi = dir === '-' ? std : std + tol;
+  if (!Number.isFinite(lo)||!Number.isFinite(hi)) return false;
+  return (dir==='+' ? v>=lo : v>=lo-eps) && (dir==='-' ? v<=hi : v<=hi+eps);
 }
 
 /* ── 自动判定 PASS / FAIL ── */
@@ -3621,39 +4029,21 @@ function _autoJudgeMeas(row) {
     if (!filled.length) return '';
     return filled.some(v=>v==='FAIL') ? 'FAIL' : 'PASS';
   }
-  if (mt === 'single') {
-    const filled=(row.values||[]).filter(v=>v!=='');
-    if (!filled.length || !row.tolerance) return null;
-    const res=filled.map(v=>_inTol(v,row.standard,row.tolerance));
-    if (res.some(r=>r===null)) return null;
-    return res.every(r=>r===true)?'PASS':'FAIL';
-  }
-  if (mt === 'LW') {
-    if (!row.toleranceL && !row.toleranceW) return null;
-    let hasAny=false, allPass=true;
-    for (let j=0;j<8;j++) {
-      const l=row.lValues?.[j]||'',w=row.wValues?.[j]||'';
-      if (!l&&!w) continue; hasAny=true;
-      const rl=_inTol(l,row.standardL,row.toleranceL);
-      const rw=_inTol(w,row.standardW,row.toleranceW);
-      if ((rl!==null&&!rl)||(rw!==null&&!rw)){allPass=false;break;}
+  if (!['single','LW','LWH'].includes(mt)) return null;
+  const axes = mt === 'LW' ? [['lValues','standardL','toleranceL'],['wValues','standardW','toleranceW']]
+    : mt === 'LWH' ? [['lValues','standardL','toleranceL'],['wValues','standardW','toleranceW'],['hValues','standardH','toleranceH']]
+    : [['values','standard','tolerance']];
+  let hasAny=false, allPass=true;
+  for (const [values, standard, tolerance] of axes) {
+    for (const value of (row[values]||[]).slice(0,8)) {
+      if (!_hasMeasValue(value)) continue;
+      hasAny=true;
+      const result=_inTol(value,row[standard],row[tolerance],row.tolDir);
+      if (result===null) return null;
+      if (!result) allPass=false;
     }
-    return hasAny?(allPass?'PASS':'FAIL'):null;
   }
-  if (mt === 'LWH') {
-    if (!row.toleranceL&&!row.toleranceW&&!row.toleranceH) return null;
-    let hasAny=false, allPass=true;
-    for (let j=0;j<8;j++) {
-      const l=row.lValues?.[j]||'',w=row.wValues?.[j]||'',h=row.hValues?.[j]||'';
-      if (!l&&!w&&!h) continue; hasAny=true;
-      const rl=_inTol(l,row.standardL,row.toleranceL);
-      const rw=_inTol(w,row.standardW,row.toleranceW);
-      const rh=_inTol(h,row.standardH,row.toleranceH);
-      if ((rl!==null&&!rl)||(rw!==null&&!rw)||(rh!==null&&!rh)){allPass=false;break;}
-    }
-    return hasAny?(allPass?'PASS':'FAIL'):null;
-  }
-  return null;
+  return hasAny ? (allPass?'PASS':'FAIL') : null;
 }
 
 /* ── 只更新平均值+判定文字（不重建 DOM）── */
@@ -3672,13 +4062,11 @@ function updateMeasAvgAndJudge(rowIdx) {
   if (resSel&&judge) {
     const cur=resSel.value;
     if (!cur||cur==='PASS'||cur==='FAIL'){resSel.value=judge;row.result=judge;}
+  } else if (!judge&&_invalidMeasNumbers(row)) {
+    if (resSel&&(resSel.value==='PASS'||resSel.value==='FAIL')) resSel.value='';
+    row.result='';
   }
-  /* 如果任何测量行 FAIL，主判定下拉强制为 REJ */
-  const mainResEl = document.getElementById('f_result');
-  if (mainResEl) {
-    const anyMeasFail = _measRows.some(m => String(m.result||'').toUpperCase()==='FAIL');
-    if (anyMeasFail) mainResEl.value = 'REJ';
-  }
+  _syncFormResult();
 }
 
 /* ── 安全更新单格（不重建 DOM）── */
@@ -3702,6 +4090,7 @@ function _onMeasTypeChange(idx, val) {
   _measRows[idx].measureType = val || 'single';
   _normalizeMeasRow(_measRows[idx]);
   _renderMeasRows();
+  updateMeasAvgAndJudge(idx);
 }
 
 /* ── 计算当前行的平均值文字（兼容三种 measureType）── */
@@ -3735,8 +4124,8 @@ function _getMeasDisplayValues(row) {
     const L = row.lValues || [];
     const W = row.wValues || [];
     return Array.from({length:8}, (_,j) => {
-      const l = L[j]||''; const w = W[j]||'';
-      return (l || w) ? `${l}×${w}` : '';
+      const l = L[j]??''; const w = W[j]??'';
+      return [l,w].some(_hasMeasValue) ? `${l}×${w}` : '';
     });
   }
   if (mt === 'LWH') {
@@ -3744,8 +4133,8 @@ function _getMeasDisplayValues(row) {
     const W = row.wValues || [];
     const H = row.hValues || [];
     return Array.from({length:8}, (_,j) => {
-      const l = L[j]||''; const w = W[j]||''; const h = H[j]||'';
-      return (l || w || h) ? `${l}×${w}×${h}` : '';
+      const l = L[j]??''; const w = W[j]??''; const h = H[j]??'';
+      return [l,w,h].some(_hasMeasValue) ? `${l}×${w}×${h}` : '';
     });
   }
   /* single：旧 values 数组 */
@@ -3759,7 +4148,7 @@ function _measValGrid(rowIdx, label, field, values) {
     `width:100%;box-sizing:border-box;min-width:0`;
   return `<div style="display:grid;grid-template-columns:20px repeat(8,1fr);gap:3px;align-items:center;margin-bottom:3px">
       <span style="font-size:9.5px;color:var(--text-muted);text-align:right">${label}</span>
-      ${Array.from({length:8},(_,j)=>`<input type="text" value="${values[j]||''}"
+      ${Array.from({length:8},(_,j)=>`<input type="text" value="${values[j]??''}"
         style="${inStyle}"
         oninput="updateMeasCell(${rowIdx},'${field}',${j},this.value)"/>`
       ).join('')}
@@ -3819,7 +4208,7 @@ function _renderMeasRows() {
           <option value="PF"     ${mt==='PF'?'selected':''}>结果判定</option>
         </select>
         <select id="meas-result-${i}" style="${inBase};font-size:10.5px;font-weight:600;color:${resColor}"
-                onchange="_measRows[${i}].result=this.value">
+                onchange="_measRows[${i}].result=this.value;_syncFormResult()">
           <option value="" ${!row.result?'selected':''}>判定</option>
           <option value="PASS" ${row.result==='PASS'?'selected':''}>✓ PASS</option>
           <option value="FAIL" ${row.result==='FAIL'?'selected':''}>✗ FAIL</option>
@@ -3834,52 +4223,63 @@ function _renderMeasRows() {
     if (mt === 'single') {
       stdRow = `<div style="display:flex;gap:5px;margin-bottom:4px;align-items:center;flex-wrap:wrap">
         <span style="font-size:10px;color:var(--text-dim)">标准值</span>
-        <input type="text" value="${row.standard||''}" placeholder="如：10.0"
+        <input type="text" value="${row.standard??''}" placeholder="如：10.0"
           style="${inSm};max-width:100px" oninput="updateMeasField(${i},'standard',this.value)"/>
-        <span style="font-size:10px;color:var(--text-dim)">公差±</span>
-        <input type="text" value="${row.tolerance||''}" placeholder="如：0.5"
+        <span style="font-size:10px;color:var(--text-dim)">公差</span>
+        <select style="${inSm};max-width:58px;padding:2px" onchange="updateMeasField(${i},'tolDir',this.value)">
+          ${['±','+','-'].map(d=>`<option value="${d}" ${((row.tolDir||'±')===d)?'selected':''}>${d==='±'?'正负':(d==='+'?'正':'负')}</option>`).join('')}
+        </select>
+        <input type="text" value="${row.tolerance??''}" placeholder="如：0.5"
           style="${inSm}" oninput="updateMeasField(${i},'tolerance',this.value)"/>
       </div>`;
     } else if (mt === 'LW') {
-      stdRow = `<div style="display:grid;grid-template-columns:repeat(4,auto);gap:4px;margin-bottom:4px;align-items:center">
+      stdRow = `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;align-items:center">
         <span style="font-size:10px;color:var(--text-dim)">L</span>
-        <input type="text" value="${row.standardL||''}" placeholder="L标准"
+        <input type="text" value="${row.standardL??''}" placeholder="L标准"
           style="${inSm}" oninput="updateMeasField(${i},'standardL',this.value)"/>
-        <span style="font-size:10px;color:var(--text-dim)">±</span>
-        <input type="text" value="${row.toleranceL||''}" placeholder="公差"
+        <span style="font-size:10px;color:var(--text-dim)">公差</span>
+        <input type="text" value="${row.toleranceL??''}" placeholder="公差"
           style="${inSm}" oninput="updateMeasField(${i},'toleranceL',this.value)"/>
         <span style="font-size:10px;color:var(--text-dim)">W</span>
-        <input type="text" value="${row.standardW||''}" placeholder="W标准"
+        <input type="text" value="${row.standardW??''}" placeholder="W标准"
           style="${inSm}" oninput="updateMeasField(${i},'standardW',this.value)"/>
-        <span style="font-size:10px;color:var(--text-dim)">±</span>
-        <input type="text" value="${row.toleranceW||''}" placeholder="公差"
+        <span style="font-size:10px;color:var(--text-dim)">公差</span>
+        <input type="text" value="${row.toleranceW??''}" placeholder="公差"
           style="${inSm}" oninput="updateMeasField(${i},'toleranceW',this.value)"/>
+        <span style="font-size:10px;color:var(--text-dim)">方向</span>
+        <select style="${inSm};max-width:58px;padding:2px" onchange="updateMeasField(${i},'tolDir',this.value)">
+          ${['±','+','-'].map(d=>`<option value="${d}" ${((row.tolDir||'±')===d)?'selected':''}>${d==='±'?'正负':(d==='+'?'正':'负')}</option>`).join('')}
+        </select>
       </div>`;
     } else if (mt === 'LWH') {
-      stdRow = `<div style="display:grid;grid-template-columns:repeat(6,auto);gap:4px;margin-bottom:4px;align-items:center">
+      stdRow = `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px;align-items:center">
         <span style="font-size:10px;color:var(--text-dim)">L</span>
-        <input type="text" value="${row.standardL||''}" placeholder="L标准"
+        <input type="text" value="${row.standardL??''}" placeholder="L标准"
           style="${inSm}" oninput="updateMeasField(${i},'standardL',this.value)"/>
         <span style="font-size:10px;color:var(--text-dim)">W</span>
-        <input type="text" value="${row.standardW||''}" placeholder="W标准"
+        <input type="text" value="${row.standardW??''}" placeholder="W标准"
           style="${inSm}" oninput="updateMeasField(${i},'standardW',this.value)"/>
         <span style="font-size:10px;color:var(--text-dim)">H</span>
-        <input type="text" value="${row.standardH||''}" placeholder="H标准"
+        <input type="text" value="${row.standardH??''}" placeholder="H标准"
           style="${inSm}" oninput="updateMeasField(${i},'standardH',this.value)"/>
-        <span style="font-size:10px;color:var(--text-dim)">±L</span>
-        <input type="text" value="${row.toleranceL||''}" placeholder="公差"
+        <span style="font-size:10px;color:var(--text-dim)">公差L</span>
+        <input type="text" value="${row.toleranceL??''}" placeholder="公差"
           style="${inSm}" oninput="updateMeasField(${i},'toleranceL',this.value)"/>
-        <span style="font-size:10px;color:var(--text-dim)">±W</span>
-        <input type="text" value="${row.toleranceW||''}" placeholder="公差"
+        <span style="font-size:10px;color:var(--text-dim)">公差W</span>
+        <input type="text" value="${row.toleranceW??''}" placeholder="公差"
           style="${inSm}" oninput="updateMeasField(${i},'toleranceW',this.value)"/>
-        <span style="font-size:10px;color:var(--text-dim)">±H</span>
-        <input type="text" value="${row.toleranceH||''}" placeholder="公差"
+        <span style="font-size:10px;color:var(--text-dim)">公差H</span>
+        <input type="text" value="${row.toleranceH??''}" placeholder="公差"
           style="${inSm}" oninput="updateMeasField(${i},'toleranceH',this.value)"/>
+        <span style="font-size:10px;color:var(--text-dim)">方向</span>
+        <select style="${inSm};max-width:58px;padding:2px" onchange="updateMeasField(${i},'tolDir',this.value)">
+          ${['±','+','-'].map(d=>`<option value="${d}" ${((row.tolDir||'±')===d)?'selected':''}>${d==='±'?'正负':(d==='+'?'正':'负')}</option>`).join('')}
+        </select>
       </div>`;
     } else if (mt === 'PF') {
       stdRow = `<div style="display:flex;gap:5px;margin-bottom:4px;align-items:center">
         <span style="font-size:10px;color:var(--text-dim)">判定标准</span>
-        <input type="text" value="${row.standard||''}" placeholder="如：粘油测试"
+        <input type="text" value="${row.standard??''}" placeholder="如：粘油测试"
           style="${inSm};max-width:160px" oninput="updateMeasField(${i},'standard',this.value)"/>
       </div>`;
     }
@@ -3930,14 +4330,16 @@ function addMeasRow() {
 function removeMeasRow(i) {
   _measRows.splice(i, 1);
   _renderMeasRows();
+  _syncFormResult();
 }
 
 function _loadMeasRows(measurements) {
   _measRows = Array.isArray(measurements)
     ? measurements.map(m => ({
         item:        m.item        || '',
-        standard:    m.standard    || '',
+        standard:    m.standard ?? '',
         measureType: m.measureType || 'single',
+        tolDir: m.tolDir==='+'||m.tolDir==='-' ? m.tolDir : '±',
         /* 兼容旧结构（values 是字符串数组）和新结构 */
         values:   Array.isArray(m.values) && (typeof m.values[0] !== 'object')
                   ? [...m.values,  ...Array(8).fill('')].slice(0,8)
@@ -3945,19 +4347,20 @@ function _loadMeasRows(measurements) {
         lValues:    m.lValues ? [...m.lValues,...Array(8).fill('')].slice(0,8) : Array(8).fill(''),
         wValues:    m.wValues ? [...m.wValues,...Array(8).fill('')].slice(0,8) : Array(8).fill(''),
         hValues:    m.hValues ? [...m.hValues,...Array(8).fill('')].slice(0,8) : Array(8).fill(''),
-        standardL:  m.standardL  || '',
-        standardW:  m.standardW  || '',
-        standardH:  m.standardH  || '',
-        tolerance:  m.tolerance  || '',
-        toleranceL: m.toleranceL || '',
-        toleranceW: m.toleranceW || '',
-        toleranceH: m.toleranceH || '',
+        standardL:  m.standardL ?? '',
+        standardW:  m.standardW ?? '',
+        standardH:  m.standardH ?? '',
+        tolerance:  m.tolerance ?? '',
+        toleranceL: m.toleranceL ?? '',
+        toleranceW: m.toleranceW ?? '',
+        toleranceH: m.toleranceH ?? '',
         avg:        m.avg        || '',
         result:     m.result     || '',
       }))
     : [];
   _measRows.forEach(_normalizeMeasRow);
   _renderMeasRows();
+  _syncFormResult();
 }
 
 
@@ -4012,10 +4415,10 @@ function renderDefectLibPage() {
               ? '<span class="badge badge-pass">启用</span>'
               : '<span class="badge badge-rej">停用</span>';
             return `<tr>
-              <td style="font-weight:500">${d.name}</td>
-              <td style="font-size:11px">${d.category||''}</td>
-              <td style="font-size:11px">${d.defaultLevel||''}</td>
-              <td style="font-size:11px;color:var(--text-dim)">${(d.keywords||[]).join('、')||'—'}</td>
+              <td style="font-weight:500">${_esc(d.name)}</td>
+              <td style="font-size:11px">${_esc(d.category||'')}</td>
+              <td style="font-size:11px">${_esc(d.defaultLevel||'')}</td>
+              <td style="font-size:11px;color:var(--text-dim)">${_esc((d.keywords||[]).join('、')||'—')}</td>
               <td style="text-align:center">${badge}</td>
               <td style="text-align:center">
                 ${canAdd ? `<button class="action-btn" onclick="_openDefLibModal(${realIdx})">编辑</button>` : ''}
@@ -4118,7 +4521,7 @@ function _saveDefLibItem() {
   }
   _saveDefectLib(lib);
   _closeDefLibModal();
-  showToast('✓ 已保存', 'success');
+  showToast('修改已在本地暂存，等待服务器同步', 'info');
   renderDefectLibPage();
   refreshDefectDescDatalist();
 }
@@ -4131,7 +4534,7 @@ function _toggleDefLibItem(idx) {
   _saveDefectLib(lib);
   renderDefectLibPage();
   refreshDefectDescDatalist();
-  showToast(lib[idx].enabled ? '✓ 已启用' : '已停用', lib[idx].enabled?'success':'info');
+  showToast('修改已在本地暂存，等待服务器同步', 'info');
 }
 
 function _deleteDefLibItem(idx) {
@@ -4143,7 +4546,7 @@ function _deleteDefLibItem(idx) {
   _saveDefectLib(lib);
   renderDefectLibPage();
   refreshDefectDescDatalist();
-  showToast('✓ 已删除', 'success');
+  showToast('删除操作已在本地暂存，等待服务器同步', 'info');
 }
 
 /* ════════════════════════════════════════
@@ -4187,7 +4590,7 @@ function _renderDefectRows() {
              oninput="_defectRows[${i}].qty=parseInt(this.value)||0;_updateDefectSummary()"/>
       <select style="padding:4px 6px;border:1px solid var(--border);border-radius:4px;
                      background:var(--bg-input);color:var(--text);font-size:12px"
-              onchange="_defectRows[${i}].level=this.value">
+              onchange="_defectRows[${i}].level=this.value;_updateDefectSummary()">
         ${DEFECT_LEVELS.map(l => `<option value="${l}" ${row.level===l?'selected':''}>${l||'—等级—'}</option>`).join('')}
       </select>
       <select style="padding:4px 6px;border:1px solid var(--border);border-radius:4px;
@@ -4270,16 +4673,7 @@ function _updateDefectSummary() {
     dsAqlR.style.color = 'var(--red)';
   }
 
-  /* 自动同步判定结果（仅 PASS/REJ，不覆盖 COND/AOD/HOLD）*/
-  if (judgment) {
-    const resultEl = document.getElementById('f_result');
-    if (resultEl) {
-      const cur = resultEl.value;
-      if (cur !== 'COND' && cur !== 'HOLD') {
-        resultEl.value = judgment.result;
-      }
-    }
-  }
+  _syncFormResult();
 }
 
 /* 从 record.defects 数组加载 */
@@ -4378,6 +4772,7 @@ function calcRate() {
 
 function closeModal(e) { if (e.target === document.getElementById('modalOverlay')) closeModalDirect(); }
 function closeModalDirect() {
+  _cancelOcrWork();
   document.getElementById('modalOverlay').classList.remove('show');
   editingId = null;
 }
@@ -4394,6 +4789,47 @@ function toggleOrderNoNA() {
     inp.focus();
   }
 }
+/* ── AQL 档位多选（pill 按钮）：值存隐藏框 f_aqlLevel，逗号分隔。
+   规则：MAJ 0.65 与 MAJ 1.0 互斥（同属 MAJ 只能选一）；
+   0.65 / 1.0 / 2.5 三者最多选两个；CR 独立，不受限制。 ── */
+function toggleAqlLevel(btn) {
+  const lv = btn.dataset.lv;
+  if (!btn.classList.contains('on')) {
+    const on = [...document.querySelectorAll('#aqlLevelPills .aql-lvl-btn.on')].map(b => b.dataset.lv);
+    const isMaj = lv.indexOf('MAJ') === 0;
+    if (isMaj) {
+      /* 选中任一 MAJ 时，自动取消另一个 MAJ（0.65 与 1.0 互斥） */
+      document.querySelectorAll('#aqlLevelPills .aql-lvl-btn.on').forEach(b => {
+        if (b.dataset.lv.indexOf('MAJ') === 0) b.classList.remove('on');
+      });
+    }
+    if (lv !== 'CR') {
+      /* 点击后 trio（0.65/1.0/2.5）预计选中数：MAJ 互斥会先摘掉已选 MAJ */
+      const curTrio = on.filter(v => v !== 'CR');
+      const curMaj = curTrio.filter(v => v.indexOf('MAJ') === 0).length;
+      const projected = curTrio.length - (isMaj ? curMaj : 0) + 1;
+      if (projected > 2) {
+        /* 互斥摘掉的要恢复显示状态（不生效本次点击） */
+        if (typeof showToast === 'function') showToast('0.65 / 1.0 / 2.5 三个档位最多选择两个');
+        syncAqlLevelPills();
+        return;
+      }
+    }
+  }
+  btn.classList.toggle('on');
+  const hid = document.getElementById('f_aqlLevel');
+  if (!hid) return;
+  const on = [...document.querySelectorAll('#aqlLevelPills .aql-lvl-btn.on')].map(b => b.dataset.lv);
+  hid.value = on.join(',');
+}
+function syncAqlLevelPills() {
+  const hid  = document.getElementById('f_aqlLevel');
+  const vals = (hid ? hid.value : '').split(',').map(s => s.trim()).filter(Boolean);
+  document.querySelectorAll('#aqlLevelPills .aql-lvl-btn').forEach(b => {
+    b.classList.toggle('on', vals.includes(b.dataset.lv));
+  });
+}
+
 /* 根据输入框当前值同步 NA 勾选状态（新增清空 / 编辑载入 / OCR 填入后调用） */
 function _syncOrderNoNA() {
   const cb  = document.getElementById('f_orderNoNA');
@@ -4410,14 +4846,23 @@ function resetSingleEntryFormForNext() {
   /* 连续录入：保留 供应商/客户/类型（类似手动批量录入，通常同一批），
      其余字段清空；检验员由 clearForm 默认当前登录账号 */
   const _keep = {
-    supplier: getVal('f_supplier'),
-    client:   getVal('f_client'),
-    type:     document.getElementById('f_type')?.value || '成品',
+    supplier:    getVal('f_supplier'),
+    client:      getVal('f_client'),
+    processType: getVal('f_processType'),
+    productNo:   getVal('f_productNo'),
+    deliveryNo:  getVal('f_deliveryNo'),
+    type:        document.getElementById('f_type')?.value || '成品',
+    aqlLevel:    getVal('f_aqlLevel'),
   };
   clearForm();
-  setVal('f_supplier', _keep.supplier);
-  setVal('f_client',   _keep.client);
-  setVal('f_type',     _keep.type);
+  setVal('f_supplier',    _keep.supplier);
+  setVal('f_client',      _keep.client);
+  setVal('f_processType', _keep.processType);   /* 连续录入同加工类型居多，保留 */
+  setVal('f_productNo',   _keep.productNo);     /* 连续录入同货号居多，保留 */
+  setVal('f_deliveryNo',  _keep.deliveryNo);    /* 连续录入常是同一张送货单，保留 */
+  setVal('f_type',        _keep.type);
+  setVal('f_aqlLevel',    _keep.aqlLevel || 'MAJ 1.0,MIN 2.5');
+  syncAqlLevelPills();
   const dateEl     = document.getElementById('f_date');
   const inspDateEl = document.getElementById('f_inspDate');
   if (dateEl)     dateEl.value     = todayStr();
@@ -4444,8 +4889,13 @@ function hasMeasurementFail(measurements) {
     measurements.some(m => String(m.result || '').toUpperCase() === 'FAIL');
 }
 
-/* 最终判定：measurements FAIL 优先，其次 defects 超 AQL，最后用原始 result */
+/* 最终判定：用户显式选择的 COND（有条件接收/AOD）/ HOLD 优先，
+   其次 measurements FAIL → REJ，再其次 defects 超 AQL → REJ，最后用原始 result */
 function getFinalRecordResult(baseResult, defects, measurements, lotQty) {
+  /* 0. 有条件接收/待定是人工特批判定，不被自动规则覆盖（否则报告/列表会错显示成 REJ） */
+  const b = String(baseResult || '').trim().toUpperCase();
+  if (b === 'COND' || b === 'HOLD') return b;
+
   /* 1. 测量 FAIL → 强制 REJ */
   if (hasMeasurementFail(measurements)) return 'REJ';
 
@@ -4456,17 +4906,56 @@ function getFinalRecordResult(baseResult, defects, measurements, lotQty) {
   }
 
   /* 3. 使用用户选择的原始结果 */
-  return baseResult || 'PASS';
+  return b || 'PASS';
+}
+
+/* 表单中使用与保存/报告相同的自动规则，保留人工 COND/HOLD。 */
+function _syncFormResult() {
+  const resultEl = document.getElementById('f_result');
+  if (!resultEl || resultEl.value === 'COND' || resultEl.value === 'HOLD') return;
+  const lotQty = Number(document.getElementById('f_qty')?.value) || 0;
+  resultEl.value = getFinalRecordResult('PASS', _defectRows, _measRows, lotQty);
 }
 
 function saveRecord(options = {}) {
+  const ocrSaveContext = window.__qcOcrFormContext || window.__qcQueue?.context;
+  if (typeof window.__QC_OCR_CAN_SAVE === 'function' && !window.__QC_OCR_CAN_SAVE(ocrSaveContext)) return false;
+  const editingRecord = editingId !== null ? state.records.find(r => r.id === editingId) : null;
+  const approved = editingRecord && recStatus(editingRecord) === 'approved';
+  if (!can(approved ? 'reviewRecord' : 'createRecord')) {
+    showToast(approved ? '该记录已通过审核并锁定，需由审核人修改或反审核退回' : '当前账号无权限执行此操作', 'error'); return false;
+  }
   const continueEntry = options && options.continueEntry === true && editingId === null;
   const date     = getVal('f_date');
   const supplier = getVal('f_supplier');
   if (!date)     { showToast('请填写来料日期', 'error'); return; }
   if (!supplier) { showToast('请填写供应商名称', 'error'); return; }
+  /* 名单白名单校验：名单外的供应商/客户不可录入，先到「供应商&客户管理」添加 */
+  if (!getSupplierOptions().includes(supplier)) {
+    showToast('供应商「' + supplier + '」不在名单中，请先到「供应商&客户管理」添加后再录入', 'error'); return;
+  }
+  const clientVal = getVal('f_client');
+  if (clientVal && !getCustomerOptions().includes(clientVal)) {
+    showToast('客户「' + clientVal + '」不在名单中，请先到「供应商&客户管理」添加后再录入', 'error'); return;
+  }
+  const ptVal = getVal('f_processType');
+  if (ptVal && !getProcessTypeOptions().includes(ptVal)) {
+    showToast('加工类型「' + ptVal + '」不在名单中，请先到「供应商&客户管理」添加后再录入', 'error'); return;
+  }
+  const invalidMeas=_measRows.findIndex(_invalidMeasNumbers);
+  if (invalidMeas>=0) {
+    showToast(`测量第 ${invalidMeas+1} 项：请填写完整的有限数字，公差不能为负数`, 'error'); return false;
+  }
 
-  const qty    = parseInt(getVal('f_qty')) || 0;
+  const qtyText = getVal('f_qty');
+  const qtyEl = document.getElementById('f_qty');
+  if (qtyEl?.dataset.ocrApplied === '1' &&
+      ((qtyText && !_isIntegerCountText(qtyText)) || (!qtyText && qtyEl.dataset.ocrNeedsReview === '1'))) {
+    showToast('OCR 数量不能直接保存：请核对原文和单位，并将来货数量改为明确整数；当前资料已保留', 'error');
+    qtyEl.focus();
+    return false;
+  }
+  const qty    = parseInt(qtyText) || 0;
   let   smpRaw = getVal('f_sampleQty');
   /* 保存前二次校验：如果 qty 有值，sampleQty 应与 AQL 推荐一致 */
   const recommendSmp = qty > 0 ? getAqlSampleSize(qty) : 0;
@@ -4498,7 +4987,8 @@ function saveRecord(options = {}) {
     /* 有明细：用明细合计 */
     fail = failFromDefs;
     if (sample != null && fail > sample) {
-      showToast('不良数量合计不能大于抽查数量。', 'error'); return;
+      /* 退货/全检场景：一个问题就可能占 100%，多个问题合计会超过抽查数，改为可确认的警告 */
+      if (!confirm(`不良数量合计 ${fail} 已超过抽查数量 ${sample}（不良率超 100%）。同一抽查件有多个不良时合计可能超出，请核对数量，确认继续保存？`)) return;
     }
     pass = sample != null ? Math.max(0, sample - fail) : 0;
 
@@ -4506,7 +4996,7 @@ function saveRecord(options = {}) {
     const resultSel = getVal('f_result');
     const judgment  = autoJudgeByAql(qty, validDefects);
     if (judgment && judgment.result === 'REJ' && resultSel === 'PASS') {
-      const msg = `当前不良数量已超过 AQL 允收（${judgment.reasons.join('；')}），建议判定为 REJ，是否继续保存为 PASS？`;
+      const msg = `当前不良数量已超过 AQL 允收（${judgment.reasons.join('；')}），保存时将自动判定为 REJ，是否继续保存？`;
       if (!confirm(msg)) return;
     }
   } else {
@@ -4515,10 +5005,14 @@ function saveRecord(options = {}) {
     pass = parseInt(getVal('f_pass')) || (sample != null ? Math.max(0, sample - fail) : 0);
   }
 
-  /* ── defect 简要文本自动生成 ── */
+  /* ── defect 简要文本自动生成 ──
+     有不良明细行时一律按行重新生成（编辑退回记录改了明细后，
+     列表「不良现象」列不会停留在旧文本；报告本来就按明细行出） */
   let defect = getVal('f_defect');
-  if (!defect && hasDefects) {
+  if (hasDefects) {
     defect = _genDefectText();
+  } else if (editingRecord && Array.isArray(editingRecord.defects) && editingRecord.defects.length) {
+    defect = '';  /* 删除最后一条结构化不良后清除旧汇总，纯文字历史记录仍保留。 */
   }
 
   /* ── 组装 defects 数组（只保留有实质内容的行）── */
@@ -4532,21 +5026,22 @@ function saveRecord(options = {}) {
 
   /* 测量数据 */
   const validMeas = _measRows.filter(m => m.item ||
-    (m.measureType==='single' ? m.values.some(v=>v!=='') :
-     (m.lValues||[]).some(v=>v!=='') || (m.wValues||[]).some(v=>v!=='')));
+    (m.measureType==='LW' ? ['lValues','wValues'] : m.measureType==='LWH' ? ['lValues','wValues','hValues'] : ['values'])
+      .some(field=>(m[field]||[]).some(_hasMeasValue)));
   const measArr = validMeas.length > 0 ? validMeas.map(m => {
     const combinedStd = _combineMeasStandard(m);
     return {
       item:        m.item        || '',
       standard:    combinedStd,         /* 组合后的 standard（供 IQC 报告读取）*/
       measureType: m.measureType || 'single',
-      standardL:   m.standardL  || '',
-      standardW:   m.standardW  || '',
-      standardH:   m.standardH  || '',
-      tolerance:   m.tolerance  || '',
-      toleranceL:  m.toleranceL || '',
-      toleranceW:  m.toleranceW || '',
-      toleranceH:  m.toleranceH || '',
+      tolDir: m.tolDir==='+'||m.tolDir==='-' ? m.tolDir : '±',
+      standardL:   m.standardL ?? '',
+      standardW:   m.standardW ?? '',
+      standardH:   m.standardH ?? '',
+      tolerance:   m.tolerance ?? '',
+      toleranceL:  m.toleranceL ?? '',
+      toleranceW:  m.toleranceW ?? '',
+      toleranceH:  m.toleranceH ?? '',
       values:      m.values     || [],
       lValues:     m.lValues    || [],
       wValues:     m.wValues    || [],
@@ -4558,7 +5053,9 @@ function saveRecord(options = {}) {
 
   const rec = {
     date, inspDate: getVal('f_inspDate') || date,
-    supplier, client: getVal('f_client'), productNo: getVal('f_productNo'),
+    supplier, client: getVal('f_client'), processType: getVal('f_processType'),
+    aqlLevel: getVal('f_aqlLevel'),
+    productNo: getVal('f_productNo'),
     productName: getVal('f_productName'), deliveryNo: getVal('f_deliveryNo'),
     orderNo: getVal('f_orderNo'),
     type: getVal('f_type'), qty, sampleQty: sample, pass, fail,
@@ -4569,10 +5066,14 @@ function saveRecord(options = {}) {
     ), defect,
     qc: getVal('f_qc'), remark: getVal('f_remark'),
     updatedAt: nowIso(),
-    ...(defectsArr ? { defects: defectsArr } : {}),
-    ...(measArr   ? { measurements: measArr } : {}),
+    defects: defectsArr || [],
+    measurements: measArr || [],
   };
 
+  /* 用户确认框返回后、任何记录写入前再次核对原 OCR 身份。 */
+  if (typeof window.__QC_OCR_CAN_SAVE === 'function' && !window.__QC_OCR_CAN_SAVE(ocrSaveContext)) return false;
+  const previousRecords = state.records.slice();
+  const previousNextId = state.nextId;
   if (editingId !== null) {
     const idx = state.records.findIndex(r => r.id === editingId);
     if (idx !== -1) {
@@ -4593,12 +5094,18 @@ function saveRecord(options = {}) {
     state.records.push(rec);
   }
 
-  persist();
+  if (persist() === false) {
+    state.records = previousRecords;
+    state.nextId = previousNextId;
+    showToast('记录保存失败，请检查浏览器存储空间后重试，当前表单已保留', 'error');
+    return false;
+  }
   const wasEditing = editingId !== null;
   if (!continueEntry) closeModalDirect();
-  showToast(wasEditing ? (rec.resubmitted ? '记录已重新提交审核 ✓' : '记录已更新 ✓') : (continueEntry ? '记录已添加并提交审核，可继续录入下一条 ✓' : '记录已添加，已提交审核 ✓'), 'success');
+  showToast(wasEditing ? '记录修改已在本地暂存，等待服务器同步' : '记录已在本地暂存，等待服务器同步，可继续录入', 'info');
   renderSupplierDatalist();   /* 新供应商/客户保存后立即进入下拉选项 */
   renderCustomerDatalist();
+  renderProcessTypeDatalist();
 
   /* 刷新当前页 */
   if (currentPage === 'dashboard') renderDashboard();
@@ -4611,6 +5118,7 @@ function saveRecord(options = {}) {
   if (continueEntry) {
     resetSingleEntryFormForNext();
   }
+  return true;
 }
 
 function deleteRecord(id) {
@@ -4620,10 +5128,11 @@ function deleteRecord(id) {
     showToast('该记录已通过审核并锁定，需先由审核人「反审核」退回后才能删除', 'error'); return;
   }
   if (!confirm('确认删除该验货记录？此操作不可撤销。')) return;
+  if (window.__QC_MARK_DELETED) window.__QC_MARK_DELETED([id]);
   state.records = state.records.filter(r => r.id !== id);
   _selectedIds.delete(id);   /* 清掉已选状态 */
   persist();
-  showToast('记录已删除', 'info');
+  showToast('删除操作已在本地暂存，等待服务器同步', 'info');
   filterRecords();
   updateTopKpis();
   if (currentPage === 'dashboard') renderDashboard();
@@ -4640,6 +5149,10 @@ const REVIEW_STATUS_META = {
   approved: { label: '已审核', cls: 'rs-approved' },
 };
 let _reviewTab   = 'pending';
+let _recordsShowAll = false;          /* 验货明细：是否显示全部（默认只渲染前 300 条防卡死） */
+const RECORDS_PAGE_SIZE = 300;
+let _reviewSelected = new Set();   /* 审核中心批量操作选中集 */
+let _reviewBatchObserver = null;
 let _rejectingId = null;
 
 function _esc(s) {
@@ -4650,6 +5163,7 @@ function _esc(s) {
 
 function setReviewTab(tab) {
   _reviewTab = tab;
+  _reviewSelected.clear();
   renderReviewPage();
 }
 
@@ -4662,6 +5176,7 @@ function _reviewCounts() {
 function renderReviewPage() {
   const wrap = document.getElementById('reviewTableWrap');
   if (!wrap) return;
+  if (_reviewBatchObserver) { _reviewBatchObserver.disconnect(); _reviewBatchObserver = null; }
   const counts = _reviewCounts();
   setText('reviewCountPending',  counts.pending);
   setText('reviewCountRejected', counts.rejected);
@@ -4676,6 +5191,8 @@ function renderReviewPage() {
   });
 
   const list = state.records.filter(r => recStatus(r) === _reviewTab);
+  const visibleIds = new Set(list.map(r => r.id));
+  _reviewSelected = new Set([..._reviewSelected].filter(id => visibleIds.has(id)));
   if (_reviewTab === 'approved') list.sort((a,b) => (b.reviewAt||'').localeCompare(a.reviewAt||''));
   else                           list.sort((a,b) => (b.updatedAt||'').localeCompare(a.updatedAt||''));
 
@@ -4686,7 +5203,7 @@ function renderReviewPage() {
   }
 
   const canReview = can('reviewRecord');
-  const canEdit   = can('editRecord') || can('createRecord');
+  const canEdit   = can('createRecord');
   const rows = list.map(r => {
     const st  = recStatus(r);
     const sm  = REVIEW_STATUS_META[st];
@@ -4702,11 +5219,15 @@ function renderReviewPage() {
     if (canReview && st !== 'approved') ops.push(`<button class="action-btn" onclick="approveRecord(${r.id})">✓ 通过</button>`);
     if (canReview)                      ops.push(`<button class="action-btn" onclick="openRejectModal(${r.id})">反审核</button>`);
     if (canEdit && st !== 'approved')   ops.push(`<button class="action-btn" onclick="openEditModal(${r.id})">编辑</button>`);
+    const checked = _reviewSelected.has(r.id) ? 'checked' : '';
     return `<tr>
+      <td style="text-align:center"><input type="checkbox" ${checked} onchange="toggleReviewSelect(${r.id})"></td>
       <td style="text-align:right;color:#3a4858">${r.id}</td>
       <td style="font-family:var(--font-mono);font-size:11px;white-space:nowrap">${_esc(r.date)}</td>
       <td style="font-weight:500;white-space:nowrap">${_esc(r.supplier)}</td>
       <td style="white-space:nowrap">${_esc(r.client||'-')}</td>
+      <td style="white-space:nowrap">${_esc(r.processType||'-')}</td>
+      <td style="font-family:var(--font-mono);font-size:11px;white-space:nowrap">${_esc(r.deliveryNo||'-')}</td>
       <td style="font-family:var(--font-mono);font-size:11px;white-space:nowrap">${_esc(r.productNo||'-')}</td>
       <td style="white-space:nowrap">${_esc(r.productName||'-')}</td>
       <td style="text-align:center"><span class="badge ${r.type==='成品'?'badge-pass':'badge-hold'}">${_esc(r.type||'-')}</span></td>
@@ -4720,10 +5241,26 @@ function renderReviewPage() {
     </tr>`;
   }).join('');
 
-  wrap.innerHTML = `<table class="data-table" style="min-width:1180px">
+  const allChecked = list.length > 0 && list.every(r => _reviewSelected.has(r.id));
+  const batchBar = `
+    <style>
+      #page-review .page-inner { height: 100%; min-height: 0; }
+      #reviewTableWrap { flex: 1; min-height: 0; }
+      #reviewTableWrap .review-batch-bar { position: sticky; top: 0; left: 0; z-index: 6; }
+      #reviewTableWrap .review-batch-bar .action-btn:not(:disabled) { color: var(--text-main); }
+      #reviewTableWrap thead tr { position: static; }
+      #reviewTableWrap thead th { position: sticky; top: var(--review-batch-height, 0px); z-index: 5; background: var(--bg-card, #1b2430); box-shadow: 0 1px 0 var(--border, #2a3442); }
+    </style>
+    <div class="review-batch-bar" style="display:flex;align-items:center;gap:10px;padding:8px 4px;background:var(--bg-card, #1b2430);">
+      <span style="font-size:12px;color:var(--text-main)">已选 <b id="reviewSelCount">${_reviewSelected.size}</b> 条</span>
+      ${canReview ? `<button class="action-btn" onclick="batchApproveSelected()" ${_reviewSelected.size && _reviewTab !== 'approved' ? '' : 'disabled'}>✓ 批量通过</button>` : ''}
+      ${can('deleteRecord') ? `<button class="action-btn del" onclick="batchDeleteSelected()" ${_reviewSelected.size ? '' : 'disabled'}>🗑 批量删除</button>` : ''}
+    </div>`;
+  wrap.innerHTML = batchBar + `<table class="data-table" style="min-width:1368px">
     <thead><tr>
+      <th style="text-align:center"><input type="checkbox" ${allChecked ? 'checked' : ''} onchange="toggleReviewSelectAll(this.checked)"></th>
       <th style="text-align:right">#</th>
-      <th>来料日期</th><th>供应商</th><th>客户</th><th>货号</th><th>款式名称</th>
+      <th>来料日期</th><th>供应商</th><th>客户</th><th>加工类型</th><th>送货单号</th><th>货号</th><th>款式名称</th>
       <th style="text-align:center">类型</th>
       <th style="text-align:right">来料数</th><th style="text-align:right">FAIL</th>
       <th style="text-align:center">判定</th><th style="text-align:center">检验员</th>
@@ -4731,6 +5268,78 @@ function renderReviewPage() {
     </tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
+  const batchBarNode = wrap.querySelector('.review-batch-bar');
+  if (batchBarNode) {
+    const measureBatchBar = () => wrap.style.setProperty('--review-batch-height', batchBarNode.offsetHeight + 'px');
+    measureBatchBar();
+    if (typeof ResizeObserver === 'function') {
+      _reviewBatchObserver = new ResizeObserver(measureBatchBar);
+      _reviewBatchObserver.observe(batchBarNode);
+    }
+  }
+}
+
+function toggleReviewSelect(id) {
+  if (_reviewSelected.has(id)) _reviewSelected.delete(id); else _reviewSelected.add(id);
+  renderReviewPage();
+}
+function toggleReviewSelectAll(on) {
+  _reviewSelected.clear();
+  if (on) state.records.filter(r => recStatus(r) === _reviewTab).forEach(r => _reviewSelected.add(r.id));
+  renderReviewPage();
+}
+
+/* 批量通过审核 */
+function batchApproveSelected() {
+  if (!can('reviewRecord')) { showToast('当前账号无权限执行此操作', 'error'); return; }
+  if (!_reviewSelected.size) { showToast('请先勾选记录', 'info'); return; }
+  const targets = state.records.filter(r => _reviewSelected.has(r.id) && recStatus(r) === _reviewTab && recStatus(r) !== 'approved');
+  if (!targets.length) { showToast('所选记录均已审核', 'info'); return; }
+  if (!confirm(`确认批量通过 ${targets.length} 条记录的审核？`)) return;
+  const u = _liveUser(), now = nowIso(), name = (u && (u.name || u.username)) || '';
+  const previousRecords = state.records, ids = new Set(targets.map(r => r.id));
+  state.records = state.records.map(r => {
+    if (!ids.has(r.id)) return r;
+    const reviewed = { ...r, status: 'approved', reviewBy: name, reviewAt: now, updatedAt: now,
+      rejectReason: '', rejectBy: '', rejectAt: '' };
+    delete reviewed.resubmitted;
+    return reviewed;
+  });
+  if (persist() === false) {
+    state.records = previousRecords;
+    showToast('批量审核未保存，请检查登录状态和浏览器存储空间后重试，原记录及选择已保留', 'error');
+    return;
+  }
+  _reviewSelected.clear();
+  showToast(`${targets.length} 条审核操作已在本地暂存，等待服务器同步`, 'info');
+  renderReviewPage();
+  updateTopKpis();
+}
+
+/* 批量删除沿用单条删除权限；只处理当前列表仍存在的选中记录。 */
+function batchDeleteSelected() {
+  if (!can('deleteRecord')) { showToast('当前账号无权限执行此操作', 'error'); return; }
+  if (!_reviewSelected.size) { showToast('请先勾选记录', 'info'); return; }
+  const targets = state.records.filter(r => _reviewSelected.has(r.id) && recStatus(r) === _reviewTab);
+  if (!targets.length) { showToast('选中记录已变更，请刷新列表后重选', 'info'); renderReviewPage(); return; }
+  const locked = targets.filter(r => recStatus(r) === 'approved');
+  if (locked.length && !can('reviewRecord')) {
+    showToast(`所选含 ${locked.length} 条已审核记录，需先反审核退回后才能删除`, 'error'); return;
+  }
+  if (!confirm(`确认批量删除所选 ${targets.length} 条记录？此操作不可撤销。`)) return;
+  const ids = targets.map(r => r.id), deletedIds = new Set(ids), previousRecords = state.records;
+  const undoDeleted = window.__QC_MARK_DELETED ? window.__QC_MARK_DELETED(ids) : null;
+  state.records = state.records.filter(r => !deletedIds.has(r.id));
+  if (persist() === false) {
+    state.records = previousRecords;
+    if (typeof undoDeleted === 'function') undoDeleted();
+    showToast('批量删除未保存，请检查登录状态和浏览器存储空间后重试，原记录及选择已保留', 'error');
+    return;
+  }
+  _reviewSelected.clear();
+  showToast(`${ids.length} 条删除操作已在本地暂存，等待服务器同步`, 'info');
+  renderReviewPage();
+  updateTopKpis();
 }
 
 function approveRecord(id) {
@@ -4741,10 +5350,11 @@ function approveRecord(id) {
   r.status   = 'approved';
   r.reviewBy = (u && (u.name || u.username)) || '';
   r.reviewAt = nowIso();
+  r.updatedAt = nowIso();   /* 服务端按 updatedAt 合并：审核动作也要刷新时间戳 */
   r.rejectReason = ''; r.rejectBy = ''; r.rejectAt = '';
   delete r.resubmitted;
   persist();
-  showToast(`记录 #${id} 已审核通过，进入验货明细 ✓`, 'success');
+  showToast(`记录 #${id} 的审核操作已在本地暂存，等待服务器同步`, 'info');
   renderReviewPage();
   if (currentPage === 'records') renderRecordsTable();
   updateTopKpis();
@@ -4784,7 +5394,7 @@ function confirmReject() {
   r.updatedAt  = nowIso();
   persist();
   closeRejectModal();
-  showToast(`记录 #${r.id} 已退回，修改保存后将重新进入待审核`, 'info');
+  showToast(`记录 #${r.id} 的退回操作已在本地暂存，等待服务器同步`, 'info');
   /* 提交反审核原因后跳到审核中心「已退回」列表 */
   _reviewTab = 'rejected';
   showPage('review');
@@ -5084,10 +5694,10 @@ function exportCSV() {
   if (_downloadServerExport('records.csv', 'CSV')) return;
   try {
     const data = filteredRecs.length ? filteredRecs : recs();
-    const HDR  = ['ID','来料日期','检验日期','修改日期','供应商','客户','货号','款式名称','PO号','类型',
+    const HDR  = ['ID','来料日期','检验日期','修改日期','供应商','客户','加工类型','送货单号','货号','款式名称','PO号','类型',
                   '来料数量','抽查数量','PASS数','FAIL数','不良率','不良现象','判定结果','检验员','备注'];
     const rows = data.map(r => [
-      r.id, r.date, r.inspDate, formatModifiedDate(r.updatedAt), r.supplier, r.client, r.productNo, r.productName,
+      r.id, r.date, r.inspDate, formatModifiedDate(r.updatedAt), r.supplier, r.client, r.processType || '', r.deliveryNo || '', r.productNo, r.productName,
       r.orderNo, r.type, r.qty, r.sampleQty, r.pass, r.fail, r.defectRate, r.defect, r.result, r.qc, r.remark,
     ].map(v => `"${String(v==null?'':v).replace(/"/g,'""')}"`));
     const csv  = '\uFEFF' + [HDR, ...rows].map(r=>r.join(',')).join('\n');
@@ -5126,7 +5736,7 @@ function exportFactoryExcel() {
     const aoa = [[title], headers];
     data.forEach((r, i) => {
       aoa.push([
-        i + 1, r.date || '', r.supplier || '', r.type || '', r.client || '',
+        i + 1, r.date || '', r.supplier || '', r.processType || r.type || '', r.client || '',
         r.deliveryNo || '', r.orderNo || '', r.productNo || '', r.productName || '',
         (r.qty != null && r.qty !== '' ? Number(r.qty) : ''), '',
         r.result || '', r.defect || '', r.qc || '', r.remark || '',
@@ -5372,6 +5982,7 @@ function _backupDoImport(incoming, mode) {
       inspDate:    r.inspDate    || r.date || '',
       supplier:    r.supplier    || r.厂名 || '',
       client:      r.client      || r.客名 || '',
+      processType: r.processType || '',
       productNo:   r.productNo   || r.款号 || '',
       productName: r.productName || r.款式 || '',
       deliveryNo:  r.deliveryNo  || r.单号 || '',
@@ -5390,15 +6001,16 @@ function _backupDoImport(incoming, mode) {
     }));
 
     if (mode === 'replace') {
+      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;
       state.records = normalized;
-      state.nextId  = normalized.length + 1;
+      state.nextId  = Math.max(state.nextId || 1, normalized.length + 1);
     } else {
       state.records.push(...normalized);
     }
     persist();
 
     const modeLabel = mode === 'replace' ? '覆盖' : '追加';
-    showToast(`✓ 已${modeLabel}导入 ${normalized.length} 条备份记录`, 'success');
+    showToast(`${normalized.length} 条备份记录已在本地暂存，等待服务器同步`, 'info');
     _backupLog(`${modeLabel}导入备份 ${normalized.length} 条记录`, 'ok');
     _backupRefreshAll();
   } catch(e) {
@@ -5451,10 +6063,11 @@ function backupClearAll() {
     confirmClass: 'btn-secondary',   /* 不用 btn-primary，减少误操作 */
     onConfirm:   () => {
       const count = recs().length;
+      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 整库清空走 /api/records/replace */
       state.records = [];
-      state.nextId  = 1;
+      state.nextId  = Math.max(1, state.nextId || 1);
       persist();
-      showToast(`已清空全部 ${count} 条记录`, 'info');
+      showToast(`清空 ${count} 条记录的操作已在本地暂存，等待服务器同步`, 'info');
       _backupLog(`清空数据 ${count} 条记录`, 'warn');
       _backupRefreshAll();
     },
@@ -5475,10 +6088,11 @@ function backupRestoreSeed() {
     confirmLabel: '确认恢复',
     confirmClass: 'btn-primary',
     onConfirm:   () => {
+      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 整库覆盖走 /api/records/replace */
       state.records = SEED_RECORDS.map(r => Object.assign({}, r));
-      state.nextId  = SEED_RECORDS.length + 1;
+      state.nextId  = Math.max(state.nextId || 1, SEED_RECORDS.length + 1);
       persist();
-      showToast(`✓ 已恢复 ${SEED_RECORDS.length} 条示例数据`, 'success');
+      showToast(`${SEED_RECORDS.length} 条示例数据已在本地暂存，等待服务器同步`, 'info');
       _backupLog(`恢复示例数据 ${SEED_RECORDS.length} 条`, 'ok');
       _backupRefreshAll();
     },
@@ -5515,6 +6129,7 @@ const FIELD_MAP = {
 
   /* ── 客户 / 客名 ── */
   '客名': 'client', '客户': 'client', '品牌': 'client',
+  '加工类型': 'processType', '加工': 'processType',
   '客戶': 'client', '客户名称': 'client',
 
   /* ── 送货单号 ── */
@@ -5707,6 +6322,7 @@ function _startImport(file) {
       const ws  = wb.Sheets[sheetName];
       const aoa = XLSX.utils.sheet_to_json(ws, {
         header:   1,        /* 返回二维数组，不自动处理表头 */
+        range:    0,        /* 从工作表第 1 行计数，保留实际行号（含开头空行） */
         defval:   '',
         raw:      true,
       });
@@ -5737,17 +6353,16 @@ function _startImport(file) {
 
       /* 取数据行：表头后面所有非空行 */
       _setProgress(85, '清洗数据行…');
-      const dataRows = aoa.slice(headerRowIdx + 1).filter(row =>
-        row.some(v => String(v || '').trim() !== '')
-      );
+      const dataRows = _importDataRows(aoa, headerRowIdx);
 
       if (dataRows.length === 0) {
         _importErrors.push({ fatal: true, msg: '表格中没有找到数据行（表头下方全为空行）' });
       }
 
       /* 把数据行转成对象数组 */
-      _importParsedRows = dataRows.map(row => {
+      _importParsedRows = dataRows.map(({ cells: row, sourceRow }) => {
         const obj = {};
+        Object.defineProperty(obj, '__sourceRow', { value: sourceRow });
         headerRow.forEach((h, i) => {
           if (h) obj[h] = row[i] != null ? row[i] : '';
         });
@@ -6102,6 +6717,12 @@ function _importHtml(v) {
     .replace(/'/g, '&#39;');
 }
 
+/* Preserve worksheet row numbers before empty rows and skipped records are removed. */
+function _importDataRows(aoa, headerRowIdx) {
+  return aoa.slice(headerRowIdx + 1).map((cells, index) => ({ cells, sourceRow: headerRowIdx + index + 2 }))
+    .filter(({ cells }) => cells.some(v => String(v ?? '').trim() !== ''));
+}
+
 function _buildImportPlan(mode) {
   const M      = _importMappedFields;
   const getCol = f => Object.keys(M).find(k => M[k] === f);
@@ -6131,15 +6752,16 @@ function _buildImportPlan(mode) {
   let nextId = mode === 'replace' ? 1 : state.nextId;
   let skipped = 0;
   let dateWarn = 0;
+  const dateWarnRows = [];   /* 日期异常的行号，方便用户定位 */
 
-  _importParsedRows.forEach(row => {
+  _importParsedRows.forEach((row, rowIndex) => {
     const rawDate = dateCol ? String(row[dateCol] ?? '').trim() : '';
     const rawSup  = supCol  ? String(row[supCol]  ?? '').trim() : '';
 
     if (!rawDate && !rawSup) { skipped++; return; }
 
     const parsedDate = _parseDate(rawDate);
-    if (rawDate && !parsedDate) dateWarn++;
+    if (rawDate && !parsedDate) { dateWarn++; dateWarnRows.push({ row: row.__sourceRow || (_importHeaderRowIdx + rowIndex + 2), value: rawDate }); }
     const date     = parsedDate || '';
     const inspDate = inspCol ? (_parseDate(String(row[inspCol] ?? '').trim()) || date) : date;
 
@@ -6176,7 +6798,7 @@ function _buildImportPlan(mode) {
       orderNo:     ordCol ? String(row[ordCol] ?? '').trim() : '',
       productNo,
       productName: nameCol  ? String(row[nameCol]  ?? '').trim() : '',
-      type:        typeCol  ? _normalizeType(String(row[typeCol] ?? '').trim()) : '成品',
+      type:        typeCol  ? _normalizeType(String(row[typeCol] ?? '').trim()) : '来料',
       qty,
       sampleQty:   smpQty,
       pass:        passFinal,
@@ -6189,6 +6811,7 @@ function _buildImportPlan(mode) {
       confirmBy:   confCol  ? String(row[confCol]  ?? '').trim() : '',
       remark:      remCol   ? String(row[remCol]   ?? '').trim() : '',
       updatedAt:   nowIso(),
+      status:      'pending',   /* 导入与手工录入一致：先进入待审核（此前不写状态时本地默认已审核、服务端默认待审核，刷新后位置跳变） */
     });
   });
 
@@ -6200,6 +6823,7 @@ function _buildImportPlan(mode) {
   const warningTexts = [
     ..._importWarnings.map(w => w.msg),
     ...(dateWarn ? ['有 ' + dateWarn + ' 行日期无法识别，导入后日期会留空，请确认是否继续。'] : []),
+    ...(dateWarnRows.length ? ['日期异常位置：' + dateWarnRows.slice(0, 10).map(x => '第 ' + x.row + ' 行「' + x.value + '」').join('，') + (dateWarnRows.length > 10 ? ' 等 ' + dateWarnRows.length + ' 行' : '')] : []),
     ...(skipped ? ['有 ' + skipped + ' 行为空行或缺少关键内容，已自动跳过。'] : []),
     ...(mode === 'replace' ? ['当前选择「替换全部数据」，确认后会覆盖现有 ' + state.records.length + ' 条验货记录。'] : []),
   ];
@@ -6319,8 +6943,9 @@ function executeImportConfirm() {
 
   try {
     if (plan.mode === 'replace') {
+      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 替换模式导入走 /api/records/replace */
       state.records = plan.records;
-      state.nextId  = plan.records.length + 1;
+      state.nextId  = Math.max(state.nextId || 1, plan.records.length + 1);
     } else {
       state.records.push(...plan.records);
       state.nextId = plan.nextId;
@@ -6328,7 +6953,7 @@ function executeImportConfirm() {
     persist();
 
     const modeLabel = plan.mode === 'replace' ? '替换' : '追加';
-    showToast('✓ 成功' + modeLabel + '导入 ' + plan.records.length + ' 条记录', 'success');
+    showToast(plan.records.length + ' 条记录已在本地暂存，等待服务器同步', 'info');
 
     setTimeout(() => {
       _closeImportConfirmPreview();
@@ -6474,7 +7099,7 @@ function _normalizeResult(raw) {
 
 /* 类型标准化 */
 function _normalizeType(raw) {
-  if (!raw) return '成品';
+  if (!raw) return '来料';   /* 未提供类型时默认来料（与新增记录一致） */
   if (raw.includes('半') || raw.includes('Semi')) return '半成品';
   if (raw.includes('成品') || raw.includes('Finish')) return '成品';
   return raw;

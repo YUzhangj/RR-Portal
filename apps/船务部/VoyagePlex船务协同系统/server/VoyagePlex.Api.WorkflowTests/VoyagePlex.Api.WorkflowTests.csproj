@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Test the built API rules and real EF/SQLite startup code together. -->
+    <ProjectReference Include="../VoyagePlex.Api/VoyagePlex.Api.csproj" />
+  </ItemGroup>
+</Project>

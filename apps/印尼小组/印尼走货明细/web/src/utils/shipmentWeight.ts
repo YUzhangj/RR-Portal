@@ -61,11 +61,18 @@ export function formatShipmentPackingLines(value: unknown): string {
   return text.trim().split(/[\s,，;；]+/).filter(Boolean).join('\n')
 }
 
-// 包装数量属于走货行；同一物料在不同行可以使用不同包装数量。
-export function shipmentGrossPerPc(weightPerCarton: unknown, qtyPerCarton: unknown, materialName?: unknown): number {
+// 与走货明细导出表保持一致：长 × 宽 × 高先换算为立方英尺，再换算为立方米。
+export function shipmentCbmPerCarton(length: unknown, width: unknown, height: unknown): number {
+  const dimensions = [length, width, height].map(Number)
+  if (dimensions.some(value => !Number.isFinite(value) || value <= 0)) return 0
+  const [l, w, h] = dimensions
+  return l * w * h / 28316.75 * 0.0283
+}
+
+// 称重数量属于走货行；同一物料每次抽取称重的数量可能不同。
+export function shipmentGrossPerPc(weightPerCarton: unknown, weighingQty: unknown): number {
   const weight = Number(weightPerCarton)
-  // 纸绳以米录入装箱数量，但单个毛/净重以每 1000 米（1 卷）为单位。
-  const quantity = shipmentWeightQuantity(materialName, shipmentPackingAverageQty(qtyPerCarton))
+  const quantity = Number(weighingQty)
   if (!Number.isFinite(weight) || !Number.isFinite(quantity) || weight <= 0 || quantity <= 0) return 0
   const gross = weight / quantity
   return Number.isFinite(gross) ? gross : 0
@@ -80,4 +87,23 @@ export function shipmentWeightQuantity(materialName: unknown, quantity: unknown)
   const qty = Number(quantity)
   if (!Number.isFinite(qty) || qty <= 0) return 0
   return isPaperRope(materialName) ? qty / 1000 : qty
+}
+
+// 送货重量按所选单位显示：KGM 为净重 KG，TNE/TON 为净重 KG ÷ 1000。
+export function shipmentKgWeight(
+  unit: unknown,
+  shipmentQty: unknown,
+  netPerPc: unknown,
+  materialName?: unknown,
+): number {
+  const qty = Number(shipmentQty)
+  if (!Number.isFinite(qty) || qty <= 0) return 0
+  const code = String(unit || 'KGM').trim().toUpperCase()
+  if (code === 'KGM' || code === 'KG' || code === 'TNE' || code === 'TON') {
+    const net = Number(netPerPc)
+    if (!Number.isFinite(net) || net <= 0) return 0
+    const netKg = net * shipmentWeightQuantity(materialName, qty)
+    return +((code === 'TNE' || code === 'TON' ? netKg / 1000 : netKg).toFixed(4))
+  }
+  return qty
 }

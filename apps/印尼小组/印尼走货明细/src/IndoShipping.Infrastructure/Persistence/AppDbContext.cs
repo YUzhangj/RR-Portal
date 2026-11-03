@@ -117,26 +117,27 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.Property(x => x.Kg).HasColumnName("kg").HasColumnType("decimal(18,4)");
             e.Property(x => x.Qty).HasColumnName("qty").HasColumnType("decimal(18,4)");
             e.Property(x => x.Cartons).HasColumnName("cartons");
-            e.Property(x => x.QtyPerCarton).HasColumnName("qty_per_carton").HasMaxLength(64);
+            e.Property(x => x.QtyPerCarton).HasColumnName("qty_per_carton").HasColumnType("text");
+            e.Property(x => x.WeighingQty).HasColumnName("weighing_qty").HasColumnType("decimal(18,4)");
             e.Property(x => x.PurchaseUnit).HasColumnName("purchase_unit").HasMaxLength(32);
-            e.Property(x => x.Pallet).HasColumnName("pallet").HasMaxLength(64);
-            e.Property(x => x.Price).HasColumnName("price").HasColumnType("decimal(18,4)");
+            e.Property(x => x.Pallet).HasColumnName("pallet").HasColumnType("text");
+            e.Property(x => x.Price).HasColumnName("price").HasColumnType("decimal(22,8)");
             e.Property(x => x.Currency).HasColumnName("currency").HasMaxLength(8);
-            e.Property(x => x.PoNo).HasColumnName("po_no").HasMaxLength(64);
+            e.Property(x => x.PoNo).HasColumnName("po_no").HasColumnType("text");
             e.Property(x => x.PoDate).HasColumnName("po_date");
             e.Property(x => x.Supplier).HasColumnName("supplier").HasMaxLength(256);
             e.Property(x => x.CustomsCompany).HasColumnName("customs_company").HasMaxLength(256);
             e.Property(x => x.BlHead).HasColumnName("bl_head").HasMaxLength(256);
-            e.Property(x => x.ContractNo).HasColumnName("contract_no").HasMaxLength(64);
+            e.Property(x => x.ContractNo).HasColumnName("contract_no").HasColumnType("text");
             e.Property(x => x.ContractDate).HasColumnName("contract_date");
-            e.Property(x => x.InvoiceNo).HasColumnName("invoice_no").HasMaxLength(64);
+            e.Property(x => x.InvoiceNo).HasColumnName("invoice_no").HasColumnType("text");
             e.Property(x => x.InvoiceDate).HasColumnName("invoice_date");
             e.Property(x => x.InvoicePrice).HasColumnName("invoice_price").HasColumnType("decimal(18,4)");
             e.Property(x => x.ProductUse).HasColumnName("product_use").HasMaxLength(256);
             e.Property(x => x.FormulaName).HasColumnName("formula_name").HasMaxLength(256);
 
             e.HasIndex(x => x.ShipmentId);
-            e.HasIndex(x => x.PoNo);
+            e.HasIndex(x => x.PoNo).HasMethod("hash");
         });
 
         b.Entity<PurchaseOrder>(e =>
@@ -166,7 +167,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.Property(x => x.ProductCode).HasColumnName("product_code").HasMaxLength(64);
             e.Property(x => x.MaterialId).HasColumnName("material_id");
             e.Property(x => x.Qty).HasColumnName("qty").HasColumnType("decimal(18,4)");
-            e.Property(x => x.Price).HasColumnName("price").HasColumnType("decimal(18,4)");
+            e.Property(x => x.Price).HasColumnName("price").HasColumnType("decimal(22,8)");
             e.Property(x => x.Currency).HasColumnName("currency").HasMaxLength(8);
             e.Property(x => x.Notes).HasColumnName("notes");
             e.HasIndex(x => x.PoId);
@@ -177,12 +178,13 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.ToTable("schedules");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasColumnName("id");
+            e.Property(x => x.Customer).HasColumnName("customer").HasDefaultValue("TOMY");
             e.Property(x => x.WeekLabel).HasColumnName("week_label").HasMaxLength(64);
             e.Property(x => x.UploadDate).HasColumnName("upload_date");
             e.Property(x => x.RawRows).HasColumnName("raw_rows");
             e.Property(x => x.DiffFromPrev).HasColumnName("diff_from_prev");
             e.Property(x => x.CreatedAt).HasColumnName("created_at");
-            e.HasIndex(x => x.WeekLabel).IsUnique();
+            e.HasIndex(x => new { x.Customer, x.WeekLabel }).IsUnique().HasDatabaseName("ix_schedules_customer_week");
         });
 
         b.Entity<OutboundRecord>(e =>

@@ -80,8 +80,37 @@ export interface ProductDetail extends Product {
   materials?: Material[]
 }
 
+/** Read-only import evidence, stored only in a shipment's material snapshot. */
+export interface ShipmentSourceCell {
+  address: string
+  label: string
+  value: string | number | boolean | null
+  display: string
+  formula?: string
+  error?: boolean
+}
+export interface ShipmentImportSource {
+  file?: string
+  sheet: string
+  row: number
+  cells: ShipmentSourceCell[]
+  context: ShipmentSourceCell[]
+}
+
 export interface Material {
+  // Local shipment snapshot only; keeps explicitly linked batches in one packing row.
+  shipment_outbound_link_group?: string
+  import_source?: ShipmentImportSource
+  // A linked ordinary row converted to a local packing snapshot retains its
+  // original product-HS fallback for absent codes; explicit empty codes do not.
+  shipment_hs_product_fallback?: boolean
+  department?: string
   id?: number
+  tool_kind?: '工具' | '机器设备'
+  related_product_code?: string
+  revision?: number
+  purchase_price?: number | null
+  purchase_currency?: string | null
   product_code?: string
   item_no?: string
   name_zh?: string
@@ -109,6 +138,17 @@ export interface Material {
 }
 
 export interface HsDict      { keyword: string; hsCN?: string; hsID?: string }
-export interface SupplierDict{ keyword: string; full?: string; customs?: string }
+export interface SupplierDict {
+  id?: number
+  keyword: string
+  full?: string
+  customs?: string
+  nameEn?: string
+  addressZh?: string
+  addressEn?: string
+  phone?: string
+  email?: string
+  contact?: string
+}
 export interface TranslationDict { keyword: string; english: string; active?: boolean; source?: string }
 export interface Dictionaries { hs: HsDict[]; suppliers: SupplierDict[]; translations: TranslationDict[] }

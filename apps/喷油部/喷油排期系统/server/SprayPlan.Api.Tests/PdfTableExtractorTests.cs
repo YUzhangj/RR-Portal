@@ -7,6 +7,104 @@ namespace SprayPlan.Api.Tests;
 // fixture 路径：bin 输出目录下的 Fixtures/（由 .csproj 拷贝）。
 public class PdfTableExtractorTests
 {
+    [Fact]
+    public void XingxinPurchasePriceChange_OffsetHeaders_RecognizesAllPricesAndProducts()
+    {
+        var words = JsonSerializer.Deserialize<List<PdfWord>>(File.ReadAllText(
+            Path.Combine(AppContext.BaseDirectory, "Fixtures", "words_xingxin_purchase_price_change.json")))!;
+        var rows = PdfTableExtractor.ExtractProductRows(words);
+        Assert.Collection(rows,
+            row => { Assert.Equal("995159", row.ProductNo); Assert.Equal("喷射套装马里奥身体", row.ItemRaw); Assert.Equal(3700, row.Qty); Assert.Equal(2.5, row.UnitPrice, 6); },
+            row => { Assert.Equal("096283", row.ProductNo); Assert.Equal("喷射套装问答块", row.ItemRaw); Assert.Equal(3300, row.Qty); Assert.Equal(0.45, row.UnitPrice, 6); },
+            row => { Assert.Equal("096283", row.ProductNo); Assert.Equal("喷射套装搪胶花朵", row.ItemRaw); Assert.Equal(3300, row.Qty); Assert.Equal(0.25, row.UnitPrice, 6); });
+        var plainRows = PdfTableExtractor.ExtractRows(words);
+        Assert.Equal(rows.Select(r => r.UnitPrice), plainRows.Select(r => r.UnitPrice));
+        var head = PdfTableExtractor.ExtractHead(words);
+        Assert.Equal("2026092101", head.ExternalOrderNo);
+        Assert.Equal(new DateTime(2026, 9, 21), head.OrderDate);
+        Assert.Equal(new DateTime(2026, 10, 30), head.DeliveryDate);
+    }
+
+    [Fact]
+    public void ExtractHuadengSprayPurchaseOrder_RecognizesTwoProductsAndHead()
+    {
+        static PdfWord W(string text, double x, double y, double width = 40) =>
+            new(1, text, x, x + width, y - 10, y);
+        var words = new List<PdfWord>
+        {
+            W("订单编号：", 610, 500, 70), W("2026092101", 690, 500, 80),
+            W("货号", 45, 400), W("模具编号", 150, 400), W("货物名称", 260, 400), W("颜色编号", 380, 400),
+            W("料型", 500, 400), W("订单数量PCS", 610, 400, 80), W("目标数", 700, 400), W("加工单价", 780, 400), W("金额", 860, 400), W("备注", 940, 400),
+            W("995159", 45, 370), W("TIUK-E73906-S01", 145, 370, 90), W("喷射套装栗宝宝", 255, 370, 90), W("3800", 625, 370), W("0.97", 785, 370),
+            W("096283", 45, 340), W("TIUK-E73907-S02", 145, 340, 90), W("喷射套装蘑菇", 255, 340, 90), W("3400", 625, 340), W("0.55", 785, 340),
+            W("合计", 780, 310),
+            W("1.", 10, 280), W("2026", 30, 280), W("年", 70, 280), W("10月", 90, 280), W("30", 125, 280), W("日前交货", 150, 280),
+            W("时间：", 700, 100), W("2026", 750, 100), W("年", 790, 100), W("9", 810, 100), W("月", 825, 100), W("21", 845, 100), W("日", 870, 100),
+        };
+
+        var rows = PdfTableExtractor.ExtractProductRows(words);
+        Assert.Collection(rows,
+            first => { Assert.Equal("995159", first.ProductNo); Assert.Equal("喷射套装栗宝宝", first.ItemRaw); Assert.Equal(3800, first.Qty); Assert.Equal(0.97, first.UnitPrice, 6); },
+            second => { Assert.Equal("096283", second.ProductNo); Assert.Equal("喷射套装蘑菇", second.ItemRaw); Assert.Equal(3400, second.Qty); Assert.Equal(0.55, second.UnitPrice, 6); });
+        var head = PdfTableExtractor.ExtractHead(words);
+        Assert.Equal("2026092101", head.ExternalOrderNo);
+        Assert.Equal(new DateTime(2026, 9, 21), head.OrderDate);
+        Assert.Equal(new DateTime(2026, 10, 30), head.DeliveryDate);
+    }
+
+    [Fact]
+    public void HuadengSprayPurchaseOrder_RealPdf_WhenProvided()
+    {
+        var path = Environment.GetEnvironmentVariable("SPRAYPLAN_HUADENG_PURCHASE_PDF");
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
+        using var source = File.OpenRead(path);
+        var words = PdfWordSource.Extract(source);
+        var rows = PdfTableExtractor.ExtractProductRows(words);
+        Assert.Collection(rows,
+            first => { Assert.Equal("995159", first.ProductNo); Assert.Equal(3800, first.Qty); },
+            second => { Assert.Equal("096283", second.ProductNo); Assert.Equal(3400, second.Qty); });
+        var head = PdfTableExtractor.ExtractHead(words);
+        Assert.Equal("2026092101", head.ExternalOrderNo);
+        Assert.Equal(new DateTime(2026, 9, 21), head.OrderDate);
+        Assert.Equal(new DateTime(2026, 10, 30), head.DeliveryDate);
+    }
+
+    [Fact]
+    public void OcrImageSample_WhenProvided_RecognizesTwoProductQuantities()
+    {
+        var path = Environment.GetEnvironmentVariable("SPRAYPLAN_SAMPLE_IMAGE");
+        if (string.IsNullOrWhiteSpace(path)) return;
+        using var source = File.OpenRead(path);
+        var words = OrderImageOcr.Extract(source, Path.GetExtension(path));
+        var parsed = OcrOrderParser.Extract(words);
+        Assert.Equal("CMC2600139", parsed.Head.ExternalOrderNo);
+        Assert.Equal(new DateTime(2026, 9, 18), parsed.Head.OrderDate);
+        Assert.Equal(new DateTime(2026, 9, 28), parsed.Head.DeliveryDate);
+        Assert.Collection(parsed.Rows,
+            first => { Assert.Equal("15792", first.ProductNo); Assert.Equal(417, first.Qty); },
+            second => { Assert.Equal("15783", second.ProductNo); Assert.Equal(21000, second.Qty); });
+    }
+    [Fact]
+    public void ExtractProductRows_HuadengTwoProductsRemainSeparate()
+    {
+        static PdfWord W(string text, double x, double y, double width = 35) =>
+            new(1, text, x, x + width, y - 10, y);
+        var words = new List<PdfWord>
+        {
+            W("款号", 49, 628, 20), W("物料名称", 122, 628, 40), W("用料名称", 199, 628, 40),
+            W("颜色", 256, 628, 20), W("单重G", 289, 628, 25), W("总重KG", 321, 628, 30),
+            W("数量", 366, 628, 20), W("单价", 412, 628, 20), W("金额(HK$)", 456, 628, 45), W("备注", 530, 628, 20),
+            W("15792总MA", 30, 606, 55), W("W-06-04/20MM尾扣", 100, 606, 85),
+            W("(印喷件)", 120, 600, 40), W("417", 365, 606, 28),
+            W("15783总MA", 30, 575, 55), W("E-11-04/35MM眼扣", 100, 575, 85),
+            W("(印喷件)", 120, 569, 40), W("21,000", 365, 575, 30), W("HK$0.14", 405, 575, 35),
+            W("TOTAL：", 410, 500),
+        };
+        var rows = PdfTableExtractor.ExtractProductRows(words);
+        Assert.Collection(rows,
+            first => { Assert.Equal("15792", first.ProductNo); Assert.Equal(417, first.Qty); Assert.True(first.IsMa); },
+            second => { Assert.Equal("15783", second.ProductNo); Assert.Equal(21000, second.Qty); Assert.Equal(0.14, second.UnitPrice, 6); });
+    }
     // 读取 fixture JSON → List<PdfWord>
     private static IReadOnlyList<PdfWord> LoadWords(string fileName)
     {

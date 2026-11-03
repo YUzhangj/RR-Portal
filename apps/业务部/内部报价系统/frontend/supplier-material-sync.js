@@ -9,9 +9,16 @@
   const supplierName = row => String(row.supplier_name || row.supplier_id || '').trim();
   function setSupplier(row, value, knownRows = []) {
     const name = String(value ?? '').trim();
-    const existing = knownRows.find(item => item !== row && normalize(supplierName(item)) === normalize(name));
-    const id = name ? (existing ? supplierId(existing) :
-      normalize(supplierName(row)) === normalize(name) ? supplierId(row) : normalize(name)) : '';
+    let id = '';
+    if (name) {
+      if (normalize(supplierName(row)) === normalize(name)) id = supplierId(row);
+      else {
+        const matches = new Set(knownRows.filter(item => item !== row &&
+          normalize(supplierName(item)) === normalize(name)).map(supplierId));
+        if (matches.size > 1) throw Error('同名供应商对应多个标识，请使用可明确区分的供应商名称');
+        id = matches.size ? [...matches][0] : normalize(name);
+      }
+    }
     row.supplier_name = name;
     row.supplier_id = id;
   }

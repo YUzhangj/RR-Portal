@@ -4,15 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>公司内部报价明细系统</title>
-  <script>
-    document.documentElement.dataset.quotationUi = new URLSearchParams(location.search).get('ui') === 'precision' ? 'precision' : 'classic';
-  </script>
-  <link rel="stylesheet" href="./styles.css?v=20260916-shared-topbar" />
-  <link rel="stylesheet" href="./quotation-precision.css?v=20261102-no-sidebar" />
+  <link rel="stylesheet" href="./styles.css?v=20260914-verification-workflow" />
 </head>
 <body>
   <div class="topbar module-topbar">
-    <div class="brand"><span class="quotation-brand-mark" aria-hidden="true">◇</span><span>报价板块 <small>多部门协同报价与客价确认</small></span></div>
+    <div class="brand">📋 内部报价明细系统 <small>多部门协同 · 主管审核 · 受控导出</small></div>
     <nav class="module-switch" aria-label="报价与核价板块">
       <a class="active" href="./index.html" aria-current="page">报价板块</a>
       <a href="./verification.html">核价板块</a>
@@ -53,32 +49,24 @@
         <p id="pwd-msg" class="msg"></p>
       </div>
 
-      <div class="card quote-center-card">
-        <header class="quote-center-head list-head">
-          <div class="quote-center-title">
-            <span class="quote-center-icon">报</span>
-            <div><h1>报价任务</h1><p>按部门填写、提交和审核；完成后由业务确认客价</p></div>
-          </div>
-          <h2 class="quote-classic-title" style="margin:0">报价单列表 · <span id="factory-list-name"></span></h2>
+      <div class="card">
+        <div class="list-head">
+          <h2 style="margin:0">报价单列表 · <span id="factory-list-name"></span></h2>
           <div class="search-box">
             <nav class="quote-feature-nav" aria-label="报价功能">
               <a class="quote-feature-link feature-summary" href="./summary.html">
                 <span class="feature-icon" aria-hidden="true">▥</span>
                 <span><strong>报价汇总</strong><small>客户统计与导出</small></span>
               </a>
-              <a class="quote-feature-link feature-verification" href="./verification.html">
-                <span class="feature-icon" aria-hidden="true">✓</span>
-                <span><strong>核价中心</strong><small>已确认报价对比</small></span>
-              </a>
               <button id="btn-trash" type="button" class="quote-feature-link feature-trash hidden">
                 <span class="feature-icon" aria-hidden="true">♲</span>
                 <span><strong>回收站</strong><small>30天内可恢复</small></span>
               </button>
             </nav>
-            <input id="search-input" type="search" placeholder="🔍 搜索 货号 / 产品 / 客户…" />
+            <input id="search-input" type="text" placeholder="🔍 搜索 货号 / 产品 / 客户…" />
             <small id="search-count" class="muted"></small>
           </div>
-        </header>
+        </div>
         <div id="new-quote-form" class="hidden new-quote-form">
           <div class="new-quote-form-head">
             <div class="new-quote-form-icon">＋</div>
@@ -101,7 +89,7 @@
             <button id="btn-create" class="new-quote-submit">＋ 创建报价单</button>
           </div>
         </div>
-        <div class="quote-table-scroll"><table id="quotes-table" class="wb-table">
+        <table id="quotes-table" class="wb-table" style="margin-top:14px">
           <thead>
             <tr>
               <th style="width:50px">#</th>
@@ -143,7 +131,7 @@
             </tr>
           </thead>
           <tbody></tbody>
-        </table></div>
+        </table>
         <div id="trash-panel" class="trash-panel hidden">
           <div class="trash-head"><h3>🗑 报价回收站</h3><button id="btn-close-trash" type="button" class="mini">关闭</button></div>
           <p class="muted">误删的报价会保留全部部门明细，30天内可恢复，超过30天自动永久删除。</p>
@@ -164,6 +152,6 @@
       };
     })();
   </script>
-  <script src="./main.js?v=20261102-no-sidebar"></script>
+  <script src="./main.js?v=20261029-revoke-confirmation"></script>
 </body>
 </html>

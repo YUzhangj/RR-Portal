@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs'
+import { prepareScheduleWorkbook } from './prepareScheduleWorkbook.js'
 import type {
   ReconciliationResult,
   RowMatchResult,
@@ -74,7 +75,7 @@ export async function writeAnnotatedSchedule(
 ): Promise<Buffer> {
   // Load the original workbook
   const workbook = new ExcelJS.Workbook()
-  await workbook.xlsx.load(scheduleBuffer)
+  await workbook.xlsx.load(await prepareScheduleWorkbook(scheduleBuffer) as unknown as Parameters<typeof workbook.xlsx.load>[0])
 
   // Resolve target sheet: explicit selector (exact, then substring), else 总排期
   let ws: ExcelJS.Worksheet | undefined
@@ -224,5 +225,5 @@ export async function writeAnnotatedSchedule(
     }
   }
 
-  return (await workbook.xlsx.writeBuffer()) as Buffer
+  return Buffer.from(await workbook.xlsx.writeBuffer())
 }

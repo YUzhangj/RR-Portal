@@ -5,6 +5,7 @@ import {
 } from 'antd'
 import dayjs from 'dayjs'
 import { api } from '../api/client'
+import { scheduleActualProduction, type ScheduleStatusRow } from '../utils/scheduleLineStatus'
 
 interface MpoItem {
   code?: string           // 货号
@@ -32,7 +33,7 @@ interface MpoItem {
   notes?: string
 }
 
-interface SchedRow {
+interface SchedRow extends ScheduleStatusRow {
   source?: string
   customer?: string
   country?: string
@@ -144,11 +145,8 @@ export default function MoldingPosPage() {
   }
   async function loadLatestSchedule() {
     try {
-      const { data: list } = await api.get<{ id: number }[]>('/schedules')
-      if (!list?.length) return
-      const top = list[0]
-      const { data: det } = await api.get<{ raw_rows?: string }>(`/schedules/${top.id}`)
-      const parsed = det.raw_rows ? JSON.parse(det.raw_rows) as SchedRow[] : []
+      const { data } = await api.get<{ raw_rows?: string }>('/schedules/latest')
+      const parsed = data.raw_rows ? JSON.parse(data.raw_rows) : []
       setSchedRows(Array.isArray(parsed) ? parsed : [])
     } catch {}
   }
@@ -186,7 +184,7 @@ export default function MoldingPosPage() {
     const prodMap = new Map<string, any>()
     await Promise.all(codes.map(async code => {
       try {
-        const { data } = await api.get<any>(`/products/${encodeURIComponent(code)}`)
+        const { data } = await api.get<any>(`/products/by-code?code=${encodeURIComponent(code)}`)
         prodMap.set(code, data)
       } catch {}
     }))
@@ -647,7 +645,7 @@ function SchedPickerModal(props: {
   const filtered = props.schedRows
     .map((r, i) => ({ ...r, _i: i }))
     .filter(r => {
-      if (props.hidePlaced && r.orderNo && props.placedOrderNos.has(r.orderNo.trim())) return false
+      if (props.hidePlaced && scheduleActualProduction(r, props.placedOrderNos)) return false
       if (!props.filter) return true
       const s = props.filter.toLowerCase()
       return ((r.code || '') + (r.productName || '') + (r.orderNo || '') + (r.endCustomer || ''))
@@ -656,7 +654,7 @@ function SchedPickerModal(props: {
   return (
     <Modal
       open={props.open}
-      title={`从排期生成生产单（共 ${props.schedRows.length} 行 · 已选 ${props.selected.length}）`}
+      title={`从排期生成生产单（排期 ${props.schedRows.length} 行 · 已选 ${props.selected.length}）`}
       width="80vw"
       onCancel={props.onCancel}
       footer={null}

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { RouterLink } from 'vue-router'
+import DeliveryReminder from './DeliveryReminder.vue'
 import { useAuthStore } from '../stores/auth'
 import { ROLE_LABELS } from '../constants/roles'
 import {
@@ -22,6 +23,7 @@ const auth = useAuthStore()
       <aside>
         <nav>
           <RouterLink to="/dashboard">首页</RouterLink>
+          <RouterLink v-if="auth.role && (canViewQuality(auth.role) || canViewOrders(auth.role))" to="/analysis">动态分析中心</RouterLink>
           <RouterLink v-if="auth.role && canViewFactories(auth.role)" to="/factories">工厂信息管理</RouterLink>
           <RouterLink v-if="auth.role && canViewFactoryAdmin(auth.role)" to="/factory-view">加工厂管理</RouterLink>
           <RouterLink v-if="auth.role && canViewOrders(auth.role)" to="/orders">货期管理</RouterLink>
@@ -34,7 +36,7 @@ const auth = useAuthStore()
           <RouterLink v-if="auth.role && canViewUsers(auth.role)" to="/admin/users">用户</RouterLink>
         </nav>
       </aside>
-      <main><slot /></main>
+      <main><DeliveryReminder /><slot /></main>
     </div>
   </div>
 </template>

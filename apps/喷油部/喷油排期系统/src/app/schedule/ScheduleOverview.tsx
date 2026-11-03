@@ -1,20 +1,24 @@
 "use client";
-// 排期总览看板（拉别 × 日期·只读）—— 照 mockup supervisor-grid-v4.html / spec 2026-06-24 §6。
+// 排期总览看板（拉别 × 日期）—— 照 mockup supervisor-grid-v4.html / spec 2026-06-24 §6。
 // 日期竖排、拉别横排；每格顶部小计（件数·产能占用%·红黄绿），下面铺「部位+数量+第几道」，按工序上色。
 // 数据来自 GET /api/schedule/overview；网格聚合/占用/配色由 @/lib/scheduleOverview 纯函数算。
-// 第一期只读；「点格子跳周排」联动留下一步。
-import { useCallback, useEffect, useMemo, useState } from "react";
+// 每天每拉备注独立保存；计划详情支持实绩录入和日期调整。
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invalidateClientCache } from "@/lib/clientCache";
 import { buildOverviewGrid, cellKey, dateRange, type CellItem, type OverviewLine, type OverviewPlan } from "@/lib/scheduleOverview";
-import { cachedJson } from "@/lib/clientCache";
 import { apiFetch } from "@/lib/apiFetch";
 import Link from "next/link";
+import MaterialReadinessDialog from "./MaterialReadinessDialog";
 import ExportDialog from "../recording/ExportDialog";
+import { isPlanDate } from "@/lib/planDateAdjustment";
+import DailyLineNoteEditor, { type DailyLineNote } from "./DailyLineNoteEditor";
 
-type Resp = { lines: OverviewLine[]; plans: OverviewPlan[] };
+type Resp = { lines: OverviewLine[]; plans: OverviewPlan[]; lineNotes?: DailyLineNote[] };
 type View = "today" | "month" | "lastMonth" | "custom";
 type DetailState = { date: string; line: OverviewLine; item: CellItem };
 type AdjustTarget = { planId: number; date: string; lineId: number };
 type OverviewProps = {
+  canAdjustDates?: boolean;
   orderFilter?: { orderId: number; orderNo: string; from?: string; to?: string };
   pendingOrderCount?: number;
   pendingUrgentCount?: number;
@@ -31,7 +35,7 @@ const parseYmd = (s: string) => { const [y, m, d] = s.split("-").map(Number); re
 const MINI_BG = { ok: "sc-bg-ok", busy: "sc-bg-busy", over: "sc-bg-over" } as const;
 const MINI_TX = { ok: "sc-ut-ok", busy: "sc-ut-busy", over: "sc-ut-over" } as const;
 
-export default function ScheduleOverview({ orderFilter, pendingOrderCount = 0, pendingUrgentCount = 0, onCreatePlan, onPlanUrgent, onAdjustPlan }: OverviewProps) {
+export default function ScheduleOverview({ orderFilter, canAdjustDates = false, pendingOrderCount = 0, pendingUrgentCount = 0, onCreatePlan, onPlanUrgent, onAdjustPlan }: OverviewProps) {
   const [view, setView] = useState<View>("today");
   const [from, setFrom] = useState<string>(() => orderFilter?.from || ymd(new Date()));
   const [to, setTo] = useState<string>(() => {
@@ -47,17 +51,38 @@ export default function ScheduleOverview({ orderFilter, pendingOrderCount = 0, p
   const [detailRemark, setDetailRemark] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [materialSelection, setMaterialSelection] = useState<{ orderId: number; partName?: string } | null | undefined>(undefined);
+  const [newPlanDate, setNewPlanDate] = useState("");
+  const [dateReason, setDateReason] = useState("");
 
+  const selectionKey = `${from}|${to}|${orderFilter?.orderId ?? ""}`;
+  const activeSelection = useRef(selectionKey);
+  activeSelection.current = selectionKey;
+  const loadVersion = useRef(0);
   const load = useCallback(async () => {
-    if (!from || !to) { setErr("请选择起止日期"); setData(null); return; }
-    if (parseYmd(to) < parseYmd(from)) { setErr("结束日期不能早于起始日期"); setData(null); return; }
+    const request = ++loadVersion.current;
+    const current = () => request === loadVersion.current && activeSelection.current === selectionKey;
+    if (!from || !to) { setErr("请选择起止日期"); setData(null); setLoading(false); return; }
+    if (parseYmd(to) < parseYmd(from)) { setErr("结束日期不能早于起始日期"); setData(null); setLoading(false); return; }
     setLoading(true); setErr("");
     try {
       const filter = orderFilter ? `&orderId=${orderFilter.orderId}` : "";
-      setData(await cachedJson<Resp>(`/api/schedule/overview?from=${from}&to=${to}${filter}`, 5_000));
-    } catch { setErr("加载失败"); setData(null); }
-    finally { setLoading(false); }
-  }, [from, to, orderFilter]);
+      // Notes are editable: a cached overview must not replay an older version.
+      const response = await apiFetch(`/api/schedule/overview?from=${from}&to=${to}${filter}`, { cache: "no-store" });
+      if (!response.ok) throw new Error("加载失败");
+      const incoming = await response.json() as Resp;
+      if (current()) setData(previous => {
+        const notes = new Map((incoming.lineNotes ?? []).map(note => [cellKey(note.date, note.lineId), note]));
+        for (const note of previous?.lineNotes ?? []) {
+          const key = cellKey(note.date, note.lineId);
+          if (note.date >= from && note.date <= to && incoming.lines.some(line => line.lineId === note.lineId)
+            && note.version > (notes.get(key)?.version ?? 0)) notes.set(key, note);
+        }
+        return { ...incoming, lineNotes: Array.from(notes.values()) };
+      });
+    } catch { if (current()) { setErr("加载失败"); setData(null); } }
+    finally { if (current()) setLoading(false); }
+  }, [from, to, orderFilter, selectionKey]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
     if (!detail) return;
@@ -74,6 +99,13 @@ export default function ScheduleOverview({ orderFilter, pendingOrderCount = 0, p
   }, [from, to]);
   const grid = useMemo(() => (data ? buildOverviewGrid(data.plans, data.lines) : {}), [data]);
   const lines = data?.lines ?? [];
+  const notes = useMemo(() => Object.fromEntries((data?.lineNotes ?? []).map(n => [cellKey(n.date, n.lineId), n])), [data]);
+  const saveNote = (note: DailyLineNote) => setData(current => {
+    if (!current) return current;
+    const existing = current.lineNotes?.find(n => n.date === note.date && n.lineId === note.lineId);
+    if (existing && existing.version > note.version) return current;
+    return { ...current, lineNotes: [...(current.lineNotes ?? []).filter(n => n.date !== note.date || n.lineId !== note.lineId), note] };
+  });
 
   const applyPreset = (v: Exclude<View, "custom">) => {
     setView(v);
@@ -96,10 +128,34 @@ export default function ScheduleOverview({ orderFilter, pendingOrderCount = 0, p
 
   const openDetail = (next: DetailState) => {
     setDetail(next);
+    setNewPlanDate(next.date); setDateReason("");
     setTodayQty(next.item.goodQty?.toString() ?? "");
     setInboundQty(next.item.inboundQty?.toString() ?? "");
     setDetailRemark(next.item.remark ?? "");
     setSaveError("");
+  };
+
+  const savePlanDate = async () => {
+    if (!detail || !canAdjustDates || !detail.item.canReschedule || !isPlanDate(newPlanDate) || newPlanDate === detail.date) return;
+    setSaving(true); setSaveError("");
+    try {
+      const res = await apiFetch("/api/plans/reschedule", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ changes: [{ id: detail.item.id, originalDate: detail.date, newDate: newPlanDate }], reason: dateReason }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || "日期调整失败");
+      invalidateClientCache("/api/orders"); invalidateClientCache("/api/schedule");
+      // 将查看范围延伸至新日期，移动后的计划仍可在看板上看到。
+      const nextFrom = newPlanDate < from ? newPlanDate : from;
+      const nextTo = newPlanDate > to ? newPlanDate : to;
+      setDetail(null);
+      if (nextFrom !== from || nextTo !== to) {
+        setView("custom"); setFrom(nextFrom); setTo(nextTo);
+        // 范围变更后由 effect 加载新范围，避免旧范围的请求覆盖新数据。
+      } else await load();
+    } catch (e) { setSaveError(e instanceof Error ? e.message : "日期调整失败"); }
+    finally { setSaving(false); }
   };
 
   const saveTodayProduction = async () => {
@@ -123,7 +179,7 @@ export default function ScheduleOverview({ orderFilter, pendingOrderCount = 0, p
 
   return (
     <div className="sc">
-      <style>{CSS}</style>
+      <style dangerouslySetInnerHTML={{ __html: CSS }} />
 
       {(pendingOrderCount > 0 || pendingUrgentCount > 0) && (
         <div className="sc-alerts">
@@ -159,6 +215,7 @@ export default function ScheduleOverview({ orderFilter, pendingOrderCount = 0, p
           <span>～</span>
           <input type="date" value={to} onChange={(e) => { setView("custom"); setTo(e.target.value); }} aria-label="结束日期" />
         </div>
+        <button type="button" className="bg-mint-50 text-mint-700 border border-mint-400 px-3 py-2 rounded-btn" onClick={() => setMaterialSelection(orderFilter ? { orderId: orderFilter.orderId } : null)}>来料管理</button>
         <div className="sc-export">
           <ExportDialog date={from === to ? from : ymd(new Date())} lines={lines.map((l) => ({ id: l.lineId, label: l.name }))} />
         </div>
@@ -199,18 +256,20 @@ export default function ScheduleOverview({ orderFilter, pendingOrderCount = 0, p
                   <td className={`sc-daycol${we ? " we" : ""}`}>周{WEEKNAME[d.getDay()]}<small>{d.getMonth() + 1}-{pad2(d.getDate())}</small></td>
                   {lines.map((l) => {
                     const cell = grid[cellKey(date, l.lineId)];
-                    if (!cell) return <td key={l.lineId} className="sc-cell"><div className="sc-blank">空</div></td>;
-                    const lvl = cell.level;
+                    const lvl = cell?.level;
                     return (
                       <td key={l.lineId} className="sc-cell">
                         <div className={`sc-mini${lvl ? " " + MINI_BG[lvl] : ""}`}>
-                          <span>{cell.count}款</span>
+                          <span>{cell?.count ?? 0}款</span>
                           <span className={lvl ? MINI_TX[lvl] : ""}>
-                            {cell.total.toLocaleString()}{cell.occupancyPct != null ? ` · ${cell.occupancyPct}%` : ""}{lvl === "over" ? " ⚠" : ""}
+                            {(cell?.total ?? 0).toLocaleString()}{cell?.occupancyPct != null ? ` · ${cell.occupancyPct}%` : ""}{lvl === "over" ? " ⚠" : ""}
                           </span>
                         </div>
+                        <DailyLineNoteEditor key={cellKey(date, l.lineId)} date={date} lineId={l.lineId} name={l.name}
+                          note={notes[cellKey(date, l.lineId)]} canEdit={canAdjustDates} onSaved={saveNote} />
+                        {!cell && <div className="sc-blank">空</div>}
                         <ul className="sc-items">
-                          {cell.items.map((it, i) => (
+                          {cell?.items.map((it, i) => (
                             <li key={i}>
                               <button
                                 type="button"
@@ -235,6 +294,8 @@ export default function ScheduleOverview({ orderFilter, pendingOrderCount = 0, p
         {lines.length === 0 && !loading && <p className="sc-empty">没有启用的拉别，请先到基础数据库维护拉别。</p>}
       </div>
 
+      {materialSelection !== undefined && <MaterialReadinessDialog selection={materialSelection ?? undefined} canEdit={canAdjustDates}
+        onClose={() => setMaterialSelection(undefined)} onChanged={() => { load(); }} />}
       {detail && (
         <div className="sc-modal" onClick={() => setDetail(null)}>
           <div className="sc-dialog" role="dialog" aria-modal="true" aria-labelledby="sc-detail-title" onClick={(e) => e.stopPropagation()}>
@@ -259,12 +320,22 @@ export default function ScheduleOverview({ orderFilter, pendingOrderCount = 0, p
               <div><dt>人数</dt><dd>{detail.item.workerCount || "-"}</dd></div>
               <div><dt>拉别产能上限</dt><dd>{detail.line.dailyLimit > 0 ? `${(detail.line.dailyLimit / 10000)}万` : "不卡"}</dd></div>
             </dl>
+            <button type="button" disabled={saving} className="text-mint-700 border border-mint-400 rounded-btn px-3 py-2 mt-3" onClick={() => {
+              setMaterialSelection({ orderId: detail.item.orderId, partName: detail.item.partName }); setDetail(null);
+            }}>登记来料 / 自动重排</button>
+            {canAdjustDates && <div className="sc-entry-grid">
+              {!detail.item.canReschedule ? <p>该计划已录实绩或订单已完工、作废，不能调整日期。</p> : <>
+                <label>调整计划日期<input disabled={saving} type="date" value={newPlanDate} onChange={e => setNewPlanDate(e.target.value)} /></label>
+                <label>调整原因<input disabled={saving} value={dateReason} onChange={e => setDateReason(e.target.value)} placeholder="如停机、缺料（可选）" /></label>
+                <button type="button" className="sc-date-save" disabled={saving || !isPlanDate(newPlanDate) || newPlanDate === detail.date} onClick={savePlanDate}>保存日期调整</button>
+              </>}
+            </div>}
             <div className="sc-entry-grid">
               <label>今日生产数<input type="number" min={0} step={1} value={todayQty} onChange={(e) => setTodayQty(e.target.value)} /></label>
               <label>实际入库数<input type="number" min={0} step={1} value={inboundQty} onChange={(e) => setInboundQty(e.target.value)} /></label>
               <label>备注<textarea rows={2} value={detailRemark} onChange={(e) => setDetailRemark(e.target.value)} placeholder="填写异常、补数或其他说明" /></label>
             </div>
-            {saveError && <p className="sc-save-error">{saveError}</p>}
+            {saveError && <p role="alert" className="sc-save-error">{saveError}</p>}
             <div className="sc-dialog-ft">
               {onAdjustPlan && (
                 <button
@@ -329,6 +400,13 @@ const CSS = `
   td.sc-daycol small { display:block; color:#9ca3af; font-weight:400; font-size:11px; margin-top:3px; }
 
   .sc-cell { padding:0; }
+  .sc-line-note { padding:4px 6px; border-bottom:1px solid #eef0f2; font-size:12px; }
+  .sc-line-note textarea { display:block; width:100%; min-height:28px; resize:vertical; padding:4px 6px; border:1px solid #dbe4df; border-radius:5px; font:inherit; background:#fff; color:#374151; }
+  .sc-line-note textarea:focus { outline:2px solid #6ee7b7; }
+  .sc-line-note button { margin-top:4px; border:0; border-radius:4px; background:#047857; color:#fff; padding:3px 8px; cursor:pointer; }
+  .sc-line-note [role=status] { color:#047857; }
+  .sc-line-note [role=alert] { display:block; color:#c91d32; }
+  .sc-line-note-text { white-space:pre-wrap; overflow-wrap:anywhere; color:#64748b; }
   .sc-mini { padding:6px 9px; font-size:11px; font-weight:700; border-bottom:1px solid #eef0f2; display:flex; justify-content:space-between; gap:6px; color:#64748b; }
   .sc-mini.sc-bg-ok { background:#f0fdf4; } .sc-mini.sc-bg-busy { background:#fffbeb; } .sc-mini.sc-bg-over { background:#fef2f2; }
   .sc-ut-ok { color:#047857; } .sc-ut-busy { color:#b45309; } .sc-ut-over { color:#b91c1c; }
@@ -362,6 +440,8 @@ const CSS = `
   .sc-entry-grid label { color:#64748b; font-size:12px; font-weight:600; display:flex; flex-direction:column; gap:6px; }
   .sc-entry-grid input, .sc-entry-grid textarea { width:100%; border:1px solid #dbe4df; border-radius:8px; padding:8px 10px; color:#111827; font:inherit; font-weight:400; resize:vertical; }
   .sc-entry-grid input:focus, .sc-entry-grid textarea:focus { outline:none; border-color:#34d399; box-shadow:0 0 0 2px rgba(52,211,153,.16); }
+  .sc-date-save { justify-self:start; border:0; border-radius:10px; background:#047857; color:#fff; padding:9px 14px; font:inherit; font-weight:600; cursor:pointer; }
+  .sc-date-save:disabled { opacity:.5; cursor:default; }
   .sc-save-error { margin:-6px 18px 12px; color:#c91d32; font-size:12px; }
   .sc-dialog-ft { border-top:1px solid #eef2f7; padding:12px 18px; display:flex; gap:10px; justify-content:flex-end; background:#fff; }
   .sc-dialog-ft button { border:1px solid #d1fae5; background:#ecfdf5; color:#047857; border-radius:8px; padding:7px 16px; font-weight:600; cursor:pointer; }

@@ -42,7 +42,7 @@ public class PlansController(AppDbContext db) : ControllerBase
         standardStepCount, standardCraft, craftAdjusted,
         p.GoodQty, p.InboundQty, p.ReportedQty, p.DefectQty, p.WorkHours,
         p.ProductionValue, p.Status, p.Remark, p.CreatedBy, p.CreatedAt, p.LastModifiedBy, p.LastModifiedAt,
-        p.ModificationHistory, p.DeletedAt, p.DeletedBy);
+        p.ModificationHistory, p.DeletedAt, p.DeletedBy, PlanDateRules.CanReschedule(p));
     }
 
     // GET /api/plans?planDate=&lineId=&orderId=&unrecordedBefore= —— 列计划（排除软删），planDate asc,id asc
@@ -76,7 +76,7 @@ public class PlansController(AppDbContext db) : ControllerBase
             var d = DateUtil.ParseUtc(unrecordedBefore);
             q = q.Where(p => p.PlanDate < d && p.GoodQty == null);
         }
-        var plans = await q.OrderBy(p => p.PlanDate).ThenBy(p => p.Id).ToListAsync();
+        var plans = await q.Include(p => p.Order).OrderBy(p => p.PlanDate).ThenBy(p => p.Id).ToListAsync();
         var standards = await BuildStandardPasses(plans);
         return Ok(plans.Select(p => ToDto(p, standards)));
     }
@@ -112,7 +112,7 @@ public class PlansController(AppDbContext db) : ControllerBase
 
     // POST /api/plans —— 批量建计划行；建后把涉及订单从 received 推进到 scheduled
     [HttpPost]
-    [Authorize(Roles = "clerk,admin")]
+    [Authorize(Roles = "clerk,manager,admin")]
     public async Task<IActionResult> Create([FromBody] CreatePlansRequest req)
     {
         var plans = req.Plans;
@@ -132,6 +132,10 @@ public class PlansController(AppDbContext db) : ControllerBase
                 return BadRequest(new { error = "工序无效（手喷/移印/自动喷/UV）" });
         }
 
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        var calendar = new ProductionCalendar(await db.Holidays.AsNoTracking().ToListAsync());
+        if (plans.Any(p => !calendar.IsWorkday(DateUtil.ParseUtc(p.PlanDate!))))
+            return BadRequest(new { error = "计划包含周日或休假日，请选择工作日" });
         var by = CurrentUser();
         var rows = plans.Select(p => new ProductionPlan
         {
@@ -159,12 +163,63 @@ public class PlansController(AppDbContext db) : ControllerBase
         foreach (var o in toUpdate) { o.Status = "scheduled"; o.LastUpdatedBy = by; }
 
         await db.SaveChangesAsync();
-        return StatusCode(201, new CreatePlansResult(plans.Count));
+        MaterialReflowResult? materialReflow;
+        try {
+            materialReflow = await MaterialReflow.ApplyCreatedParts(db, rows.Select(plan => (plan.OrderId, plan.PartName)), by);
+            if (materialReflow is not null) await db.SaveChangesAsync();
+        } catch (InvalidOperationException error) { return BadRequest(new { error = error.Message }); }
+        catch (JsonException) { return BadRequest(new { error = "来料配置或历史记录格式异常，本次排期未保存" }); }
+        catch (DbUpdateConcurrencyException) { return Conflict(new { error = "来料或排期已变化，请重新加载后再保存" }); }
+        await transaction.CommitAsync();
+        return StatusCode(201, new CreatePlansResult(plans.Count, materialReflow));
+    }
+
+    // 日期调整采用整批校验后保存，避免部分移动；原日期用于防止覆盖他人修改。
+    [HttpPost("reschedule")]
+    [Authorize(Roles = "clerk,manager,admin")]
+    public async Task<IActionResult> Reschedule([FromBody] ReschedulePlansRequest req)
+    {
+        if (req.Changes is null || req.Changes.Count == 0 || req.Changes.Any(c => c is null) || req.Changes.Select(c => c.Id).Distinct().Count() != req.Changes.Count)
+            return BadRequest(new { error = "请选择需要调整的计划，不能重复提交" });
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        var calendar = new ProductionCalendar(await db.Holidays.AsNoTracking().ToListAsync());
+        var dates = new Dictionary<int, (DateTime Original, DateTime Next)>();
+        foreach (var change in req.Changes)
+        {
+            if (!DateTime.TryParseExact(change.OriginalDate, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var original) ||
+                !DateTime.TryParseExact(change.NewDate, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var next))
+                return BadRequest(new { error = "日期格式不正确" });
+            if (!calendar.IsWorkday(next)) return BadRequest(new { error = $"{ScheduleCalc.Ymd(next)} 是休息日，请选择工作日" });
+            dates[change.Id] = (DateTime.SpecifyKind(original, DateTimeKind.Utc), DateTime.SpecifyKind(next, DateTimeKind.Utc));
+        }
+        var ids = dates.Keys.ToList();
+        var plans = await db.ProductionPlans.Include(p => p.Order).Where(p => ids.Contains(p.Id) && p.DeletedAt == null).ToListAsync();
+        if (plans.Count != ids.Count) return NotFound(new { error = "部分计划已撤销或不属于当前厂区，请刷新" });
+        if (plans.Any(PlanDateRules.HasActuals))
+            return BadRequest(new { error = "已录实绩的计划不能调整日期，请只选择未录实绩的计划" });
+        if (plans.Any(p => p.Order is null || p.Order.Status is "completed" or "archived"))
+            return BadRequest(new { error = "完工或作废订单不能调整排期" });
+        if (plans.Any(p => p.PlanDate.Date != dates[p.Id].Original))
+            return Conflict(new { error = "排期已被修改，请刷新后重新调整" });
+        var now = DateTime.UtcNow;
+        foreach (var plan in plans)
+        {
+            var next = dates[plan.Id].Next;
+            if (plan.PlanDate == next) continue;
+            var history = ParseHistory(plan.ModificationHistory);
+            history.Add(new { field = "planDate", oldValue = ScheduleCalc.Ymd(plan.PlanDate), newValue = ScheduleCalc.Ymd(next), reason = req.Reason?.Trim(), by = CurrentUser(), at = now });
+            plan.ModificationHistory = JsonSerializer.Serialize(history);
+            plan.PlanDate = next;
+            plan.LastModifiedBy = CurrentUser(); plan.LastModifiedAt = now;
+            plan.Order!.LastUpdatedBy = CurrentUser(); plan.Order.UpdatedAt = now;
+        }
+        await db.SaveChangesAsync(); await transaction.CommitAsync();
+        return Ok(new { adjustedPlans = plans.Count });
     }
 
     // PATCH /api/plans/{id} —— 改计划字段 或 录实绩（goodQty→算产值+status recorded+改值留痕）
     [HttpPatch("{id:int}")]
-    [Authorize(Roles = "clerk,admin")]
+    [Authorize(Roles = "clerk,manager,admin")]
     public async Task<IActionResult> Update(int id, [FromBody] UpdatePlanRequest req)
     {
         // 值校验前置（非法立即 400，不依赖记录是否存在，对齐旧逻辑）
@@ -181,8 +236,22 @@ public class PlansController(AppDbContext db) : ControllerBase
         if (req.GoodQty is not null && req.GoodQty < 0)
             return BadRequest(new { error = "实际生产数必须 ≥ 0" });
 
+        await using var transaction = await db.Database.BeginTransactionAsync();
         var p = await db.ProductionPlans.FindAsync(id);
         if (p is null) return NotFound(new { error = "计划不存在" });
+        if (req.PlanDate is not null && DateUtil.ParseUtc(req.PlanDate) != p.PlanDate)
+        {
+            if (!new ProductionCalendar(await db.Holidays.AsNoTracking().ToListAsync()).IsWorkday(DateUtil.ParseUtc(req.PlanDate)))
+                return BadRequest(new { error = "所选日期是休息日，请选择工作日" });
+            if (p.DeletedAt != null || PlanDateRules.HasActuals(p))
+                return BadRequest(new { error = "已撤销或已录实绩的计划不能调整日期" });
+            var owner = await db.Orders.FindAsync(p.OrderId);
+            if (owner is null || owner.Status is "completed" or "archived")
+                return BadRequest(new { error = "完工或作废订单不能调整排期" });
+            var history = ParseHistory(p.ModificationHistory);
+            history.Add(new { field = "planDate", oldValue = ScheduleCalc.Ymd(p.PlanDate), newValue = ScheduleCalc.Ymd(DateUtil.ParseUtc(req.PlanDate)), by = CurrentUser(), at = DateTime.UtcNow });
+            p.ModificationHistory = JsonSerializer.Serialize(history);
+        }
 
         // ── 计划字段 ──
         if (req.PlannedQty is not null) p.PlannedQty = (int)req.PlannedQty.Value;
@@ -267,6 +336,7 @@ public class PlansController(AppDbContext db) : ControllerBase
                     Quantity = inboundDelta,
                     CreatedBy = CurrentUser(),
                     CreatedAt = now,
+                    UpdatedAt = now,
                     Remark = inboundDelta > 0 ? null : "实际入库数调减自动生成",
                 });
             }
@@ -274,6 +344,7 @@ public class PlansController(AppDbContext db) : ControllerBase
 
         p.LastModifiedBy = CurrentUser();
         await db.SaveChangesAsync();
+        await transaction.CommitAsync();
         return Ok(new PlanUpdated(p.Id, p.GoodQty, p.InboundQty, p.ProductionValue, p.Status, p.PlannedQty, ScheduleCalc.SafeArr(p.MachineNos)));
     }
 
@@ -325,7 +396,7 @@ public class PlansController(AppDbContext db) : ControllerBase
 
     // DELETE /api/plans/{id} —— 软删（deletedAt + deletedBy）
     [HttpPost("batch-unschedule")]
-    [Authorize(Roles = "clerk,admin")]
+    [Authorize(Roles = "clerk,manager,admin")]
     public async Task<IActionResult> BatchUnschedule([FromBody] BatchUnscheduleRequest req)
     {
         var ids = (req.PlanIds ?? new()).Distinct().ToList();
@@ -371,18 +442,20 @@ public class PlansController(AppDbContext db) : ControllerBase
             order.UpdatedAt = now;
         }
 
+        await MaterialReflow.Pause(db, plans, by);
         await db.SaveChangesAsync();
         return Ok(new BatchUnscheduleResult(plans.Count, orderIds.Count, ids));
     }
 
     [HttpDelete("{id:int}")]
-    [Authorize(Roles = "clerk,admin")]
+    [Authorize(Roles = "clerk,manager,admin")]
     public async Task<IActionResult> Delete(int id)
     {
         var p = await db.ProductionPlans.FindAsync(id);
         if (p is null) return NotFound(new { error = "计划不存在" });
         p.DeletedAt = DateTime.UtcNow;
         p.DeletedBy = CurrentUser();
+        await MaterialReflow.Pause(db, new[] { p }, CurrentUser());
         await db.SaveChangesAsync();
         return Ok(new PlanDeleted(p.Id, p.DeletedAt));
     }

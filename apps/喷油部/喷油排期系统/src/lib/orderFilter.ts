@@ -23,6 +23,7 @@ export type OrderRow = {
   planProductionDays?: number;
   finishedQty?: number;
   remainingQty?: number;
+  inProductionRemainingQty?: number;
   riskLevel?: "none" | "missing_due" | "unscheduled" | "late" | "overdue";
   riskText?: string;
 };
@@ -68,4 +69,10 @@ export function filterOrders(rows: OrderRow[], f: OrderFilter): OrderRow[] {
     if (f.deliveryTo && (!r.deliveryDate || r.deliveryDate > f.deliveryTo)) return false;
     return true;
   });
+}
+
+/** 已排期和在产订单的欠数合计，与列表“订单欠数”列保持一致。 */
+export function inProductionQuantity(rows: OrderRow[]): number {
+  return rows.filter(row => !row.pendingProduct && (row.status === "scheduled" || row.status === "in_production"))
+    .reduce((sum, row) => sum + Math.max(0, row.remainingQty ?? 0), 0);
 }

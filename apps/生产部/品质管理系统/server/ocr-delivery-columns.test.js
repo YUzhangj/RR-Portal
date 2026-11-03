@@ -1,0 +1,143 @@
+'use strict';
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const path=require('node:path');
+const vm=require('node:vm');
+const test=require('node:test');
+
+// Actual parser/provider dispatch; all documents and provider responses below are synthetic.
+// No server start, private configuration, database, real HTTP, or model request.
+const app=path.join(__dirname,'..');
+const server=fs.readFileSync(path.join(__dirname,'server.js'),'utf8');
+const declarations=server.slice(server.indexOf('const OCR_READ_PROMPT ='),server.indexOf('/* ── 记录表列顺序'));
+const plain=value=>JSON.parse(JSON.stringify(value));
+function runtime(responses=[]) {
+  let calls=0;
+  const context=vm.createContext({AI:{ready:true,baseURL:'https://synthetic.invalid/v1',apiKey:'synthetic',ocrModel:'synthetic'},
+    console:{warn(){}},setTimeout:fn=>fn(),fetch:async()=>{
+      assert.ok(responses.length,'Unexpected additional provider call');calls++;
+      return{status:200,text:async()=>JSON.stringify({choices:[{message:{content:responses.shift()}}]})};
+    }});
+  vm.runInContext(declarations+';globalThis.actual={parseDeliveryNote,aiVisionExtract};',context);
+  return{parse:raw=>plain(context.actual.parseDeliveryNote(raw)),extract:async()=>plain(await context.actual.aiVisionExtract('data:image/png;base64,c3ludGhldGlj')),calls:()=>calls};
+}
+const prefix='序号 订单编号 货号 货品名称 单位 ';
+const cases=[
+  ['nonempty SKU must not disappear into the name',prefix+'订单数量 交货数量 单价 金额\n1 PO-123456 SKU001 合成零件 PCS 100 34 9.50 323.00'],
+  ['a price before quantity columns must not shift the delivered quantity',prefix+'单价 订单数量 交货数量\n1 PO-123456 合成零件 PCS 9.50 100 34'],
+  ['an unreadable delivered quantity must not be replaced by the amount',prefix+'订单数量 交货数量 金额\n1 PO-123456 合成零件 PCS 100 unreadable 340'],
+  ['a total must not become the current delivered quantity',prefix+'订单数量 总交货数量 交货数量\n1 PO-123456 合成零件 PCS 100 80 34'],
+  ['order quantity alone must not become delivered quantity',prefix+'订单数量 未交数量\n1 PO-123456 合成零件 PCS 100 66'],
+  ['a numeric SKU must not be appended to the adjacent PO',prefix+'订单数量 交货数量\n1 BBC2025285-0 12 合成零件 PCS 100 34'],
+];
+function pending(fields,raw) {
+  assert.equal(fields.items.length,1);assert.equal(fields.items[0].qty,'');assert.equal(fields.items[0].productNo,'');
+  assert.equal(fields.items[0].orderNo,undefined);assert.equal(fields.orderNo,'');assert.equal(fields.items[0].quantityNeedsReview,true);
+  assert.equal(fields.items[0].productName,'待核对原文：'+raw);
+}
+for(const [name,raw]of cases)test('unpositioned delivery layout: '+name,async()=>{
+  const r=runtime([raw,'|货号|品名|数量|\n|REPLACEMENT|替换零件|999|']);
+  pending(r.parse(raw),raw);const result=await r.extract();
+  assert.equal(r.calls(),1);assert.equal(result.rawText,raw);assert.equal(result.needsManualReview,true);pending(result.fields,raw);
+});
+
+test('actual line breaks inside a PO remain full manual source, not an invented continuation',()=>{
+  const raw='订单号：PO-HEADER\n'+prefix+'订单数量 交货数量\n1 BBC2025285-0\n1 12 合成零件 PCS 100 34';
+  pending(runtime().parse(raw),raw);
+});
+
+const header=['序号','订单编号','货号','货品名称','单位'];
+function table(extra,rows){return'|'+header.concat(extra).join('|')+'|\n'+rows.map(row=>'|'+row.join('|')+'|').join('\n');}
+
+test('positioned delivery columns preserve actual PO/SKU/name and use the exact delivered column despite price/order/total columns',()=>{
+  const raw=table(['单价','订单数量','总交货数量','累计交货数量','本次交货数量','金额'],
+    [['1','BBC2025285-0','0012','合成零件','PCS','9.50','100','80','90','34','323.00']]);
+  const fields=runtime().parse(raw);
+  assert.deepEqual(fields.items,[{productNo:'0012',productName:'合成零件',qty:'34',unit:'PCS',orderNo:'BBC2025285-0'}]);
+  assert.equal(fields.orderNo,'BBC2025285-0');
+});
+
+for(const label of ['交货数量','本次交货数量','送货数量','实送数量','交貨數量','本次交貨數量','送貨數量','實送數量']) {
+  test('a unique explicit delivery header is exact: '+label,()=>{
+    const fields=runtime().parse(table(['订单数量',label],[['1','PO-REAL','SKU001','合成零件','PCS','100','34']]));
+    assert.equal(fields.items[0].qty,'34');assert.equal(fields.items[0].productNo,'SKU001');
+  });
+}
+
+for(const columns of [['订单数量','未交数量'],['订单数量','总交货数量'],['订单数量','累计交货数量'],
+  ['订单数量','本次交货数量','交货数量'],['交货数量','交货数量']]) {
+  test('missing or ambiguous exact delivery columns require whole-source review: '+columns.join('/'),()=>{
+    const raw=table(columns,[['1','PO-REAL','SKU001','合成零件','PCS',...columns.map((_c,i)=>String(100-i))]]);
+    pending(runtime().parse(raw),raw);
+  });
+}
+
+test('positioned unreadable or width-mismatched rows keep the complete row instead of shifting a later amount',()=>{
+  const rows=[['1','PO-A','SKU001','合成零件','PCS','100','unreadable','340'],['2','PO-B','合成零件','PCS','100','34','340']];
+  const raw=table(['订单数量','交货数量','金额'],rows),fields=runtime().parse(raw);
+  assert.equal(fields.items.length,2);assert.equal(fields.orderNo,'');
+  for(let i=0;i<rows.length;i++) {
+    assert.equal(fields.items[i].qty,'');assert.equal(fields.items[i].quantityNeedsReview,true);
+    assert.equal(fields.items[i].productName,'待核对原文：|'+rows[i].join('|')+'|');
+  }
+});
+
+test('structured empty SKU and PO cells remain empty without inheriting another row or gluing a numeric SKU to PO',()=>{
+  const raw=table(['订单数量','交货数量'],[
+    ['1','BBC2025285-0','12','合成零件A','PCS','100','34'],
+    ['2','','','合成零件B','PCS','100','20'],
+    ['3','PO-C','SKU003','','PCS','100','10'],
+  ]),fields=runtime().parse(raw);
+  assert.equal(fields.orderNo,'');assert.deepEqual(fields.items.map(row=>[row.productNo,row.productName,row.orderNo,row.qty]),
+    [['12','合成零件A','BBC2025285-0','34'],['','合成零件B','','20'],['SKU003','','PO-C','10']]);
+});
+
+test('HTML real cells follow the same exact column contract and retain explicit rowspan PO provenance',()=>{
+  const raw='<table><tr>'+header.concat(['单价','订单数量','累计交货数量','交货数量']).map(h=>'<th>'+h+'</th>').join('')+'</tr>'+
+    '<tr><td>1</td><td rowspan="2">PO-HTML</td><td>0012</td><td>合成A</td><td>PCS</td><td>9.50</td><td>100</td><td>80</td><td>34</td></tr>'+
+    '<tr><td>2</td><td>0013</td><td>合成B</td><td>PCS</td><td>9.50</td><td>100</td><td>80</td><td>0</td></tr></table>';
+  const fields=runtime().parse(raw);
+  assert.deepEqual(fields.items.map(row=>[row.productNo,row.orderNo,row.qty]),[['0012','PO-HTML','34'],['0013','PO-HTML','0']]);
+});
+
+for(const [quantity,unit]of [['0','PCS'],['8.760','KG'],['0.650','KG'],['1.234.567','KG']]) {
+  test('the positioned layout retains original zero/decimal/ambiguous number text: '+quantity+' '+unit,()=>{
+    const raw=table(['订单数量','交货数量'],[['1','PO-QTY','0012','合成原料',unit,'100',quantity]]);
+    const row=runtime().parse(raw).items[0];assert.equal(row.qty,quantity);assert.equal(row.unit,unit);assert.equal(row.productNo,'0012');
+  });
+}
+
+test('the new source cannot auto-save a guessed count; correction is explicit and parser flags are not persisted',async()=>{
+  const front=fs.readFileSync(path.join(app,'frontend-ocr-rotation.test.js'),'utf8');
+  const end=front.indexOf("test('manual rotations");assert.ok(end>0);
+  const ctx={require,__dirname:app,Buffer,AbortController,setImmediate,console};
+  vm.runInNewContext(front.slice(0,end)+';this.make=fixture;',ctx);
+  const x=ctx.make(),raw=cases[0][1],fields=runtime().parse(raw);
+  x.upload();x.responses.push({ok:true,fields,rawText:raw,needsManualReview:true});x.b.ctx.openAddModal();
+  await x.b.ctx.startOcr();x.b.elements.get('ocrSupplier').value='Test Supplier';x.b.ctx.applyOcrToForm();
+  assert.equal(x.b.ctx.saveRecord(),false);assert.equal(plain(x.b.json('state.records')).length,0);
+  x.b.elements.get('f_qty').value='34';assert.equal(x.b.ctx.saveRecord(),true);
+  const saved=plain(x.b.json('state.records[0]'));
+  assert.equal(saved.qty,34);assert.equal(saved.productNo,'');assert.equal(saved.orderNo,'');
+  assert.equal(saved.productName,'待核对原文：'+raw);assert.equal('quantityNeedsReview'in saved,false);
+});
+
+test('a manual delivery-layout retry never acquires a previous response PO or other metadata',async()=>{
+  const raw=cases[1][1],r=runtime(['订单号：PO-PREVIOUS\n日期：2026-11-01\n没有货品行',raw]);
+  const result=await r.extract();assert.equal(r.calls(),2);pending(result.fields,raw);
+  assert.equal(result.fields.date,'');assert.equal(result.rawText,raw);
+});
+
+test('decimal and multi-dot delivery-column values reach the existing real save guard unchanged',async()=>{
+  const front=fs.readFileSync(path.join(app,'frontend-ocr-rotation.test.js'),'utf8'),end=front.indexOf("test('manual rotations");
+  const ctx={require,__dirname:app,Buffer,AbortController,setImmediate,console};
+  vm.runInNewContext(front.slice(0,end)+';this.make=fixture;',ctx);
+  for(const quantity of ['8.760','0.650','1.234.567']) {
+    const raw=table(['订单数量','交货数量'],[['1','PO-KG','0012','合成原料','KG','100',quantity]]),fields=runtime().parse(raw),x=ctx.make();
+    assert.equal(fields.items[0].qty,quantity);x.upload();x.responses.push({ok:true,fields,rawText:raw});x.b.ctx.openAddModal();
+    await x.b.ctx.startOcr();x.b.elements.get('ocrSupplier').value='Test Supplier';x.b.ctx.applyOcrToForm();
+    assert.equal(x.b.ctx.saveRecord(),false);assert.equal(plain(x.b.json('state.records')).length,0);
+    x.b.elements.get('f_qty').value='8760';assert.equal(x.b.ctx.saveRecord(),true);
+    const saved=plain(x.b.json('state.records[0]'));assert.equal(saved.qty,8760);assert.equal(saved.productNo,'0012');assert.equal(saved.orderNo,'PO-KG');
+  }
+});

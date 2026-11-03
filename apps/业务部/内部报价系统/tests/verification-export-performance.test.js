@@ -1,10 +1,11 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const source=fs.readFileSync(path.join(__dirname,'../backend/routes/verificationSummary.js'),'utf8');
+const routeRequire=require('node:module').createRequire(path.join(__dirname,'../backend/routes/verificationSummary.js'));
 function route(db,buildWorkbook){
   const handlers=new Map(),router={use(){},put(){},get(p,fn){handlers.set(p,fn);}},module={exports:{}};
   vm.runInNewContext(source,{module,Buffer,Date,Promise,Map,JSON,setImmediate,require:id=>id==='express'?{Router:()=>router}:id==='../db'?db:id==='../middleware/auth'?{requireAuth(){}}:id==='../services/sourceSummary'?{sourceQuantity:()=>null}:id==='../services/verificationSummary'?{
     columns:[],buildVerificationRow:(q,v,ss)=>({id:q.id,version:v.label,workshop:ss[0]?.dept}),buildVerificationWorkbook:buildWorkbook,
-  }:id==='../../frontend/verification-customers'?{display:x=>x}:require(id)});
+  }:id==='../../frontend/verification-customers'?{display:x=>x}:routeRequire(id)});
   return {load:module.exports.loadRows,handlers};
 }
 const user={id:1,active_factory_code:'qingxi',perms:{'账号管理':{can_admin:true}}};

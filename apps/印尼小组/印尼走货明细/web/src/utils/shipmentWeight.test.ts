@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   formatShipmentPackingLines, isPaperRope, parseShipmentPacking, shipmentCartonCount,
-  shipmentGrossPerPc, shipmentWeightQuantity,
+  shipmentCbmPerCarton, shipmentGrossPerPc, shipmentKgWeight, shipmentWeightQuantity,
 } from './shipmentWeight'
 
 describe('每箱数量分段写法', () => {
@@ -24,15 +24,30 @@ describe('每箱数量分段写法', () => {
   })
 })
 
+describe('立方数/每箱', () => {
+  it('使用与导出表一致的长宽高换算公式', () => {
+    expect(shipmentCbmPerCarton(60, 50, 34)).toBeCloseTo(60 * 50 * 34 / 28316.75 * 0.0283)
+  })
+
+  it.each([
+    [0, 50, 34],
+    ['', 50, 34],
+    [60, undefined, 34],
+    [60, 50, -1],
+  ])('任一尺寸无效时返回 0：%s × %s × %s', (length, width, height) => {
+    expect(shipmentCbmPerCarton(length, width, height)).toBe(0)
+  })
+})
+
 describe('走货单个毛重', () => {
-  it('按行包装数量计算，修改数量或箱重后重新计算', () => {
+  it('按称重数量计算，修改称重数量或箱重后重新计算', () => {
     expect(shipmentGrossPerPc(12, '200')).toBe(0.06)
     expect(shipmentGrossPerPc(12, '400')).toBe(0.03)
     expect(shipmentGrossPerPc(20, '400')).toBe(0.05)
   })
 
-  it('混合装箱时按平均每箱数量计算单个毛重', () => {
-    expect(shipmentGrossPerPc(9, '1-2/3000 3/4000')).toBeCloseTo(9 / (10000 / 3))
+  it('称重数量与每箱数量相互独立', () => {
+    expect(shipmentGrossPerPc(9, 2500)).toBeCloseTo(9 / 2500)
   })
 
   it.each([0, '', undefined, -1, '无', Infinity])('无效包装数量 %s 返回 0', quantity => {
@@ -47,9 +62,9 @@ describe('走货单个毛重', () => {
     expect(shipmentGrossPerPc(8, '30000') * 30000).toBeCloseTo(8)
   })
 
-  it('纸绳按每 1000 米一卷计算单个毛重', () => {
-    expect(shipmentGrossPerPc(7.9, '20000', '纸绳')).toBeCloseTo(0.395)
-    expect(shipmentGrossPerPc(7.9, '20000', '纸绳') * shipmentWeightQuantity('纸绳', 20000)).toBeCloseTo(7.9)
+  it('纸绳也直接使用录入的称重数量', () => {
+    expect(shipmentGrossPerPc(7.9, 20)).toBeCloseTo(0.395)
+    expect(shipmentGrossPerPc(7.9, 20) * shipmentWeightQuantity('纸绳', 20000)).toBeCloseTo(7.9)
   })
 })
 
@@ -61,5 +76,21 @@ describe('纸绳计重数量', () => {
 
   it('其它物料仍按原送货数量计重', () => {
     expect(shipmentWeightQuantity('螺丝', 20000)).toBe(20000)
+  })
+})
+
+describe('送货 KG 重量', () => {
+  it('TNE/TON 按净重 KG ÷ 1000 换算为吨', () => {
+    expect(shipmentKgWeight('TNE', 20000, 0.7, '纸绳')).toBe(0.014)
+    expect(shipmentKgWeight('ton', 1000, 0.5, '螺丝')).toBe(0.5)
+  })
+
+  it('KGM 仍按单个净重和计重数量计算', () => {
+    expect(shipmentKgWeight('KGM', 11000, 0.00021, '螺丝')).toBe(2.31)
+    expect(shipmentKgWeight('KGM', 20000, 0.7, '纸绳')).toBe(14)
+  })
+
+  it('数量单位保持送货数量', () => {
+    expect(shipmentKgWeight('PCE', 25, 0.2)).toBe(25)
   })
 })

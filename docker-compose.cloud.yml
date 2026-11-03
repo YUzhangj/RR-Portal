@@ -17,16 +17,20 @@ x-qc-report-environment: &qc-report-environment
   SEED_SAMPLE_DATA: "false"
   PROXY_PREFIX: /qc-report
   SESSION_COOKIE_PATH: /qc-report/
+  SSO_SECRET: ${SSO_SECRET:?SSO_SECRET is required}
   COOKIE_SECURE: ${QC_REPORT_COOKIE_SECURE:-false}
   REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
   QUEUE_REQUIRED: "true"
   RQ_QUEUE_NAME: qc-report-ai
+  # RQ's whole-job deadline must also cover file validation and result persistence.
+  RQ_JOB_TIMEOUT_SECONDS: ${QC_REPORT_RQ_JOB_TIMEOUT_SECONDS:-1200}
   OPENAI_API_KEY: ${QC_REPORT_OPENAI_API_KEY:-}
   OPENAI_BASE_URL: ${QC_REPORT_OPENAI_BASE_URL:-https://api.openai.com/v1}
+  OPENAI_API_FORMAT: ${QC_REPORT_OPENAI_API_FORMAT:-responses}
   OPENAI_MODEL: ${QC_REPORT_OPENAI_MODEL:-gpt-5.6-terra}
-  OPENAI_TIMEOUT_SECONDS: ${QC_REPORT_OPENAI_TIMEOUT_SECONDS:-180}
+  OPENAI_TIMEOUT_SECONDS: ${QC_REPORT_OPENAI_TIMEOUT_SECONDS:-900}
   OPENAI_MAX_RETRIES: ${QC_REPORT_OPENAI_MAX_RETRIES:-2}
-  OPENAI_MAX_OUTPUT_TOKENS: ${QC_REPORT_OPENAI_MAX_OUTPUT_TOKENS:-12000}
+  OPENAI_MAX_OUTPUT_TOKENS: ${QC_REPORT_OPENAI_MAX_OUTPUT_TOKENS:-64000}
   AI_MOCK_MODE: "false"
 
 services:
@@ -43,6 +47,9 @@ services:
       - ./frontend/index.cloud.html:/usr/share/nginx/html/index.html:ro
       - ./frontend/logo.png:/usr/share/nginx/html/logo.png:ro
       - ./frontend/favicon.png:/usr/share/nginx/html/favicon.png:ro
+      - ./frontend/maintenance.html:/usr/share/nginx/html/maintenance.html:ro
+      # 维护模式开关目录：部署脚本 touch/rm ON 标志文件，nginx 容器只读检测（if -f）
+      - ./deploy/maintenance:/etc/nginx/maintenance:ro
       # Uncomment for HTTPS after running setup-ssl.sh:
       # - ./ssl:/etc/nginx/ssl:ro
     depends_on:
@@ -212,6 +219,60 @@ services:
     networks:
       - platform-net
 
+  gongcheng-ziliao:
+    build:
+      context: ./apps/工程部/工程资料管理系统
+      dockerfile: Dockerfile
+    volumes:
+      - ./apps/工程部/工程资料管理系统/资料库存储:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3100/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - platform-net
+
+  # ─── PrintLink 3D 打印协同平台（工程部）：独立 3100 端口对外，不走 nginx 子路径 ───
+  # 前端资源全部用绝对路径，挂子路径会整站错位（作者明确不适配），故直接映射主机端口，
+  # 由阿里云安全组控制入站。当前无域名/HTTPS，COOKIE_SECURE=false；恢复 HTTPS 后应移除该行。
+  printlink:
+    build:
+      context: ./apps/工程部/3D打印协同平台
+      dockerfile: Dockerfile
+    environment:
+      APP_MODE: production
+      HOST: 0.0.0.0
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: ${PRINTLINK_ADMIN_PASSWORD:?PRINTLINK_ADMIN_PASSWORD is required}
+      COOKIE_SECURE: "false"
+      BUSINESS_SYNC_STATION: ${BUSINESS_SYNC_STATION:-}
+    ports:
+      - "3100:3100"
+    volumes:
+      - printlink-data:/app/runtime
+    healthcheck:
+      test: ["CMD", "node", "ops/healthcheck.mjs"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    mem_limit: 768m
+    memswap_limit: 768m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - platform-net
+
   zouhuo:
     build:
       context: ./apps/工程部/A-doc生成系統
@@ -282,6 +343,7 @@ services:
       - PORT=3000
       - DATA_PATH=/app/data
       # 阿里云百炼 (Bailian/Qwen-VL) —— 图片订单识别用
+      - ERP_RECEIPT_RETURN_TOKEN=${PAIJI_ERP_RECEIPT_RETURN_TOKEN:-}
       - BAILIAN_API_KEY=${PAIJI_BAILIAN_API_KEY:-}
       - BAILIAN_BASE_URL=${PAIJI_BAILIAN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       - BAILIAN_VISION_MODEL=${PAIJI_BAILIAN_VISION_MODEL:-qwen-vl-max}
@@ -346,6 +408,7 @@ services:
       - TOYQMS_DATA_DIR=/app/data
       - TOYQMS_STATIC_DIR=/app/out
       - NODE_ENV=production
+      - SSO_SECRET=${SSO_SECRET:?SSO_SECRET is required}
     volumes:
       - ./apps/QA部/玩具质量管理系统/server-data:/app/data
     healthcheck:
@@ -355,6 +418,31 @@ services:
       retries: 3
     mem_limit: 512m
     memswap_limit: 512m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - platform-net
+
+  # ─── 品质集中门户（品制管理部）：Vite 静态构建 + nginx 托管，/portal/ 子路径 ───
+  # SSO_SECRET 在构建时注入前端包（门户在浏览器端签发 JWT），必须与各系统后端的 SSO_SECRET 一致；
+  # 更换 SSO_SECRET 后需要重新构建本镜像。
+  quality-portal:
+    build:
+      context: ./apps/品制管理部/品质集中门户
+      dockerfile: Dockerfile
+      args:
+        VITE_SSO_SECRET: ${SSO_SECRET:?SSO_SECRET is required}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:80/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    mem_limit: 256m
+    memswap_limit: 256m
     restart: unless-stopped
     logging:
       driver: json-file
@@ -410,6 +498,9 @@ services:
       - NODE_ENV=production
       # 阿里云百炼 (DashScope/Qwen-VL) — 送货单 AI 识别用；复用同一把 Bailian key
       - DASHSCOPE_API_KEY=${QC_BAILIAN_API_KEY:-}
+      - SSO_SECRET=${SSO_SECRET:?SSO_SECRET is required}
+      # Server-only, read-only credential for the factory-review inspection bridge.
+      - QC_INSPECTIONS_READ_TOKEN=${QC_INSPECTIONS_READ_TOKEN:-}
     volumes:
       - ./apps/生产部/品质管理系统/data:/app/data
     healthcheck:
@@ -699,6 +790,30 @@ services:
     networks:
       - platform-net
 
+  # 兴信大陆发票系统：浏览器本地处理文件，静态 Nginx 容器，无服务端业务数据。
+  xingxin-invoice:
+    build:
+      context: ./apps/业务部/兴信大陆发票系统
+      dockerfile: Dockerfile
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    mem_limit: 128m
+    memswap_limit: 128m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - platform-net
+
   tomy-paiqi:
     build:
       context: ./apps/业务部/TOMY排期核对系统
@@ -761,8 +876,8 @@ services:
       - TZ=Asia/Shanghai
       # OCR 走阿里云百炼 (Bailian) OpenAI 兼容端点 + 通义千问 VL
       - BAILIAN_API_KEY=${PEISE_BAILIAN_API_KEY:-}
-      # 注意: 阿里云已关闭 -latest 别名模型的访问权限(403 access_denied), 必须用稳定版模型名
-      - BAILIAN_MODEL=${PEISE_BAILIAN_MODEL:-qwen-vl-max}
+      # 使用已验证可访问的视觉模型；API Key 所属地域与模型权限需匹配
+      - BAILIAN_MODEL=${PEISE_BAILIAN_MODEL:-qwen3-vl-plus}
       - BAILIAN_BASE_URL=${PEISE_BAILIAN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       # 登录凭据(默认 ps/ps123456,改要改 .env.cloud 的 PEISE_AUTH_*)
       # SECRET_KEY 不传,app 会在 instance/.secret_key 自建并持久化
@@ -857,6 +972,13 @@ services:
       - FACTORY_REVIEW_ADMIN_PASSWORD=${FACTORY_REVIEW_ADMIN_PASSWORD:-}
       # 对车缝核价对比系统的只读集成 API 密钥；未设置时集成接口一律返回 401
       - INTEGRATION_API_KEY=${FACTORY_REVIEW_INTEGRATION_API_KEY:-}
+      - FACTORY_REVIEW_QMS_READ_TOKEN=${FACTORY_REVIEW_QMS_READ_TOKEN:-}
+      # AI remains disabled until a dedicated service/model/key is configured.
+      - FACTORY_REVIEW_AI_PROVIDER=${FACTORY_REVIEW_AI_PROVIDER:-openai}
+      - FACTORY_REVIEW_AI_ENABLED=${FACTORY_REVIEW_AI_ENABLED:-false}
+      - FACTORY_REVIEW_AI_API_KEY=${FACTORY_REVIEW_AI_API_KEY:-}
+      - FACTORY_REVIEW_AI_MODEL=${FACTORY_REVIEW_AI_MODEL:-}
+      - FACTORY_REVIEW_AI_BASE_URL=${FACTORY_REVIEW_AI_BASE_URL:-}
       - TZ=Asia/Shanghai
     volumes:
       - ./apps/PMC跟仓管/加工厂月度评审管理制度/pb_data:/pb/pb_data
@@ -890,6 +1012,12 @@ services:
       - FACTORY_REVIEW_ADMIN_PASSWORD=${FACTORY_REVIEW_ADMIN_PASSWORD:-}
       # 测试版不开集成 API（密钥留空，集成接口一律 401）
       - INTEGRATION_API_KEY=
+      - FACTORY_REVIEW_QMS_READ_TOKEN=${FACTORY_REVIEW_QMS_READ_TOKEN:-}
+      - FACTORY_REVIEW_AI_PROVIDER=${FACTORY_REVIEW_TEST_AI_PROVIDER:-openai}
+      - FACTORY_REVIEW_AI_ENABLED=${FACTORY_REVIEW_TEST_AI_ENABLED:-false}
+      - FACTORY_REVIEW_AI_API_KEY=${FACTORY_REVIEW_TEST_AI_API_KEY:-}
+      - FACTORY_REVIEW_AI_MODEL=${FACTORY_REVIEW_TEST_AI_MODEL:-}
+      - FACTORY_REVIEW_AI_BASE_URL=${FACTORY_REVIEW_TEST_AI_BASE_URL:-}
       - TZ=Asia/Shanghai
     volumes:
       - ./apps/PMC跟仓管/加工厂月度评审管理制度/pb_data_test:/pb/pb_data
@@ -1079,6 +1207,217 @@ services:
     networks:
       - platform-net
 
+  voyageplex-web:
+    build:
+      context: ./apps/船务部/VoyagePlex船务协同系统
+      dockerfile: Dockerfile.web
+      args:
+        NEXT_PUBLIC_BASE_PATH: /voyageplex
+    environment:
+      NEXT_PUBLIC_BASE_PATH: /voyageplex
+      VOYAGEPLEX_API_BASE_URL: http://voyageplex-api:5088
+      EMAIL_PARSER_BASE_URL: http://voyageplex-parser:8091
+      QC_SYSTEM_API_URL: ${QC_SYSTEM_API_URL:-http://qc-plan-api:5188/api/integrations/shipping/results}
+      QC_SYSTEM_API_TOKEN: ${QC_PLAN_SHIPPING_API_KEY:-}
+    volumes:
+      - ./apps/船务部/VoyagePlex船务协同系统/data-runtime:/app/data
+    depends_on:
+      voyageplex-api:
+        condition: service_healthy
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:3000/voyageplex/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - platform-net
+
+  voyageplex-api:
+    build:
+      context: ./apps/船务部/VoyagePlex船务协同系统
+      dockerfile: Dockerfile.api
+    environment:
+      ASPNETCORE_URLS: http://0.0.0.0:5088
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: Data Source=/app/data/voyageplex.db
+      EmailParser__BaseUrl: http://voyageplex-parser:8091
+      VOYAGEPLEX_HUADENG_MAILBOXES_JSON: ${VOYAGEPLEX_HUADENG_MAILBOXES_JSON:-}
+      SSO_SECRET: ${SSO_SECRET:?SSO_SECRET is required}
+    volumes:
+      - ./apps/船务部/VoyagePlex船务协同系统/data-runtime:/app/data
+    depends_on:
+      voyageplex-parser:
+        # parser 是辅助收信服务，API 对其不可用已有容错（poll 返回 configured:false
+        # 或同步记录错误后台重试）；service_healthy 会让 parser 不健康阻塞整个平台部署
+        condition: service_started
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:5088/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - platform-net
+
+  voyageplex-parser:
+    build:
+      context: ./apps/船务部/VoyagePlex船务协同系统/services/email-parser
+      dockerfile: Dockerfile
+    environment:
+      # 网易企业邮箱自动收信（IMAP 只读）。空值 = 未配置，/v1/mailbox/poll 返回 configured:false，
+      # 不影响其他解析功能；值由 deploy.yml 从 GitHub secret 同步进 .env.cloud.production
+      VOYAGEPLEX_MAIL_ADDRESS: ${VOYAGEPLEX_MAIL_ADDRESS:-}
+      VOYAGEPLEX_MAIL_AUTH_CODE: ${VOYAGEPLEX_MAIL_AUTH_CODE:-}
+      VOYAGEPLEX_MAIL_IMAP_HOST: ${VOYAGEPLEX_MAIL_IMAP_HOST:-imaphz.qiye.163.com}
+      VOYAGEPLEX_MAIL_FOLDER: ${VOYAGEPLEX_MAIL_FOLDER:-INBOX}
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health')"]
+      interval: 10s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - platform-net
+
+  # ─── QC 验货计划系统（QA部）：/qc-plan/ 子路径挂载，模式同 voyageplex ───
+  qc-plan-api:
+    build:
+      context: ./apps/QA部/QC验货计划系统
+      dockerfile: Dockerfile.api
+    environment:
+      QC_JWT_KEY: ${QC_PLAN_JWT_KEY:?QC_PLAN_JWT_KEY is required}
+      QC_SHIPPING_API_KEY: ${QC_PLAN_SHIPPING_API_KEY:?QC_PLAN_SHIPPING_API_KEY is required}
+      # 仅空库首次启动时创建 admin 账号；留空则不创建
+      QC_ADMIN_PASSWORD: ${QC_PLAN_ADMIN_PASSWORD:-}
+      ConnectionStrings__Default: Data Source=/data/qc-inspection.db
+      TZ: Asia/Shanghai
+    volumes:
+      - ./apps/QA部/QC验货计划系统/data:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:5188/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 768m
+    memswap_limit: 768m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - platform-net
+
+  qc-plan-web:
+    build:
+      context: ./apps/QA部/QC验货计划系统
+      dockerfile: Dockerfile.web
+      args:
+        NEXT_PUBLIC_BASE_PATH: /qc-plan
+        NEXT_PUBLIC_QC_API_URL: /qc-plan
+    depends_on:
+      qc-plan-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:3000/qc-plan"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 1g
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - platform-net
+
+  # ERP 生产管理系统（独立顶层系统，不属任何部门）：SQL Server + 迁移初始化 + 后端同源托管前端
+  erp-sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${ERP_SA_PASSWORD:?ERP_SA_PASSWORD is required}
+      # 限制 SQL Server 内存，避免挤占同机其他服务
+      MSSQL_MEMORY_LIMIT_MB: "1536"
+      TZ: Asia/Shanghai
+    volumes:
+      - ./apps/ERP/data/sqlserver:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S 127.0.0.1 -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -l 3 >/dev/null 2>&1 || /opt/mssql-tools/bin/sqlcmd -S 127.0.0.1 -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -l 3 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 90s
+    mem_limit: 2304m
+    memswap_limit: 2304m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - platform-net
+
+  erp-db-init:
+    build:
+      context: ./apps/ERP
+      dockerfile: Dockerfile.dbinit
+    environment:
+      ERP_DB: Server=erp-sqlserver,1433;Database=erp;User Id=sa;Password=${ERP_SA_PASSWORD:?ERP_SA_PASSWORD is required};TrustServerCertificate=True
+    depends_on:
+      erp-sqlserver:
+        condition: service_healthy
+    # 迁移脚本幂等，每次部署可重复执行；跑完即退出
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - platform-net
+
+  erp-api:
+    build:
+      context: ./apps/ERP
+      dockerfile: Dockerfile
+    environment:
+      ERP_DB: Server=erp-sqlserver,1433;Database=erp;User Id=sa;Password=${ERP_SA_PASSWORD:?ERP_SA_PASSWORD is required};TrustServerCertificate=True
+      ERP_JWT_KEY: ${ERP_JWT_KEY:?ERP_JWT_KEY is required}
+      ASPNETCORE_URLS: http://+:8080
+      ASPNETCORE_ENVIRONMENT: Production
+      TZ: Asia/Shanghai
+    volumes:
+      - ./apps/ERP/data/uploads:/app/wwwroot/uploads
+    depends_on:
+      erp-db-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: 768m
+    memswap_limit: 768m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - platform-net
+
 
 networks:
   platform-net:
@@ -1086,3 +1425,4 @@ networks:
 
 volumes:
   redis-data:
+  printlink-data:

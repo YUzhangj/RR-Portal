@@ -1,3 +1,4 @@
+const { quoteWriteRoute } = require('../services/quoteFreeze');
 const express = require('express');
 const db = require('../db');
 const { requireAuth, quoteAccess } = require('../middleware/auth');
@@ -5,8 +6,15 @@ const { expandEngineeringMolds } = require('../services/engineeringMolds');
 
 const router = express.Router();
 router.use(requireAuth);
+router.use(require('./mixedQuotes'));
 
 const DEPT_CODES = ['sales', 'engineering', 'electronic', 'molding', 'painting', 'slush', 'sewing', 'assembly'];
+const HIDE_IMPORTED_VERIFICATIONS = `AND NOT EXISTS (SELECT 1 FROM quote_verifications k WHERE k.quote_id=q.id AND k.origin='direct') AND NOT EXISTS (
+  SELECT 1 FROM quote_sections imported_section
+  WHERE imported_section.quote_id = q.id
+    AND imported_section.dept = 'sales'
+    AND imported_section.payload_json LIKE '%"legacy_import"%'
+)`;
 
 // GET /api/quotes  报价单列表（按 user_customers 过滤；admin 看全部）
 router.get('/', async (req, res) => {
@@ -18,9 +26,11 @@ router.get('/', async (req, res) => {
     rows = await db.prepare(`
       SELECT q.*, f.name_cn AS factory_name,
         (SELECT COUNT(*) FROM quote_sections s WHERE s.quote_id=q.id AND s.status='approved') AS approved_count,
-        COALESCE((SELECT c.status FROM quote_customer_confirmations c WHERE c.quote_id=q.id), 'pending') AS customer_confirmation_status
+        COALESCE((SELECT c.status FROM quote_customer_confirmations c WHERE c.quote_id=q.id), 'pending') AS customer_confirmation_status,
+        COALESCE((SELECT MAX(a.id) FROM audit_log a WHERE a.quote_id=q.id AND a.action IN ('customer_confirmation','customer_confirmation_revoke')), 0) AS confirmation_revision
       FROM quotes q JOIN factories f ON f.code = q.factory_code
       WHERE q.factory_code = ? AND q.deleted_at IS NULL
+        ${HIDE_IMPORTED_VERIFICATIONS}
       ORDER BY q.id DESC
     `).all(req.user.active_factory_code);
   } else {
@@ -32,9 +42,11 @@ router.get('/', async (req, res) => {
     rows = await db.prepare(`
       SELECT q.*, f.name_cn AS factory_name,
         (SELECT COUNT(*) FROM quote_sections s WHERE s.quote_id=q.id AND s.status='approved') AS approved_count,
-        COALESCE((SELECT c.status FROM quote_customer_confirmations c WHERE c.quote_id=q.id), 'pending') AS customer_confirmation_status
+        COALESCE((SELECT c.status FROM quote_customer_confirmations c WHERE c.quote_id=q.id), 'pending') AS customer_confirmation_status,
+        COALESCE((SELECT MAX(a.id) FROM audit_log a WHERE a.quote_id=q.id AND a.action IN ('customer_confirmation','customer_confirmation_revoke')), 0) AS confirmation_revision
       FROM quotes q JOIN factories f ON f.code = q.factory_code
       WHERE q.factory_code = ? AND q.deleted_at IS NULL AND q.customer IN (${placeholders})
+        ${HIDE_IMPORTED_VERIFICATIONS}
       ORDER BY q.id DESC
     `).all(req.user.active_factory_code, ...customers);
   }
@@ -121,6 +133,12 @@ router.post('/', async (req, res) => {
     const id = info.lastInsertRowid;
     const ins = db.prepare(`INSERT INTO quote_sections (quote_id, dept) VALUES (?, ?)`);
     for (const d of DEPT_CODES) await ins.run(id, d);
+    if (req.body.quote_type === 'mixed') {
+      const mixed_quote = { enabled: true, version: 1, mode: 'equal', units_per_pack: 1,
+        products: [] };
+      await db.prepare("UPDATE quote_sections SET payload_json = ? WHERE quote_id = ? AND dept = 'sales'")
+        .run(JSON.stringify({ mixed_quote }), id);
+    }
     await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action) VALUES (?, ?, ?, 'create')`)
       .run(id, req.user.dept, req.user.name);
     return id;
@@ -149,6 +167,13 @@ router.post('/:id/clone', async (req, res) => {
   if (acc.status !== 200) return res.status(acc.status).json({ error: acc.status === 404 ? '源报价单不存在' : '无权复制其他厂区的报价单' });
   const src = await db.prepare('SELECT * FROM quotes WHERE id = ? AND deleted_at IS NULL').get(srcId);
   if (!src) return res.status(404).json({ error: '源报价单不存在' });
+  const clonedCustomer = String(customer != null ? customer : src.customer || '').trim();
+  if (!clonedCustomer) return res.status(400).json({ error: '客户不能为空' });
+  if (req.user.role !== 'admin') {
+    const allowedCustomer = await db.prepare('SELECT 1 FROM user_customers WHERE user_id = ? AND customer = ?')
+      .get(req.user.id, clonedCustomer);
+    if (!allowedCustomer) return res.status(403).json({ error: '该客户不在当前账号的授权范围内' });
+  }
 
   const tx = db.transaction(async () => {
     const info = await db.prepare(`
@@ -157,7 +182,7 @@ router.post('/:id/clone', async (req, res) => {
     `).run(
       quote_no,
       product_name || src.product_name,
-      customer != null ? customer : src.customer,
+      clonedCustomer,
       qty != null ? qty : src.qty,
       version != null ? version : src.version,
       req.user.name,
@@ -170,11 +195,6 @@ router.post('/:id/clone', async (req, res) => {
     for (const s of srcSecs) await ins.run(newId, s.dept, s.payload_json || '{}');
     await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail) VALUES (?, 'sales', ?, 'clone', ?)`)
       .run(newId, req.user.name, `from #${srcId} (${src.quote_no})`);
-    const clonedCustomer = customer != null ? customer : src.customer;
-    if (clonedCustomer && req.user.role !== 'admin') {
-      await db.prepare('INSERT INTO user_customers (user_id, customer) VALUES (?, ?) ON CONFLICT DO NOTHING')
-        .run(req.user.id, clonedCustomer);
-    }
     return newId;
   });
 
@@ -208,7 +228,8 @@ router.delete('/:id', async (req, res) => {
 });
 
 // PUT /api/quotes/:id/header  修改表头（产品名/客户/数量）— 业务+工程可改
-router.put('/:id/header', async (req, res) => {
+router.put('/:id/header', quoteWriteRoute(db, req => Number(req.params.id), async (req, res) => {
+  if (!require('../middleware/auth').canEditDepartment(req.user, 'sales')) return res.status(403).json({ error: '没有报价基本资料的编辑权限' });
   if (!['sales', 'engineering'].includes(req.user.dept)) {
     return res.status(403).json({ error: '只有业务或工程可改表头' });
   }
@@ -247,7 +268,7 @@ router.put('/:id/header', async (req, res) => {
   await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail) VALUES (?, ?, ?, 'edit_header', ?)`)
     .run(id, req.user.dept, req.user.name, JSON.stringify(req.body || {}));
   res.json({ ok: true });
-});
+}));
 
 // GET /api/quotes/:id  报价单详情 + 所有 section（按可见性过滤）
 router.get('/:id', async (req, res) => {
@@ -302,7 +323,16 @@ router.get('/:id', async (req, res) => {
     } catch {}
   }
 
-  res.json({ quote, sections: filtered, engineering_molds });
+  const quote_locked = await require('../services/quoteFreeze').quoteFrozen(db,id);
+  const mixed_quote = require('../services/mixedQuotation').getConfig(sections);
+  const salesHeader = JSON.parse(sections.find(s => s.dept === 'sales')?.payload_json || '{}').header || {};
+  const quotation_rates = { fx_rmb_hkd: salesHeader.fx_rmb_hkd ?? .85, fx_hkd_usd: salesHeader.fx_hkd_usd ?? 7.8 };
+  const engPayload = JSON.parse(engSection?.payload_json || '{}');
+  const mixed_engineering_molds = mixed_quote?.enabled ? Object.fromEntries([
+    ...mixed_quote.products.map(p => [p.id, expandEngineeringMolds(engPayload.mixed_products?.[p.id]?.molds)]),
+    ['__shared__', expandEngineeringMolds(engPayload.mixed_shared?.molds)],
+  ]) : {};
+  res.json({ quote_locked, quote, sections: filtered, engineering_molds, mixed_quote, mixed_engineering_molds, quotation_rates });
 });
 
 // GET /api/quotes/:id/audit-log  返回该报价单全部动作时间线（最新在前）

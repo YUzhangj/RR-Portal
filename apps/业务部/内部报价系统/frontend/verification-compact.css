@@ -2,6 +2,7 @@
 .verification-ledger-page:has(#verification-list:not(.hidden)){padding:12px 14px;gap:0}
 .verification-tools{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;margin-bottom:8px;flex:0 0 auto;min-width:0}
 .verification-tools>.card,.verification-tools .card{margin:0;min-width:0}
+.verification-tools>#verification-transfer{padding:0;align-self:start}
 .verification-tools #verification-transfer[hidden]{display:none!important}
 .verification-tools details>summary{display:flex;flex-direction:row;justify-content:flex-start;align-items:center;gap:10px;box-sizing:border-box;min-height:42px;padding:9px 12px;list-style:none;cursor:pointer}
 .verification-tools details>summary::-webkit-details-marker{display:none}
@@ -31,7 +32,7 @@
 #verification-list .verification-toolbar input,#verification-list .verification-toolbar select{min-height:34px;padding:6px 9px}
 #verification-list #workshop-assignment{padding:8px 12px!important;gap:8px!important}
 @media(min-width:1000px){
- .verification-tools:has(#verification-transfer:not([hidden])){grid-template-columns:auto minmax(0,1fr)}
+ .verification-tools:has(#verification-transfer:not([hidden])):not(:has(details[open])){grid-template-columns:auto minmax(0,1fr)}
  .verification-tools:has(details[open]){grid-template-columns:minmax(0,1fr)}
 }
 @media(min-width:761px){

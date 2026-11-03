@@ -11,6 +11,60 @@
   var aiStatus = null;
   var statusPromise = null;
   var patchTimer = null;
+  var activeOperation = null;
+
+  function imageApi() { return window.__QC_OCR_IMAGE; }
+  function stillCurrent(op) {
+    return activeOperation === op && imageApi() && imageApi().current(op.snapshot);
+  }
+  function controlsBusy(busy) {
+    ['btnStartOcr', 'btnRotateOcr', 'btnApplyOcrToForm'].forEach(function (id) {
+      var button = document.getElementById(id);
+      if (button) button.disabled = busy;
+    });
+  }
+  function cancelOperation() {
+    var previous = activeOperation;
+    activeOperation = null;
+    if (previous && previous.controller) previous.controller.abort();
+    controlsBusy(false);
+  }
+  window.__QC_OCR_CANCEL = cancelOperation;
+
+  function beginOperation() {
+    if (activeOperation && stillCurrent(activeOperation)) return null;
+    cancelOperation();
+    var snapshot = imageApi() && imageApi().snapshot();
+    if (!snapshot) { toast('请先上传图片', 'error'); return null; }
+    if (!window.__QC_AUTH) { toast('请先登录当前公司的品质账号', 'error'); return null; }
+    var op = { snapshot: snapshot,
+      controller: typeof AbortController === 'function' ? new AbortController() : null };
+    activeOperation = op;
+    controlsBusy(true);
+    return op;
+  }
+  function endOperation(op) {
+    if (activeOperation === op) { activeOperation = null; controlsBusy(false); }
+  }
+  function obsolete() { var e = new Error('图片或登录已改变'); e.name = 'AbortError'; return e; }
+  function requireCurrent(op) { if (!stillCurrent(op)) throw obsolete(); }
+
+  function actorContext() {
+    var auth = window.__QC_AUTH;
+    return { authenticated: !!auth, username: auth && auth.user && auth.user.username,
+      csrfToken: auth && auth.csrfToken, authCompany: auth && auth.company, company: window.__QC_COMPANY };
+  }
+  function sameActor(context) {
+    var current = actorContext();
+    return !context || ['authenticated','username','csrfToken','authCompany','company'].every(function (key) { return context[key] === current[key]; });
+  }
+  function canSaveOcr(context) {
+    if (sameActor(context)) return true;
+    toast('登录或公司已改变，旧 OCR 资料已暂停，请用原身份重新核对后录入', 'error');
+    return false;
+  }
+  window.__QC_OCR_CAN_SAVE = canSaveOcr;
+
 
   var API_BASE = (function () {
     var p = location.pathname.replace(/[^/]*$/, '');
@@ -31,20 +85,30 @@
     if (typeof window.showToast === 'function') window.showToast(msg, type || 'info');
   }
 
-  function checkAiStatus(force) {
+  /* 识别出的公司全称 → 名单简称（app.js 提供 matchManagedName） */
+  function canonName(type, v) {
+    if (!v) return v;
+    return (typeof window.matchManagedName === 'function') ? window.matchManagedName(type, v) : v;
+  }
+
+  function checkAiStatus(force, op) {
+    if (!window.__QC_AUTH || typeof window.__QC_REQUEST !== 'function') return Promise.resolve(false);
     if (statusPromise && !force) return statusPromise;
-    statusPromise = fetch(API_BASE + '/api/ai/status', { cache: 'no-store' })
+    var actor = actorContext();
+    statusPromise = window.__QC_REQUEST('/api/ai/status', op && op.controller ? { signal: op.controller.signal } : undefined)
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
       })
       .then(function (s) {
+        if (!sameActor(actor) || (op && !stillCurrent(op))) return false;
         aiStatus = s || {};
         aiReady = !!(s && s.ready);
         updateHint();
         return aiReady;
       })
       .catch(function (err) {
+        if (!sameActor(actor) || (op && !stillCurrent(op))) return false;
         aiStatus = { ready: false, error: err && err.message };
         aiReady = false;
         updateHint();
@@ -55,7 +119,7 @@
 
   function updateHint() {
     var el = document.getElementById('ocrStatus');
-    if (!el) return;
+    if (!el || activeOperation) return;
     var text = el.textContent || '';
     if (!text || text === '未上传图片' || text.indexOf('AI OCR') === 0 || text.indexOf('本地 OCR') === 0) {
       el.textContent = aiReady
@@ -64,46 +128,70 @@
     }
   }
 
-  function shrinkDataUrl(dataUrl, maxEdge) {
-    return new Promise(function (resolve) {
+  /* 每个候选都从不可变原图生成，画布最多 2000 × 2000，失败不冒充旋转成功。 */
+  function renderImage(dataUrl, angle, op) {
+    return new Promise(function (resolve, reject) {
+      var timer;
+      function fail(error) { clearTimeout(timer); reject(error); }
       try {
+        if (!/^data:image\/(?:png|jpe?g|webp);base64,[A-Za-z0-9+/]+={0,2}$/i.test(dataUrl) || dataUrl.length > 14 * 1024 * 1024) {
+          throw new Error('图片编码无效或过大，请重新上传');
+        }
         var img = new Image();
+        timer = setTimeout(function () { fail(new Error('图片解码超时，请重新上传')); }, 15000);
         img.onload = function () {
-          var w = img.width;
-          var h = img.height;
-          var long = Math.max(w, h);
-          if (long <= maxEdge) {
-            resolve(dataUrl);
-            return;
-          }
-          var scale = maxEdge / long;
-          var cv = document.createElement('canvas');
-          cv.width = Math.round(w * scale);
-          cv.height = Math.round(h * scale);
-          cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
-          resolve(cv.toDataURL('image/jpeg', 0.9));
+          try {
+            requireCurrent(op);
+            var w = img.naturalWidth === undefined ? img.width : img.naturalWidth;
+            var h = img.naturalHeight === undefined ? img.height : img.naturalHeight;
+            if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) throw new Error('图片尺寸无效');
+            var scale = Math.min(1, 2000 / Math.max(w, h));
+            var sw = Math.max(1, Math.round(w * scale)), sh = Math.max(1, Math.round(h * scale));
+            var d = ((angle % 360) + 360) % 360;
+            if ([0, 90, 180, 270].indexOf(d) === -1) throw new Error('图片旋转方向无效');
+            var cv = document.createElement('canvas');
+            cv.width = d === 90 || d === 270 ? sh : sw;
+            cv.height = d === 90 || d === 270 ? sw : sh;
+            var ctx = cv.getContext('2d');
+            if (!ctx) throw new Error('浏览器无法处理图片');
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(0, 0, cv.width, cv.height);
+            ctx.translate(cv.width / 2, cv.height / 2);
+            ctx.rotate(d * Math.PI / 180);
+            ctx.drawImage(img, -sw / 2, -sh / 2, sw, sh);
+            var result = cv.toDataURL('image/jpeg', 0.92);
+            if (!/^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/i.test(result) || result.length > 14 * 1024 * 1024) throw new Error('图片处理失败，请重新上传');
+            clearTimeout(timer);
+            resolve(result);
+          } catch (error) { fail(error); }
         };
-        img.onerror = function () { resolve(dataUrl); };
+        img.onerror = function () { fail(new Error('图片解码失败，请重新上传')); };
         img.src = dataUrl;
-      } catch (e) {
-        resolve(dataUrl);
-      }
+      } catch (error) { fail(error); }
     });
   }
 
   function applyFields(fields) {
     fields = fields || {};
+    if (fields.supplier) {
+      var matched = canonName('supplier', fields.supplier);
+      if (matched !== fields.supplier) {
+        toast('供应商全称已自动匹配为名单中的「' + matched + '」', 'info');
+        fields.supplier = matched;
+      }
+    }
     var items = Array.isArray(fields.items) ? fields.items : [];
     var first = items[0] || {};
 
-    if (fields.date) setV('ocrDate', fields.date);
-    if (fields.supplier) setV('ocrSupplier', fields.supplier);
-    if (fields.deliveryNo) setV('ocrDeliveryNo', fields.deliveryNo);
-    if (fields.orderNo) setV('ocrOrderNo', fields.orderNo);
-    if (fields.type) setV('ocrType', fields.type || '来料');
-    if (first.productNo) setV('ocrProductNo', first.productNo);
-    if (first.productName) setV('ocrProductName', first.productName);
-    if (first.qty) setV('ocrQty', String(first.qty).replace(/[^\d.]/g, ''));
+    /* 每次识别整组替换；缺失字段不能继承上一张图片的日期、货号或PO。 */
+    setV('ocrDate', fields.date || '');
+    setV('ocrSupplier', fields.supplier || '');
+    setV('ocrDeliveryNo', fields.deliveryNo || '');
+    setV('ocrOrderNo', fields.orderNo || '');
+    setV('ocrType', fields.type || '来料');
+    setV('ocrProductNo', first.productNo || '');
+    setV('ocrProductName', first.productName || '');
+    setV('ocrQty', String(first.qty == null ? '' : first.qty).replace(/[^\d.]/g, ''));
 
     var lines = [];
     if (fields.supplier) lines.push('供应商：' + fields.supplier);
@@ -138,73 +226,111 @@
     return items.length;
   }
 
-  function aiStartOcr() {
-    var imgEl = document.getElementById('ocrPreview');
-    var dataUrl = imgEl && imgEl.src && imgEl.src.indexOf('data:image') === 0 ? imgEl.src : '';
-    if (!dataUrl) {
-      toast('请先上传图片', 'error');
-      return Promise.resolve();
-    }
+  function usableItems(fields) {
+    return fields && Array.isArray(fields.items) && fields.items.length > 0 && fields.items.every(function (item) {
+      return item && typeof item === 'object' &&
+        (item.quantityNeedsReview === true || String(item.productNo || '').trim() ||
+         String(item.productName || '').trim() || String(item.qty == null ? '' : item.qty).trim());
+    });
+  }
 
-    var btn = document.getElementById('btnStartOcr');
-    if (btn) btn.disabled = true;
-    setT('ocrStatus', 'AI 识别中，请稍候...');
-    window.__qcAiResult = null;
-
-    return shrinkDataUrl(dataUrl, 2000)
-      .then(function (small) {
-        return fetch(API_BASE + '/api/ai/ocr-extract', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+  function aiStartOcr(op) {
+    var baseAngle = op.snapshot.angle;
+    var attempted = [baseAngle], candidates = null;
+    function attempt(angle) {
+      requireCurrent(op);
+      return renderImage(op.snapshot.original, angle, op).then(function (small) {
+        requireCurrent(op);
+        return window.__QC_REQUEST('/api/ai/ocr-extract', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ image: small }),
+          signal: op.controller ? op.controller.signal : undefined,
+        }).then(function (response) {
+          return response.json().catch(function () { return {}; }).then(function (body) {
+            requireCurrent(op);
+            if (!response.ok || !body || !body.ok) throw new Error((body && body.error) || ('HTTP ' + response.status));
+            if (!usableItems(body.fields)) {
+              if ([90, 180, 270].indexOf(body.needRotate) !== -1 && !candidates) {
+                var correction = body.needRotate === 180 ? 180 : (body.needRotate === 270 ? 90 : 270);
+                candidates = [(baseAngle + correction) % 360];
+                if (correction !== 180) candidates.push((baseAngle + 360 - correction) % 360);
+              }
+              var next = candidates && candidates.find(function (candidate) { return attempted.indexOf(candidate) === -1; });
+              if (next !== undefined && next !== null) {
+                attempted.push(next);
+                setT('ocrStatus', '检测到图片旋转，自动转正重试（第 ' + (attempted.length - 1) + ' 次）...');
+                return attempt(next);
+              }
+              throw new Error('未识别到货品明细，请核对图片方向或手动录入；原有更正已保留');
+            }
+            var committed = imageApi().commit(op.snapshot, small, angle);
+            if (!committed) throw obsolete();
+            op.snapshot = committed;
+            var n = applyFields(body.fields);
+            window.__qcOcrResultContext = committed;
+            if (body.rawText) setV('ocrRawText', body.rawText);
+            var manual = body.needsManualReview || body.fields.items.some(function (item) { return item && item.quantityNeedsReview; });
+            setT('ocrStatus', manual ? '识别结果需要人工核对，请逐行确认数量后保存' :
+              'AI 识别完成' + (n > 1 ? ('（共 ' + n + ' 行货品，已填第 1 行）') : ''));
+            toast(manual ? '原文已保留，请人工核对货品与数量' :
+              (n > 1 ? ('识别完成，共 ' + n + ' 行，已填第 1 行') : 'AI 识别完成，请核对字段'), manual ? 'info' : 'success');
+          });
         });
-      })
-      .then(function (r) {
-        return r.json().catch(function () { return {}; }).then(function (j) {
-          return { ok: r.ok, status: r.status, j: j };
-        });
-      })
-      .then(function (res) {
-        if (!res.ok || !res.j || !res.j.ok) {
-          throw new Error((res.j && res.j.error) || ('HTTP ' + res.status));
-        }
-        var n = applyFields(res.j.fields || {});
-        setT('ocrStatus', 'AI 识别完成' + (n > 1 ? ('（共 ' + n + ' 行货品，已填第 1 行）') : ''));
-        toast(n > 1 ? ('识别完成，共 ' + n + ' 行，已填第 1 行') : 'AI 识别完成，请核对字段', 'success');
-      })
-      .catch(function (err) {
-        var msg = err && err.message ? err.message : '未知错误';
-        console.warn('[AI-OCR]', msg, err);
-        setT('ocrStatus', 'AI 识别失败：' + msg);
-        toast('AI 识别失败：' + msg, 'error');
-      })
-      .finally(function () {
-        if (btn) btn.disabled = false;
       });
+    }
+    setT('ocrStatus', 'AI 识别中，请稍候...');
+    return attempt(baseAngle);
+  }
+
+  function operationFailure(op, error, prefix) {
+    if (!stillCurrent(op) || error && error.name === 'AbortError') return;
+    var msg = error && error.message ? error.message : '未知错误';
+    setT('ocrStatus', prefix + '：' + msg);
+    toast(prefix + '：' + msg, 'error');
+  }
+
+  function manualRotate() {
+    var op = beginOperation();
+    if (!op) return Promise.resolve();
+    var angle = (op.snapshot.angle + 90) % 360;
+    setT('ocrStatus', '正在旋转图片...');
+    return renderImage(op.snapshot.original, angle, op).then(function (dataUrl) {
+      requireCurrent(op);
+      var committed = imageApi().commit(op.snapshot, dataUrl, angle);
+      if (!committed) throw obsolete();
+      op.snapshot = committed;
+      setT('ocrStatus', '图片已旋转 90°，点击"开始识别"重新识别');
+    }).catch(function (error) { operationFailure(op, error, '图片旋转失败'); })
+      .finally(function () { endOperation(op); });
   }
 
   function loadQueueItem(q) {
     if (!q || q.idx >= q.items.length) return;
+    if (!canSaveOcr(q.context)) return false;
     var it = q.items[q.idx];
     var c = q.common || {};
     if (typeof window.openAddModal === 'function') window.openAddModal();
-    setV('f_date', c.date || '');
+    window.__qcOcrFormContext = q.context;
+    /* 公共日期为空时回退今天（openAddModal 的默认值），不要把今天清成空 */
+    var date = String(c.date || '').trim();
+    if (date) setV('f_date', date);
     setV('f_supplier', c.supplier || '');
     setV('f_deliveryNo', c.deliveryNo || '');
-    setV('f_orderNo', c.orderNo || '');
+    setV('f_orderNo', it.orderNo || c.orderNo || '');   /* 多 PO 单：用本条自己的 PO 号 */
     if (c.type) setV('f_type', c.type);
     setV('f_productNo', it.productNo || '');
     setV('f_productName', it.productName || '');
     setV('f_qty', String(it.qty == null ? '' : it.qty).replace(/[^\d.]/g, ''));
+    if (typeof window._markOcrQuantity === 'function') window._markOcrQuantity(it.quantityNeedsReview ? '待核对' : it.qty);
     if (typeof window.onQtyChange === 'function') window.onQtyChange();
     if (typeof window.onProductNoChange === 'function') window.onProductNoChange();
     setT('modalTitle', '新增验货记录（第 ' + (q.idx + 1) + '/' + q.items.length + ' 条）');
   }
 
   function startQueue(common, items) {
-    window.__qcQueue = { common: common, items: items, idx: 0 };
-    loadQueueItem(window.__qcQueue);
+    window.__qcQueue = { common: common, items: items, idx: 0, context: actorContext() };
     toast('共 ' + items.length + ' 条货品，逐条录入', 'info');
+    loadQueueItem(window.__qcQueue);
   }
 
   function runOriginalOcr() {
@@ -213,11 +339,16 @@
   }
 
   function aiDispatch() {
-    return checkAiStatus(true).then(function (ready) {
-      if (ready) return aiStartOcr();
+    var op = beginOperation();
+    if (!op) return Promise.resolve();
+    setT('ocrStatus', '正在检查识别服务...');
+    return checkAiStatus(true, op).then(function (ready) {
+      requireCurrent(op);
+      if (ready) return aiStartOcr(op);
       setT('ocrStatus', 'AI OCR 未就绪，正在改用本地 OCR...');
       return runOriginalOcr();
-    });
+    }).catch(function (error) { operationFailure(op, error, 'AI 识别失败'); })
+      .finally(function () { endOperation(op); });
   }
 
   function patch() {
@@ -236,12 +367,48 @@
       btn.__qcAiClickPatched = true;
     }
 
+    /* 手动旋转按钮：横拍/倒置的单据转正后再识别 */
+    var rotBtn = document.getElementById('btnRotateOcr');
+    if (rotBtn && !rotBtn.__qcRotPatched) {
+      rotBtn.addEventListener('click', function (e) {
+        e.preventDefault();
+        return manualRotate();
+      });
+      rotBtn.__qcRotPatched = true;
+    }
+
     if (typeof window.applyOcrToForm === 'function' && !window.applyOcrToForm.__qcWrapped) {
       var origApply = window.applyOcrToForm;
       window.applyOcrToForm = function () {
+        if (activeOperation && stillCurrent(activeOperation)) { toast('请等待图片处理完成后再应用', 'info'); return false; }
+        var context = window.__qcOcrResultContext;
+        var current = imageApi() && imageApi().snapshot();
+        if (context && (!current || context.original !== current.original || !sameActor(context.actor))) {
+          toast('图片或登录已改变，请重新识别后应用', 'error'); return false;
+        }
         var r = window.__qcAiResult;
+        if (!r && ['ocrDate','ocrSupplier','ocrProductNo','ocrProductName','ocrDeliveryNo','ocrOrderNo','ocrQty','ocrType','ocrRemark'].every(function (id) {
+          var input = document.getElementById(id);
+          return !input || !String(input.value || '').trim();
+        })) { toast('尚无可应用的识别结果，请先识别或填写核对字段', 'info'); return false; }
         if (r && r.items && r.items.length > 1) return startQueue(r.common, r.items);
-        return origApply.apply(this, arguments);
+        var ret = origApply.apply(this, arguments);
+        window.__qcOcrFormContext = actorContext();
+        /* number 输入可能把多点原文清空，仍以原识别值标记待人工核对。 */
+        if (r && r.items && r.items.length === 1 && typeof window._markOcrQuantity === 'function') {
+          var quantity = r.items[0].quantityNeedsReview ? '待核对' : r.items[0].qty;
+          var previewQty = document.getElementById('ocrQty');
+          if (r.items[0].quantityNeedsReview) {
+            var previewNo = document.getElementById('ocrProductNo');
+            var previewOrder = document.getElementById('ocrOrderNo');
+            setV('f_productNo', previewNo ? previewNo.value : '');
+            setV('f_orderNo', previewOrder ? previewOrder.value : '');
+            if (typeof window._syncOrderNoNA === 'function') window._syncOrderNoNA();
+          }
+          if (quantity && typeof window._isIntegerCountText === 'function' && !window._isIntegerCountText(String(quantity)) && !(previewQty && previewQty.value.trim())) setV('f_qty', '');
+          window._markOcrQuantity(quantity);
+        }
+        return ret;
       };
       window.applyOcrToForm.__qcWrapped = true;
     }
@@ -250,17 +417,25 @@
       var origSave = window.saveRecord;
       window.saveRecord = function () {
         var q = window.__qcQueue;
-        var overlay = document.getElementById('modalOverlay');
+        var context = window.__qcOcrFormContext || q && q.context;
+        if (!canSaveOcr(context)) return false;
         var ret = origSave.apply(this, arguments);
-        if (q && overlay && !overlay.classList.contains('show')) {
-          q.idx++;
-          if (q.idx < q.items.length) {
-            window.__qcQueue = q;
-            loadQueueItem(q);
-          } else {
-            window.__qcQueue = null;
-            toast(q.items.length + ' 条货品已全部录入完成', 'success');
-          }
+        /* 普通保存可能已关闭弹窗并清理全局状态，仍核对保存前捕获的身份。 */
+        if (!sameActor(context)) {
+          if (q) window.__qcQueue = q;
+          window.__qcOcrFormContext = context;
+          canSaveOcr(context);
+          return false;
+        }
+        /* 两种保存按钮共用明确的保存结果；校验取消或本地写入失败时保留当前项。 */
+        if (!q || ret !== true) return ret;
+        q.idx++;
+        if (q.idx < q.items.length) {
+          window.__qcQueue = q;
+          loadQueueItem(q);
+        } else {
+          window.__qcQueue = null;
+          toast(q.items.length + ' 条货品已在本地录入，等待服务器同步', 'info');
         }
         return ret;
       };
@@ -272,6 +447,7 @@
       window.closeModalDirect = function () {
         var ret = origClose.apply(this, arguments);
         window.__qcQueue = null;
+        window.__qcOcrFormContext = null;
         return ret;
       };
       window.closeModalDirect.__qcQueueWrapped = true;

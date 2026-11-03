@@ -1,0 +1,286 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { mount, flushPromises } from '@vue/test-utils'
+const mocks=vi.hoisted(()=>({send:vi.fn(),changed:null as any,record:{id:'u'} as any}))
+vi.mock('../src/pb',()=>({pb:{send:mocks.send,authStore:{get record(){return mocks.record},onChange:(cb:any)=>{mocks.changed=cb;return ()=>{}}}}}))
+vi.mock('../src/stores/auth',()=>({useAuthStore:()=>({role:'admin'})}))
+import AnalysisAiPanel from '../src/components/AnalysisAiPanel.vue'
+const response={report:{summary:'需要核实',findings:[{title:'风险',risk:'medium',analysis:'有待核实',actions:['复查'],evidence_ids:['quality_patrols:p']}],limitations:['缺少产能']},evidence:[{id:'quality_patrols:p',factoryId:'f',factoryCode:'F1',factoryName:'工厂',source:'quality_patrols',recordId:'p',date:'2026-10-16',craft:'assembly',region:'hunan'}],coverage:[],model:'test-model',start:'2026-10-01',end:'2026-10-20',generatedAt:'2026-10-20T00:00:00Z'}
+const mountPanel=()=>mount(AnalysisAiPanel,{props:{factories:[]},global:{stubs:{RouterLink:{props:['to'],template:'<a><slot /></a>'}}}})
+beforeEach(()=>{vi.clearAllMocks();mocks.record={id:'u'};mocks.send.mockImplementation(async(path:string,options:any)=>path.endsWith('/config')?{enabled:true,model:'test-model',reason:'',dailyLimit:20}:options?.body?.preview?{total:5,limit:500,orderDateBasis:options.body.orderDateBasis,coverage:[{source:'订单',count:5,status:'已读取'}]}:response)})
+describe('AI analysis interaction',()=>{
+  it('does not issue a paid request without configuration and shows the admin entry',async()=>{
+    mocks.send.mockResolvedValue({enabled:false,model:'',reason:'AI服务尚未启用',dailyLimit:20})
+    const w=mountPanel();await flushPromises();expect(w.find('button.primary').attributes('disabled')).toBeDefined();expect(w.text()).toContain('AI服务配置入口');expect(mocks.send).toHaveBeenCalledTimes(1);w.unmount()
+  })
+  it('requires an explicit click, renders evidence and clears stale answers on scope changes',async()=>{
+    const w=mountPanel();await flushPromises();expect(mocks.send).toHaveBeenCalledTimes(1)
+    await w.find('button.primary').trigger('click');await flushPromises();expect(w.text()).toContain('F1＝工厂');expect(w.text()).toContain('缺少产能');expect(w.findAll('article a')).toHaveLength(1)
+    expect(mocks.send.mock.calls[1]![1].body).not.toHaveProperty('records')
+    await w.find('textarea').setValue('其他分析问题');expect(w.find('.result').exists()).toBe(false);w.unmount()
+  })
+  it('keeps configuration loading independent from edits to the analysis question',async()=>{
+    let resolve!:(value:any)=>void;mocks.send.mockImplementation(()=>new Promise(r=>resolve=r))
+    const w=mountPanel();await w.find('textarea').setValue('正在输入分析问题')
+    resolve({enabled:true,model:'test-model',reason:'',dailyLimit:20});await flushPromises()
+    expect(w.find('button.primary').attributes('disabled')).toBeUndefined();expect(mocks.send).toHaveBeenCalledTimes(1);w.unmount()
+  })
+  it('shows server failures and never substitutes a fake AI conclusion',async()=>{
+    mocks.send.mockImplementation(async(path:string)=>{if(path.endsWith('/config'))return {enabled:true,model:'test-model',reason:'',dailyLimit:20};throw {response:{message:'AI服务暂不可用'}}})
+    const w=mountPanel();await flushPromises();await w.find('button.primary').trigger('click');await flushPromises();expect(w.find('[role=alert]').text()).toContain('AI服务暂不可用');expect(w.find('.result').exists()).toBe(false);w.unmount()
+  })
+  it('discards a pending answer after authorization changes',async()=>{
+    let resolve!:(value:any)=>void;mocks.send.mockImplementation((path:string)=>path.endsWith('/config')?Promise.resolve({enabled:true,model:'test-model',reason:'',dailyLimit:20}):new Promise(r=>resolve=r))
+    const w=mountPanel();await flushPromises();await w.find('button.primary').trigger('click');mocks.changed();resolve(response);await flushPromises();expect(w.find('.result').exists()).toBe(false);w.unmount()
+  })
+})
+
+it('replaces opaque server errors with actionable Chinese guidance',async()=>{
+ mocks.send.mockImplementation(async(path:string)=>{if(path.endsWith('/config'))return {enabled:true,model:'test-model',reason:'',dailyLimit:20};throw {response:{message:'Something went wrong while processing your request.'}}})
+ const w=mountPanel();await flushPromises();await w.find('button.primary').trigger('click');await flushPromises()
+ expect(w.text()).toContain('请稍后重试')
+ expect(w.text()).not.toContain('Something went wrong')
+ w.unmount()
+})
+
+it('retries a transient config failure once and recovers without retaining the old error',async()=>{
+ mocks.send.mockRejectedValueOnce({status:503}).mockResolvedValueOnce({enabled:true,model:'qwen3-max',reason:'',dailyLimit:20})
+ const w=mountPanel();await flushPromises()
+ expect(mocks.send).toHaveBeenCalledTimes(2);expect(w.find('header').text()).toContain('服务已配置');expect(w.find('[role=alert]').exists()).toBe(false)
+ expect(mocks.send.mock.calls.every(c=>c[0].endsWith('/config'))).toBe(true);w.unmount()
+})
+it('shows login expiry without retrying or misreporting missing model configuration',async()=>{
+ mocks.send.mockRejectedValue({status:401})
+ const w=mountPanel();await flushPromises()
+ expect(mocks.send).toHaveBeenCalledTimes(1);expect(w.find('[role=alert]').text()).toContain('登录状态已失效');expect(w.find('header').text()).toContain('配置状态未知')
+ await w.find('textarea').setValue('新问题');expect(w.text()).toContain('登录状态已失效');w.unmount()
+})
+it('clears config error after manual retry succeeds',async()=>{
+ mocks.send.mockRejectedValue({status:403})
+ const w=mountPanel();await flushPromises();expect(w.text()).toContain('当前账号无AI分析权限')
+ mocks.send.mockResolvedValue({enabled:true,model:'qwen3-max',reason:'',dailyLimit:20})
+ await w.find('[role=alert] button').trigger('click');await flushPromises()
+ expect(w.find('[role=alert]').exists()).toBe(false);expect(w.find('button.primary').attributes('disabled')).toBeUndefined();w.unmount()
+})
+it('rejects HTML or malformed successful responses instead of displaying unconfigured service',async()=>{
+ mocks.send.mockResolvedValue('<html>proxy fallback</html>')
+ const w=mountPanel();await flushPromises();expect(w.text()).toContain('接口返回格式异常');expect(w.find('button.primary').attributes('disabled')).toBeDefined();w.unmount()
+})
+it('bounds stalled config requests and cancels them on unmount',async()=>{
+ vi.useFakeTimers()
+ mocks.send.mockImplementation((_path,options)=>new Promise((_resolve,reject)=>options.signal.addEventListener('abort',()=>reject({status:0,isAbort:true}))))
+ const w=mountPanel();await vi.advanceTimersByTimeAsync(10000)
+ expect(w.text()).toContain('请求超时或网络连接失败');expect(mocks.send).toHaveBeenCalledTimes(1)
+ w.unmount();expect(vi.getTimerCount()).toBe(0);vi.useRealTimers()
+})
+
+
+it('discards a late config response after switching accounts and preserves the new account config',async()=>{
+ let resolveOld!:(value:any)=>void
+ mocks.send.mockImplementationOnce(()=>new Promise(resolve=>{resolveOld=resolve}))
+ const w=mountPanel();await flushPromises()
+ const oldSignal=mocks.send.mock.calls[0]![1].signal as AbortSignal
+ mocks.record={id:'other-user'};mocks.changed();await flushPromises()
+ expect(oldSignal.aborted).toBe(true);expect(mocks.send).toHaveBeenCalledTimes(2)
+ expect(w.find('header').text()).toContain('服务已配置')
+ resolveOld({enabled:false,model:'old-user-model',reason:'旧账号未启用',dailyLimit:20});await flushPromises()
+ expect(w.text()).not.toContain('旧账号未启用')
+ expect(w.find('button.primary').attributes('disabled')).toBeUndefined()
+ expect(mocks.send.mock.calls.every(call=>call[0].endsWith('/config')&&call[1].method==='GET')).toBe(true)
+ w.unmount()
+})
+
+it('cancels a genuinely pending config request on unmount without retrying or leaving a timer',async()=>{
+ vi.useFakeTimers()
+ try {
+  mocks.send.mockImplementation((_path,options)=>new Promise((_resolve,reject)=>options.signal.addEventListener('abort',()=>reject({status:0,isAbort:true}))))
+  const w=mountPanel();await flushPromises()
+  const signal=mocks.send.mock.calls[0]![1].signal as AbortSignal
+  expect(signal.aborted).toBe(false);expect(vi.getTimerCount()).toBe(1)
+  w.unmount();await flushPromises()
+  expect(signal.aborted).toBe(true);expect(vi.getTimerCount()).toBe(0)
+  await vi.advanceTimersByTimeAsync(20000);expect(mocks.send).toHaveBeenCalledTimes(1)
+ } finally {vi.useRealTimers()}
+})
+
+it.each([
+ [403,'当前账号无AI分析权限',1],
+ [404,'AI配置接口不存在',1],
+ [429,'配置查询过于频繁',1],
+ [503,'AI配置服务暂不可用',2],
+ [0,'AI配置请求超时或网络连接失败',2],
+])('classifies config failure %s without reporting unconfigured or retrying beyond its budget',async(status,message,count)=>{
+ mocks.send.mockRejectedValue({status})
+ const w=mountPanel();await flushPromises()
+ expect(mocks.send).toHaveBeenCalledTimes(count)
+ expect(w.find('[role=alert]').text()).toContain(message)
+ expect(w.find('header').text()).toContain('配置状态未知')
+ expect(w.find('header').text()).not.toContain('待配置服务')
+ expect(w.find('button.primary').attributes('disabled')).toBeDefined()
+ w.unmount()
+})
+
+it('cascades region and department choices, submits server scope and clears stale factory selection',async()=>{
+ const w=mount(AnalysisAiPanel,{props:{factories:[{id:'h1',name:'湖南装配',region:'hunan',craft:'assembly'},{id:'h2',name:'湖南车缝',region:'hunan',craft:'sewing'},{id:'d1',name:'东莞喷油',region:'dongguan',craft:'painting'}] as any},global:{stubs:{RouterLink:true}}});await flushPromises()
+ await w.find('[aria-label="分析厂区"]').setValue('hunan')
+ expect(w.find('[aria-label="分析部门"]').text()).not.toContain('喷油部')
+ await w.find('[aria-label="分析部门"]').setValue('assembly')
+ expect(w.find('[aria-label="分析工厂"]').text()).toContain('湖南装配');expect(w.find('[aria-label="分析工厂"]').text()).not.toContain('湖南车缝')
+ await w.find('button.primary').trigger('click');await flushPromises()
+ expect(mocks.send.mock.calls.at(-1)![1].body).toMatchObject({region:'hunan',craft:'assembly',factory:''})
+ await w.find('[aria-label="分析工厂"]').setValue('h1')
+ await w.find('[aria-label="分析厂区"]').setValue('dongguan')
+ expect((w.find('[aria-label="分析部门"]').element as HTMLSelectElement).value).toBe('')
+ expect((w.find('[aria-label="分析工厂"]').element as HTMLSelectElement).value).toBe('')
+ expect(w.find('.result').exists()).toBe(false);w.unmount()
+})
+
+const scopeFactoriesFixture=[
+ {id:'h1',name:'Hunan assembly',region:'hunan',craft:'assembly'},
+ {id:'h2',name:'Hunan sewing',region:'hunan',craft:'sewing'},
+ {id:'d1',name:'Dongguan painting',region:'dongguan',craft:'painting'},
+] as any
+const mountScopePanel=()=>mount(AnalysisAiPanel,{props:{factories:scopeFactoriesFixture},global:{stubs:{RouterLink:true}}})
+
+it('clears unavailable region, department and factory after the authorized factory list changes',async()=>{
+ const w=mountScopePanel();await flushPromises()
+ await w.find('[aria-label="分析厂区"]').setValue('hunan')
+ await w.find('[aria-label="分析部门"]').setValue('assembly')
+ await w.find('[aria-label="分析工厂"]').setValue('h1')
+ await w.setProps({factories:[scopeFactoriesFixture[2]]});await flushPromises()
+ await w.find('button.primary').trigger('click');await flushPromises()
+ expect(mocks.send.mock.calls.at(-1)![1].body).toMatchObject({region:'',craft:'',factory:''})
+ w.unmount()
+})
+
+it('does not carry a selected scope into the next account after authorization changes',async()=>{
+ const w=mountScopePanel();await flushPromises()
+ await w.find('[aria-label="分析厂区"]').setValue('hunan')
+ await w.find('[aria-label="分析部门"]').setValue('assembly')
+ await w.find('[aria-label="分析工厂"]').setValue('h1')
+ mocks.record={id:'other-account'};mocks.changed();await flushPromises()
+ await w.find('button.primary').trigger('click');await flushPromises()
+ expect(mocks.send.mock.calls.at(-1)![1].body).toMatchObject({region:'',craft:'',factory:''})
+ w.unmount()
+})
+
+it('keeps a still-valid selected scope when a background factory refresh returns new objects',async()=>{
+ const w=mountScopePanel();await flushPromises()
+ await w.find('[aria-label="分析厂区"]').setValue('hunan')
+ await w.find('[aria-label="分析部门"]').setValue('assembly')
+ await w.find('[aria-label="分析工厂"]').setValue('h1')
+ await w.setProps({factories:scopeFactoriesFixture.map((f:any)=>({...f}))});await flushPromises()
+ await w.find('button.primary').trigger('click');await flushPromises()
+ expect(mocks.send.mock.calls.at(-1)![1].body).toMatchObject({region:'hunan',craft:'assembly',factory:'h1'})
+ w.unmount()
+})
+
+it('keeps explicit single-factory routes scoped even if their factory is absent from the latest list',async()=>{
+ const w=mountScopePanel();await flushPromises()
+ await w.find('[aria-label="分析厂区"]').setValue('hunan')
+ await w.find('[aria-label="分析部门"]').setValue('assembly')
+ await w.setProps({factoryId:'route-only',factories:[]});await flushPromises()
+ expect(w.find('[aria-label="分析厂区"]').exists()).toBe(false)
+ expect(w.find('[aria-label="分析工厂"]').exists()).toBe(false)
+ await w.find('button.primary').trigger('click');await flushPromises()
+ expect(mocks.send.mock.calls.at(-1)![1].body).toMatchObject({region:'',craft:'',factory:'route-only'})
+ await w.setProps({factoryId:'different-route'});await flushPromises()
+ await w.find('button.primary').trigger('click');await flushPromises()
+ expect(mocks.send.mock.calls.at(-1)![1].body).toMatchObject({region:'',craft:'',factory:'different-route'})
+ w.unmount()
+})
+
+it('aborts and discards an in-flight analysis when a selected factory disappears from its scope',async()=>{
+ let resolveReport!:(value:any)=>void
+ mocks.send.mockImplementation((path:string)=>path.endsWith('/config')?Promise.resolve({enabled:true,model:'test-model',reason:'',dailyLimit:20}):new Promise(resolve=>{resolveReport=resolve}))
+ const w=mountScopePanel();await flushPromises()
+ await w.find('[aria-label="分析厂区"]').setValue('hunan')
+ await w.find('[aria-label="分析部门"]').setValue('assembly')
+ await w.find('[aria-label="分析工厂"]').setValue('h1')
+ await w.find('button.primary').trigger('click');await flushPromises()
+ const signal=mocks.send.mock.calls.at(-1)![1].signal as AbortSignal
+ expect(signal.aborted).toBe(false)
+ await w.setProps({factories:[scopeFactoriesFixture[1]]});await flushPromises()
+ expect(signal.aborted).toBe(true)
+ resolveReport(response);await flushPromises();expect(w.find('.result').exists()).toBe(false)
+ w.unmount()
+})
+
+it('previews counts without a paid request and blocks combined overflow',async()=>{
+ const w=mountPanel();await flushPromises()
+ mocks.send.mockImplementation(async(_path:string,options:any)=>({total:501,limit:500,orderDateBasis:options.body.orderDateBasis,coverage:[{source:'订单',count:340,status:'已读取'},{source:'品质检验',count:161,status:'已读取'}]}))
+ await w.find('button.primary').trigger('click');await flushPromises()
+ expect(mocks.send).toHaveBeenCalledTimes(2);expect(mocks.send.mock.calls[1]![1].body).toMatchObject({preview:true,orderDateBasis:'order_date'})
+ expect(w.text()).toContain('订单：340条');expect(w.text()).toContain('品质检验：161条');expect(w.text()).toContain('尚未调用AI')
+ await w.find('[aria-label="订单日期口径"]').setValue('delivery_date');expect(w.find('.coverage').exists()).toBe(false)
+ await w.findAll('button').find(b=>b.text()==='统计分析范围（不调用AI）')!.trigger('click');await flushPromises()
+ expect(mocks.send.mock.calls.at(-1)![1].body).toMatchObject({preview:true,orderDateBasis:'delivery_date'});w.unmount()
+})
+
+it.each([
+ ['missing statistics',{}],
+ ['proxy HTML','<html>proxy fallback</html>'],
+ ['null statistics',null],
+ ['wrong date basis',{total:1,limit:500,orderDateBasis:'delivery_date',coverage:[{source:'订单',count:1,status:'已读取'}]}],
+ ['missing total',{limit:500,orderDateBasis:'order_date',coverage:[{source:'订单',count:1,status:'已读取'}]}],
+ ['inconsistent total',{total:5,limit:500,orderDateBasis:'order_date',coverage:[{source:'订单',count:1,status:'已读取'}]}],
+ ['invalid limit',{total:501,limit:1000,orderDateBasis:'order_date',coverage:[{source:'订单',count:501,status:'已读取'}]}],
+ ['invalid source count',{total:1,limit:500,orderDateBasis:'order_date',coverage:[{source:'订单',count:'1',status:'已读取'}]}],
+])('does not generate after an invalid statistics response: %s',async(_name,counts)=>{
+ mocks.send.mockImplementation(async(path:string,options:any)=>path.endsWith('/config')?{enabled:true,model:'test-model',reason:'',dailyLimit:20}:options?.body?.preview?counts:response)
+ const w=mountPanel();await flushPromises();await w.find('button.primary').trigger('click');await flushPromises()
+ expect(mocks.send).toHaveBeenCalledTimes(2)
+ expect(w.find('[role=alert]').text()).toContain('统计结果格式异常')
+ expect(w.find('.result').exists()).toBe(false)
+ expect(w.find('.coverage').exists()).toBe(false)
+ w.unmount()
+})
+
+it('can preview with an empty question while keeping generation disabled',async()=>{
+ const w=mountPanel();await flushPromises();await w.find('textarea').setValue('')
+ expect(w.find('button.primary').attributes('disabled')).toBeDefined()
+ await w.findAll('button').find(b=>b.text()==='统计分析范围（不调用AI）')!.trigger('click');await flushPromises()
+ expect(mocks.send).toHaveBeenCalledTimes(2)
+ expect(mocks.send.mock.calls[1]![1].body).toMatchObject({preview:true,question:'',orderDateBasis:'order_date'})
+ expect(w.find('[role=status]').text()).toContain('合计 5 条')
+ expect(w.find('.result').exists()).toBe(false);w.unmount()
+})
+
+it('accepts a complete 500-record preview and generates only once on repeated clicks',async()=>{
+ let resolveCounts!:(value:any)=>void
+ mocks.send.mockImplementation((path:string,options:any)=>path.endsWith('/config')?Promise.resolve({enabled:true,model:'test-model',reason:'',dailyLimit:20}):options?.body?.preview?new Promise(resolve=>{resolveCounts=resolve}):Promise.resolve(response))
+ const w=mountPanel();await flushPromises()
+ await w.find('[aria-label="订单日期口径"]').setValue('delivery_date')
+ await w.find('button.primary').trigger('click');await w.find('button.primary').trigger('click')
+ expect(mocks.send).toHaveBeenCalledTimes(2)
+ resolveCounts({total:500,limit:500,orderDateBasis:'delivery_date',coverage:[{source:'订单',count:340,status:'已读取'},{source:'品质检验',count:160,status:'已读取'}]});await flushPromises()
+ expect(mocks.send).toHaveBeenCalledTimes(3)
+ expect(mocks.send.mock.calls[2]![1].body).toMatchObject({orderDateBasis:'delivery_date'})
+ expect(mocks.send.mock.calls[2]![1].body).not.toHaveProperty('preview')
+ expect(w.find('.result').exists()).toBe(true);w.unmount()
+})
+
+it('does not call the model after a source-cap statistics failure',async()=>{
+ mocks.send.mockImplementation(async(path:string)=>{if(path.endsWith('/config'))return {enabled:true,model:'test-model',reason:'',dailyLimit:20};throw {response:{message:'订单候选记录超过2000条，统计未完成，请缩短时间或选择工厂'}}})
+ const w=mountPanel();await flushPromises();await w.find('button.primary').trigger('click');await flushPromises()
+ expect(mocks.send).toHaveBeenCalledTimes(2);expect(w.find('[role=alert]').text()).toContain('统计未完成')
+ expect(w.find('.coverage').exists()).toBe(false);expect(w.find('.result').exists()).toBe(false)
+ expect(w.find('button.primary').attributes('disabled')).toBeUndefined();w.unmount()
+})
+
+it('discards an old preview after a date-basis change and keeps the new statistics',async()=>{
+ let resolveOld!:(value:any)=>void;let previews=0
+ mocks.send.mockImplementation((path:string,options:any)=>{
+  if(path.endsWith('/config'))return Promise.resolve({enabled:true,model:'test-model',reason:'',dailyLimit:20})
+  if(options?.body?.preview&&++previews===1)return new Promise(resolve=>{resolveOld=resolve})
+  return Promise.resolve({total:8,limit:500,orderDateBasis:options.body.orderDateBasis,coverage:[{source:'订单',count:8,status:'已读取'}]})
+ })
+ const w=mountPanel();await flushPromises();await w.find('button.primary').trigger('click');await flushPromises()
+ const oldSignal=mocks.send.mock.calls[1]![1].signal as AbortSignal
+ // A route change can clear the busy scope while the transport still resolves.
+ await w.setProps({factoryId:'different-route'});await w.find('[aria-label="订单日期口径"]').setValue('delivery_date')
+ await w.findAll('button').find(b=>b.text()==='统计分析范围（不调用AI）')!.trigger('click');await flushPromises()
+ expect(oldSignal.aborted).toBe(true);expect(w.find('[role=status]').text()).toContain('合计 8 条')
+ resolveOld({total:501,limit:500,orderDateBasis:'order_date',coverage:[{source:'订单',count:501,status:'已读取'}]});await flushPromises()
+ expect(w.find('[role=status]').text()).toContain('合计 8 条');expect(w.find('[role=alert]').exists()).toBe(false)
+ expect(mocks.send).toHaveBeenCalledTimes(3);expect(w.find('.result').exists()).toBe(false);w.unmount()
+})

@@ -1,5 +1,9 @@
 'use strict';
 
+const {nextSectionTime} = require('./verificationSectionSave');
+const InjectionPricing = require('../../frontend/injection-pricing');
+const conflict = () => { throw Object.assign(new Error('资料在同步期间已更新，请刷新后重新发布基准'), {status:409}); };
+
 const DEFAULT_COSTING_BASIS = {
   version: '2026-07-31',
   title: '华登集团—清溪厂区2026年成本最新核价方式',
@@ -135,16 +139,7 @@ function cartonRate(basis, label) {
 const normalized = value => text(value).replace(/\s+/g, '').toUpperCase();
 
 function machineMatch(model, machines) {
-  const target = normalized(model);
-  const targetNumber = Number.parseFloat(target);
-  for (const row of machines || []) {
-    const candidate = normalized(row.model);
-    const range = candidate.match(/^([\d.]+)A?-([\d.]+)A?$/);
-    if (range && Number.isFinite(targetNumber)
-      && targetNumber >= Number(range[1]) && targetNumber <= Number(range[2])) return row;
-    if (candidate === target) return row;
-  }
-  return (machines || []).find(row => target.includes(normalized(row.model))) || null;
+  return InjectionPricing.lookupMachinePrice(model, machines);
 }
 
 function applyCostingBasisPayload(dept, rawPayload, rawBasis) {
@@ -165,17 +160,17 @@ function applyCostingBasisPayload(dept, rawPayload, rawBasis) {
     payload.material_prices = clone(basis.materials);
     payload.machine_prices = clone(basis.machines);
     for (const row of Array.isArray(payload.injection) ? payload.injection : []) {
+      // A shared-mold row owns an independently frozen allocation, including
+      // its material and labor prices. Generic machine rates cannot replace it.
+      if (row.catalog_raw_weight != null) continue;
       const grade = normalized(row.material_grade);
       const material = basis.materials.find(item => normalized(item.model) === grade);
       if (material) row.material_unit_price = +(material.price / 454).toFixed(5);
       const machine = machineMatch(row.machine_model, basis.machines);
-      const target = number(row.target, 0);
-      const sets = number(row.sets, 1) || 1;
-      if (machine && target > 0) {
-        row.shot_price = number(row.mold_part_index, 0) > 0
-          ? 0
-          : +(machine.price / sets / target).toFixed(4);
-      }
+      // Numeric equality with a formula is not provenance. Only an explicitly
+      // automatic row follows new fees; manual and unmarked historical values
+      // (including blank and zero) remain fixed until an explicit input action.
+      if (row.shot_price_mode === 'auto') row.shot_price = InjectionPricing.calculate(row, basis.machines);
       if (machine?.normal) row.machine = machine.normal;
     }
   }
@@ -207,36 +202,41 @@ function applyCostingBasisPayload(dept, rawPayload, rawBasis) {
 async function syncOpenVerificationVersionsToCostingBasis(db, { factoryCode, basis, actor }) {
   const rows = await db.prepare(`
     SELECT s.id AS section_id, s.dept, s.payload_json, s.status AS section_status,
-           v.id AS version_id, v.quote_id
+           v.id AS version_id, v.quote_id, s.filled_at, s.reviewed_at
     FROM quote_verification_sections s
     JOIN quote_verification_versions v ON v.id = s.version_id
     JOIN quotes q ON q.id = v.quote_id
     WHERE q.factory_code = ?
       AND v.status NOT IN ('completed', 'cancelled')
+      AND q.deleted_at IS NULL
       AND s.dept IN ('sales', 'engineering', 'molding', 'painting', 'assembly')
+    ORDER BY v.id, s.id
   `).all(factoryCode);
   const stats = { verification_scanned: rows.length, verification_synced: 0, verification_reopened: 0 };
   const changedVersions = new Set();
   const reopenedVersions = new Set();
   for (const row of rows) {
+    const version = await db.prepare(`SELECT status FROM quote_verification_versions WHERE id=?${db.pool ? ' FOR UPDATE' : ''}`).get(row.version_id);
+    if (!version || ['completed','cancelled'].includes(version.status)) continue;
     let payload;
     try { payload = JSON.parse(row.payload_json || '{}'); } catch { payload = {}; }
     const result = applyCostingBasisPayload(row.dept, payload, basis);
     if (!result.changed) continue;
     const reopen = row.section_status === 'approved';
-    await db.prepare(`
+    const changed = await db.prepare(`
       UPDATE quote_verification_sections
-      SET payload_json = ?,
-          status = CASE WHEN ? = 1 THEN 'filled' ELSE status END,
-          reviewed_by = CASE WHEN ? = 1 THEN NULL ELSE reviewed_by END,
-          reviewed_at = CASE WHEN ? = 1 THEN NULL ELSE reviewed_at END,
-          review_comment = CASE WHEN ? = 1 THEN ? ELSE review_comment END
-      WHERE id = ?
-    `).run(
-      JSON.stringify(result.payload), reopen ? 1 : 0, reopen ? 1 : 0, reopen ? 1 : 0,
-      reopen ? 1 : 0, reopen ? `【统一核价基准更新】${basis.version}，请重新审核` : null,
-      row.section_id,
-    );
+      SET payload_json=?, filled_by=?, filled_at=?,
+          status=CASE WHEN ?=1 THEN 'filled' ELSE status END,
+          reviewed_by=CASE WHEN ?=1 THEN NULL ELSE reviewed_by END,
+          reviewed_at=CASE WHEN ?=1 THEN NULL ELSE reviewed_at END,
+          review_comment=CASE WHEN ?=1 THEN ? ELSE review_comment END
+      WHERE id=? AND payload_json=? AND status=?
+        AND filled_at IS NOT DISTINCT FROM ? AND reviewed_at IS NOT DISTINCT FROM ?
+        AND EXISTS (SELECT 1 FROM quote_verification_versions v WHERE v.id=version_id AND v.status NOT IN ('completed','cancelled'))
+    `).run(JSON.stringify(result.payload), actor, nextSectionTime(row), reopen?1:0,
+      reopen?1:0,reopen?1:0,reopen?1:0,reopen?`【统一核价基准更新】${basis.version}，请重新审核`:null,
+      row.section_id,row.payload_json,row.section_status,row.filled_at??null,row.reviewed_at??null);
+    if (!changed.changes) conflict();
     await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
       VALUES (?, ?, ?, 'sync_verification_costing_basis', ?)`)
       .run(row.quote_id, row.dept, actor, `核价版本 #${row.version_id} 套用统一核价基准 ${basis.version}`);
@@ -249,7 +249,7 @@ async function syncOpenVerificationVersionsToCostingBasis(db, { factoryCode, bas
     await db.prepare(`UPDATE quote_verification_versions
       SET status = CASE WHEN ? = 1 THEN 'in_review' ELSE status END,
           updated_at = datetime('now')
-      WHERE id = ?`).run(reopenedVersions.has(versionId) ? 1 : 0, versionId);
+      WHERE id = ? AND status NOT IN ('completed','cancelled')`).run(reopenedVersions.has(versionId) ? 1 : 0, versionId);
   }
   if (changedVersions.size) {
     const marks = [...changedVersions].map(() => '?').join(',');
@@ -263,13 +263,17 @@ async function syncOpenVerificationVersionsToCostingBasis(db, { factoryCode, bas
 
 async function syncOpenQuotesToCostingBasis(db, { factoryCode, basis: rawBasis, actor }) {
   const basis = normalizeCostingBasis(rawBasis);
+  await require('./quoteFreeze').lockFactoryQuotes(db, factoryCode);
   const rows = await db.prepare(`
     SELECT s.id AS section_id, s.quote_id, s.dept, s.payload_json, s.status AS section_status,
            q.status AS quote_status
     FROM quote_sections s
     JOIN quotes q ON q.id = s.quote_id
     WHERE q.factory_code = ?
+      AND q.deleted_at IS NULL
       AND q.status NOT IN ('fully_approved', 'exported')
+      AND NOT EXISTS (SELECT 1 FROM quote_verifications v WHERE v.quote_id=q.id)
+      AND NOT EXISTS (SELECT 1 FROM quote_customer_confirmations c WHERE c.quote_id=q.id AND c.status='confirmed')
       AND s.dept IN ('sales', 'engineering', 'molding', 'painting', 'assembly')
   `).all(factoryCode);
   const stats = { scanned: rows.length, synced: 0, reopened: 0 };
@@ -279,19 +283,20 @@ async function syncOpenQuotesToCostingBasis(db, { factoryCode, basis: rawBasis, 
     const result = applyCostingBasisPayload(row.dept, payload, basis);
     if (!result.changed) continue;
     const reopen = row.section_status === 'approved';
-    await db.prepare(`
+    const changed = await db.prepare(`
       UPDATE quote_sections
       SET payload_json = ?,
           status = CASE WHEN ? = 1 THEN 'filled' ELSE status END,
           reviewed_by = CASE WHEN ? = 1 THEN NULL ELSE reviewed_by END,
           reviewed_at = CASE WHEN ? = 1 THEN NULL ELSE reviewed_at END,
           review_comment = CASE WHEN ? = 1 THEN ? ELSE review_comment END
-      WHERE id = ?
+      WHERE id = ? AND payload_json = ? AND status = ?
     `).run(
       JSON.stringify(result.payload), reopen ? 1 : 0, reopen ? 1 : 0, reopen ? 1 : 0,
       reopen ? 1 : 0, reopen ? `【统一核价基准更新】${basis.version}，请重新审核` : null,
-      row.section_id,
+      row.section_id, row.payload_json, row.section_status,
     );
+    if (!changed.changes) conflict();
     await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
       VALUES (?, ?, ?, 'sync_global_costing_basis', ?)`)
       .run(row.quote_id, row.dept, actor, `统一核价基准 ${basis.version}`);

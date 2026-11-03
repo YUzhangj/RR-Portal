@@ -131,6 +131,7 @@ test('internal export writes product-ratio weighted injection formulas', async (
   const injectionHeaders = worksheet.getRow(titleRow + 1).values.slice(1);
   assert.ok(!injectionHeaders.includes('料型'));
   assert.ok(!injectionHeaders.includes('颜色'));
+  assert.ok(!injectionHeaders.includes('行位'));
   assert.equal(worksheet.getCell(totalRow, 14).value.formula, `((N${dataStart}+N${dataStart + 1})*2+(N${dataStart + 2})*1)/3`);
   assert.equal(Number(worksheet.getCell(totalRow, 14).value.result.toFixed(4)), 33.3333);
   assert.equal(worksheet.getCell(titleRow + 1, 15).value, null);
@@ -247,8 +248,9 @@ test('carton product dimensions are labeled in inches', async () => {
   assert.match(workbenchSource, /产品尺寸（mm 自动换算为英寸）/);
   assert.match(workbenchSource, /id="cc-pl-mm"/);
   assert.match(workbenchSource, /c\[k\] = mm \/ 25\.4/);
-  assert.match(workbenchSource, /const productInchInput = key =>.*toFixed\(2\)/);
-  assert.match(workbenchSource, /el\.value = mmEl\.value === '' \? '' : c\[k\]\.toFixed\(2\)/);
+  assert.match(workbenchSource, /const productInchInput = key =>.*toFixed\(3\)/);
+  assert.match(workbenchSource, /id="cc-pl" type="number" step="0\.001"/);
+  assert.match(workbenchSource, /el\.value = mmEl\.value === '' \? '' : c\[k\]\.toFixed\(3\)/);
 });
 
 test('carton dimensions accept formulas and preserve them in Excel export', async () => {
@@ -314,17 +316,17 @@ test('internal export keeps editable spray-product ratios and a weighted-average
   const totalRow = secondSummary + 1;
   assert.ok(firstSummary && secondSummary);
   assert.equal(worksheet.getCell(totalRow, 1).value, '合计 HKD');
-  assert.equal(worksheet.getCell(firstSummary, 23).value, 2);
-  assert.equal(worksheet.getCell(secondSummary, 23).value, 1);
-  assert.equal(worksheet.getCell(firstSummary, 24).value.result, 30);
-  assert.equal(worksheet.getCell(secondSummary, 24).value.result, 60);
+  assert.equal(worksheet.getCell(firstSummary, 29).value, 2);
+  assert.equal(worksheet.getCell(secondSummary, 29).value, 1);
+  assert.equal(worksheet.getCell(firstSummary, 30).value.result, 30);
+  assert.equal(worksheet.getCell(secondSummary, 30).value.result, 60);
   assert.equal(
-    worksheet.getCell(totalRow, 24).value.formula,
-    `(IFERROR(SUMPRODUCT(W${firstSummary}:W${secondSummary},X${firstSummary}:X${secondSummary})/SUM(W${firstSummary}:W${secondSummary}),0))`,
+    worksheet.getCell(totalRow, 30).value.formula,
+    `(IFERROR(SUMPRODUCT(AC${firstSummary}:AC${secondSummary},AD${firstSummary}:AD${secondSummary})/SUM(AC${firstSummary}:AC${secondSummary}),0))`,
   );
-  assert.equal(worksheet.getCell(totalRow, 24).value.result, 40);
-  assert.equal(worksheet.getCell(totalRow, 25).value.formula, `X${totalRow}*30%*5/100`);
-  assert.equal(worksheet.getCell(totalRow, 25).value.result, 0.6);
+  assert.equal(worksheet.getCell(totalRow, 30).value.result, 40);
+  assert.equal(worksheet.getCell(totalRow, 31).value.formula, `AD${totalRow}*30%*5/100`);
+  assert.equal(worksheet.getCell(totalRow, 31).value.result, 0.6);
 });
 
 test('empty department Indonesian freight totals do not create circular references', async () => {
@@ -651,7 +653,7 @@ test('internal export keeps mold rows separated by product group', async () => {
   assert.notEqual(rows['NO.03'].getCell(18).fill?.fgColor?.argb, 'FFE0F2FE');
 });
 
-test('internal export keeps molding rows separated by engineering product group', async () => {
+test('internal export shows mold numbers instead of product sequence', async () => {
   const workbook = await buildWorkbook({
     quote: { quote_no: 'MOLDING-PRODUCT-GROUPS', product_name: '多产品注塑', qty: 1000 },
     sections: [
@@ -659,9 +661,9 @@ test('internal export keeps molding rows separated by engineering product group'
         dept: 'molding',
         payload_json: JSON.stringify({
           injection: [
-            { name: '产品一外壳', product_group_id: 'product-1', product_group_name: '1#产品', weight_g: 10 },
-            { name: '产品一配件', product_group_id: 'product-1', product_group_name: '1#产品', weight_g: 5 },
-            { name: '产品二外壳', product_group_id: 'product-2', product_group_name: '2#产品', weight_g: 12 },
+            { mold_no: '001', name: '产品一外壳', product_group_id: 'product-1', product_group_name: '1#产品', weight_g: 10 },
+            { mold_no: '002', name: '产品一配件', product_group_id: 'product-1', product_group_name: '1#产品', weight_g: 5 },
+            { mold_no: '003', name: '产品二外壳', product_group_id: 'product-2', product_group_name: '2#产品', weight_g: 12 },
           ],
         }),
       },
@@ -681,12 +683,12 @@ test('internal export keeps molding rows separated by engineering product group'
     const name = String(row.getCell(2).value || '');
     if (name) rows[name] = row;
   });
-  assert.equal(rows['产品一外壳'].getCell(1).value, '1#产品\n1.1');
-  assert.equal(rows['产品一配件'].getCell(1).value, '1.2');
-  assert.equal(rows['产品二外壳'].getCell(1).value, '2#产品\n2.1');
+  assert.equal(rows['产品一外壳'].getCell(1).value, '001');
+  assert.equal(rows['产品一配件'].getCell(1).value, '002');
+  assert.equal(rows['产品二外壳'].getCell(1).value, '003');
   assert.equal(rows['产品一外壳'].getCell(2).value, '产品一外壳');
   assert.equal(rows['产品二外壳'].getCell(2).value, '产品二外壳');
-  assert.equal(worksheet.getCell(rows['产品一外壳'].number - 1, 1).value, '产品 / 序号');
+  assert.equal(worksheet.getCell(rows['产品一外壳'].number - 1, 1).value, '模号');
 });
 
 test('export keeps prototype and testing amortization when mold items are empty', async () => {
@@ -838,13 +840,13 @@ test('export tax-summary base price uses the live page formula result instead of
   });
   const basePriceCell = worksheet.getCell(titleRow + 2, 1).value;
 
-  assert.equal(Number(basePriceCell.result.toFixed(4)), 4.2);
+  assert.equal(Number(basePriceCell.result.toFixed(4)), Number(((2.5 + 7200 / 1980) * 1.2 * (1 + .004 * 1.2 / .98)).toFixed(4)));
   assert.doesNotMatch(basePriceCell.formula, /SUM/);
 });
 
-test('page base price uses customer TOTAL HKD multiplied by divisor', () => {
+test('page base price uses final USD multiplied by divisor and exchange rate', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'workbench.js'), 'utf8');
-  assert.match(source, /customerBeforeDivisorHkd\s*=\s*customerTotalHkd\s*\*\s*num\(s\.divisor\)/);
+  assert.match(source, /customerBeforeDivisorHkd\s*=\s*customerUSD\s*\*\s*num\(s\.divisor\)\s*\*\s*fxHU/);
   assert.match(source, /base_price:\s*shippingCalc\.customerBeforeDivisorHkd/);
   assert.match(source, /codeBefore\s*=\s*totalCost\s*>\s*0\s*\?\s*basePrice\s*\/\s*totalCost\s*:\s*0/);
 });
@@ -905,13 +907,13 @@ test('tax deduction UI is read-only and export uses formulas for every calculate
     assert.equal(typeof worksheet.getCell(amountRow, col).value, 'object');
   }
   assert.equal(worksheet.getCell(rateRow, 1).value, null);
-  assert.equal(worksheet.getCell(rateRow, 2).value, 0.1);
+  assert.equal(worksheet.getCell(rateRow, 2).value, 0.115);
   assert.ok(Math.abs(worksheet.getCell(rateRow, 3).value - 0.0099) < 1e-12);
   assert.equal(worksheet.getCell(deductionRow, 1).value, '—');
   for (let col = 2; col <= 9; col += 1) {
     const value = worksheet.getCell(deductionRow, col).value;
     assert.equal(typeof value, 'object');
-    assert.match(value.formula, /^[A-J]\d+\*[A-J]\d+$/);
+    assert.match(value.formula, col === 2 ? /^[A-J]\d+\/1\.1\*[A-J]\d+$/ : /^[A-J]\d+\*[A-J]\d+$/);
   }
   assert.match(worksheet.getCell(deductionRow, 10).value.formula, /^SUM\(A\d+:I\d+\)$/);
 
@@ -1276,7 +1278,7 @@ test('export combines mold RMB and USD display prices and converts production mo
   assert.match(productionMoldUsd.formula, /I\d+\/0\.85\/7\.75/);
 });
 
-test('export includes UV in painting detail and total quotation formula', async () => {
+test('export includes UV and heat transfer in painting detail and total quotation formula', async () => {
   const workbook = await buildWorkbook({
     quote: { quote_no: 'PAINT-UV', product_name: 'UV喷油测试', qty: 1000, factory_code: 'qingxi' },
     sections: [
@@ -1286,6 +1288,8 @@ test('export includes UV in painting detail and total quotation formula', async 
           position: '正面',
           uv_qty: 2,
           uv_unit: 1.25,
+          heat_transfer_qty: 3,
+          heat_transfer_unit: 0.5,
         }],
       }) },
       { dept: 'sales', payload_json: JSON.stringify({
@@ -1297,14 +1301,18 @@ test('export includes UV in painting detail and total quotation formula', async 
 
   const worksheet = workbook.getWorksheet('喷油明细');
   let uvHeaderFound = false;
+  let heatHeaderFound = false;
   let uvQuoteCell;
   worksheet.eachRow(row => row.eachCell(cell => {
+    if (cell.value === '热转印') heatHeaderFound = true;
     if (cell.value === 'UV') uvHeaderFound = true;
-    if (cell.value === 'UV测试件') uvQuoteCell = worksheet.getCell(row.number, 24).value;
+    if (cell.value === 'UV测试件') uvQuoteCell = worksheet.getCell(row.number, 30).value;
   }));
 
   assert.equal(uvHeaderFound, true);
-  assert.equal(uvQuoteCell.result, 2.5);
+  assert.equal(heatHeaderFound, true);
+  assert.match(uvQuoteCell.formula, /X\d+\*Y\d+/);
+  assert.equal(uvQuoteCell.result, 4);
   assert.match(uvQuoteCell.formula, /V\d+\*W\d+/);
 });
 
@@ -1660,11 +1668,27 @@ test('internal export mirrors UI formulas for slush and each departmental Indone
     if (typeof value === 'string') paintingSectionRows[value] = row.number;
   });
   const paintingHeader = paintingSectionRows['五、二次加工（印喷报价）'] + 1;
-  assert.equal(paintingWorksheet.getCell(paintingHeader, 25).value, '印尼运费 6%');
-  assert.equal(paintingWorksheet.getCell(paintingHeader + 2, 25).value.formula, `X${paintingHeader + 2}*30%*6/100`);
+  assert.equal(paintingWorksheet.getCell(paintingHeader, 31).value, '印尼运费 6%');
+  assert.equal(paintingWorksheet.getCell(paintingHeader + 2, 31).value.formula, `AD${paintingHeader + 2}*30%*6/100`);
 
   const sewingDetail = workbook.getWorksheet('车缝明细');
   assert.equal(sewingDetail.getCell(3, 12).value, '印尼运费 4%');
   assert.equal(sewingDetail.getCell(4, 12).value.formula, 'J4*4/100');
   assert.equal(sewingDetail.getCell(5, 12).value, 0);
+});
+
+test('single export uses independent surtax markup without changing main markup', async()=>{
+ const workbook=await buildWorkbook({quote:{quote_no:'SURTAX',qty:1000},sections:[
+  {dept:'sales',payload_json:JSON.stringify({header:{fx_hkd_usd:7.8,fx_rmb_hkd:.85},shipping:{markup_x:1.2,surtax_markup_x:1.6,divisor:.98,scenarios:[{name:"出厂价",is_factory:true,base_rmb:10}]}})},
+  {dept:'painting',payload_json:JSON.stringify({painting_items:[{pad_qty:1,pad_unit:10}]})}
+ ]});
+ let found=false,main=false;
+ workbook.eachSheet(ws=>ws.eachRow(row=>{
+  if(row.getCell(1).value==='码点 × 1.2') main=true;
+  if(row.getCell(1).value==='码点 × 1.6') {
+   found=true;
+   assert.match(row.getCell(2).value.formula,/\*1\.6$/);
+  }
+ }));
+ assert.equal(found,true);assert.equal(main,true);
 });

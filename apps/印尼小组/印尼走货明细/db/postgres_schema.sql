@@ -94,6 +94,16 @@ CREATE TABLE IF NOT EXISTS materials (
 CREATE INDEX IF NOT EXISTS "IX_materials_product" ON materials(product_code);
 CREATE INDEX IF NOT EXISTS "IX_materials_name"    ON materials(name_zh);
 
+-- 工具、模具、设备及耗材共享全局物料 ID，但 product_code 为空，不进入产品 BOM。
+CREATE TABLE IF NOT EXISTS tool_materials (
+    material_id INT PRIMARY KEY REFERENCES materials(id) ON DELETE CASCADE,
+    related_product_code VARCHAR(64) NOT NULL DEFAULT '',
+    tool_kind VARCHAR(16) NOT NULL CONSTRAINT tool_materials_kind_v2_check CHECK (tool_kind IN ('工具','机器设备')),
+    revision INT NOT NULL DEFAULT 1,
+    purchase_price DECIMAL(18,6) NULL,
+    purchase_currency VARCHAR(3) NULL
+);
+
 CREATE TABLE IF NOT EXISTS images (
     id          VARCHAR(64)  NOT NULL PRIMARY KEY,
     mime        VARCHAR(64)  NULL,
@@ -116,6 +126,12 @@ CREATE TABLE IF NOT EXISTS dict_supplier (
     keyword         VARCHAR(128) NOT NULL,
     full_name       VARCHAR(256) NULL,
     customs_company VARCHAR(256) NULL,
+    name_en         TEXT NOT NULL DEFAULT '',
+    address_zh      TEXT NOT NULL DEFAULT '',
+    address_en      TEXT NOT NULL DEFAULT '',
+    phone           TEXT NOT NULL DEFAULT '',
+    email           TEXT NOT NULL DEFAULT '',
+    contact         TEXT NOT NULL DEFAULT '',
     priority        INT          NOT NULL DEFAULT 100
 );
 CREATE INDEX IF NOT EXISTS "IX_dict_supplier_keyword" ON dict_supplier(keyword);
@@ -141,7 +157,8 @@ CREATE TABLE IF NOT EXISTS schedules (
     raw_rows        JSONB        NULL,   -- JSON（T-SQL 原为 NVARCHAR(MAX) + ISJSON CHECK）
     diff_from_prev  JSONB        NULL,   -- JSON（同上）
     created_at      TIMESTAMP(0) NOT NULL DEFAULT now(),
-    CONSTRAINT "UQ_schedules_week_label" UNIQUE (week_label)
+    customer        TEXT NOT NULL DEFAULT 'TOMY',
+    CONSTRAINT ix_schedules_customer_week UNIQUE (customer, week_label)
 );
 
 -- ============ 采购 ============
@@ -164,7 +181,7 @@ CREATE TABLE IF NOT EXISTS po_items (
     material_id     INT          NULL,
     material_name   VARCHAR(256) NULL,
     qty             DECIMAL(18,4) NULL,
-    price           DECIMAL(18,4) NULL,
+    price           DECIMAL(22,8) NULL,
     currency        VARCHAR(8)   NOT NULL DEFAULT '¥',
     notes           TEXT         NULL,
     category        VARCHAR(64)  NULL,
@@ -249,19 +266,20 @@ CREATE TABLE IF NOT EXISTS shipment_items (
     kg                  DECIMAL(18,4) NULL,
     qty                 DECIMAL(18,4) NULL,
     cartons             INT          NULL,
-    qty_per_carton      VARCHAR(64)  NULL,
+    qty_per_carton      TEXT  NULL,
+    weighing_qty        DECIMAL(18,4) NULL,
     purchase_unit       VARCHAR(32)  NOT NULL DEFAULT '个',
-    pallet              VARCHAR(64)  NULL,
-    price               DECIMAL(18,4) NULL,
+    pallet              TEXT  NULL,
+    price               DECIMAL(22,8) NULL,
     currency            VARCHAR(8)   NOT NULL DEFAULT '¥',
-    po_no               VARCHAR(64)  NULL,
+    po_no               TEXT  NULL,
     po_date             DATE         NULL,
     supplier            VARCHAR(256) NULL,
     customs_company     VARCHAR(256) NULL,
     bl_head             VARCHAR(256) NULL,
-    contract_no         VARCHAR(64)  NULL,
+    contract_no         TEXT  NULL,
     contract_date       DATE         NULL,
-    invoice_no          VARCHAR(64)  NULL,
+    invoice_no          TEXT  NULL,
     invoice_date        DATE         NULL,
     invoice_price       DECIMAL(18,4) NULL,
     product_use         VARCHAR(256) NULL,
@@ -270,7 +288,113 @@ CREATE TABLE IF NOT EXISTS shipment_items (
     CONSTRAINT "FK_shipment_items_material" FOREIGN KEY (material_id) REFERENCES materials(id)
 );
 CREATE INDEX IF NOT EXISTS "IX_shipment_items_shipment" ON shipment_items(shipment_id);
-CREATE INDEX IF NOT EXISTS "IX_shipment_items_po_no"    ON shipment_items(po_no);
+ALTER TABLE shipment_items ADD COLUMN IF NOT EXISTS weighing_qty DECIMAL(18,4) NULL;
+ALTER TABLE shipment_items ADD COLUMN IF NOT EXISTS carton_group VARCHAR(64) NULL;
+ALTER TABLE shipment_items ADD COLUMN IF NOT EXISTS material_snapshot JSONB NULL;
+ALTER TABLE shipment_items ADD COLUMN IF NOT EXISTS carton_no VARCHAR(256) NULL;
+
+-- BEGIN shipment-detail-text-20261102
+-- Packing segments, pallet descriptions and document references are user text.
+-- Preserve complete values instead of relying on the old 64-character storage cap.
+-- PO references are queried by equality only; a hash index also accepts long,
+-- incompressible text that would exceed a PostgreSQL B-tree index tuple limit.
+DO $$
+DECLARE
+    column_name TEXT;
+    type_changes TEXT;
+    index_definition TEXT;
+    index_oid OID;
+    expected_btree TEXT := format('CREATE INDEX %I ON %I.shipment_items USING btree (po_no)',
+        'IX_shipment_items_po_no', current_schema());
+    expected_hash TEXT := format('CREATE INDEX %I ON %I.shipment_items USING hash (po_no)',
+        'IX_shipment_items_po_no', current_schema());
+BEGIN
+    index_oid := to_regclass(format('%I.%I', current_schema(), 'IX_shipment_items_po_no'));
+    SELECT pg_get_indexdef(index_oid) INTO index_definition;
+    IF EXISTS (
+        SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_am am ON am.oid = c.relam
+        WHERE i.indrelid = 'shipment_items'::regclass AND i.indexrelid IS DISTINCT FROM index_oid
+          AND EXISTS (
+              SELECT 1 FROM pg_depend d
+              WHERE d.classid = 'pg_class'::regclass AND d.objid = i.indexrelid
+                AND d.refclassid = 'pg_class'::regclass AND d.refobjid = i.indrelid
+                AND d.refobjsubid IN (SELECT attnum FROM pg_attribute
+                    WHERE attrelid = 'shipment_items'::regclass
+                      AND attname = ANY(ARRAY['qty_per_carton', 'pallet', 'po_no', 'contract_no', 'invoice_no']))
+          )
+          AND am.amname <> 'hash'
+    ) THEN
+        RAISE EXCEPTION 'Unexpected additional shipment text index; shipment text migration was not applied';
+    END IF;
+    IF index_definition = expected_hash AND EXISTS (
+        SELECT 1 FROM pg_index WHERE indexrelid = index_oid AND indisvalid AND indisready AND indislive
+    ) AND (
+        SELECT count(*) = 5 FROM pg_attribute
+        WHERE attrelid = 'shipment_items'::regclass AND NOT attisdropped
+          AND attname = ANY(ARRAY['qty_per_carton', 'pallet', 'po_no', 'contract_no', 'invoice_no'])
+          AND atttypid = 'text'::regtype AND atttypmod = -1
+    ) THEN
+        RETURN; -- Already applied: do not take a DDL lock on every startup.
+    END IF;
+
+    -- The caller can bound lock_timeout (production rollout uses a short timeout).
+    -- Hold this lock while rechecking catalog state so concurrent DDL cannot turn
+    -- a reviewed index into an unrelated index between validation and replacement.
+    LOCK TABLE shipment_items IN ACCESS EXCLUSIVE MODE;
+    index_oid := to_regclass(format('%I.%I', current_schema(), 'IX_shipment_items_po_no'));
+    SELECT pg_get_indexdef(index_oid) INTO index_definition;
+    IF index_oid IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM pg_index WHERE indexrelid = index_oid AND indisvalid AND indisready AND indislive
+    ) THEN
+        RAISE EXCEPTION 'Unusable IX_shipment_items_po_no; shipment text migration was not applied';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_am am ON am.oid = c.relam
+        WHERE i.indrelid = 'shipment_items'::regclass AND i.indexrelid IS DISTINCT FROM index_oid
+          AND EXISTS (
+              SELECT 1 FROM pg_depend d
+              WHERE d.classid = 'pg_class'::regclass AND d.objid = i.indexrelid
+                AND d.refclassid = 'pg_class'::regclass AND d.refobjid = i.indrelid
+                AND d.refobjsubid IN (SELECT attnum FROM pg_attribute
+                    WHERE attrelid = 'shipment_items'::regclass
+                      AND attname = ANY(ARRAY['qty_per_carton', 'pallet', 'po_no', 'contract_no', 'invoice_no']))
+          )
+          AND am.amname <> 'hash'
+    ) THEN
+        RAISE EXCEPTION 'Unexpected additional shipment text index; shipment text migration was not applied';
+    END IF;
+    IF index_definition IS NOT NULL AND index_definition <> expected_btree AND index_definition <> expected_hash THEN
+        RAISE EXCEPTION 'Unexpected IX_shipment_items_po_no definition; shipment text migration was not applied';
+    END IF;
+    FOREACH column_name IN ARRAY ARRAY['qty_per_carton', 'pallet', 'po_no', 'contract_no', 'invoice_no'] LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_attribute
+            WHERE attrelid = 'shipment_items'::regclass AND attname = column_name AND NOT attisdropped
+              AND ((atttypid = 'varchar'::regtype AND atttypmod = 68)
+                   OR (atttypid = 'text'::regtype AND atttypmod = -1))
+        ) THEN
+            RAISE EXCEPTION 'Unexpected shipment text column type: %; migration was not applied', column_name;
+        END IF;
+    END LOOP;
+    SELECT string_agg(format('ALTER COLUMN %I TYPE TEXT', attname), ', ' ORDER BY attnum)
+    INTO type_changes
+    FROM pg_attribute
+    WHERE attrelid = 'shipment_items'::regclass AND NOT attisdropped
+      AND attname = ANY(ARRAY['qty_per_carton', 'pallet', 'po_no', 'contract_no', 'invoice_no'])
+      AND atttypid = 'varchar'::regtype AND atttypmod = 68;
+    IF type_changes IS NOT NULL THEN
+        EXECUTE 'ALTER TABLE shipment_items ' || type_changes;
+    END IF;
+    IF index_definition = expected_btree THEN
+        DROP INDEX "IX_shipment_items_po_no";
+    END IF;
+    IF index_definition IS NULL OR index_definition = expected_btree THEN
+        CREATE INDEX "IX_shipment_items_po_no" ON shipment_items USING hash(po_no);
+    END IF;
+END $$;
+-- END shipment-detail-text-20261102
 
 -- ============ 设置 ============
 CREATE TABLE IF NOT EXISTS settings (
@@ -293,10 +417,12 @@ CREATE TABLE IF NOT EXISTS po_receipts (
     po_item_id      INT NOT NULL,
     receipt_date    DATE NOT NULL,
     qty             DECIMAL(18,4) NOT NULL,
+    spare_qty       DECIMAL(18,4) NOT NULL DEFAULT 0,
     batch_no        VARCHAR(64),
     notes           TEXT,
     created_at      TIMESTAMP(0) NOT NULL DEFAULT now(),
-    CONSTRAINT "CK_po_receipts_qty_positive" CHECK (qty > 0),
+    CONSTRAINT "CK_po_receipts_qty_or_spare_positive" CHECK (qty > 0 OR (qty = 0 AND spare_qty > 0)),
+    CONSTRAINT "CK_po_receipts_spare_qty_nonnegative" CHECK (spare_qty >= 0),
     CONSTRAINT "FK_po_receipts_item"
         FOREIGN KEY (po_item_id) REFERENCES po_items(id) ON DELETE CASCADE
 );

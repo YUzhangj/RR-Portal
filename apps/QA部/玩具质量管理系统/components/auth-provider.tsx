@@ -2,13 +2,16 @@
 import { createContext,useCallback,useContext,useEffect,useMemo,useState } from "react";
 import { usePathname,useRouter } from "next/navigation";
 import { defaultPermissions,hasPermission,normalizeLoginName,routePermission,type Permission,type PublicUser,type ToyQMSUser,type UserCategory } from "@/lib/auth";
-import { apiFetch,ensureReachableBackend,getRemoteToken,setRemoteToken } from "@/lib/backend";
-import { hashPasswordCompat,randomId,randomSaltBase64 } from "@/lib/crypto-fallback";
+import { apiFetch,getRemoteToken,setRemoteToken } from "@/lib/backend";
+import { randomId } from "@/lib/crypto-fallback";
+
 
 const USERS_KEY="toyqms.users.v1",SESSION_KEY="toyqms.session.v1",DEFAULT_PASSWORD="12345678";
-// http 非安全上下文没有 crypto.subtle/randomUUID，一律走 crypto-fallback（#651）
-const hashPassword=hashPasswordCompat;
-async function passwordFields(password:string){const salt=randomSaltBase64();return {passwordSalt:salt,passwordHash:await hashPassword(password,salt)}}
+const encoder=new TextEncoder();
+const bytesToBase64=(bytes:Uint8Array)=>btoa(String.fromCharCode(...bytes));
+const base64ToBytes=(value:string)=>Uint8Array.from(atob(value),char=>char.charCodeAt(0));
+async function hashPassword(password:string,salt:string){const material=await crypto.subtle.importKey("raw",encoder.encode(password),"PBKDF2",false,["deriveBits"]);const bits=await crypto.subtle.deriveBits({name:"PBKDF2",salt:base64ToBytes(salt),iterations:120000,hash:"SHA-256"},material,256);return bytesToBase64(new Uint8Array(bits))}
+async function passwordFields(password:string){const salt=bytesToBase64(crypto.getRandomValues(new Uint8Array(16)));return {passwordSalt:salt,passwordHash:await hashPassword(password,salt)}}
 const publicUser=(user:ToyQMSUser):PublicUser=>{const {passwordHash:_hash,passwordSalt:_salt,...safe}=user;return safe};
 
 type CreateUserInput={name:string;responsibility:string;loginName:string;category:UserCategory;permissions?:Permission[]};
@@ -29,8 +32,18 @@ export function AuthProvider({children}:{children:React.ReactNode}){
   },[remote]);
   useEffect(()=>{void(async()=>{
     if(remote){
-      await ensureReachableBackend();
       try{
+        // 门户免登：网址带 sso_ticket 时先换会话令牌
+        const url=new URL(window.location.href);
+        const ticket=url.searchParams.get("sso_ticket");
+        if(ticket){
+          try{
+            const result=await apiFetch<{token:string;user:PublicUser}>("/auth/sso",{method:"POST",body:{ticket}});
+            setRemoteToken(result.token);
+            url.searchParams.delete("sso_ticket");
+            window.history.replaceState(null,"",url.toString());
+          }catch{/* 免登失败则回落到账号密码登录 */}
+        }
         if(getRemoteToken()){const me=await apiFetch<{user:PublicUser}>("/auth/me");setUser(me.user)}
         try{setUsers(await apiFetch<PublicUser[]>("/users"))}catch{setUsers([])}
       }catch{setUser(null)}

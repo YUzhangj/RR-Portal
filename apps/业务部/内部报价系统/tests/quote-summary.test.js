@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {
-  QUOTE_COMPONENTS, TAX_DEDUCTION_RATES, SUMMARY_COLUMNS, calculateSummaryValues, groupSummaryRows, buildQuoteSummary, buildSummaryWorkbook,
+  QUOTE_COMPONENTS, TAX_DEDUCTION_RATES, BASE_SUMMARY_COLUMNS, SUMMARY_COLUMNS, afterTaxComponents, calculateSummaryValues, groupSummaryRows, buildQuoteSummary, buildSummaryWorkbook,
 } = require('../backend/services/quoteSummary');
 
 test('客价确认在报价单列表操作，汇总页只关联显示', () => {
@@ -68,7 +68,8 @@ test('报价汇总直接统计各部门明细，不依赖业务部历史快照',
   const sections = [
     { dept: 'sales', payload_json: JSON.stringify({
       header: { fx_rmb_hkd: 0.85, fx_hkd_usd: 7.8 },
-      shipping: { markup_x: 1.2, freight_pct: 48, lifting_pct: 52, scenarios: [{ name: '盐田40柜', _freight_rate: 10 }] },
+      freight_calc: {cap_40: 100,yt40: 1000},
+      shipping: { markup_x: 1.2, divisor:1, surtax_markup_x:0, freight_pct: 48, lifting_pct: 52, scenarios: [{ name: '盐田40柜', _freight_rate: 999 }] },
     }) },
     { dept: 'molding', payload_json: JSON.stringify({
       injection: [{ material: 'PVC', weight_g: 2, material_unit_price: 1, shot_price: 3 }],
@@ -86,7 +87,7 @@ test('报价汇总直接统计各部门明细，不依赖业务部历史快照',
   assert.equal(result.abs_material_cost, 0);
   assert.equal(result.components.freight, 4.40352);
   assert.equal(result.components.cabinet, 5.2);
-  assert.equal(result.quoted_price, 21.6);
+  assert.ok(Math.abs(result.quoted_price - 21.6) < 1e-10);
 });
 
 test('ABS料价成本从注塑材料单独识别且不重复计入原料', () => {
@@ -120,7 +121,7 @@ test('报价汇总按减税明细口径计算各项减税后单价', () => {
   assert.equal(result.components.suction, 9.4);
   assert.equal(result.components.color_box, 8.85);
   assert.equal(result.components.plating, 9.901);
-  assert.equal(result.components.carton, 8.85);
+  assert.equal(result.components.carton, 8.954545); // 10 - 10 / 1.1 × 11.5%，保留六位
   assert.equal(result.components.freight, 9.174);
   assert.equal(result.components.cabinet, 10);
   assert.equal(result.components.misc, 10);
@@ -130,7 +131,7 @@ test('报价汇总项目按参考表顺序排列，系统新增项目插入同�
   assert.deepEqual(QUOTE_COMPONENTS.map(([key]) => key), [
     'injection_labor', 'assembly_labor', 'painting_labor',
     'imp_mat', 'dom_mat', 'blow',
-    'color_box', 'glue_bag', 'suction', 'carton', 'plating',
+    'color_box', 'glue_bag', 'suction', 'carton', 'plating', 'flocking',
     'electronic', 'motor', 'battery', 'libao', 'hardware',
     'slush', 'sewing_hair', 'sewing_cloth', 'paint_material',
     'other_buy', 'misc', 'freight', 'cabinet',
@@ -139,7 +140,7 @@ test('报价汇总项目按参考表顺序排列，系统新增项目插入同�
 
 test('导出表横向展开报价项目并保留客户确认和实际生产车间', async () => {
   const row = {
-    id: 1, customer: 'Sky Castle', quote_no: 'SC-1', product_name: '产品', version: 'V1', qty: 100,
+    id: 1, customer: 'Sky Castle', quote_no: 'SC-1', product_name: '产品', version: 'X1', qty: 100,
     quoted_price: 10, created_at: '2026-09-08T09:00:00Z',
     components_before_tax: { injection_labor: 1.5, dom_mat: 2 },
     components: { injection_labor: 1.5, dom_mat: 1.77 },
@@ -154,17 +155,17 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   assert.equal(sheet.getCell(4, 3).value, '实际生产车间');
   assert.equal(sheet.getCell(5, 3).value, '兴信A');
   assert.equal(sheet.getCell(4, 4).value, '货号');
-  assert.equal(sheet.getCell(4, 9).value, '啤工');
-  assert.equal(sheet.getCell(4, 10).value, '退税后啤工');
-  assert.equal(sheet.getCell(4, 11).value, '啤工金额');
-  assert.equal(sheet.getCell(4, 12).value, '啤工占比');
-  assert.equal(sheet.getCell(5, 9).value, 1.5);
-  assert.deepEqual(sheet.getCell(5, 10).value, { formula: 'I5', result: 1.5 });
-  assert.deepEqual(sheet.getCell(5, 11).value, { formula: 'J5*G5', result: 150 });
-  assert.equal(sheet.getCell(5, 12).value.formula, 'IF(H5=0,0,J5/H5)');
-  assert.ok(Math.abs(sheet.getCell(5, 12).value.result - 0.15) < 1e-12);
-  assert.equal(sheet.getCell(4, 23).value, '退税后原料');
-  assert.equal(sheet.getCell(4, 28).value, '总采购价');
+  assert.equal(sheet.getCell(4, 11).value, '啤工');
+  assert.equal(sheet.getCell(4, 12).value, '退税后啤工');
+  assert.equal(sheet.getCell(4, 13).value, '啤工金额');
+  assert.equal(sheet.getCell(4, 14).value, '啤工占比');
+  assert.equal(sheet.getCell(5, 11).value, 1.5);
+  assert.deepEqual(sheet.getCell(5, 12).value, { formula: 'K5', result: 1.5 });
+  assert.deepEqual(sheet.getCell(5, 13).value, { formula: 'L5*G5', result: 150 });
+  assert.equal(sheet.getCell(5, 14).value.formula, 'IF(DM5=0,0,M5/DM5)');
+  assert.ok(Math.abs(sheet.getCell(5, 14).value.result - 0.15) < 1e-12);
+  assert.equal(sheet.getCell(4, 25).value, '退税后原料');
+  assert.equal(sheet.getCell(4, 30).value, '总采购价');
   assert.equal(sheet.getCell(4, workflowStart).value, '客价确认');
   assert.equal(sheet.getCell(5, workflowStart).value, '已确认');
   assert.equal(sheet.getCell(5, 8).value, 10);
@@ -179,16 +180,16 @@ test('导出表横向展开报价项目并保留客户确认和实际生产车�
   assert.equal(sheet.getCell(6, 2).border.right.style, 'thin');
   assert.equal(sheet.getCell(6, 7).value.formula, 'SUM(G5:G5)');
   assert.equal(sheet.getCell(6, 8).value.formula, 'SUM(H5:H5)');
-  assert.equal(sheet.getCell(6, 9).value.formula, 'SUM(I5:I5)');
-  assert.equal(sheet.getCell(6, 10).value.formula, 'SUM(J5:J5)');
   assert.equal(sheet.getCell(6, 11).value.formula, 'SUM(K5:K5)');
   assert.equal(sheet.getCell(6, 12).value.formula, 'SUM(L5:L5)');
+  assert.equal(sheet.getCell(6, 13).value.formula, 'SUM(M5:M5)');
+  assert.equal(sheet.getCell(6, 14).value.formula, 'IF(DM6=0,0,SUM(M6)/DM6)');
   const buffer = await workbook.xlsx.writeBuffer();
   assert.ok(buffer.byteLength > 1000);
   const reopened = new (require('exceljs').Workbook)();
   await reopened.xlsx.load(buffer);
-  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('J5').value.formula, 'I5');
-  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('K5').value.formula, 'J5*G5');
+  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('L5').value.formula, 'K5');
+  assert.equal(reopened.getWorksheet('各客报价汇总').getCell('M5').value.formula, 'L5*G5');
 });
 
 test('报价汇总按客户排序分组，序号由每个客户组内重新开始', () => {
@@ -221,7 +222,7 @@ test('导出表按客户组内逐条编号并在总计行留空', () => {
   assert.equal(sheet.getCell('A9').value, '');
 });
 
-test('客户总计逐列汇总货价、单价和占比，即使接单数量为零', () => {
+test('客户总计汇总金额后计算占比，零接单数量占比为零', () => {
   const base = {
     customer: 'TOMY', product_name: '产品', qty: 0,
     components_before_tax: {}, confirmation: { confirmed_qty: 0 },
@@ -232,10 +233,11 @@ test('客户总计逐列汇总货价、单价和占比，即使接单数量为�
   ]);
   const sheet = workbook.getWorksheet('各客报价汇总');
   assert.deepEqual(sheet.getCell('H7').value, { formula: 'SUM(H5:H6)', result: 30 });
-  assert.deepEqual(sheet.getCell('I7').value, { formula: 'SUM(I5:I6)', result: 3 });
-  assert.deepEqual(sheet.getCell('J7').value, { formula: 'SUM(J5:J6)', result: 3 });
-  assert.equal(sheet.getCell('K7').value.formula, 'SUM(K5:K6)');
-  assert.deepEqual(sheet.getCell('L7').value, { formula: 'SUM(L5:L6)', result: 0.2 });
+  assert.deepEqual(sheet.getCell('K7').value, { formula: 'SUM(K5:K6)', result: 3 });
+  assert.deepEqual(sheet.getCell('L7').value, { formula: 'SUM(L5:L6)', result: 3 });
+  assert.equal(sheet.getCell('M7').value.formula, 'SUM(M5:M6)');
+  assert.equal(sheet.getCell('N7').value.formula, 'IF(DM7=0,0,SUM(M7)/DM7)');
+  assert.equal(sheet.getCell('N7').value.result || 0, 0);
 });
 
 test('导出表长内容自动换行并增加行高', () => {
@@ -272,7 +274,7 @@ test('网页汇总使用后端完整栏目清单并保持固定表格布局', ()
   assert.match(html, /<colgroup id="summary-cols"><\/colgroup>/);
 });
 
-test('汇总导出在当前页面内下载并按业务分区显示不同颜色', () => {
+test('汇总导出在当前页面内下载并按参考表显示负责人及税前税后颜色', () => {
   const source = fs.readFileSync(path.join(__dirname, '../frontend/summary.js'), 'utf8');
   assert.match(source, /fetch\(`\$\{base\}\/api\/quote-summary\/export\/xlsx/);
   assert.match(source, /URL\.createObjectURL\(blob\)/);
@@ -284,14 +286,16 @@ test('汇总导出在当前页面内下载并按业务分区显示不同颜色',
   }]);
   const sheet = workbook.getWorksheet('各客报价汇总');
   const headerColumn = label => sheet.getRow(4).values.findIndex(value => value === label);
-  assert.notEqual(sheet.getCell(4, headerColumn('啤工')).fill.fgColor.argb, sheet.getCell(4, headerColumn('彩盒')).fill.fgColor.argb);
-  assert.notEqual(sheet.getCell(4, headerColumn('彩盒')).fill.fgColor.argb, sheet.getCell(4, headerColumn('电子')).fill.fgColor.argb);
+  assert.equal(sheet.getCell(3, headerColumn('啤工')).value, '张副总');
+  assert.equal(sheet.getCell(3, headerColumn('电子')).value, '胡总');
+  assert.equal(sheet.getCell(4, headerColumn('总未退税前利润率')).fill.fgColor.argb, 'FFFFFF00');
+  assert.equal(sheet.getCell(4, headerColumn('总退税后利润率')).fill.fgColor.argb, 'FF00B0F0');
   assert.equal(sheet.getCell(5, headerColumn('客价确认')).fill.fgColor.argb, 'FFC6EFCE');
 });
 
 test('完整汇总栏目严格按参考表顺序', () => {
   const labels = SUMMARY_COLUMNS.map(([, label]) => label);
-  assert.deepEqual(labels.slice(0, 12), ['啤工','退税后啤工','啤工金额','啤工占比','装工','退税后装工','装工金额','装工占比','喷印工','退税后喷印工','喷印工金额','喷印工占比']);
+  assert.deepEqual(labels.slice(0, 14), ['成本（含人工）','成本（不含人工）','啤工','退税后啤工','啤工金额','啤工占比','装工','退税后装工','装工金额','装工占比','喷印工','退税后喷印工','喷印工金额','喷印工占比']);
   assert.ok(labels.indexOf('料价进口料') < labels.indexOf('彩盒'));
   assert.ok(labels.indexOf('总退税可减少成本') < labels.indexOf('退税及返点后总成本（含人工）'));
   assert.deepEqual(labels.slice(-5), ['总退税后料成本','总未退税前料成本占比','总退税后人工成本','总退税后人工成本占比','各金额占比求和']);
@@ -314,4 +318,66 @@ test('汇总最后一列汇总各成本项目占比并导出为公式', () => {
   const column = sheet.getRow(4).values.findIndex(value => value === '各金额占比求和');
   assert.match(sheet.getCell(5, column).value.formula, /^SUM\(/);
   assert.equal(sheet.getCell(5, column).value.result, 0.5);
+});
+
+test('总生产成本包含人工和未展开的采购项目，总毛利率按生产金额计算', () => {
+  const before = { injection_labor: 2, assembly_labor: 3, imp_mat: 20, dom_mat: 10, blow: 7, glue_bag: 8, motor: 9 };
+  const after = afterTaxComponents(before);
+  const values = calculateSummaryValues(before, after, 10, 100);
+  assert.equal(values.cost_with_labor, 59);
+  assert.equal(values.production_cost, 590);
+  assert.equal(values.production_amount, 1000);
+  assert.equal(values.total_gross_before_tax, 460);
+  assert.equal(values.total_gross_before_tax_rate, 0.46);
+
+  const zeroQty = calculateSummaryValues(before, after, 0, 100);
+  assert.equal(zeroQty.gross_before_tax_rate, 0.46);
+  assert.equal(zeroQty.production_cost, 0);
+  assert.equal(zeroQty.total_gross_before_tax_rate, 0);
+  const zeroPrice = calculateSummaryValues(before, after, 10, 0);
+  assert.equal(zeroPrice.production_cost, 590);
+  assert.equal(zeroPrice.total_gross_before_tax, -540);
+  assert.equal(zeroPrice.total_gross_before_tax_rate, 0);
+});
+
+test('客户总毛利率按金额加权并保留明确的零数量和零货价确认值', () => {
+  const makeRow = (id, qty, quoted_price, before, confirmation = {}) => ({
+    id, customer: 'TOMY', quote_no: `WEIGHT-${id}`, product_name: '加权毛利',
+    qty, quoted_price, components_before_tax: before, components: afterTaxComponents(before), confirmation,
+  });
+  const rows = [
+    makeRow(1, 100, 100, { injection_labor: 1, imp_mat: 1 }, { confirmed_qty: 2, confirmed_price: 10 }),
+    makeRow(2, 20, 5, { injection_labor: 1, imp_mat: 2 }),
+    makeRow(3, 500, 200, { imp_mat: 1000 }, { confirmed_qty: 0 }),
+    makeRow(4, 4, 300, { imp_mat: 1 }, { confirmed_price: 0 }),
+  ];
+  const sheet = buildSummaryWorkbook(rows).getWorksheet('各客报价汇总');
+  const columns = [...BASE_SUMMARY_COLUMNS, ...SUMMARY_COLUMNS];
+  const column = key => columns.findIndex(([code]) => code === key) + 1;
+  const value = (row, key) => sheet.getCell(row, column(key));
+  assert.equal(value(5, 'qty').value, 2);
+  assert.equal(value(5, 'quoted_price').value, 10);
+  assert.equal(value(7, 'qty').value, 0);
+  assert.equal(value(7, 'total_gross_before_tax_rate').result, 0);
+  assert.equal(value(8, 'quoted_price').value, 0);
+  assert.equal(value(8, 'total_gross_before_tax_rate').result, 0);
+  assert.equal(value(9, 'production_cost').result, 68);
+  assert.equal(value(9, 'production_amount').result, 120);
+  assert.equal(value(9, 'total_gross_before_tax').result, 74);
+  assert.equal(value(9, 'total_gross_before_tax_rate').result, 74 / 120);
+  assert.equal(value(9, 'total_gross_before_tax_rate').formula, 'IF(DM9=0,0,SUM(DO9)/DM9)');
+});
+
+test('汇总导出总成本及总毛利率引用可重算单元格，保存后保留公式及结果', async () => {
+  const workbook = buildSummaryWorkbook([{
+    id: 1, customer: 'TOMY', quote_no: 'FORMULA-1', product_name: '公式引用', qty: 10, quoted_price: 100,
+    components_before_tax: { injection_labor: 2, assembly_labor: 3, imp_mat: 20, dom_mat: 10, blow: 7, glue_bag: 8, motor: 9 },
+    components: afterTaxComponents({ injection_labor: 2, assembly_labor: 3, imp_mat: 20, dom_mat: 10, blow: 7, glue_bag: 8, motor: 9 }),
+  }]);
+  const reopened = new (require('exceljs').Workbook)();
+  await reopened.xlsx.load(await workbook.xlsx.writeBuffer());
+  const sheet = reopened.getWorksheet('各客报价汇总');
+  assert.deepEqual(sheet.getCell('DN5').value, { formula: 'G5*I5', result: 590 });
+  assert.deepEqual(sheet.getCell('DP5').value, { formula: 'IF(DM5=0,0,DO5/DM5)', result: 0.46 });
+  assert.deepEqual(sheet.getCell('DP6').value, { formula: 'IF(DM6=0,0,SUM(DO6)/DM6)', result: 0.46 });
 });

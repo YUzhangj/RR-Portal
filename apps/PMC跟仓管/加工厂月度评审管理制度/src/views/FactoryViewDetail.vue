@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import DynamicAnalysisPanel from '../components/DynamicAnalysisPanel.vue'
 import { ref, onMounted } from 'vue'
 import { useRoute, RouterLink } from 'vue-router'
 import AppLayout from '../components/AppLayout.vue'
@@ -34,6 +35,7 @@ onMounted(async () => {
 </script>
 <template>
   <AppLayout>
+    <DynamicAnalysisPanel v-if="factory.id" compact :factory-id="factory.id" />
     <div class="page detail">
       <div class="toolbar">
         <RouterLink to="/factory-view" class="back">← 加工厂管理</RouterLink>
@@ -87,7 +89,7 @@ onMounted(async () => {
               <div class="m-title"><span class="ic">🧹</span>现场管理</div>
               <div class="m-line"><span>现场得分</span><b>{{ site ? site.siteScore : '-' }}</b></div>
               <div class="m-line"><span>折算总达成率</span><b class="hl">{{ site ? site.finalRate : '-' }}</b></div>
-              <div class="m-line"><span>IP管控</span><b>{{ factory.ip_control || '-' }}</b></div>
+              <div class="m-line"><span>IP管控</span><b>{{ site ? site.ipScore : '-' }}</b></div>
             </div>
           </div>
         </div>

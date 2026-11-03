@@ -1,5 +1,6 @@
 using Dapper;
 using IndoShipping.Api.Auditing;
+using IndoShipping.Api.Features.Purchasing;
 using IndoShipping.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Mvc;
 
@@ -16,7 +17,7 @@ public class OutboundController(ISqlConnectionFactory factory) : ControllerBase
         var where = string.IsNullOrWhiteSpace(po_no) ? "" : "WHERE o.po_no=@po_no";
         var rows = await c.QueryAsync($@"
             WITH receipt_totals AS (
-                SELECT po_item_id, SUM(qty) AS received_qty
+                SELECT po_item_id, SUM(qty + spare_qty) AS received_qty
                 FROM po_receipts
                 GROUP BY po_item_id
             ),
@@ -59,7 +60,7 @@ public class OutboundController(ISqlConnectionFactory factory) : ControllerBase
         using var c = factory.Create();
         var rows = await c.QueryAsync(@"
             WITH receipt_totals AS (
-                SELECT po_item_id, SUM(qty) AS received_qty
+                SELECT po_item_id, SUM(qty + spare_qty) AS received_qty
                 FROM po_receipts
                 GROUP BY po_item_id
             ),
@@ -144,7 +145,7 @@ public class OutboundController(ISqlConnectionFactory factory) : ControllerBase
             }
 
             var received = await c.ExecuteScalarAsync<decimal>(
-                "SELECT COALESCE(SUM(qty), 0) FROM po_receipts WHERE po_item_id=@poItemId",
+                "SELECT COALESCE(SUM(qty + spare_qty), 0) FROM po_receipts WHERE po_item_id=@poItemId",
                 new { poItemId = item.PoItemId }, tx);
             var alreadyOut = await c.ExecuteScalarAsync<decimal>(
                 "SELECT COALESCE(SUM(qty), 0) FROM outbound WHERE po_item_id=@poItemId",
@@ -201,10 +202,10 @@ public class OutboundController(ISqlConnectionFactory factory) : ControllerBase
             await c.ExecuteAsync(@"
                 SELECT i.id FROM po_items i
                 WHERE i.po_id=@poId AND i.id = ANY(@itemIds)
-                FOR UPDATE", new { poId = body.po_id, itemIds }, tx);
+                ORDER BY i.id FOR UPDATE", new { poId = body.po_id, itemIds }, tx);
             var stocks = (await c.QueryAsync<BulkOutboundStock>(@"
                 SELECT i.id AS ""PoItemId"", po.po_no AS ""PoNo"", i.material_id AS ""MaterialId"",
-                       COALESCE((SELECT SUM(r.qty) FROM po_receipts r WHERE r.po_item_id=i.id), 0) AS ""ReceivedQty"",
+                       COALESCE((SELECT SUM(r.qty + r.spare_qty) FROM po_receipts r WHERE r.po_item_id=i.id), 0) AS ""ReceivedQty"",
                        COALESCE((SELECT SUM(o.qty) FROM outbound o WHERE o.po_item_id=i.id), 0) AS ""OutboundQty""
                 FROM po_items i
                 JOIN purchase_orders po ON po.id=i.po_id
@@ -304,7 +305,7 @@ public class OutboundController(ISqlConnectionFactory factory) : ControllerBase
             }
 
             var received = await c.ExecuteScalarAsync<decimal>(
-                "SELECT COALESCE(SUM(qty), 0) FROM po_receipts WHERE po_item_id=@poItemId",
+                "SELECT COALESCE(SUM(qty + spare_qty), 0) FROM po_receipts WHERE po_item_id=@poItemId",
                 new { poItemId = item.PoItemId }, tx);
             var otherOut = await c.ExecuteScalarAsync<decimal>(@"
                 SELECT COALESCE(SUM(qty), 0)
@@ -389,8 +390,8 @@ public class OutboundController(ISqlConnectionFactory factory) : ControllerBase
     public async Task<IActionResult> Allocatable([FromQuery] int? shipment_id)
     {
         using var c = factory.Create();
-        var rows = await c.QueryAsync(@"
-            WITH allocations AS (
+        var rows = await c.QueryAsync($@"
+            WITH receipt_basis AS ({ShipmentPurchaseBasis.ReceiptBasisSql}), allocations AS (
                 SELECT outbound_id,
                        SUM(qty) FILTER (WHERE shipment_id <> COALESCE(@shipmentId, -1)) AS allocated_other,
                        SUM(qty) FILTER (WHERE shipment_id = @shipmentId) AS allocated_current
@@ -399,19 +400,22 @@ public class OutboundController(ISqlConnectionFactory factory) : ControllerBase
                 GROUP BY outbound_id
             )
             SELECT o.id AS outbound_id, o.po_item_id, o.po_no, o.material_id,
-                   m.product_code AS code, COALESCE(i.material_name, m.name_zh) AS name_zh,
+                   COALESCE(m.product_code, t.related_product_code) AS code, COALESCE(i.material_name, m.name_zh) AS name_zh,
                    i.spec,
                    po.supplier, o.out_date, o.notes,
                    COALESCE(o.qty, 0) AS outbound_qty,
                    COALESCE(a.allocated_other, 0) AS allocated_other,
                    COALESCE(a.allocated_current, 0) AS allocated_current,
                    GREATEST(COALESCE(o.qty, 0) - COALESCE(a.allocated_other, 0), 0) AS allocatable_qty,
-                   i.price, i.currency, i.purchase_unit, po.order_date AS po_date, m.customs_company
+                   i.price, i.currency, i.purchase_unit, po.order_date AS po_date, m.customs_company,
+                   COALESCE(rb.purchase_charge_ratio, 1) AS purchase_charge_ratio
             FROM outbound o
             LEFT JOIN allocations a ON a.outbound_id=o.id
             LEFT JOIN po_items i ON i.id=o.po_item_id
+            LEFT JOIN receipt_basis rb ON rb.po_item_id=i.id
             LEFT JOIN purchase_orders po ON po.id=i.po_id
             LEFT JOIN materials m ON m.id=o.material_id
+            LEFT JOIN tool_materials t ON t.material_id=m.id
             WHERE COALESCE(o.qty, 0) > COALESCE(a.allocated_other, 0)
             ORDER BY o.out_date, o.id", new { shipmentId = shipment_id });
         return Ok(rows);
@@ -425,7 +429,7 @@ public class OutboundController(ISqlConnectionFactory factory) : ControllerBase
             WITH movements AS (
                 SELECT 'R-' || r.id AS movement_id, r.po_item_id, r.receipt_date AS movement_date,
                        r.created_at, 'receipt' AS movement_type, r.batch_no AS reference_no,
-                       r.qty AS in_qty, 0::numeric AS out_qty, r.notes
+                       r.qty + r.spare_qty AS in_qty, 0::numeric AS out_qty, r.notes
                 FROM po_receipts r
                 UNION ALL
                 SELECT 'O-' || o.id, o.po_item_id, o.out_date, o.created_at, 'outbound',

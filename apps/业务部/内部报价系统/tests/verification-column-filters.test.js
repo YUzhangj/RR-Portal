@@ -8,7 +8,7 @@ function fixture(){
     {id:3,quote_no:'CD-003',product_name:'咖啡杯',customer:'B',current_version_label:'V1',approved_count:8,total_depts:8,verification_status:'completed',workshop:'河源'},
     {id:4,quote_no:'NEW-004',product_name:'待创建',customer:'C',total_depts:8},
   ];
-  const context=vm.createContext({$,listState,num:v=>Number(v)||0});
+  const context=vm.createContext({$,listState,num:v=>Number(v)||0,window:{VerificationCustomers:{display:value=>value}}});
   vm.runInContext(source.slice(source.indexOf('function filteredList('),source.indexOf('function renderList(')),context);
   return {$,listState,context,ids:()=>Array.from(context.filteredList(),r=>r.id)};
 }
@@ -25,15 +25,18 @@ test('uncreated versions, missing workshops and category progress remain filtera
   f.$('verification-progress-filter').value='completed';assert.deepEqual(f.ids(),[3]);
 });
 test('paired filters synchronize; clearing resets all conditions and workshop selection',()=>{
-  const f=fixture(),selected=new Set([1]),count={renders:0};
+  const f=fixture(),selected=new Set([1]),revisions=new Map([[1,'r1']]),count={renders:0};
   const listFilterIds=['verification-search','verification-status-filter','verification-customer-filter','verification-no-filter','verification-product-filter','verification-table-customer-filter','verification-version-filter','verification-progress-filter','verification-table-status-filter','workshop-filter','verification-table-workshop-filter'];
-  Object.assign(f.context,{listFilterIds,workshopSelected:selected,renderList:()=>count.renders++});
-  vm.runInContext(source.slice(source.indexOf('const pairedListFilters='),source.indexOf("$('verification-preview').addEventListener",source.indexOf('const pairedListFilters='))),f.context);
+  Object.assign(f.context,{listFilterIds,workshopSelected:selected,workshopRevisions:revisions,renderList:()=>count.renders++});
+  vm.runInContext(source.slice(source.indexOf('const pairedListFilters='),source.indexOf("$('workshop-select-visible').onchange")),f.context);
+  const previewBinding=source.indexOf("$('verification-preview').addEventListener");
+  const filterBinding=source.indexOf("for (const id of listFilterIds) {\n  const eventName");
+  vm.runInContext(source.slice(filterBinding,previewBinding),f.context);
   f.$('verification-table-customer-filter').value='A';f.$('verification-table-customer-filter').onchange();
-  assert.equal(f.$('verification-customer-filter').value,'A');assert.equal(selected.size,0);
+  assert.equal(f.$('verification-customer-filter').value,'A');assert.equal(selected.size,0);assert.equal(revisions.size,0);
   f.$('verification-table-workshop-filter').value='兴信B';f.$('verification-table-workshop-filter').onchange();
   assert.equal(f.$('workshop-filter').value,'兴信B');
   f.$('verification-no-filter').value='AB';f.$('verification-progress-filter').value='ratio:4/8';selected.add(2);
   f.$('verification-clear-filters').onclick();
-  assert.ok(listFilterIds.every(id=>f.$(id).value===''));assert.equal(selected.size,0);assert.equal(count.renders,3);assert.deepEqual(f.ids(),[1,2,3,4]);
+  assert.ok(listFilterIds.every(id=>f.$(id).value===''));assert.equal(selected.size,0);assert.equal(revisions.size,0);assert.equal(count.renders,3);assert.deepEqual(f.ids(),[1,2,3,4]);
 });

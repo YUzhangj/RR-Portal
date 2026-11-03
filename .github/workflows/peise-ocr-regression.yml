@@ -1,0 +1,33 @@
+name: Peise OCR regression
+
+on:
+  pull_request:
+    paths:
+      - 'apps/PMC跟仓管/配色库存管理/**'
+      - '.github/workflows/peise-ocr-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  peise-ocr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/PMC跟仓管/配色库存管理
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - name: Test provider errors, image formats and previews without inventory writes
+        # test_full_regression.py is a manual program that writes a real DB on
+        # import. Collect only these isolated tests backed by in-memory SQLite.
+        run: >-
+          python -m pytest -q
+          tests/test_ocr_llm_errors.py tests/test_ocr_upload_errors.py
+          tests/test_ocr_out_prices.py tests/test_inventory.py
+          tests/test_models.py tests/test_excel_io.py

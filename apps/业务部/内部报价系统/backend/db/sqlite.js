@@ -3,12 +3,14 @@ const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
+const { AsyncLocalStorage } = require('node:async_hooks');
+const transactionStore = new AsyncLocalStorage();
+let transactionTail = Promise.resolve();
 const {
   appendMissingRefDefaults,
   appendMissingRefDefaultsToSectionPayloads,
   refSeedUpgrades,
 } = require('./ref-defaults');
-const { DEFAULT_COSTING_BASIS } = require('../services/costingBasis');
 
 const DB_PATH = process.env.DB_FILE || path.join(__dirname, '..', 'data.db');
 const SCHEMA_PATH = path.join(__dirname, 'schema.sql');
@@ -115,10 +117,11 @@ if (!_softDeleteCols.includes('deleted_at')) db.exec('ALTER TABLE quotes ADD COL
 if (!_softDeleteCols.includes('deleted_by')) db.exec('ALTER TABLE quotes ADD COLUMN deleted_by TEXT');
 const _verificationOriginCols = db.prepare('PRAGMA table_info(quote_verifications)').all().map(c => c.name);
 if (!_verificationOriginCols.includes('origin')) db.exec("ALTER TABLE quote_verifications ADD COLUMN origin TEXT NOT NULL DEFAULT 'quote'");
-const _verificationCols = db.prepare('PRAGMA table_info(quote_verifications)').all().map(c => c.name);
-if (!_verificationCols.includes('verified_sections_json')) db.exec("ALTER TABLE quote_verifications ADD COLUMN verified_sections_json TEXT NOT NULL DEFAULT '{}'");
 const _verificationVersionCols = db.prepare('PRAGMA table_info(quote_verification_versions)').all().map(c => c.name);
-if (!_verificationVersionCols.includes('category')) db.exec('ALTER TABLE quote_verification_versions ADD COLUMN category TEXT');
+if (!_verificationVersionCols.includes('category')) {
+  db.exec('ALTER TABLE quote_verification_versions ADD COLUMN category TEXT');
+  console.log('[migrate] 核价版本类别字段已添加');
+}
 db.prepare("DELETE FROM audit_log WHERE quote_id IN (SELECT id FROM quotes WHERE deleted_at IS NOT NULL AND deleted_at < datetime('now', '-30 days'))").run();
 db.prepare("DELETE FROM quotes WHERE deleted_at IS NOT NULL AND deleted_at < datetime('now', '-30 days')").run();
 db.exec('CREATE INDEX IF NOT EXISTS idx_users_factory ON users(factory_code)');
@@ -220,7 +223,26 @@ const refSeeds = {
 };
 
 // 清溪 2026 年料价（HK$/Lb）：以清溪最新报价表为准，并保留 ABS 抽粒料。
-const qingxiMaterialPrices2026 = DEFAULT_COSTING_BASIS.materials;
+const qingxiMaterialPrices2026 = [
+  { name: 'ABS', model: '750SW', price: 8.50 },
+  { name: 'ABS', model: '抽粒料', price: 4.60 },
+  { name: '透明ABS', model: 'TR558/920', price: 12.50 },
+  { name: 'HIPS', model: 'HI425', price: 7.80 },
+  { name: 'GP', model: 'MW-1', price: 7.80 },
+  { name: '1#PP', model: 'JM350/K8009', price: 6.80 },
+  { name: '1#PP', model: '7032 E3', price: 6.80 },
+  { name: '透明PP', model: '5090T', price: 7.80 },
+  { name: 'POM', model: 'F3003/M9044', price: 16.50 },
+  { name: 'POM', model: 'PM820/DM220', price: 21.50 },
+  { name: 'PVC', model: '普通透明', price: 9.00 },
+  { name: 'PVC', model: '普通本白', price: 8.00 },
+  { name: 'LDPE', model: 'G812', price: 7.80 },
+  { name: 'HDPE', model: 'HMA016', price: 8.00 },
+  { name: 'TPR', model: '本白橡胶料', price: 15.00 },
+  { name: 'TPR', model: '透明橡胶料', price: 17.00 },
+  { name: 'K料', model: 'KR-03NW', price: 15.00 },
+  { name: 'PC料', model: '2605', price: 12.50 },
+];
 
 function isLegacyStandardMaterialPriceTable(raw) {
   let rows;
@@ -291,46 +313,6 @@ for (const f of factorySeeds) {
         .run(JSON.stringify(data), f.code, key);
     }
   }
-}
-
-for (const f of factorySeeds) {
-  db.prepare(`INSERT OR IGNORE INTO factory_ref_tables (factory_code, key, data_json, updated_by)
-    VALUES (?, 'costing_basis', ?, '[factory-seed]')`)
-    .run(f.code, JSON.stringify(DEFAULT_COSTING_BASIS));
-}
-
-// 2026-07-31 清溪统一核价基准：只更新全局基准；已保存的历史报价副本继续冻结。
-const unifiedCostingBasisMigration = 'unified_costing_basis_20260731';
-if (!db.prepare('SELECT 1 FROM app_migrations WHERE key = ?').get(unifiedCostingBasisMigration)) {
-  db.exec('BEGIN');
-  try {
-    const actor = '[统一核价基准 2026-07-31]';
-    for (const [key, data] of [
-      ['costing_basis', DEFAULT_COSTING_BASIS],
-      ['material_prices', DEFAULT_COSTING_BASIS.materials],
-      ['machine_prices', DEFAULT_COSTING_BASIS.machines],
-    ]) {
-      if (key !== 'costing_basis') {
-        const current = db.prepare('SELECT data_json FROM factory_ref_tables WHERE factory_code = ? AND key = ?')
-          .get('qingxi', key);
-        let rows = [];
-        try { rows = JSON.parse(current?.data_json || '[]'); } catch {}
-        // 一行或少量自定义表视为人工配置，不用系统基准覆盖。
-        if (!Array.isArray(rows) || rows.length < 10) continue;
-      }
-      db.prepare(`INSERT INTO factory_ref_tables (factory_code, key, data_json, updated_at, updated_by)
-        VALUES ('qingxi', ?, ?, datetime('now'), ?)
-        ON CONFLICT(factory_code,key) DO UPDATE SET
-          data_json = excluded.data_json, updated_at = excluded.updated_at, updated_by = excluded.updated_by`)
-        .run(key, JSON.stringify(data), actor);
-    }
-    db.prepare('INSERT INTO app_migrations (key) VALUES (?)').run(unifiedCostingBasisMigration);
-    db.exec('COMMIT');
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
-  }
-  console.log('[migrate] 清溪统一核价基准已更新为 2026-07-31 标准');
 }
 
 // 已有数据库只更新清溪厂区参考表；河源和历史报价单内保存的料价副本保持不变。
@@ -509,32 +491,24 @@ if (!db.prepare('SELECT 1 FROM app_migrations WHERE key = ?').get(retireHeyuanFa
 // 包装：transaction(fn) 在 BEGIN/COMMIT/ROLLBACK 中运行 fn
 db.transaction = function (fn) {
   return async (...args) => {
-    db.exec('BEGIN');
-    try { const r = await fn(...args); db.exec('COMMIT'); return r; }
-    catch (e) { db.exec('ROLLBACK'); throw e; }
+    if (transactionStore.getStore()) return fn(...args);
+    const run = async () => {
+      db.exec('BEGIN');
+      try {
+        const result = await transactionStore.run(true, () => fn(...args));
+        db.exec('COMMIT');
+        return result;
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+    };
+    const current = transactionTail.then(run, run);
+    transactionTail = current.then(() => {}, () => {});
+    return current;
   };
 };
 
 const { seedConfiguredAccounts } = require('./accountSeed');
-db.ready = (async () => {
-  await seedConfiguredAccounts(db);
-  if (process.env.APPLY_LEGACY_SKY_CASTLE_IMPORT === '1') {
-    const manifest = require('./legacy-sky-castle-20260908.json');
-    const { importLegacyVerificationItems } = require('../services/legacyVerificationImport');
-    const result = await importLegacyVerificationItems(db, manifest, { apply: true, skipReady: true });
-    console.log(`[migrate] Sky Castle 历史核价：${result.status}，${result.itemCount} 个货号`);
-  }
-  if (process.env.APPLY_LEGACY_ZURU_IMPORT === '1') {
-    const manifest = require('./legacy-zuru-20260909.json');
-    const { importLegacyVerificationItems } = require('../services/legacyVerificationImport');
-    const result = await importLegacyVerificationItems(db, manifest, {
-      apply: true,
-      skipReady: true,
-      customer: 'ZURU',
-      migrationKey: 'legacy_verification_zuru_20260909',
-    });
-    console.log(`[migrate] ZURU 历史核价：${result.status}，${result.itemCount} 个货号`);
-  }
-})();
+const {DEFAULT_COSTING_BASIS}=require('../services/costingBasis');
+for(const f of factorySeeds) db.prepare(`INSERT OR IGNORE INTO factory_ref_tables(factory_code,key,data_json,updated_by) VALUES (?,'costing_basis',?,'[factory-seed]')`).run(f.code,JSON.stringify(DEFAULT_COSTING_BASIS));
+db.ready = seedConfiguredAccounts(db);
 
 module.exports = db;

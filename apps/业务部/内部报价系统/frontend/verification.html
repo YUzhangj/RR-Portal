@@ -4,19 +4,21 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>核价板块</title>
-  <script>
-    document.documentElement.dataset.verificationUi = 'precision';
-  </script>
-  <link rel="stylesheet" href="./styles.css?v=20261030-full-mold-number">
-  <link rel="stylesheet" href="./excel-grid.css?v=20260929-sheet-zoom">
+  <script>document.documentElement.dataset.verificationUi = 'precision';</script>
+  <link rel="stylesheet" href="./styles.css?v=20261030-full-mold-number-r2">
   <style>
     #workshop-assignment[hidden]{display:none!important}
     #workshop-assignment label{display:flex;align-items:center;gap:6px;white-space:nowrap}
     #workshop-assignment input[type=checkbox],[data-workshop-select]{width:auto}
     #workshop-assignment select{width:auto;min-width:130px}
     .verification-list-table{min-width:850px}
+    .verification-toolbar{grid-template-columns:minmax(220px,1fr) repeat(3,minmax(120px,170px))}
+    [data-workshop-select],#workshop-select-visible{min-height:20px;min-width:20px;vertical-align:middle}
+    #workshop-message{overflow-wrap:anywhere;min-width:0;flex:1 1 220px}
+    @media(max-width:700px){.verification-toolbar{grid-template-columns:1fr}#workshop-assignment select{font-size:16px;max-width:100%}}
     @media(min-width:761px){#verification-list:not(.hidden):has(#workshop-assignment:not([hidden])){grid-template-rows:auto auto auto minmax(0,1fr)}}
   </style>
+  <link rel="stylesheet" href="./excel-grid.css?v=20261020-delivery">
   <link rel="stylesheet" href="./verification-compact.css?v=20261031-summary-button">
   <link rel="stylesheet" href="./verification-precision.css?v=20261103-scale-and-filters-3">
 </head>
@@ -37,11 +39,7 @@
     </div>
   </div>
 
-  <main class="verification-page verification-ledger-page">
-    <div class="verification-tools">
-      <section id="verification-transfer" class="card" hidden></section>
-      <section id="verification-costing-basis"></section>
-    </div>
+  <main class="verification-page verification-ledger-page"><div class="verification-tools"><section id="verification-transfer" class="card" hidden></section><section id="verification-costing-basis"></section></div>
     <section id="verification-list" class="card verification-center-card">
       <header class="verification-center-head">
         <div class="verification-center-title">
@@ -101,23 +99,19 @@
   </main>
 
   <script>(function(){var b=location.pathname.replace(/\/[^/]*$/,'');if(!b)return;var f=window.fetch.bind(window);window.fetch=function(u,o){if(typeof u==='string'&&u.indexOf('/api/')===0)u=b+u;return f(u,o)}})();</script>
-  <script>
-    (function(){
-      document.querySelectorAll('option[data-precision-detail]').forEach(function (option) { option.remove(); });
-    })();
-  </script>
+  <script>document.querySelectorAll('option[data-precision-detail]').forEach(function (option) { option.remove(); });</script>
   <script>window.__WORKBENCH_EMBED__ = true;</script>
   <script src="./formula-input.js?v=20260731-fraction-export"></script>
-  <script src="./excel-formulas.js?v=20261017-import-functions"></script>
-  <script src="./excel-valuation.js?v=20260917-whole-sheet"></script>
-  <script src="./excel-grid.js?v=20260929-sheet-zoom"></script>
-  <script src="./verification-transfer.js?v=20261102-reference"></script>
-  <script src="./jazwares-freight.js?v=20261009"></script>
-  <script src="./sewing-tax.js?v=20261028-spin-labor"></script>
-  <script src="./supplier-material-sync.js?v=20261103-edit-supplier"></script>
-  <script src="./injection-pricing.js?v=20261103-linked-shot-price"></script>
+<script src="./jazwares-freight.js?v=20261009"></script>
+<script src="./sewing-tax.js?v=20261028-spin-labor"></script>
+<script src="./supplier-material-sync.js?v=20261103-edit-supplier"></script>
+<script src="./injection-pricing.js?v=20261103-linked-shot-price"></script>
 <script src="./workbench.js?v=20261103-linked-shot-price"></script>
-  <script src="./verification-customers.js?v=20261016-customer-names"></script>
-  <script type="module" src="./verification.js?v=20261102-approved-reference"></script>
+  <script src="./verification-customers.js?v=20261020-delivery"></script>
+  <script src="./excel-formulas.js?v=20261020-delivery"></script>
+  <script src="./excel-valuation.js?v=20261020-delivery"></script>
+  <script src="./excel-grid.js?v=20261020-delivery"></script>
+  <script src="./verification-transfer.js?v=20261020-compact-v1"></script>
+  <script type="module" src="./verification.js?v=20261103-ui-final"></script>
 </body>
 </html>

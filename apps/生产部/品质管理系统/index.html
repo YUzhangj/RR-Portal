@@ -75,7 +75,7 @@
   <div class="sidebar-logo">
     <span class="logo-icon">⬡</span>
     <div class="logo-text">
-      <div class="logo-main">兴信 QMS</div>
+      <div class="logo-main">品质</div>
       <div class="logo-sub">品质管理系统</div>
     </div>
   </div>
@@ -95,7 +95,7 @@
       <span class="nav-icon">◈</span><span>统计分析</span>
     </a>
     <a class="nav-item" data-page="suppliers" onclick="showPage('suppliers')">
-      <span class="nav-icon">◉</span><span>供应商管理</span>
+      <span class="nav-icon">◉</span><span>供应商&客户管理</span>
     </a>
     <div class="nav-group-label">报告中心</div>
     <a class="nav-item" data-page="daily" onclick="showPage('daily')">
@@ -157,6 +157,24 @@
         </select>
       </label>
       <button class="btn-icon" onclick="exportPDF()" title="导出PDF">⬇ PDF</button>
+      <div id="sysSwitch" style="position:relative;display:inline-block">
+        <button class="btn-icon" onclick="event.stopPropagation();document.getElementById('sysSwitchMenu').hidden=!document.getElementById('sysSwitchMenu').hidden" title="切换系统">⇄ 切换系统 ▾</button>
+        <div id="sysSwitchMenu" hidden style="position:absolute;right:0;top:110%;z-index:60;background:#fff;color:#1f2937;border-radius:12px;box-shadow:0 12px 30px rgba(0,0,0,.25);overflow:hidden;min-width:180px;text-align:left">
+          <a href="http://localhost:3000/#/jump?app=qc-report" style="display:block;padding:10px 14px;font-size:14px;color:#1f2937;text-decoration:none">QC成品报告系统</a>
+          <a href="http://localhost:3000/#/jump?app=toyqms" style="display:block;padding:10px 14px;font-size:14px;color:#1f2937;text-decoration:none">玩具质量管理系统</a>
+          <a href="http://localhost:3000/#/jump?app=voyageplex" style="display:block;padding:10px 14px;font-size:14px;color:#1f2937;text-decoration:none">VoyagePlex船务协同</a>
+          <a href="http://localhost:3000/" style="display:block;padding:10px 14px;font-size:14px;color:#475569;text-decoration:none;border-top:1px solid #e5e7eb">← 返回门户首页</a>
+        </div>
+        <script>
+        // 服务器部署时门户在 /portal/ 子路径（nginx 同源反代），本地开发仍在 localhost:3000
+        (function(){
+          if(location.hostname==='localhost'||location.hostname==='127.0.0.1')return;
+          document.querySelectorAll('#sysSwitchMenu a').forEach(function(a){
+            a.href=a.href.replace('http://localhost:3000','/portal');
+          });
+        })();
+        </script>
+      </div>
       <div id="userBadge" style="display:inline-flex;align-items:center;gap:6px;margin-right:4px"></div>
       <button class="btn-icon btn-add" onclick="openAddModal()" title="新增记录">＋ 新增验货</button>
     </div>
@@ -257,8 +275,9 @@
             <option value="4">锁到 修改日期</option>
             <option value="5" selected>锁到 供应商</option>
             <option value="6">锁到 客户</option>
-            <option value="7">锁到 货号</option>
-            <option value="8">锁到 款式名称</option>
+            <option value="7">锁到 加工类型</option>
+            <option value="9">锁到 货号</option>
+            <option value="10">锁到 款式名称</option>
           </select>
           <span id="batchDelWrap" style="display:inline-flex;align-items:center;gap:6px">
           <button class="btn-secondary btn-batch-del" id="btnBatchDel"
@@ -324,10 +343,47 @@
   <!-- PAGE: SUPPLIERS -->
   <div class="page" id="page-suppliers">
     <div class="page-inner">
-      <div class="section-header mb16">
-        <span class="section-title">供应商质量档案</span>
+      <div class="review-tabs" style="margin-bottom:16px">
+        <button class="mode-tab active" id="partnerTabSupplier" onclick="setPartnerTab('supplier')">供应商</button>
+        <button class="mode-tab" id="partnerTabCustomer" onclick="setPartnerTab('customer')">客户</button>
+        <button class="mode-tab" id="partnerTabProcess" onclick="setPartnerTab('processType')">加工类型</button>
       </div>
-      <div id="supplierCards"></div>
+
+      <!-- 供应商视图：名单 + 质量档案 -->
+      <div id="partnerViewSupplier">
+        <div class="section-header mb16">
+          <span class="section-title">供应商名单 <span style="font-size:11px;color:var(--text-dim);font-weight:400">（新增/编辑记录只能录入名单内的供应商）</span></span>
+        </div>
+        <div id="partnerMgr_supplier" style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px;max-width:720px"></div>
+        <div class="section-header mb16">
+          <span class="section-title">供应商质量档案</span>
+        </div>
+        <div id="supplierCards"></div>
+      </div>
+
+      <!-- 客户视图：仅名单 -->
+      <div id="partnerViewCustomer" style="display:none">
+        <div class="section-header mb16">
+          <span class="section-title">客户名单 <span style="font-size:11px;color:var(--text-dim);font-weight:400">（新增/编辑记录只能录入名单内的客户）</span></span>
+        </div>
+        <div id="partnerMgr_customer" style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px;max-width:720px"></div>
+        <div class="section-header mb16">
+          <span class="section-title">客户档案</span>
+        </div>
+        <div id="customerCards"></div>
+      </div>
+
+      <!-- 加工类型视图：仅名单 -->
+      <div id="partnerViewProcess" style="display:none">
+        <div class="section-header mb16">
+          <span class="section-title">加工类型名单 <span style="font-size:11px;color:var(--text-dim);font-weight:400">（新增/编辑记录只能录入名单内的加工类型）</span></span>
+        </div>
+        <div id="partnerMgr_processType" style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px;max-width:720px"></div>
+        <div class="section-header mb16">
+          <span class="section-title">加工类型档案</span>
+        </div>
+        <div id="processTypeCards"></div>
+      </div>
     </div>
   </div>
 
@@ -586,6 +642,7 @@
 
 </main>
 
+<!-- ═══════════════ MODAL: REJECT (反审核退回) ═══════════════ -->
 <div class="modal-overlay" id="rejectOverlay" onclick="if(event.target===this)closeRejectModal()">
   <div class="modal" style="width:min(460px,92vw)">
     <div class="modal-header">
@@ -605,8 +662,20 @@
   </div>
 </div>
 
+<!-- ═══════════════ MODAL: SWITCH COMPANY ═══════════════ -->
+<div class="modal-overlay" id="companySwitchOverlay">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-header">
+      <span>切换厂区 / 子公司</span>
+      <button class="modal-close" onclick="closeCompanySwitch()">✕</button>
+    </div>
+    <div style="padding:16px 20px" id="companySwitchBox"></div>
+  </div>
+</div>
+
 <!-- ═══════════════ MODAL: ADD/EDIT RECORD ═══════════════ -->
-<div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
+<!-- 点空白不关闭弹窗，防止误点丢失已填内容；只能用 ✕ 或「取消」关闭 -->
+<div class="modal-overlay" id="modalOverlay">
   <div class="modal" id="modal">
     <div class="modal-header">
       <span id="modalTitle">新增验货记录</span>
@@ -642,6 +711,11 @@
             <datalist id="customerList"></datalist>
           </div>
           <div class="form-group">
+            <label>加工类型</label>
+            <input type="text" id="f_processType" list="processTypeList" placeholder="如：啤机、印刷、UV" autocomplete="off" />
+            <datalist id="processTypeList"></datalist>
+          </div>
+          <div class="form-group">
             <label>货号</label>
             <input type="text" id="f_productNo" placeholder="如：15784" oninput="onProductNoChange()" autocomplete="off" />
           </div>
@@ -651,7 +725,7 @@
             <datalist id="materialNameList"></datalist>
           </div>
           <div class="form-group">
-            <label>送货编号</label>
+            <label>送货单号</label>
             <input type="text" id="f_deliveryNo" />
           </div>
           <div class="form-group">
@@ -710,7 +784,17 @@
           <div class="form-group full" id="defectsPanel">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
               <label style="margin:0">不良明细 <span style="font-size:10px;color:var(--text-dim)">（用于 IQC 报告自动填充 CR/MAJ/MIN 栏位）</span></label>
-              <button type="button" class="btn-secondary btn-sm" id="btnAddDefectRow">＋ 添加一行</button>
+              <span style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:11px;color:var(--text-dim);white-space:nowrap">AQL档位：</span>
+                <input type="hidden" id="f_aqlLevel" value="MAJ 0.65" />
+                <span id="aqlLevelPills" style="display:flex;gap:4px" title="可多选；无不良时 IQC 报告 AQL 表也高亮选中的列表头">
+                  <button type="button" class="aql-lvl-btn" data-lv="CR" onclick="toggleAqlLevel(this)">CR</button>
+                  <button type="button" class="aql-lvl-btn" data-lv="MAJ 0.65" onclick="toggleAqlLevel(this)">MAJ 0.65</button>
+                  <button type="button" class="aql-lvl-btn" data-lv="MAJ 1.0" onclick="toggleAqlLevel(this)">MAJ 1.0</button>
+                  <button type="button" class="aql-lvl-btn" data-lv="MIN 2.5" onclick="toggleAqlLevel(this)">MIN 2.5</button>
+                </span>
+                <button type="button" class="btn-secondary btn-sm" id="btnAddDefectRow">＋ 添加一行</button>
+              </span>
             </div>
             <div id="defectsRowsWrap"
                  style="border:1px solid var(--border);border-radius:6px;padding:8px;
@@ -782,6 +866,7 @@
         <!-- 2. 操作按钮 -->
         <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center">
           <button class="btn-primary" id="btnStartOcr" onclick="startOcr()">🔍 开始识别</button>
+          <button class="btn-secondary" id="btnRotateOcr" title="图片横拍/拍倒时点这里旋转后再识别">⟳ 旋转图片</button>
           <button class="btn-secondary" id="btnClearOcr" onclick="clearOcr()">清空图片</button>
           <button class="btn-secondary" id="btnApplyOcrToForm" onclick="applyOcrToForm()">✓ 应用到单条录入</button>
           <span class="batch-status" id="ocrStatus">未上传图片</span>
@@ -835,11 +920,19 @@
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
+<script src="sso.js"></script><!-- 门户SSO免登：必须在 qc-backend.js / app.js 之前 -->
 <script src="report_export.js"></script>
 <script src="qc-backend.js?v=20260709-sync"></script><!-- 后端同步层：必须在 app.js 之前 -->
 <script src="app.js?v=20260702-heatmap"></script>
 <script src="ai-ocr.js?v=20260706-ocr-dispatch"></script><!-- AI(百炼)识别，劫持 startOcr -->
 <script src="mobile.js"></script><!-- 移动端侧栏抽屉交互 -->
+<script>
+/* 切换系统下拉：点击页面其它位置时收起 */
+document.addEventListener('click', function () {
+  var menu = document.getElementById('sysSwitchMenu');
+  if (menu) menu.hidden = true;
+});
+</script>
 </div><!-- /appWrapper -->
 
 </body>

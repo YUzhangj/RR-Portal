@@ -1,17 +1,21 @@
 import io
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from reportlab.pdfgen import canvas
+from pypdf import PdfReader
 
 from unified_pdf import (
     _Evidence,
-    _draw_photo_page,
+    _build_photo_pages,
     _normalize_photos,
     _packaging_items,
     _percentage_value,
     _timestamp_value,
     _weight_value,
+    generate_unified_report_pdf,
 )
 
 
@@ -61,20 +65,42 @@ class UnifiedPDFNormalizationTests(unittest.TestCase):
         self.assertEqual(_weight_value("1.39"), "1.39 kg")
         self.assertEqual(_timestamp_value("2026-07-15T02:44:45.641526"), "2026-07-15 02:44")
 
-    def test_partial_photo_page_does_not_render_fake_empty_slots(self):
-        output = io.BytesIO()
-        document = canvas.Canvas(output)
-        with patch("unified_pdf._draw_photo_card") as draw_card:
-            _draw_photo_page(
-                document,
-                {"company_name": "QC", "report_no": "R-1", "revision": 0},
-                page_no=3,
-                total_pages=4,
-                items=[_Evidence("Carton packing", "Carton packing", "photo.jpg")],
-                start_index=9,
-            )
-        self.assertEqual(draw_card.call_count, 1)
-        self.assertEqual(draw_card.call_args.args[-1], 9)
+    def test_fixed_photo_slots_preserve_every_actual_photo_once_including_overflow(self):
+        evidence = [_Evidence(f"Defect {i}", f"Evidence {i}", f"photo-{i}.jpg") for i in range(13)]
+        pages = _build_photo_pages([*evidence, _Evidence("Optional placeholder", "No photo supplied", None)])
+        retained = []
+        for page in pages:
+            for kind, payload in page:
+                if kind == "row":
+                    retained.extend(item for _, item in payload if item is not None)
+                elif kind == "defect_row":
+                    retained.extend(item for item in payload if item is not None)
+        self.assertEqual(sorted(item.path for item in retained), sorted(item.path for item in evidence))
+        self.assertEqual(len(retained), len(evidence))
+
+    def test_pdf_preserves_long_notes_tables_photo_sample_ids_and_page_identity(self):
+        payload = {
+            "report_no": "SYN-QC-950", "revision": 2, "result": "ON HOLD",
+            "result_reason": "SYNTHETIC-HOLD-REASON", "remarks": "\n".join(f"REMARK-{i:03d}" for i in range(120)),
+            "defects": [{"description": f"DEFECT-{i:03d} " + "long " * 30 + f"END-DEFECT-{i:03d}", "quantity": 1} for i in range(65)],
+            "tests": [{"name": f"TEST-{i:03d}", "standard": "Long standard " * 20 + f"END-TEST-{i:03d}", "result": "PASS"} for i in range(65)],
+            "packing": {"individual_packaging": {**{f"Custom-{i}": "YES" for i in range(50)}, "Open Box": "YES"}},
+            "photo_slots": [{"label": "Defect evidence", "category": "defect", "photos": [{"file_path": "missing.jpg", "caption": "Evidence caption", "sample_id": "SAMPLE-950"}]}],
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            output = generate_unified_report_pdf(payload, Path(folder) / "report.pdf")
+            reader = PdfReader(output)
+            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            for token in ["REMARK-119", "Custom-49", "SYNTHETIC-HOLD-REASON", "SAMPLE-950", "END-DEFECT-064", "END-TEST-064"]:
+                self.assertIn(token, text)
+            for index, page in enumerate(reader.pages, 1):
+                self.assertIn("SYN-QC-950 | Rev.2", page.extract_text())
+                self.assertIn(f"Page {index} of {len(reader.pages)}", page.extract_text())
+
+    def test_production_image_copies_the_bundled_logo(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertTrue((root / "assets/tigerhead_logo.png").is_file())
+        self.assertIn("COPY assets ./assets", (root / "Dockerfile").read_text())
 
 
 if __name__ == "__main__":

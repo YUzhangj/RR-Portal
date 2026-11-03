@@ -1,13 +1,17 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { RouterLink, useRoute } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AppLayout from '../components/AppLayout.vue'
 import { useFactoriesStore, filterByCraft } from '../stores/factories'
 import { useScoresStore } from '../stores/scores'
 import { useScoreTemplatesStore } from '../stores/scoreTemplates'
 import { useAuthStore } from '../stores/auth'
 import { pb } from '../pb'
-import { filterMonthlyScoringData, mergeAutomaticScores } from '../utils/monthlyAutoScoring'
+import {
+  factoryIdsWithOrdersInRange,
+  filterMonthlyScoringData,
+  mergeAutomaticScores,
+} from '../utils/monthlyAutoScoring'
 import {
   monthsInScoringRange,
   resolveScoringRange,
@@ -22,6 +26,7 @@ import type { QualityInspection } from '../types/qualityInspection'
 import type { Quality5sCheck } from '../types/quality5s'
 
 const route = useRoute()
+const router = useRouter()
 const requestedMonth = String(route.query.month ?? '')
 const month = ref(/^\d{4}-\d{2}$/.test(requestedMonth) ? requestedMonth : new Date().toISOString().slice(0, 7))
 const factories = useFactoriesStore()
@@ -37,12 +42,13 @@ const customEnd = ref(month.value)
 const loadingScores = ref(false)
 const autoScoring = ref(false)
 const autoProgress = ref('')
+const scoringOrders = ref<Order[]>([])
 const myRegions = computed(() => (auth.role ? allowedRegions(auth.role) : REGIONS))
 
 const gradeCls: Record<string, string> = { A: 'badge-A', B: 'badge-B', C: 'badge-C', D: 'badge-D' }
 const statusLabel: Record<string, string> = { draft: '草稿', submitted: '已提交', approved: '已审批' }
 const flagLabel: Record<string, string> = { yellow: '黄牌', red: '红牌' }
-const formatScore = (value: number) => value.toFixed(2)
+const formatScore = (value: number) => String(Math.round(value))
 
 const selectedRange = computed(() => resolveScoringRange(rangeMode.value, month.value, customStart.value, customEnd.value))
 const rangeMonthCount = computed(() => monthsInScoringRange(selectedRange.value))
@@ -50,6 +56,11 @@ const isRange = computed(() => rangeMode.value !== 'month')
 const rangeLabel = computed(() => selectedRange.value.start === selectedRange.value.end
   ? selectedRange.value.start
   : `${selectedRange.value.start} 至 ${selectedRange.value.end}`)
+const factoryIdsWithOrders = computed(() => factoryIdsWithOrdersInRange(
+  scoringOrders.value,
+  selectedRange.value.start,
+  selectedRange.value.end,
+))
 
 const monthlyScoreByFactory = computed(() => {
   const m: Record<string, MonthlyScore> = {}
@@ -65,6 +76,7 @@ const scoreByFactory = computed(() => {
 
 const rows = computed(() => {
   let list = filterByCraft(factories.items, null).filter((f) => allowedCrafts().includes(f.craft))
+  list = list.filter((f) => factoryIdsWithOrders.value.has(f.id))
   list = list.filter((f) => myRegions.value.includes(regionOf(f)))
   if (regionFilter.value) list = list.filter((f) => regionOf(f) === regionFilter.value)
   if (deptFilter.value) list = list.filter((f) => f.craft === deptFilter.value)
@@ -80,15 +92,25 @@ const rows = computed(() => {
   })
 })
 
-async function load() {
+async function load(force = false) {
   const range = selectedRange.value
+  if (!force) {
+    const cachedOrders = scores.restoreScoringList(range.start, range.end)
+    if (cachedOrders) {
+      scoringOrders.value = cachedOrders
+      return
+    }
+  }
   loadingScores.value = true
   try {
-    await Promise.all([
+    const [, , , orders] = await Promise.all([
       factories.fetchAll(),
       range.start === range.end ? scores.fetchByMonth(range.start) : scores.fetchByRange(range.start, range.end),
       templates.fetchAll(),
+      pb.collection('orders').getFullList<Order>(),
     ])
+    scoringOrders.value = orders
+    scores.rememberScoringList(range.start, range.end, orders)
   } finally {
     loadingScores.value = false
   }
@@ -99,10 +121,16 @@ function changeRangeMode() {
     customStart.value = selectedRange.value.start
     customEnd.value = selectedRange.value.end
   }
-  void load()
+  void load(true)
+}
+
+async function changeMonth() {
+  await router.replace({ path: '/scoring', query: { ...route.query, month: month.value } })
+  await load(true)
 }
 
 async function calculateMonthScores() {
+  if (autoScoring.value || loadingScores.value) return
   autoScoring.value = true
   autoProgress.value = '读取货期和品质数据...'
   try {
@@ -111,17 +139,20 @@ async function calculateMonthScores() {
       pb.collection('quality_inspections').getFullList<QualityInspection>(),
       pb.collection('quality_5s_checks').getFullList<Quality5sCheck>(),
     ])
+    scoringOrders.value = orders
     const existing = monthlyScoreByFactory.value
+    // 保存会更新缓存并触发分数排序；本次计算始终遍历固定的工厂列表。
+    const factoriesToScore = [...rows.value]
     let saved = 0
     let skipped = 0
-    for (let index = 0; index < rows.value.length; index += 1) {
-      const factory = rows.value[index]
+    for (let index = 0; index < factoriesToScore.length; index += 1) {
+      const factory = factoriesToScore[index]
       const current = existing[factory.id]
       if (current && current.status !== 'draft') {
         skipped += 1
         continue
       }
-      autoProgress.value = `正在计算 ${index + 1}/${rows.value.length}：${factory.name}`
+      autoProgress.value = `正在计算 ${index + 1}/${factoriesToScore.length}：${factory.name}`
       const monthlyData = filterMonthlyScoringData({
         orders: orders.filter((item) => item.factory === factory.id),
         inspections: inspections.filter((item) => item.factory === factory.id),
@@ -133,11 +164,12 @@ async function calculateMonthScores() {
         factory,
         monthlyData,
       )
-      await scores.save(factory.id, month.value, { score_items: scoreItems, status: 'draft' })
+      await scores.save(factory.id, month.value, { score_items: scoreItems, status: 'submitted', submitted_by: auth.userId ?? undefined })
       saved += 1
     }
     await scores.fetchByMonth(month.value)
-    autoProgress.value = `自动评分完成：更新 ${saved} 家${skipped ? `，跳过已提交/已审批 ${skipped} 家` : ''}`
+    scores.rememberScoringList(month.value, month.value, orders)
+    autoProgress.value = `自动评分完成：已提交 ${saved} 家${skipped ? `，跳过已提交/已审批 ${skipped} 家` : ''}`
   } catch (error) {
     autoProgress.value = `自动评分失败：${error instanceof Error ? error.message : '未知错误'}`
   } finally {
@@ -170,13 +202,13 @@ load()
           <option value="custom">自定义范围</option>
         </select>
         <template v-if="rangeMode === 'custom'">
-          <label class="range-month">从 <input v-model="customStart" type="month" aria-label="开始月份" @change="load" /></label>
+          <label class="range-month">从 <input v-model="customStart" type="month" aria-label="开始月份" @change="load(true)" /></label>
           <span class="muted">至</span>
-          <label class="range-month"><input v-model="customEnd" type="month" aria-label="结束月份" @change="load" /></label>
+          <label class="range-month"><input v-model="customEnd" type="month" aria-label="结束月份" @change="load(true)" /></label>
         </template>
-        <label v-else>{{ rangeMode === 'month' ? '月份' : '基准月份' }} <input v-model="month" type="month" @change="load" /></label>
+        <label v-else>{{ rangeMode === 'month' ? '月份' : '基准月份' }} <input v-model="month" type="month" @change="changeMonth" /></label>
         <button v-if="!isRange" class="ghost" :disabled="autoScoring || loadingScores" @click="calculateMonthScores">
-          {{ autoScoring ? '自动评分中...' : '自动计算本月评分' }}
+          {{ autoScoring ? '自动评分中...' : '自动计算并提交本月评分' }}
         </button>
       </div>
       <p v-if="autoProgress" class="auto-progress">{{ autoProgress }}</p>
@@ -211,7 +243,11 @@ load()
             </td>
             <td><RouterLink :to="`/factories/${f.id}/score/${selectedRange.end}`"><button class="ghost mini">{{ isRange ? '末月评分' : '评分' }} →</button></RouterLink></td>
           </tr>
-          <tr v-if="!rows.length"><td colspan="7" class="hint" style="text-align:center">暂无工厂</td></tr>
+          <tr v-if="!rows.length">
+            <td colspan="7" class="hint" style="text-align:center">
+              {{ loadingScores ? '正在加载...' : '当前评分范围内暂无订单工厂' }}
+            </td>
+          </tr>
         </tbody>
       </table>
     </div>

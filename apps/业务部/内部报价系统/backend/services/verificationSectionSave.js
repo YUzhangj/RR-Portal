@@ -1,5 +1,30 @@
 const { createHash } = require('node:crypto');
 const conflict = message => Object.assign(new Error(message), { status: 409 });
+const sqliteWrites = new WeakMap();
+
+// A section CAS alone cannot protect a different row (the version lock). Every
+// lifecycle writer takes the version first and keeps it until its audit commits.
+async function withVerificationVersion(db, versionId, operation) {
+  const run = db.transaction(async () => {
+    const version = await db.prepare(`SELECT * FROM quote_verification_versions WHERE id=?${db.pool ? ' FOR UPDATE' : ''}`).get(versionId);
+    if (!version) throw Object.assign(new Error('核价版本不存在'), { status: 404 });
+    return operation(version);
+  });
+  if (db.pool) return run();
+  // The optional SQLite adapter has one connection and async transactions.
+  // Keep this workflow's writes queued rather than opening overlapping BEGINs.
+  const previous = sqliteWrites.get(db) || Promise.resolve();
+  const current = previous.then(run, run);
+  const settled = current.then(() => {}, () => {});
+  sqliteWrites.set(db, settled);
+  try { return await current; }
+  finally { if (sqliteWrites.get(db) === settled) sqliteWrites.delete(db); }
+}
+
+function nextSectionTime(section) {
+  const previousTime = Math.max(Date.parse(section.filled_at || '') || 0, Date.parse(section.reviewed_at || '') || 0);
+  return new Date(Math.max(Date.now(), previousTime + 1)).toISOString();
+}
 function sectionRevision(section) {
   return createHash('sha256').update(JSON.stringify([
     section.id, section.payload_json || '{}', section.status,
@@ -12,8 +37,7 @@ function assertSectionRevision(section, revision) {
   }
 }
 async function saveVerificationSection(db, section, payload, submit, actor) {
-  const previousTime = Date.parse(section.filled_at || '') || 0;
-  const filledAt = new Date(Math.max(Date.now(), previousTime + 1)).toISOString();
+  const filledAt = nextSectionTime(section);
   const saved = await db.prepare(`UPDATE quote_verification_sections
     SET payload_json=?, status=CASE WHEN ?=1 THEN 'filled' ELSE status END,
         filled_by=?, filled_at=?
@@ -26,4 +50,4 @@ async function saveVerificationSection(db, section, payload, submit, actor) {
   if (!saved.changes) throw conflict('保存期间核价资料或审核状态已更新，本次未覆盖。当前输入已保留，请刷新核对。');
   return filledAt;
 }
-module.exports = { sectionRevision, assertSectionRevision, saveVerificationSection };
+module.exports = { sectionRevision, assertSectionRevision, saveVerificationSection, nextSectionTime, withVerificationVersion };

@@ -1,15 +1,18 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
+import { pb } from '../pb'
 import { useAuthStore } from '../stores/auth'
-import { canAccessPath, canViewCraft } from '../utils/permissions'
-import type { Craft } from '../constants/roles'
+import { canAccessPath, canViewCraft, canViewRegion } from '../utils/permissions'
+import type { Craft, Region } from '../constants/roles'
 
 const routes: RouteRecordRaw[] = [
   { path: '/login', component: () => import('../views/LoginView.vue'), meta: { public: true } },
   { path: '/', redirect: '/dashboard' },
+  { path: '/analysis', component: () => import('../views/DynamicAnalysisView.vue') },
   { path: '/dashboard', component: () => import('../views/DashboardView.vue') },
   { path: '/grade/:month/:grade', component: () => import('../views/GradeDetailView.vue') },
   { path: '/factories', component: () => import('../views/FactoryListView.vue') },
   { path: '/factory-view', component: () => import('../views/FactoryAdminView.vue') },
+  { path: '/factory-view/region/:region/summary', component: () => import('../views/FactoryRegionSummaryView.vue') },
   { path: '/factory-view/dept/:craft/summary', component: () => import('../views/FactoryDeptSummaryView.vue') },
   { path: '/factory-view/dept/:craft', component: () => import('../views/FactoryAdminDeptView.vue') },
   { path: '/factory-view/:id', component: () => import('../views/FactoryViewDetail.vue') },
@@ -19,12 +22,15 @@ const routes: RouteRecordRaw[] = [
   { path: '/factories/:id', component: () => import('../views/FactoryDetailView.vue') },
   { path: '/factories/:id/score/:month', component: () => import('../views/ScoreSheetView.vue') },
   { path: '/orders', component: () => import('../views/OrdersView.vue') },
+  { path: '/orders/region/:region/delayed', component: () => import('../views/DelayedOrdersView.vue') },
   { path: '/orders/new', component: () => import('../views/OrderFormView.vue') },
   { path: '/orders/dept/:craft', component: () => import('../views/DeptOrdersView.vue') },
   { path: '/orders/dept/:craft/new', component: () => import('../views/OrderFormView.vue') },
   { path: '/orders/dept/:craft/:id', component: () => import('../views/OrderDetailView.vue') },
   { path: '/order-tracking', component: () => import('../views/OrderTrackingView.vue') },
   { path: '/quality', component: () => import('../views/QualityHubView.vue') },
+  { path: '/quality-patrol', component: () => import('../views/QualityPatrolView.vue') },
+  { path: '/quality-qms', component: () => import('../views/QualityQmsView.vue') },
   { path: '/quality-5s', component: () => import('../views/Quality5sView.vue') },
   { path: '/quality-inspection', component: () => import('../views/QualityInspectionView.vue') },
   { path: '/monthly-output', component: () => import('../views/MonthlyOutputView.vue') },
@@ -43,10 +49,16 @@ export const router = createRouter({ history: createWebHistory(import.meta.env.B
 
 router.beforeEach((to) => {
   const auth = useAuthStore()
-  if (!to.meta.public && !auth.isLoggedIn) return '/login'
+  if (!to.meta.public && (!auth.isLoggedIn || !pb.authStore.isValid)) {
+    // Cached account details survive token expiry; they are not proof of login.
+    auth.logout()
+    return '/login'
+  }
   if (auth.role && !canAccessPath(auth.role, to.path)) return '/dashboard'
   const craft = to.params.craft as Craft | undefined
   if (craft && !canViewCraft(craft)) return '/dashboard'
+  const region = (to.params.region || to.query.region) as Region | undefined
+  if (auth.role && region && !canViewRegion(auth.role, region)) return '/dashboard'
   return true
 })
 

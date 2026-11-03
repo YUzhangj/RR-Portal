@@ -1,0 +1,24 @@
+FROM node:20-alpine
+WORKDIR /app
+# China 网络：registry.npmjs.org 直连会被重置（部署 ECS 在阿里云），
+# 构建期改用 npmmirror，与 voyageplex/sprayplan 等 Dockerfile 同一模式；仅作用于构建阶段。
+ENV npm_config_registry=https://registry.npmmirror.com \
+    NEXT_TELEMETRY_DISABLED=1
+# node:20-alpine 内置 corepack 太旧，验不了 pnpm 10.x 的签名
+#（Cannot find matching keyid），改用 npm 全局安装，版本与 packageManager 字段一致
+RUN npm install -g pnpm@10.26.1
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY app ./app
+# public/ 目录在 favicon 移入 app/icon.svg 后已为空，git 不跟踪空目录，
+# COPY 不存在的路径会让 docker build 失败（"/public": not found）；以后有静态资源再加回
+COPY next.config.mjs postcss.config.mjs tailwind.config.ts tsconfig.json .eslintrc.json ./
+# 云端子路径部署：/qc-plan（basePath + 同域 API 前缀）；独立部署传空即可
+ARG NEXT_PUBLIC_BASE_PATH=
+ARG NEXT_PUBLIC_QC_API_URL=
+ENV NEXT_PUBLIC_BASE_PATH=$NEXT_PUBLIC_BASE_PATH
+ENV NEXT_PUBLIC_QC_API_URL=$NEXT_PUBLIC_QC_API_URL
+RUN pnpm build
+ENV NODE_ENV=production
+EXPOSE 3000
+CMD ["pnpm", "start", "-p", "3000", "-H", "0.0.0.0"]

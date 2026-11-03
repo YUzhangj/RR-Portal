@@ -38,6 +38,7 @@
     // 共模分阶段封穴的零件单价由分摊模型计算，不能再按普通整模公式覆盖。
     if (row.catalog_raw_weight != null) return;
     row.shot_price = calculate(row, prices);
+    row.shot_price_mode = 'auto';
     const machine = lookupMachinePrice(row.machine_model, prices);
     row.machine = machine?.normal || '';
   }

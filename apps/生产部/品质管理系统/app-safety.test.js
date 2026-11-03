@@ -88,7 +88,7 @@ test('AI OCR carries the PO number through single and queued entry', () => {
   assert.equal(aiWindow.__qcAiResult.common.orderNo, 'PO-AI-001');
 
   const formValues = {};
-  const loadQueueItem = loadFunction(aiOcrSource, 'loadQueueItem', {
+  const queueContext = {
     setV: (id, value) => { formValues[id] = value; },
     setT: () => {},
     window: {
@@ -96,7 +96,11 @@ test('AI OCR carries the PO number through single and queued entry', () => {
       onQtyChange: () => {},
       onProductNoChange: () => {},
     },
-  });
+  };
+  queueContext.actorContext = loadFunction(aiOcrSource, 'actorContext', queueContext);
+  queueContext.sameActor = loadFunction(aiOcrSource, 'sameActor', queueContext);
+  queueContext.canSaveOcr = loadFunction(aiOcrSource, 'canSaveOcr', queueContext);
+  const loadQueueItem = loadFunction(aiOcrSource, 'loadQueueItem', queueContext);
 
   loadQueueItem({
     idx: 0,
@@ -109,19 +113,34 @@ test('AI OCR carries the PO number through single and queued entry', () => {
 
 test('clearing OCR also clears the PO number', () => {
   const cleared = [];
-  const clearOcr = loadFunction(appSource, 'clearOcr', {
+  let canceled = 0;
+  const applyButton = { textContent: '应用 2 条（逐条录入）' };
+  const context = {
     _ocrImageFile: null,
+    _ocrImageRevision: 0,
+    _ocrOriginalImage: 'synthetic-original',
+    _ocrImageAngle: 90,
+    window: { __QC_OCR_CANCEL: () => { canceled++; }, __qcAiResult: { items: [] } },
     document: {
-      getElementById: id => id === 'ocrPreview' ? { src: 'data:image/png', style: {} } : { value: 'set' },
+      getElementById: id => id === 'btnApplyOcrToForm' ? applyButton : id === 'ocrPreview' ? { src: 'data:image/png', style: {} } : { value: 'set' },
       querySelector: () => ({ style: {} }),
     },
     setVal: (id, value) => { if (value === '') cleared.push(id); },
     setText: () => {},
-  });
+  };
+  context._cancelOcrWork = loadFunction(appSource, '_cancelOcrWork', context);
+  context._clearOcrPreviewFields = loadFunction(appSource, '_clearOcrPreviewFields', context);
+  const clearOcr = loadFunction(appSource, 'clearOcr', context);
 
   clearOcr();
 
   assert.ok(cleared.includes('ocrOrderNo'));
+  assert.equal(canceled, 1);
+  assert.equal(context._ocrImageRevision, 1);
+  assert.equal(context._ocrOriginalImage, '');
+  assert.equal(context._ocrImageAngle, 0);
+  assert.equal(context.window.__qcAiResult, null);
+  assert.equal(applyButton.textContent, '应用到单条录入');
 });
 
 test('import mapping keeps customer order numbers separate from delivery numbers', () => {
@@ -206,6 +225,57 @@ test('IQC report renders the PO label and value', () => {
   assert.match(canvas.innerHTML, /PO-IQC-001/);
 });
 
+test('IQC report means retain two decimal places for single and multi-dimensional samples without changing the record', () => {
+  const aqlRow = { range: '1-50', sample: 20, cr: 0, maj065: 0, maj10: 1, min25: 1, func_sample: 20, m065: 0 };
+  const build = loadFunction(reportSource, '_buildIQCCanvas', {
+    document: { createElement: () => ({ id: '', innerHTML: '' }) },
+    _todayStr: () => '2026-10-31', _iqcGetRow: () => aqlRow, IQC_AQL_TABLE: [aqlRow],
+  });
+  for (const [measurement, expected] of [
+    [{ item: 'single', values: ['1.20','1.30'], avg: '1.3' }, '>1.25</div>'],
+    [{ item: 'zero', values: ['0','0'], avg: '9' }, '>0.00</div>'],
+    [{ item: 'legacy', values: [], avg: '1.2' }, '>1.20</div>'],
+    [{ item: 'LW', measureType: 'LW', lValues: ['1.20','1.30'], wValues: ['2','2'] }, '>1.25*2.00</span>'],
+    [{ item: 'LWH', measureType: 'LWH', lValues: ['1.20','1.30'], wValues: ['2','2'], hValues: ['3','3'] }, '>1.25*2.00*3.00</span>'],
+  ]) {
+    const record = { id: 1, qty: 100, sampleQty: 20, measurements: [measurement] }, before = JSON.stringify(record);
+    assert.ok(build(record).innerHTML.includes(expected), expected);
+    assert.equal(JSON.stringify(record), before);
+  }
+});
+
+test('IQC report actual sample cells retain two decimals and explicit numeric zero without changing raw measurements', () => {
+  const aqlRow = { range: '1-50', sample: 20, cr: 0, maj065: 0, maj10: 1, min25: 1, func_sample: 20, m065: 0 };
+  const build = loadFunction(reportSource, '_buildIQCCanvas', {
+    document: { createElement: () => ({ id: '', innerHTML: '' }) },
+    _todayStr: () => '2026-11-02', _iqcGetRow: () => aqlRow, IQC_AQL_TABLE: [aqlRow],
+  });
+  const cells = record => {
+    const html = build(record).innerHTML;
+    const measurementRow = html.match(/<tr class="meas-row">([\s\S]*?)<\/tr>/)[1];
+    return Array.from(measurementRow.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g), match => match[1].replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ''));
+  };
+  const cases = [
+    [{ item: 'Single', standard: '15.35', tolerance: '0.12', values: ['15.35','15.16',0,'0'], avg: '99' },
+      ['Single','15.35±0.12','15.35','15.16','0','0'], '7.63'],
+    [{ item: 'LW', measureType: 'LW', standardL: 0, toleranceL: 0, standardW: '2.345', toleranceW: '0.12', lValues: [0,'1.234'], wValues: ['2.345','2.355'] },
+      ['LW','0±0*2.35±0.12','0*2.35','1.23*2.35'], '0.62*2.35'],
+    [{ item: 'LWH', measureType: 'LWH', lValues: [0], wValues: ['1.236'], hValues: ['2.678'] },
+      ['LWH','','0*1.24*2.68'], '0.00*1.24*2.68'],
+    [{ item: 'Raw average', values: ['2.344','2.344','2.349'], avg: '9.9' },
+      ['Raw average','','2.34','2.34','2.35'], '2.35'],
+    [{ item: 'PF', measureType: 'PF', values: ['P','F'], standard: 'P/F' },
+      ['PF','P/F','P','F'], '—'],
+  ];
+  for (const [measurement, expectedPrefix, expectedMean] of cases) {
+    const record = { id: 1, qty: 100, sampleQty: 20, measurements: [measurement] }, before = JSON.stringify(record);
+    const rendered = cells(record);
+    assert.deepEqual(rendered.slice(0, expectedPrefix.length), expectedPrefix, measurement.item);
+    assert.equal(rendered[10], expectedMean, measurement.item);
+    assert.equal(JSON.stringify(record), before, measurement.item);
+  }
+});
+
 test('basic record entry does not grant defect-library management', () => {
   const checkedActions = [];
   const context = {
@@ -248,7 +318,7 @@ test('single entry modal can save and continue entering the next record', () => 
   assert.match(indexSource, /id="btnSaveContinue"[^>]*onclick="saveRecord\(\{ continueEntry: true \}\)"/);
   assert.match(indexSource, /保存并继续录入/);
   assert.match(appSource, /function resetSingleEntryFormForNext\(\)/);
-  assert.match(appSource, /continueEntry \? '记录已添加并提交审核，可继续录入下一条/);
+  assert.match(appSource, /记录已在本地暂存，等待服务器同步，可继续录入/);
 });
 
 test('account editor clearly exposes password reset fields', () => {
@@ -261,4 +331,30 @@ test('account editor clearly exposes password reset fields', () => {
 test('mobile modal controls keep a 16px font to avoid iOS focus zoom', () => {
   assert.match(mobileCss, /html\.qc-mobile \.modal textarea\s*\{[^}]*font-size:\s*16px\s*!important/s);
   assert.match(mobileCss, /html\.qc-narrow \.modal textarea\s*\{[^}]*font-size:\s*16px\s*!important/s);
+});
+
+
+test('capped records select only displayed rows and show-all explicitly expands selection', () => {
+  const records = Array.from({ length: 305 }, (_, id) => ({ id: id + 1 }));
+  const selected = new Set();
+  const ctx = vm.createContext({ filteredRecs: records, _recordsShowAll: false, RECORDS_PAGE_SIZE: 300,
+    _selectedIds: selected, document: { querySelectorAll: () => [] }, _updateBatchBtn() {} });
+  ctx._renderedRecordRows = loadFunction(appSource, '_renderedRecordRows', ctx);
+  const check = loadFunction(appSource, '_onCheckAll', ctx);
+  check({ checked: true });
+  assert.equal(selected.size, 300); assert.equal(selected.has(301), false);
+  ctx._recordsShowAll = true; check({ checked: true }); assert.equal(selected.size, 305);
+  ctx._recordsShowAll = false;
+  const displayed = new Set(ctx._renderedRecordRows().map(r => r.id));
+  for (const id of selected) if (!displayed.has(id)) selected.delete(id);
+  assert.equal(selected.size, 300);
+  assert.match(appSource, /const visibleIds = new Set\(renderRows.map/);
+});
+
+test('import source rows retain header and blank-row offsets before date diagnostics', () => {
+  const rows = loadFunction(appSource, '_importDataRows')([['Title'], ['date', 'supplier'],
+    ['2026-11-03', 'Fixture'], [], ['', '', 0], ['not-a-date', 'Fixture']], 1);
+  assert.deepEqual(Array.from(rows, row => row.sourceRow), [3, 5, 6]);
+  assert.match(appSource, /Object.defineProperty\(obj, '__sourceRow'/);
+  assert.match(appSource, /row: row.__sourceRow \|\|/);
 });

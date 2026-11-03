@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { useRoute } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import AppLayout from '../components/AppLayout.vue'
 import { useScoresStore } from '../stores/scores'
 import { useScoreTemplatesStore } from '../stores/scoreTemplates'
@@ -9,6 +9,7 @@ import { useAuthStore } from '../stores/auth'
 import { totalFromItems, gradeFromScore } from '../utils/grading'
 import { pb } from '../pb'
 import {
+  defaultScoreItem,
   filterMonthlyScoringData,
   isAutoScoreModule,
   mergeAutomaticScores,
@@ -36,19 +37,25 @@ const flag = ref<'none' | 'yellow' | 'red'>('none')
 const flagReason = ref('')
 const recalculating = ref(false)
 const autoError = ref('')
+const submitting = ref(false)
+const submitError = ref('')
+const scoreNotice = ref('')
+const scoreStatus = ref<'draft' | 'submitted' | 'approved'>('draft')
 
 onMounted(async () => {
-  await templates.fetchAll()
-  const f = await factories.get(factoryId)
+  if (!templates.items.length) await templates.fetchAll()
+  const f = factories.items.find((item) => item.id === factoryId) ?? await factories.get(factoryId)
   factory.value = f
   craft.value = f.craft
-  const existing = await scores.getOne(factoryId, month)
-  if (existing?.score_items) for (const it of existing.score_items) itemMap.value[it.template_id] = it
+  const existing = scores.findCached(factoryId, month) ?? await scores.getOne(factoryId, month)
+  if (existing?.score_items) for (const it of existing.score_items) itemMap.value[it.template_id] = { ...it }
   if (existing) {
+    scoreStatus.value = existing.status
     flag.value = existing.flag ?? 'none'
     flagReason.value = existing.flag_reason ?? ''
+    if (existing.score_items?.length) scoreNotice.value = '已加载保存的评分结果'
   }
-  await recalculateAutomaticScores()
+  if (!existing?.score_items?.length && scoreStatus.value === 'draft') await recalculateAutomaticScores()
 })
 
 const applicable = computed(() => templates.applicable(craft.value))
@@ -61,7 +68,7 @@ const canEditItem = (scoringRole: string) =>
 const isManager = computed(() => auth.role === 'sc_manager' || auth.role === 'admin')
 
 const liveTotal = computed(() =>
-  totalFromItems(applicable.value.map((t) => itemMap.value[t.id] ?? { template_id: t.id, score: 0 })),
+  totalFromItems(applicable.value.map((t) => itemMap.value[t.id] ?? defaultScoreItem(t))),
 )
 const liveGrade = computed(() => gradeFromScore(liveTotal.value))
 
@@ -76,9 +83,10 @@ async function loadMonthlyData(): Promise<MonthlyScoringData> {
 }
 
 async function recalculateAutomaticScores() {
-  if (!factory.value) return
+  if (!factory.value || recalculating.value || scoreStatus.value !== 'draft') return
   recalculating.value = true
   autoError.value = ''
+  scoreNotice.value = ''
   try {
     const data = await loadMonthlyData()
     const merged = mergeAutomaticScores(
@@ -87,7 +95,10 @@ async function recalculateAutomaticScores() {
       factory.value,
       data,
     )
-    for (const item of merged) itemMap.value[item.template_id] = item
+    const saved = await scores.save(factoryId, month, { score_items: merged, status: 'submitted', submitted_by: auth.userId ?? undefined })
+    for (const item of saved.score_items ?? merged) itemMap.value[item.template_id] = { ...item }
+    scoreStatus.value = saved.status
+    scoreNotice.value = '已自动计算并提交，总分已同步'
   } catch (error) {
     autoError.value = error instanceof Error ? error.message : '自动评分数据读取失败'
   } finally {
@@ -96,13 +107,25 @@ async function recalculateAutomaticScores() {
 }
 
 async function submit() {
+  if (submitting.value || recalculating.value) return
+  submitError.value = ''
   const score_items = applicable.value.map((t) => ({
     template_id: t.id,
-    score: itemMap.value[t.id]?.score ?? 0,
+    score: itemMap.value[t.id]?.score ?? defaultScoreItem(t).score,
     notes: itemMap.value[t.id]?.notes ?? '',
   }))
-  await scores.save(factoryId, month, { score_items, status: 'submitted', submitted_by: auth.userId ?? undefined })
-  alert('已提交，总分由服务端核定')
+  if (score_items.some((item, index) => !Number.isFinite(Number(item.score)) || Number(item.score) < 0 || Number(item.score) > applicable.value[index]!.max_score)) {
+    submitError.value = '得分必须是 0 至对应满分之间的数字'
+    return
+  }
+  submitting.value = true
+  try {
+    const saved = await scores.save(factoryId, month, { score_items, status: 'submitted', submitted_by: auth.userId ?? undefined })
+    scoreStatus.value = saved.status
+    scoreNotice.value = '已提交，总分由服务端核定'
+  } catch (error) {
+    submitError.value = error instanceof Error ? error.message : '提交失败，请重试'
+  } finally { submitting.value = false }
 }
 
 async function saveReason() {
@@ -120,10 +143,16 @@ async function saveFlag() {
   <AppLayout>
     <div class="page">
       <div class="score-head">
-        <h2>评分单 — {{ month }}</h2>
-        <button class="ghost" :disabled="recalculating" @click="recalculateAutomaticScores">
-          {{ recalculating ? '计算中...' : '重新计算自动评分' }}
-        </button>
+        <div>
+          <RouterLink :to="{ path: '/scoring', query: { month } }" class="back">← 返回月度评分</RouterLink>
+          <h2>评分单 — {{ month }}</h2>
+        </div>
+        <div class="score-actions">
+          <span v-if="scoreNotice && !recalculating" class="cache-hint">{{ scoreNotice }}</span>
+          <button class="ghost" :disabled="recalculating || scoreStatus !== 'draft'" @click="recalculateAutomaticScores">
+            {{ recalculating ? '计算中...' : '重新计算自动评分' }}
+          </button>
+        </div>
       </div>
       <p v-if="autoError" class="error">自动评分失败：{{ autoError }}</p>
       <table>
@@ -134,8 +163,8 @@ async function saveFlag() {
             <td>{{ t.max_score }}</td>
             <td>
               <input type="number" :max="t.max_score" min="0"
-                :disabled="isAutoScoreModule(t.module) || !canEditItem(t.scoring_role)"
-                v-model.number="(itemMap[t.id] ??= { template_id: t.id, score: 0 }).score" />
+                :disabled="recalculating || submitting || !canEditItem(t.scoring_role)"
+                v-model.number="(itemMap[t.id] ??= defaultScoreItem(t)).score" />
             </td>
             <td>{{ t.scoring_role === 'buyer' ? '采购' : '品质' }}</td>
             <td class="basis">{{ itemMap[t.id]?.notes || '人工评分' }}</td>
@@ -147,7 +176,9 @@ async function saveFlag() {
       <span class="badge" :class="'badge-' + liveGrade">{{ liveGrade }} 级</span>
       <span class="hint">最终以服务端核定为准</span>
     </p>
-    <button @click="submit">提交评分</button>
+    <p class="hint">自动计算后直接提交；需要调整时可修改有权限的得分，再次手动提交。</p>
+    <p v-if="submitError" class="error" role="alert">{{ submitError }}</p>
+    <button :disabled="submitting || recalculating" @click="submit">{{ submitting ? '提交中…' : scoreStatus === 'submitted' ? '再次提交评分' : '提交评分' }}</button>
 
     <section class="card flag-box">
       <h3>红黄牌</h3>
@@ -174,6 +205,9 @@ async function saveFlag() {
 .flag-act { display: flex; gap: .5rem; margin-top: .6rem; }
 .score-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .score-head h2 { margin: 0; }
+.back { display: inline-block; margin-bottom: .55rem; color: var(--primary); text-decoration: none; }
+.score-actions { display: flex; align-items: center; gap: .75rem; }
+.cache-hint { color: var(--text-soft); font-size: .82rem; }
 .auto-tag { display: inline-block; margin-left: .35rem; padding: .12rem .35rem; border-radius: 4px; background: #eef0ff; color: var(--primary); font-size: .72rem; }
 .basis { min-width: 320px; color: var(--text-soft); font-size: .85rem; line-height: 1.5; }
 .error { color: #dc2626; }

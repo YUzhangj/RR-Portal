@@ -84,10 +84,33 @@ test('molding UI visually separates multiple product groups', () => {
   assert.match(source, /产品 \$\{group\.index \+ 1\}\/\$\{injectionGroupsForTable\.length\}/);
   assert.match(source, /rowStyle: showInjectionGroups/);
   assert.match(source, /key: 'mold_size', label: '模具尺寸'/);
-  assert.match(source, /mold_size: m\.mold_size \|\| existing\.mold_size \|\| ''/);
+  assert.match(source, /mold_size: m\.mold_size \|\| existing\?\.mold_size \|\| ''/);
   assert.equal((source.match(/className: 'molding-machine-key'/g) || []).length, 3);
   assert.match(styles, /thead th\.molding-machine-key/);
   assert.match(styles, /tbody td\.molding-machine-key input/);
+});
+
+test('molding injection table shows engineering images in its first column without copying them into costing rows', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  assert.match(source, /function engineeringImagesForInjection\(row, refMolds\)/);
+  assert.match(source, /key: 'engineering_images', label: '图片'/);
+  assert.match(source, /renderImageCell\(td, \{ images \}, false/);
+  assert.match(source, /showRowNumber: false/);
+  assert.doesNotMatch(source, /payload\.injection[^\n]*images:/);
+});
+
+test('molding injection table keeps an editable side-action column on screen only', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  assert.match(source, /key: 'side_action', label: '行位'/);
+  assert.match(source, /side_action: m\.side_action \|\| existing\?\.side_action \|\| ''/);
+});
+
+test('molding preview exposes the shot-price action and protects approved prices', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  assert.match(source, /s\.dept === 'molding' && !inEdit/);
+  assert.match(source, /data-act="auto-shot"/);
+  assert.match(source, /if \(s\.status === 'approved'\) \{[\s\S]*?解除审核[\s\S]*?return;/);
+  assert.match(source, /if \(act === 'auto-shot'\) \{[\s\S]*?inEdit = true;[\s\S]*?body\.querySelector\('#btn-auto-shot'\)\?\.click\(\)/);
 });
 
 test('mold table hides the unused mold structure column', () => {
@@ -110,8 +133,8 @@ test('molding defaults automatically fill missing material and shot prices witho
 
 test('molding summary converts HKD to RMB by multiplying the RMB/HKD rate', () => {
   const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
-  assert.match(source, /formatNum\(finishedSum \* fxv\)/);
-  assert.doesNotMatch(source, /formatNum\(finishedSum \/ fxv\)/);
+  assert.match(source, /format(?:Num|Total)\(finishedSum \* fxv\)/);
+  assert.doesNotMatch(source, /format(?:Num|Total)\(finishedSum \/ fxv\)/);
 });
 
 test('electronic IC rows are excluded only from Indonesian freight', () => {
@@ -150,6 +173,20 @@ test('department tabs require save or cancel before leaving dirty edits', () => 
   assert.doesNotMatch(source, /不保存跳转/);
   assert.match(source, /dirtyByDept\.get\(activeDept\)/);
   assert.match(source, /await save\(\)/);
+});
+
+test('Ctrl+S and Command+S save the active dirty department', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
+  const quotePage = fs.readFileSync(path.join(__dirname, '../frontend/quote.html'), 'utf8');
+  assert.match(source, /\(event\.ctrlKey \|\| event\.metaKey\)[\s\S]*event\.code === 'KeyS'/);
+  assert.match(source, /event\.preventDefault\(\)/);
+  assert.match(source, /addEventListener\('keydown', quoteSaveShortcutHandler, \{ capture: true \}\)/);
+  assert.match(source, /host\.querySelector\('\.dept-tab\.active'\)\?\.dataset\.dept \|\| mySec\.dept/);
+  assert.match(source, /dirtyByDept\.get\(activeDept\)/);
+  assert.match(source, /const save = saveHandlers\.get\(activeDept\)/);
+  assert.match(source, /showSaveShortcutStatus\('\u2713 已保存'\)/);
+  assert.match(source, /保存草稿（Ctrl\/⌘\+S）/);
+  assert.match(quotePage, /workbench\.js\?v=[^"\s]+/);
 });
 
 test('summary tab recalculates whenever it is opened or clicked again', () => {

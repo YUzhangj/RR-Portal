@@ -23,8 +23,18 @@ public class HolidaysController(AppDbContext db) : ControllerBase
         return Ok(filtered.Select(h => new HolidayDto(h.Id, ScheduleCalc.Ymd(h.Date), h.Type, h.Remark)));
     }
 
+    [HttpPost("reflow")]
+    [Authorize(Roles = "clerk,manager,admin")]
+    public async Task<IActionResult> Reflow()
+    {
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        var adjusted = await ProductionCalendar.Reflow(db, User.FindFirst("username")?.Value ?? "unknown");
+        await transaction.CommitAsync();
+        return Ok(new { adjustedPlans = adjusted });
+    }
+
     [HttpPost]
-    [Authorize(Roles = "clerk,admin")]
+    [Authorize(Roles = "clerk,manager,admin")]
     public async Task<IActionResult> Create([FromBody] CreateHolidayRequest req)
     {
         if (string.IsNullOrWhiteSpace(req.Date)) return BadRequest(new { error = "日期必填" });
@@ -40,13 +50,16 @@ public class HolidaysController(AppDbContext db) : ControllerBase
 
         var holiday = new Holiday { Date = date, Type = type, Remark = string.IsNullOrEmpty(req.Remark) ? null : req.Remark };
         db.Holidays.Add(holiday);
+        await using var transaction = await db.Database.BeginTransactionAsync();
         await db.SaveChangesAsync();
+        await ProductionCalendar.ReflowSharedCalendar(db, User.FindFirst("username")?.Value ?? "unknown");
+        await transaction.CommitAsync();
         return StatusCode(201, new HolidayDto(holiday.Id, ScheduleCalc.Ymd(holiday.Date), holiday.Type, holiday.Remark));
     }
 
     // PATCH /api/holidays/{id} —— 编辑（文员或主管）：可改日期/类型/备注
     [HttpPatch("{id:int}")]
-    [Authorize(Roles = "clerk,admin")]
+    [Authorize(Roles = "clerk,manager,admin")]
     public async Task<IActionResult> Update(int id, [FromBody] UpdateHolidayRequest req)
     {
         var holiday = await db.Holidays.FindAsync(id);
@@ -69,18 +82,24 @@ public class HolidaysController(AppDbContext db) : ControllerBase
             holiday.Date = date;
         }
 
+        await using var transaction = await db.Database.BeginTransactionAsync();
         await db.SaveChangesAsync();
+        await ProductionCalendar.ReflowSharedCalendar(db, User.FindFirst("username")?.Value ?? "unknown");
+        await transaction.CommitAsync();
         return Ok(new HolidayDto(holiday.Id, ScheduleCalc.Ymd(holiday.Date), holiday.Type, holiday.Remark));
     }
 
     [HttpDelete("{id:int}")]
-    [Authorize(Roles = "clerk,admin")]
+    [Authorize(Roles = "clerk,manager,admin")]
     public async Task<IActionResult> Delete(int id)
     {
         var holiday = await db.Holidays.FindAsync(id);
         if (holiday is null) return NotFound(new { error = "记录不存在" });
         db.Holidays.Remove(holiday);   // 节假日是配置数据，真删
+        await using var transaction = await db.Database.BeginTransactionAsync();
         await db.SaveChangesAsync();
+        await ProductionCalendar.ReflowSharedCalendar(db, User.FindFirst("username")?.Value ?? "unknown");
+        await transaction.CommitAsync();
         return Ok(new { id });
     }
 }

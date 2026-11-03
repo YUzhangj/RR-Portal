@@ -3,7 +3,7 @@ namespace SprayPlan.Api.Features.Plans;
 // ===== 入参 =====
 public record CreatePlanRow(string? PlanDate, string? PlanType, int? LineId, int? OrderId, string? ItemName, string? PartName, int? SourcePartId, List<string>? MachineNos, double? PlannedQty, int? WorkerCount, int? StepNo, string? Craft);
 public record CreatePlansRequest(List<CreatePlanRow>? Plans);
-public record CreatePlansResult(int Count);
+public record CreatePlansResult(int Count, global::SprayPlan.Api.Services.MaterialReflowResult? MaterialReflow = null);
 public record BatchUnscheduleRequest(List<int>? PlanIds, string? Reason);
 public record BatchUnscheduleResult(int DeletedPlans, int AffectedOrders, List<int> PlanIds);
 
@@ -13,4 +13,7 @@ public record UpdatePlanRequest(double? PlannedQty, List<string>? MachineNos, in
 // ===== 出参 =====
 public record PlanUpdated(int Id, int? GoodQty, int? InboundQty, double? ProductionValue, string Status, int PlannedQty, List<string> MachineNos);
 public record PlanDeleted(int Id, DateTime? DeletedAt);
-public record PlanDto(int Id, DateTime PlanDate, string PlanType, int LineId, int OrderId, string ItemName, string PartName, int? SourcePartId, List<string> MachineNos, int PlannedQty, int WorkerCount, int StepNo, string Craft, int? StandardStepCount, string? StandardCraft, bool CraftAdjusted, int? GoodQty, int? InboundQty, int? ReportedQty, int DefectQty, double WorkHours, double? ProductionValue, string Status, string? Remark, string CreatedBy, DateTime CreatedAt, string? LastModifiedBy, DateTime LastModifiedAt, string ModificationHistory, DateTime? DeletedAt, string? DeletedBy);
+public record PlanDto(int Id, DateTime PlanDate, string PlanType, int LineId, int OrderId, string ItemName, string PartName, int? SourcePartId, List<string> MachineNos, int PlannedQty, int WorkerCount, int StepNo, string Craft, int? StandardStepCount, string? StandardCraft, bool CraftAdjusted, int? GoodQty, int? InboundQty, int? ReportedQty, int DefectQty, double WorkHours, double? ProductionValue, string Status, string? Remark, string CreatedBy, DateTime CreatedAt, string? LastModifiedBy, DateTime LastModifiedAt, string ModificationHistory, DateTime? DeletedAt, string? DeletedBy, bool CanReschedule);
+
+public record PlanDateChange(int Id, string OriginalDate, string NewDate);
+public record ReschedulePlansRequest(List<PlanDateChange>? Changes, string? Reason);
