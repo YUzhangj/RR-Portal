@@ -240,15 +240,56 @@ export function parseShipmentWorkbook(wb: XLSX.WorkBook): ShipmentImportResult {
 
 const mib = 1024 * 1024
 
+function readBoundedZipEntry(entry: JSZip.JSZipObject, remainingBytes: number, limitMessage: string): Promise<Uint8Array<ArrayBuffer>> {
+  if (!Number.isSafeInteger(remainingBytes) || remainingBytes < 0) return Promise.reject(new Error('工作表数据大小限制无效'))
+  // async('uint8array') allocates the complete inflated part before its caller
+  // can check the limit. Pause the public JSZip stream at the first excess chunk.
+  const stream = (entry as JSZip.JSZipObject & {
+    internalStream(type: 'uint8array'): JSZip.JSZipStreamHelper<Uint8Array>
+  }).internalStream('uint8array')
+  return new Promise((resolve, reject) => {
+    const chunks: Uint8Array[] = []
+    let bytes = 0, done = false
+    stream.on('data', chunk => {
+      if (done) return
+      if (chunk.byteLength > remainingBytes - bytes) {
+        done = true; stream.pause(); chunks.length = 0
+        reject(new Error(limitMessage))
+        return
+      }
+      bytes += chunk.byteLength; chunks.push(chunk)
+    }).on('error', error => {
+      if (done) return
+      done = true; chunks.length = 0; reject(error)
+    }).on('end', () => {
+      if (done) return
+      done = true
+      const content = new Uint8Array(bytes)
+      let offset = 0
+      for (const chunk of chunks) { content.set(chunk, offset); offset += chunk.byteLength }
+      chunks.length = 0
+      resolve(content)
+    }).resume()
+  })
+}
+
+export function readBoundedShipmentXml(entry: JSZip.JSZipObject, remainingBytes: number) {
+  return readBoundedZipEntry(entry, remainingBytes, '工作表数据过大，请将走货明细复制到新工作簿后分批导入')
+}
+
+const imageSourceLimitMessage = '单张图片原始数据超过 32 MB'
+export function readBoundedShipmentImage(entry: JSZip.JSZipObject) {
+  return readBoundedZipEntry(entry, 32 * mib, imageSourceLimitMessage)
+}
+
 async function readLargeShipmentWorkbook(source: JSZip) {
   const workbook = new JSZip()
   let totalBytes = 0
   for (const entry of Object.values(source.files)) {
     // Preserve workbook XML and relationships, but do not inflate embedded media.
     if (entry.dir || !/\.(?:xml|rels)$/i.test(entry.name) || /^xl\/media\//i.test(entry.name)) continue
-    const content = await entry.async('uint8array')
+    const content = await readBoundedShipmentXml(entry, 64 * mib - totalBytes)
     totalBytes += content.byteLength
-    if (totalBytes > 64 * mib) throw new Error('工作表数据过大，请将走货明细复制到新工作簿后分批导入')
     workbook.file(entry.name, content)
   }
   return workbook.generateAsync({ type: 'arraybuffer' })
@@ -272,7 +313,7 @@ export async function importShipmentFile(file: File) {
 }
 
 async function resizeShipmentImage(file: JSZip.JSZipObject): Promise<string> {
-  const bitmap = await createImageBitmap(new Blob([await file.async('arraybuffer')]))
+  const bitmap = await createImageBitmap(new Blob([await readBoundedShipmentImage(file)]))
   try {
     const canvas = document.createElement('canvas')
     const context = canvas.getContext('2d')
@@ -297,31 +338,48 @@ async function resizeShipmentImage(file: JSZip.JSZipObject): Promise<string> {
 export async function loadShipmentImages(zip: JSZip, rows: ShipmentImportRow[],
   resize?: (file: JSZip.JSZipObject) => Promise<string>) {
   const cache = new Map<string, string | null>()
+  const failures = new Map<string, string>()
   for (const sheet of new Set(rows.map(row => row.sheet))) {
     const sheetRows = rows.filter(row => row.sheet === sheet)
-    const byCell = new Map(sheetRows.map(row => [`${row.row - 1}:${row.imageCol}`, row]))
-    const failed = new Set<ShipmentImportRow>()
+    const byCell = new Map<string, ShipmentImportRow[]>()
+    for (const row of sheetRows) {
+      const key = `${row.row - 1}:${row.imageCol}`
+      byCell.set(key, [...byCell.get(key) || [], row])
+    }
+    const failed = new Map<ShipmentImportRow, string>()
+    const markFailed = (row: number, col: number, reason = '对应图片读取或压缩失败，已保留原图（如有）') => {
+      byCell.get(`${row}:${col}`)?.forEach(item => failed.set(item, reason))
+    }
     const images = await extractSheetImages(zip, sheet, true, resize ? {
       includes: (row, col) => byCell.has(`${row}:${col}`),
       read: async (path, row, col) => {
         if (!cache.has(path)) {
           const file = zip.file(path)
           try { cache.set(path, file ? await resize(file) : null) }
-          catch { cache.set(path, null) }
+          catch (error) {
+            cache.set(path, null)
+            if (error instanceof Error && error.message === imageSourceLimitMessage)
+              failures.set(path, `${imageSourceLimitMessage}，已保留原图（如有）`)
+          }
         }
         const image = cache.get(path)
-        if (!image) failed.add(byCell.get(`${row}:${col}`)!)
+        if (!image) markFailed(row, col, failures.get(path))
         return image ?? null
       },
+      missing: markFailed,
     } : undefined)
     for (const row of sheetRows) {
       const matched = images.filter(image => image.row === row.row - 1 && image.col === row.imageCol)
-      if (failed.has(row)) row.warnings.push('对应图片读取或压缩失败，已保留原图（如有）')
+      const clearUnreadImage = () => {
+        delete row.item.material_snapshot.image
+        row.item._fileMaterialFields = (row.item._fileMaterialFields || []).filter(field => field !== 'image')
+      }
+      if (failed.has(row)) { clearUnreadImage(); row.warnings.push(failed.get(row)!) }
       else if (matched.length === 1) {
         row.item.material_snapshot.image = matched[0].dataUrl
         row.item._fileMaterialFields = [...(row.item._fileMaterialFields || []), 'image']
       }
-      else if (matched.length > 1) row.warnings.push('多张图片对应同一行，未自动选择')
+      else if (matched.length > 1) { clearUnreadImage(); row.warnings.push('多张图片对应同一行，未自动选择') }
     }
   }
 }

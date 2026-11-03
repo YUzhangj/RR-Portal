@@ -95,7 +95,7 @@ it('实际确认按钮允许已关联行的缺省币种，不接受重复匹配�
   const context = createContext({ selected: [{ item: { ...incoming, currency: undefined } }], targets: [0], linkedTarget: () => old,
     busy: false, loadImages: undefined, importContext: { current: { active: true } },
     onImport: vi.fn(() => false), setRows: vi.fn(), message: { warning: vi.fn(), success: vi.fn() } })
-  runInContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context)
+  runInContext(ts.transpileModule(code, { fileName: 'ShipmentImport.tsx', compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText, context)
   await runInContext('confirm()', context)
   expect(context.onImport).toHaveBeenCalledOnce(); expect(context.setRows).not.toHaveBeenCalled()
   expect(context.message.warning).not.toHaveBeenCalled()

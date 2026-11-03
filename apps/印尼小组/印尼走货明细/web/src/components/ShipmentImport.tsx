@@ -14,18 +14,18 @@ export default function ShipmentImport({ existing, materials, onImport }: {
   existing: ExistingShipmentImportRow[]; materials: ReadonlyMap<number, Material>
   onImport: (rows: ShipmentImportItem[], targets: number[]) => void | boolean
 }) {
-  const { message } = App.useApp()
+  const { message, modal } = App.useApp()
   const [busy, setBusy] = useState(false)
   const [rows, setRows] = useState<ShipmentImportRow[] | null>(null)
   const [warnings, setWarnings] = useState<string[]>([])
   const [fileName, setFileName] = useState('')
   const [loadImages, setLoadImages] = useState<Awaited<ReturnType<typeof importShipmentFile>>['loadImages']>()
-  const importContext = useRef({ existing, materials, active: true })
+  const importContext = useRef({ existing, materials, rows, active: true })
   useLayoutEffect(() => {
-    const context = { existing, materials, active: true }
+    const context = { existing, materials, rows, active: true }
     importContext.current = context
     return () => { context.active = false }
-  }, [existing, materials])
+  }, [existing, materials, rows])
   const selected = (rows || []).filter(row => row.selected)
   const matching = existing.map(row => ({ ...row, material_snapshot: materials.get(row.material_id!) || row.material_snapshot }))
   const targets = planShipmentImport(selected.map(row => row.item), matching)
@@ -52,6 +52,7 @@ export default function ShipmentImport({ existing, materials, onImport }: {
     return { ...r, item }
   }))
   async function read(file: File) {
+    const context = importContext.current
     setBusy(true)
     try {
       const result = await importShipmentFile(file)
@@ -88,6 +89,7 @@ export default function ShipmentImport({ existing, materials, onImport }: {
       // An incomplete/invalid merged carton count must be reviewed manually.
       const bad = new Set(imported.filter(r => r.item.carton_group && !(Number(r.item.cartons) > 0)).map(r => r.item.carton_group))
       imported.forEach(r => { if (bad.has(r.item.carton_group)) { r.item.carton_group = undefined; r.warnings.push('合并箱数无有效数值，导入后请重新合并') } })
+      if (!context.active) { message.warning('走货明细或导入预览已变化，请重新选择文件'); return false }
       setLoadImages(() => result.loadImages)
       setRows(imported); setWarnings(notices); setFileName(file.name)
     } catch (e) { message.error(e instanceof Error ? e.message : '读取失败') }
@@ -106,6 +108,25 @@ export default function ShipmentImport({ existing, materials, onImport }: {
       setBusy(true)
       try {
         await loadImages(prepared)
+        if (!context.active) { message.warning('走货明细已变化，请重新核对后导入'); return }
+        const imageIssues = prepared.flatMap((row, index) => {
+          const warnings = row.warnings.slice(selected[index].warnings.length)
+          return warnings.length ? [{ row, warnings }] : []
+        })
+        if (imageIssues.length) {
+          const proceed = await new Promise<boolean>(resolve => {
+            modal.confirm({
+              title: `${imageIssues.length} 行图片需要核对`,
+              content: <div><p>下列图片未能读取或无法唯一匹配。继续导入将保留已有图片；新增明细不会附上这些图片。</p>
+                <ul style={{ maxHeight: 280, overflow: 'auto', paddingLeft: 20 }}>{imageIssues.map(({ row, warnings }) =>
+                  <li key={row.key}>{row.sheet} 第 {row.row} 行：{warnings.join('；')}</li>)}</ul></div>,
+              okText: '确认导入，保留已有图片', cancelText: '返回核对',
+              onOk: () => { resolve(true) }, onCancel: () => { resolve(false) },
+            })
+          })
+          if (!proceed) return
+          if (!context.active) { message.warning('走货明细已变化，请重新核对后导入'); return }
+        }
       } catch {
         message.error('读取 Excel 图片失败，请重试')
         return
@@ -113,11 +134,6 @@ export default function ShipmentImport({ existing, materials, onImport }: {
       if (!context.active) { message.warning('走货明细已变化，请重新核对后导入'); return }
     }
     if (onImport(prepared.map(r => r.item), targets) === false) return
-    const imageIssues = prepared.filter((row, index) => row.warnings.length > selected[index].warnings.length)
-    if (imageIssues.length) {
-      const locations = imageIssues.slice(0, 5).map(row => `${row.sheet} 第 ${row.row} 行`).join('、')
-      message.warning(`${imageIssues.length} 行图片无法读取或无法唯一匹配（${locations}），请核对`)
-    }
     setLoadImages(undefined)
     setRows(null)
     message.success(`已更新 ${targets.filter(t => t >= 0).length} 行，新增 ${targets.filter(t => t === -1).length} 行，请点击走货单“保存”`)

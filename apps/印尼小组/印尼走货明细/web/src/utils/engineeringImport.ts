@@ -49,6 +49,7 @@ export function inferHsCode(name?: string, userDict?: HsDictEntry[]): { hsCN: st
 export async function extractSheetImages(zip: JSZip, targetSheetName: string, rowByCenter = false, options?: {
   includes: (row: number, col: number) => boolean
   read: (path: string, row: number, col: number) => Promise<string | null>
+  missing?: (row: number, col: number) => void
 }): Promise<{ row: number; col: number; dataUrl: string }[]> {
   try {
     const wbFile = zip.file('xl/workbook.xml'); if (!wbFile) return []
@@ -60,17 +61,41 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
       if (sheetNodes[i].getAttribute('name') === targetSheetName) { sheetIdx = i + 1; break }
     }
     if (!sheetIdx) return []
-    const resolvePart = (from: string, target: string) =>
-      new URL(target, 'https://workbook.invalid/' + from).pathname.slice(1)
+    const hasControlCharacter = (value: string) => Array.from(value).some(char => char.charCodeAt(0) < 32)
+    const resolvePart = (from: string, target: string): string | null => {
+      const uri = target.trim()
+      if (!uri || /^[A-Za-z][A-Za-z0-9+.-]*:|^\/\//.test(uri) || /[\\?#]/.test(uri) || hasControlCharacter(uri)) throw new Error('非法工作簿关系路径')
+      // ZIP entry names are decoded strings, unlike URL.pathname. Decode once
+      // before dot-segment normalization, and reject escaping the package root.
+      const decoded = decodeURIComponent(uri)
+      if (/^[A-Za-z][A-Za-z0-9+.-]*:|^\/\//.test(decoded) || decoded.includes('\\') || hasControlCharacter(decoded)) throw new Error('非法工作簿关系路径')
+      const parts = decoded.startsWith('/') ? [] : from.split('/').slice(0, -1)
+      for (const part of decoded.split('/')) {
+        if (!part || part === '.') continue
+        if (part === '..') {
+          if (!parts.length) throw new Error('工作簿关系路径超出文件范围')
+          parts.pop()
+        } else parts.push(part)
+      }
+      const name = parts.join('/')
+      const entry = zip.file(name)
+      if (entry?.unsafeOriginalName && entry.unsafeOriginalName !== name) throw new Error('非法 ZIP 条目路径')
+      return entry && !entry.dir ? name : null
+    }
     const relationshipsPart = (path: string) => path.replace(/^(.*\/)([^/]+)$/, '$1_rels/$2.rels')
     let sheetPath = `xl/worksheets/sheet${sheetIdx}.xml`
     const workbookRels = zip.file('xl/_rels/workbook.xml.rels')
     const sheetId = sheetNodes[sheetIdx - 1].getAttribute('r:id')
     if (workbookRels && sheetId) {
       const doc = new DOMParser().parseFromString(await workbookRels.async('string'), 'application/xml')
-      const target = Array.from(doc.getElementsByTagName('Relationship'))
-        .find(rel => rel.getAttribute('Id') === sheetId)?.getAttribute('Target')
-      if (target) sheetPath = resolvePart('xl/workbook.xml', target)
+      const relationship = Array.from(doc.getElementsByTagName('Relationship'))
+        .find(rel => rel.getAttribute('Id') === sheetId)
+      if (relationship?.getAttribute('TargetMode')?.toLowerCase() === 'external') return []
+      const target = relationship?.getAttribute('Target')
+      if (!target) return []
+      const resolved = resolvePart('xl/workbook.xml', target)
+      if (!resolved) return []
+      sheetPath = resolved
     }
     const rowHeights = new Map<number, number>()
     let defaultRowHeight = 15 * 12700
@@ -100,18 +125,23 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
       const dataUrl = options ? await options.read(path, row, col) : decoded.get(path)
       if (dataUrl) imgList.push({ row, col, dataUrl })
     }
+    const missingImage = (row: number, col: number) => {
+      if (options?.includes(row, col)) options.missing?.(row, col)
+    }
     // ① 标准 xdr 锚定
     const relsFile = zip.file(relationshipsPart(sheetPath))
     let anchors: Element[] = []
     const embedToTarget: Record<string, string> = {}
     if (relsFile) {
       const relsDoc = new DOMParser().parseFromString(await relsFile.async('string'), 'application/xml')
-      let drawingTarget: string | null = null
+      let drawingPath: string | null = null
       for (const rel of Array.from(relsDoc.getElementsByTagName('Relationship'))) {
-        if ((rel.getAttribute('Type') || '').endsWith('/drawing')) { drawingTarget = rel.getAttribute('Target'); break }
+        if (rel.getAttribute('TargetMode')?.toLowerCase() === 'external') continue
+        if (!(rel.getAttribute('Type') || '').endsWith('/drawing')) continue
+        try { drawingPath = resolvePart(sheetPath, rel.getAttribute('Target') || '') } catch { continue }
+        if (drawingPath) break
       }
-      if (drawingTarget) {
-        const drawingPath = resolvePart(sheetPath, drawingTarget)
+      if (drawingPath) {
         const drawingFile = zip.file(drawingPath)
         if (drawingFile) {
           const drawingDoc = new DOMParser().parseFromString(await drawingFile.async('string'), 'application/xml')
@@ -123,8 +153,12 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
           if (dRelsFile) {
             const dRelsDoc = new DOMParser().parseFromString(await dRelsFile.async('string'), 'application/xml')
             for (const rel of Array.from(dRelsDoc.getElementsByTagName('Relationship'))) {
+              if (rel.getAttribute('TargetMode')?.toLowerCase() === 'external') continue
               const target = rel.getAttribute('Target')
-              if (target) embedToTarget[rel.getAttribute('Id') || ''] = resolvePart(drawingPath, target)
+              try {
+                const resolved = target && resolvePart(drawingPath, target)
+                if (resolved) embedToTarget[rel.getAttribute('Id') || ''] = resolved
+              } catch { /* This relationship cannot invalidate unrelated images. */ }
             }
           }
         }
@@ -154,7 +188,7 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
       const col = colEl ? parseInt(colEl.textContent || '0', 10) : 0
       const blip = anchor.getElementsByTagName('a:blip')[0]; if (!blip) continue
       const target = embedToTarget[blip.getAttribute('r:embed') || '']
-      if (!target) continue
+      if (!target) { missingImage(row, col); continue }
       await addImage(row, col, target)
     }
     // ② WPS DISPIMG 单元格图
@@ -166,6 +200,7 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
         const ciRelsDoc = new DOMParser().parseFromString(await ciRelsFile.async('string'), 'application/xml')
         const embed2target: Record<string, string> = {}
         for (const rel of Array.from(ciRelsDoc.getElementsByTagName('Relationship'))) {
+          if (rel.getAttribute('TargetMode')?.toLowerCase() === 'external') continue
           embed2target[rel.getAttribute('Id') || ''] = rel.getAttribute('Target') || ''
         }
         const idToTarget = new Map<string, string>()
@@ -190,10 +225,16 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
             const formula = cell.getElementsByTagNameNS('*', 'f')[0]?.textContent || ''
             const match = /(?:_xlfn\.)?DISPIMG\s*\(\s*"([^"]+)"/i.exec(formula)
             const target = match && idToTarget.get(match[1])
-            if (!address || !target) continue
-            const path = resolvePart('xl/cellimages.xml', target)
-            const legacyPath = resolvePart('xl/cellimages.xml', target.replace(/^\.\.\//, ''))
-            await addImage(Number(address[2]) - 1, colLetterToNum(address[1]), zip.file(path) ? path : legacyPath)
+            if (!address || !match) continue
+            const row = Number(address[2]) - 1, col = colLetterToNum(address[1])
+            if (!target) { missingImage(row, col); continue }
+            try {
+              const path = resolvePart('xl/cellimages.xml', target)
+              const legacyPath = path ? null : resolvePart('xl/cellimages.xml', target.replace(/^\.\.\//, ''))
+              const resolved = path || legacyPath
+              if (resolved) await addImage(row, col, resolved)
+              else missingImage(row, col)
+            } catch { missingImage(row, col) }
           }
         }
       }
@@ -290,7 +331,7 @@ function usageAt(cell: { t: string; v?: unknown } | undefined, fallback: number,
     if (cell?.t === 'e') throw new Error('用量单元格为 Excel 错误，请修正后重新导入')
     return parseEngineeringUsage(cell?.v, fallback)
   }
-  catch (error) { throw new Error(`${sheet} 第 ${row} 行：${(error as Error).message}`) }
+  catch (error) { throw new Error(`${sheet} 第 ${row} 行：${(error as Error).message}`, { cause: error }) }
 }
 
 export async function importEngineeringFile(file: File, opts?: { hsDict?: HsDictEntry[] }): Promise<EngineeringImportResult> {
