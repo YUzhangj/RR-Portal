@@ -14,6 +14,7 @@ test('valuation workspace uses the confirmed precision layout without a legacy s
   assert.match(html, /verification-master-detail/);
   assert.match(css, /Quote-aligned shell/);
   assert.doesNotMatch(html, /verification-ui-switch|ui=classic|返回旧版|体验新版/);
+  assert.doesNotMatch(read('frontend/verification.js'), /部门核价流程/);
 });
 
 test('task list exposes the compact status choices and every visible column filter', () => {

@@ -981,7 +981,6 @@ function renderDetail() {
     </div>
     <div class="verification-sticky-navigation">
       <nav class="verification-mode-tabs" aria-label="核价工作模式">
-        <button data-detail-mode="workflow" class="${detailMode === 'workflow' ? 'active' : ''}">部门核价流程</button>
         ${hasOriginalWorkbook() ? `<button data-detail-mode="workbook" class="${detailMode === 'workbook' ? 'active' : ''}">原核价表</button>` : ''}
         <button data-detail-mode="compare" class="${detailMode === 'compare' ? 'active' : ''}">${quote.verification_origin==='direct'?'核价版本对比':'报价 / 核价版本对比'}</button>
       </nav>
