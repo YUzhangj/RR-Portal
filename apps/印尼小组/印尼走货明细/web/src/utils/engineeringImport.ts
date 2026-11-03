@@ -46,7 +46,10 @@ export function inferHsCode(name?: string, userDict?: HsDictEntry[]): { hsCN: st
 
 // 从 xlsx 某个 sheet 提取内嵌图片 → [{row,col,dataUrl}]（row/col 0-indexed）
 // 兼容：① 标准 xdr 锚定图片 ② WPS DISPIMG 单元格图(cellimages.xml)。移植自旧版 extractSheetImages。
-export async function extractSheetImages(zip: JSZip, targetSheetName: string, rowByCenter = false): Promise<{ row: number; col: number; dataUrl: string }[]> {
+export async function extractSheetImages(zip: JSZip, targetSheetName: string, rowByCenter = false, options?: {
+  includes: (row: number, col: number) => boolean
+  read: (path: string, row: number, col: number) => Promise<string | null>
+}): Promise<{ row: number; col: number; dataUrl: string }[]> {
   try {
     const wbFile = zip.file('xl/workbook.xml'); if (!wbFile) return []
     const wbXml = await wbFile.async('string')
@@ -57,10 +60,22 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
       if (sheetNodes[i].getAttribute('name') === targetSheetName) { sheetIdx = i + 1; break }
     }
     if (!sheetIdx) return []
+    const resolvePart = (from: string, target: string) =>
+      new URL(target, 'https://workbook.invalid/' + from).pathname.slice(1)
+    const relationshipsPart = (path: string) => path.replace(/^(.*\/)([^/]+)$/, '$1_rels/$2.rels')
+    let sheetPath = `xl/worksheets/sheet${sheetIdx}.xml`
+    const workbookRels = zip.file('xl/_rels/workbook.xml.rels')
+    const sheetId = sheetNodes[sheetIdx - 1].getAttribute('r:id')
+    if (workbookRels && sheetId) {
+      const doc = new DOMParser().parseFromString(await workbookRels.async('string'), 'application/xml')
+      const target = Array.from(doc.getElementsByTagName('Relationship'))
+        .find(rel => rel.getAttribute('Id') === sheetId)?.getAttribute('Target')
+      if (target) sheetPath = resolvePart('xl/workbook.xml', target)
+    }
     const rowHeights = new Map<number, number>()
     let defaultRowHeight = 15 * 12700
     if (rowByCenter) {
-      const sheetFile = zip.file(`xl/worksheets/sheet${sheetIdx}.xml`)
+      const sheetFile = zip.file(sheetPath)
       if (sheetFile) {
         const doc = new DOMParser().parseFromString(await sheetFile.async('string'), 'application/xml')
         defaultRowHeight = Number(doc.getElementsByTagName('sheetFormatPr')[0]?.getAttribute('defaultRowHeight') || 15) * 12700
@@ -78,8 +93,15 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
       let bin = ''; for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i])
       return 'data:' + mime + ';base64,' + btoa(bin)
     }
+    const decoded = new Map<string, string | null>()
+    const addImage = async (row: number, col: number, path: string) => {
+      if (options && !options.includes(row, col)) return
+      if (!options && !decoded.has(path)) decoded.set(path, await toDataUrl(path))
+      const dataUrl = options ? await options.read(path, row, col) : decoded.get(path)
+      if (dataUrl) imgList.push({ row, col, dataUrl })
+    }
     // ① 标准 xdr 锚定
-    const relsFile = zip.file(`xl/worksheets/_rels/sheet${sheetIdx}.xml.rels`)
+    const relsFile = zip.file(relationshipsPart(sheetPath))
     let anchors: Element[] = []
     const embedToTarget: Record<string, string> = {}
     if (relsFile) {
@@ -89,7 +111,7 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
         if ((rel.getAttribute('Type') || '').endsWith('/drawing')) { drawingTarget = rel.getAttribute('Target'); break }
       }
       if (drawingTarget) {
-        const drawingPath = ('xl/worksheets/' + drawingTarget).replace(/[^/]+\/\.\.\//g, '')
+        const drawingPath = resolvePart(sheetPath, drawingTarget)
         const drawingFile = zip.file(drawingPath)
         if (drawingFile) {
           const drawingDoc = new DOMParser().parseFromString(await drawingFile.async('string'), 'application/xml')
@@ -97,11 +119,12 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
             ...Array.from(drawingDoc.getElementsByTagName('xdr:twoCellAnchor')),
             ...Array.from(drawingDoc.getElementsByTagName('xdr:oneCellAnchor')),
           ]
-          const dRelsFile = zip.file(drawingPath.replace(/^(.*\/)([^/]+)$/, '$1_rels/$2.rels'))
+          const dRelsFile = zip.file(relationshipsPart(drawingPath))
           if (dRelsFile) {
             const dRelsDoc = new DOMParser().parseFromString(await dRelsFile.async('string'), 'application/xml')
             for (const rel of Array.from(dRelsDoc.getElementsByTagName('Relationship'))) {
-              embedToTarget[rel.getAttribute('Id') || ''] = rel.getAttribute('Target') || ''
+              const target = rel.getAttribute('Target')
+              if (target) embedToTarget[rel.getAttribute('Id') || ''] = resolvePart(drawingPath, target)
             }
           }
         }
@@ -132,8 +155,7 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
       const blip = anchor.getElementsByTagName('a:blip')[0]; if (!blip) continue
       const target = embedToTarget[blip.getAttribute('r:embed') || '']
       if (!target) continue
-      const dataUrl = await toDataUrl(('xl/' + target.replace(/^\.\.\//, '')).replace(/[^/]+\/\.\.\//g, ''))
-      if (dataUrl) imgList.push({ row, col, dataUrl })
+      await addImage(row, col, target)
     }
     // ② WPS DISPIMG 单元格图
     try {
@@ -146,7 +168,7 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
         for (const rel of Array.from(ciRelsDoc.getElementsByTagName('Relationship'))) {
           embed2target[rel.getAttribute('Id') || ''] = rel.getAttribute('Target') || ''
         }
-        const idToData: Record<string, string> = {}
+        const idToTarget = new Map<string, string>()
         const picNodes = ciDoc.getElementsByTagNameNS('*', 'cellImage')
         for (let i = 0; i < picNodes.length; i++) {
           const pic = picNodes[i]
@@ -154,11 +176,9 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
           const blip = pic.getElementsByTagNameNS('*', 'blip')[0]
           if (!blip || !id) continue
           const target = embed2target[blip.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'embed') || blip.getAttribute('r:embed') || '']
-          if (!target) continue
-          const dataUrl = await toDataUrl(('xl/' + target.replace(/^\.\.\//, '')).replace(/[^/]+\/\.\.\//g, ''))
-          if (dataUrl) idToData[id] = dataUrl
+          if (target) idToTarget.set(id, target)
         }
-        const sheetFile = zip.file('xl/worksheets/sheet' + sheetIdx + '.xml')
+        const sheetFile = zip.file(sheetPath)
         if (sheetFile) {
           const sheetXml = await sheetFile.async('string')
           const colLetterToNum = (s: string) => { let n = 0; for (const c of s) n = n * 26 + (c.charCodeAt(0) - 64); return n - 1 }
@@ -169,8 +189,11 @@ export async function extractSheetImages(zip: JSZip, targetSheetName: string, ro
             const address = /^([A-Z]+)(\d+)$/.exec(cell.getAttribute('r') || '')
             const formula = cell.getElementsByTagNameNS('*', 'f')[0]?.textContent || ''
             const match = /(?:_xlfn\.)?DISPIMG\s*\(\s*"([^"]+)"/i.exec(formula)
-            if (!address || !match || !idToData[match[1]]) continue
-            imgList.push({ row: Number(address[2]) - 1, col: colLetterToNum(address[1]), dataUrl: idToData[match[1]] })
+            const target = match && idToTarget.get(match[1])
+            if (!address || !target) continue
+            const path = resolvePart('xl/cellimages.xml', target)
+            const legacyPath = resolvePart('xl/cellimages.xml', target.replace(/^\.\.\//, ''))
+            await addImage(Number(address[2]) - 1, colLetterToNum(address[1]), zip.file(path) ? path : legacyPath)
           }
         }
       }

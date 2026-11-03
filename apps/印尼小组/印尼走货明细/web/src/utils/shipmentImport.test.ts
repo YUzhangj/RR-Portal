@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest'
 import * as XLSX from 'xlsx'
+import JSZip from 'jszip'
 import { readFileSync } from 'node:fs'
 import { parseShipmentWorkbook, matchShipmentMaterial, importShipmentFile, planShipmentImport } from './shipmentImport'
 import { DOMParser } from '@xmldom/xmldom'
@@ -9,6 +10,22 @@ function book(rows: unknown[][]) {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), '明细')
   return wb
 }
+it('大走货文件读取单元格和采购格式，跳过体积较大的媒体', async () => {
+  const wb = book([
+    ['货号', '产品中文名称', '送货数量', '采购单价'],
+    ['001', '螺丝', 20700, 0.247],
+  ])
+  wb.Sheets['明细'].D2.z = '"US$"0.000'
+  const zip = await JSZip.loadAsync(XLSX.write(wb, { type: 'array', bookType: 'xlsx', bookSST: true }))
+  zip.file('xl/media/image1.png', new Uint8Array(119823 * 1024))
+  const data = await zip.generateAsync({ type: 'arraybuffer' })
+  const result = await importShipmentFile(new File([data], '走货.xlsx'))
+  expect(result.rows).toHaveLength(1)
+  expect(result.rows[0].item).toMatchObject({ qty: 20700, price: 0.247, currency: 'US$' })
+  expect(result.rows[0].item.material_snapshot).toMatchObject({ product_code: '001', name_zh: '螺丝' })
+  expect(result.loadImages).toBeTypeOf('function')
+  expect(result.rows[0].item.material_snapshot.image).toBeUndefined()
+})
 it('相同明细唯一匹配更新，已关联出库行也可匹配；重复需核对，未匹配追加', () => {
   const item = { material_snapshot: { name_zh: '螺丝', product_code: 'A', spec: '3MM', supplier: '供应商' }, qty: 2 }
   expect(planShipmentImport([item], [item])).toEqual([0])

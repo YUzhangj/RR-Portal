@@ -83,7 +83,7 @@ it('同物料分批更新后仍按确认的真实物料合并；报关资料不�
   expect(consolidateShipmentItems(local.map(row => ({ ...row, outbound_id: undefined })), map)).toHaveLength(2)
 })
 
-it('实际确认按钮允许已关联行的缺省币种，不接受重复匹配；页面拒绝时保留预览', () => {
+it('实际确认按钮允许已关联行的缺省币种，不接受重复匹配；页面拒绝时保留预览', async () => {
   const text = readFileSync(new URL('../components/ShipmentImport.tsx', import.meta.url), 'utf8')
   const tree = ts.createSourceFile('import.tsx', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
   let code = ''
@@ -93,13 +93,14 @@ it('实际确认按钮允许已关联行的缺省币种，不接受重复匹配�
   }
   walk(tree)
   const context = createContext({ selected: [{ item: { ...incoming, currency: undefined } }], targets: [0], linkedTarget: () => old,
+    busy: false, loadImages: undefined, importContext: { current: { active: true } },
     onImport: vi.fn(() => false), setRows: vi.fn(), message: { warning: vi.fn(), success: vi.fn() } })
   runInContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context)
-  runInContext('confirm()', context)
+  await runInContext('confirm()', context)
   expect(context.onImport).toHaveBeenCalledOnce(); expect(context.setRows).not.toHaveBeenCalled()
   expect(context.message.warning).not.toHaveBeenCalled()
   context.targets = [-2]; context.onImport.mockClear()
-  runInContext('confirm()', context)
+  await runInContext('confirm()', context)
   expect(context.onImport).not.toHaveBeenCalled()
   expect(context.message.warning).toHaveBeenCalledWith(expect.stringContaining('重复匹配'))
   expect(text).toContain('（保留出库）')
