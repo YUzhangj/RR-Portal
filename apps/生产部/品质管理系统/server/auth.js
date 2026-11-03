@@ -1,5 +1,6 @@
 'use strict';
 const crypto = require('node:crypto');
+const fs     = require('node:fs');
 
 const MENUS = ['dashboard', 'records', 'review', 'analysis', 'suppliers', 'daily', 'weekly',
   'monthly', 'yearly', 'supplier-report', 'defectlib', 'import', 'users'];
@@ -82,10 +83,26 @@ function validJSONRequest(req) {
     if (!['http:', 'https:'].includes(origin.protocol) || origin.host !== req.headers.host) fail(403, '请求来源不允许');
   }
 }
-function createSessions({ now = Date.now, lifetime = 12 * 60 * 60 * 1000 } = {}) {
+function createSessions({ now = Date.now, lifetime = 12 * 60 * 60 * 1000, storeFile = null } = {}) {
   const sessions = new Map(), failures = new Map();
   const digest = s => crypto.createHash('sha256').update(s).digest('hex');
   function prune(map) { for (const [key, value] of map) if (value.expires <= now()) map.delete(key); }
+  /* 会话持久化：重启/热更新后已登录用户不掉线（存的是 token 摘要，非明文） */
+  function persist() {
+    if (!storeFile) return;
+    try {
+      prune(sessions);
+      const tmp = storeFile + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify([...sessions]));
+      fs.renameSync(tmp, storeFile);
+    } catch (_) { /* 磁盘异常不影响登录流程 */ }
+  }
+  if (storeFile) {
+    try {
+      const arr = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
+      for (const [k, v] of arr) if (v && typeof v.expires === 'number' && v.expires > now()) sessions.set(k, v);
+    } catch (_) { /* 首次启动/文件损坏按无会话处理 */ }
+  }
   function cookieName(company) { return 'rr_qms_session_' + company.replace(/-/g, '_'); }
   function token(req, company) {
     const matches = String(req.headers.cookie || '').split(';').map(s => s.trim()).filter(s => s.startsWith(cookieName(company) + '='));
@@ -98,7 +115,7 @@ function createSessions({ now = Date.now, lifetime = 12 * 60 * 60 * 1000 } = {})
     res.setHeader('Set-Cookie', cookieName(company) + '=' + value + '; HttpOnly; SameSite=Strict; Path=/; Max-Age=' + age + (req.socket.encrypted ? '; Secure' : ''));
   }
   function clear(req, res, company) {
-    const value = token(req, company); if (value) sessions.delete(digest(value));
+    const value = token(req, company); if (value) { sessions.delete(digest(value)); persist(); }
     cookie(res, req, company, '', 0);
   }
   return {
@@ -107,6 +124,7 @@ function createSessions({ now = Date.now, lifetime = 12 * 60 * 60 * 1000 } = {})
       const old = token(req, company); if (old) sessions.delete(digest(old));
       const value = crypto.randomBytes(32).toString('hex'), csrfToken = crypto.randomBytes(32).toString('hex');
       sessions.set(digest(value), { username: user.username, company, password: digest(user.password), expires: now() + lifetime, csrfToken });
+      persist();
       cookie(res, req, company, value, Math.floor(lifetime / 1000)); return csrfToken;
     },
     authenticate(req, company, lookup) {
@@ -114,13 +132,14 @@ function createSessions({ now = Date.now, lifetime = 12 * 60 * 60 * 1000 } = {})
       if (!session || session.company !== company) fail(401, '请登录品质系统');
       const user = lookup(session.username);
       if (!user || !user.enabled || typeof user.password !== 'string' || !equalSecret(session.password, digest(user.password))) {
-        sessions.delete(digest(value)); fail(401, '登录已失效，请重新登录');
+        sessions.delete(digest(value)); persist(); fail(401, '登录已失效，请重新登录');
       }
       return { user, csrfToken: session.csrfToken };
     },
     requireCSRF(req, session) { validJSONRequest(req); if (!equalSecret(req.headers['x-qc-csrf'], session.csrfToken)) fail(403, '请刷新页面后重试'); },
     revoke(company, username) {
-      for (const [key, value] of sessions) if (value.company === company && value.username === username) sessions.delete(key);
+      for (const [key, value] of sessions) if (value.company === company && value.username === username) { sessions.delete(key); }
+      persist();
     },
     clear,
     loginAttempt(req, company, username) {

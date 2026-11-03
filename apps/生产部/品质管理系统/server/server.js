@@ -20,7 +20,6 @@ const fs   = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const Auth = require('./auth');
-const sessions = Auth.createSessions();
 
 const ROOT      = path.join(__dirname, '..');           // 前端静态根目录
 const DATA_DIR  = process.env.DATA_PATH || path.join(__dirname, 'data');
@@ -28,6 +27,7 @@ const LEGACY_DB = path.join(__dirname, 'qc.db');        // 本地开发的旧版
 const SEED_PATH = path.join(__dirname, 'seed.json');
 const AI_CONFIG_PATH = path.join(__dirname, 'ai-config.json');
 const PORT      = process.env.PORT === undefined ? 8765 : Number(process.env.PORT);
+const sessions  = Auth.createSessions({ storeFile: path.join(DATA_DIR, 'sessions.json') });   // 会话落盘，重启不掉线
 
 /* ════════ 厂区 → 子公司清单（数据隔离边界；每家子公司一个独立库 server/data/<id>/qc.db）════════
    新增子公司：在这里加一行 + 前端 app.js 的 QC_COMPANIES 加一行即可 */
