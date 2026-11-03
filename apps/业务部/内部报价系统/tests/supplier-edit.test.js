@@ -28,3 +28,19 @@ test('改名同时更改供应商标识，复用已知供应商标识，清空�
   assert.equal(Supplier.supplierId(row), '');
   assert.equal(row.supplier_name, '');
 });
+
+test('名称未改时保留原归属，改名遇同名不同标识不按首行猜身份', () => {
+  const row = { supplier_id: 'A', supplier_name: '同名厂' };
+  const other = { supplier_id: 'B', supplier_name: '同名厂' };
+  Supplier.setSupplier(row, ' 同名厂 ', [other, row]);
+  assert.equal(row.supplier_id, 'A');
+  const before = structuredClone(row);
+  assert.throws(() => Supplier.setSupplier(row, '歧义厂', [
+    { supplier_id: 'C', supplier_name: '歧义厂' }, { supplier_id: 'D', supplier_name: '歧义厂' },
+  ]), /多个标识/);
+  assert.deepEqual(row, before);
+  Supplier.setSupplier(row, '唯一厂', [
+    { supplier_id: 'E', supplier_name: '唯一厂' }, { supplier_id: 'e', supplier_name: '唯一厂' },
+  ]);
+  assert.equal(row.supplier_id, 'E');
+});

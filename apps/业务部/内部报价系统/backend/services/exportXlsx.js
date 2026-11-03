@@ -1440,7 +1440,7 @@ function renderInjection(ws, row, payload, fxRH, refs, sequenceForMix=false) {
     // 使用本单真实机型费用，禁止用保存啤价反推费用。历史/手填价不静默改价。
     const pricing = InjectionPricing.parameters(r, payload.machine_prices);
     const autoPrice = InjectionPricing.calculate(r, payload.machine_prices);
-    const formulaPrice = r.catalog_raw_weight == null && num(r.mold_part_index) === 0 &&
+    const formulaPrice = r.shot_price_mode === 'auto' && r.catalog_raw_weight == null && num(r.mold_part_index) === 0 &&
       pricing.valid && r.shot_price != null && r.shot_price !== '' && autoPrice === sp;
     ws.getCell(row, 9).value = formulaPrice
       ? { formula: `ROUND(${pricing.price}/J${row}/L${row},4)`, result: sp }

@@ -4130,10 +4130,30 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
       input.type = 'text'; input.value = row.supplier_name || row.supplier_id || '';
       input.placeholder = '填写供应商'; input.maxLength = 100;
       input.setAttribute('aria-label', '供应商'); input.style.minWidth = '140px';
+      let original = { supplier_name: row.supplier_name, supplier_id: row.supplier_id };
+      let supplierError = '';
+      input.onfocus = () => { original = { supplier_name: row.supplier_name, supplier_id: row.supplier_id }; };
       input.oninput = () => {
-        window.SupplierMaterialSync.setSupplier(row, input.value,
-          [...payload.hardware, ...payload.aux_materials, ...payload.packaging_materials]);
+        try {
+          const candidate = { ...original };
+          window.SupplierMaterialSync.setSupplier(candidate, input.value,
+            [...payload.hardware, ...payload.aux_materials, ...payload.packaging_materials].filter(item => item !== row));
+          Object.assign(row, candidate);
+          supplierError = '';
+        } catch (error) {
+          // 同名歧义时恢复编辑前的归属，快捷保存也不能提交逐字输入的临时标识。
+          Object.assign(row, original);
+          supplierError = error.message;
+        }
+        input.setCustomValidity(supplierError);
         onChange();
+      };
+      input.onchange = () => {
+        if (!supplierError) return;
+        input.value = row.supplier_name || row.supplier_id || '';
+        input.setCustomValidity('');
+        alert(supplierError);
+        supplierError = '';
       };
       td.appendChild(input);
     },
@@ -4585,7 +4605,7 @@ function syncInjectionMolds(payload, refMolds) {
       machine_model: m.machine_model || existing?.machine_model || '',
       target: existing?.target ?? m.target ?? null,
       material_unit_price: m.material_unit_price ?? existing?.material_unit_price ?? null,
-      shot_price: existing?.shot_price ?? m.shot_price ?? null,
+      shot_price: existing ? existing.shot_price : (m.shot_price ?? null),
       note: m.note || existing?.note || '',
     };
     if (!existing || window.InjectionPricing.signature(existing, payload.machine_prices) !==
@@ -4653,7 +4673,7 @@ function engineeringImagesForInjection(row, refMolds) {
   ].filter(Boolean))];
 }
 
-// 默认只补齐空白料价/啤价，避免进入页面时覆盖人工调整；按钮手动套价时可传 overwrite=true。
+// 默认补齐空白料价、已明确自动计算行的空啤价；历史未标记值保持，按钮套价可传 overwrite=true。
 function applyInjectionReferencePrices(payload, { overwrite = false, material = true, machine = true } = {}) {
   let materialHits = 0;
   let machineHits = 0;
@@ -4680,13 +4700,16 @@ function applyInjectionReferencePrices(payload, { overwrite = false, material = 
       const matchedMachine = lookupMachinePrice(row.machine_model, payload.machine_prices);
       const nextPrice = window.InjectionPricing.calculate(row, payload.machine_prices);
       if (row.catalog_raw_weight != null) continue;
-      if ((overwrite || isBlankInjectionPrice(row.shot_price)) && nextPrice !== null) {
+      const shouldPrice = overwrite || (isBlankInjectionPrice(row.shot_price) && row.shot_price_mode === 'auto');
+      if (shouldPrice && nextPrice !== null) {
         if (row.shot_price !== nextPrice) changed = true;
         row.shot_price = nextPrice;
+        row.shot_price_mode = 'auto';
         machineHits++;
-      } else if (overwrite || isBlankInjectionPrice(row.shot_price)) {
+      } else if (shouldPrice) {
         if (row.shot_price !== null) changed = true;
         row.shot_price = null;
+        row.shot_price_mode = 'auto';
         machineMisses.push(`${row.machine_model || '(无机型)'}(请补齐有效机型价、套数和目标数)`);
       }
       if (!row.machine && matchedMachine && matchedMachine.normal) {
@@ -4791,6 +4814,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       target: m.target ?? null,
       material_unit_price: m.material_unit_price ?? null,
       shot_price: m.shot_price ?? null,
+      shot_price_mode: m.shot_price_mode ?? (isBlankInjectionPrice(m.shot_price) ? 'auto' : undefined),
       note: m.note || '',
     }));
   }
@@ -4810,7 +4834,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     ${canEdit ? `<small style="margin-left:8px"><button id="btn-auto-price" class="mini" type="button">🔄 自动按材质套料价</button></small>` : ''}
     ${canEdit ? `<small style="margin-left:6px"><button id="btn-auto-shot" class="mini" type="button">🔄 自动按机型套啤价</button></small>` : ''}
     </h3>
-    <p class="muted">啤价＝本单机型台班费用 ÷ 目标数 ÷ 套数；修改机型、目标数、套数或机型费用时自动重算。修改后请保存本部门草稿。</p>
+    <p class="muted">啤价＝本单机型台班费用 ÷ 目标数 ÷ 套数。修改本行机型、目标数、套数或点击“自动按机型套啤价”后使用自动计算；手填啤价及历史固定值保留，机型费用变化只更新自动计算行。修改后请保存本部门草稿。</p>
     <div id="wb-inj"></div>
     <div id="wb-inj-shared"></div>
     <div id="wb-inj-summary"></div>
@@ -4871,9 +4895,33 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     machineRefreshers.get(row)?.();
     shotRefreshers.get(row)?.();
   };
+  const pricingCell = (key, refreshers, numeric = false) => (td, row, { readonly, refreshCalcs, onChange }) => {
+    if (readonly) {
+      td.classList.add('ro');
+      const refresh = () => { td.textContent = formatNum(row[key] ?? ''); refreshCalcs(); };
+      refreshers.set(row, refresh);
+      refresh();
+      return;
+    }
+    const input = document.createElement('input');
+    input.type = numeric ? 'number' : 'text';
+    if (numeric) input.step = 'any';
+    input.style.minWidth = numeric ? '100px' : '90px';
+    const refresh = () => { input.value = row[key] ?? ''; refreshCalcs(); };
+    refreshers.set(row, refresh);
+    refresh();
+    input.oninput = () => {
+      row[key] = numeric ? (input.value === '' ? null : Number(input.value)) : input.value;
+      if (key === 'shot_price') row.shot_price_mode = 'manual';
+      refreshCalcs();
+      onChange();
+    };
+    td.appendChild(input);
+  };
   const refreshChangedMachinePrices = () => {
     for (const row of payload.injection) {
-      if (priceSignatures.get(row) !== window.InjectionPricing.signature(row, payload.machine_prices)) refreshShot(row);
+      if (row.shot_price_mode === 'auto' &&
+          priceSignatures.get(row) !== window.InjectionPricing.signature(row, payload.machine_prices)) refreshShot(row);
     }
   };
   const onMachChange = () => { refreshChangedMachinePrices(); refreshInjectionTotals(); };
@@ -5035,13 +5083,15 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     { key: 'material_unit_price', label: '料价 HK$/g', type: 'number', width: '110px' },
     { key: 'raw_unit', label: '原料单价 HK$', readonly: true, width: '100px',
       calc: r => num(r.weight_g) * (1 + num(payload.injection_loss_pct ?? 3)/100) * num(r.material_unit_price) },
-    { key: 'machine', label: '机台', width: '90px', className: 'molding-machine-key' },
-    { key: 'shot_price', label: payload.injection.some(r => r.catalog_raw_weight != null) ? '零件啤工(HK$/件)' : '啤价(HK$/啤)', type: 'number', width: '100px' },
+    { key: 'machine', label: '机台', width: '90px', className: 'molding-machine-key',
+      renderCell: pricingCell('machine', machineRefreshers) },
+    { key: 'shot_price', label: payload.injection.some(r => r.catalog_raw_weight != null) ? '零件啤工(HK$/件)' : '啤价(HK$/啤)', type: 'number', width: '100px',
+      renderCell: pricingCell('shot_price', shotRefreshers, true) },
     { key: 'cavity', label: '出模数', width: '80px' },
     { key: 'side_action', label: '行位', width: '90px' },
-    { key: 'sets', label: '套数', type: 'number', width: '70px' },
-    { key: 'machine_model', label: '机型', width: '90px', className: 'molding-machine-key' },
-    { key: 'target', label: '目标数', type: 'number', width: '100px', className: 'molding-machine-key' },
+    { key: 'sets', label: '套数', type: 'number', width: '70px', onValue: refreshShot },
+    { key: 'machine_model', label: '机型', width: '90px', className: 'molding-machine-key', onValue: refreshShot },
+    { key: 'target', label: '目标数', type: 'number', width: '100px', className: 'molding-machine-key', onValue: refreshShot },
     { key: 'mold_size', label: '模具尺寸', width: '130px' },
     { key: 'cycle_sec', label: '周期(秒)', type: 'number', width: '80px' },
     { key: 'finished_amt', label: '成品金额 HK$', readonly: true, width: '100px',
