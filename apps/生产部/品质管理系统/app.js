@@ -3861,7 +3861,10 @@ function _inTol(valStr, stdStr, tolStr) {
   const v=parseFloat(valStr), std=parseFloat(stdStr), tol=parseFloat(tolStr);
   if (isNaN(v)||isNaN(std)) return null;
   if (isNaN(tol)||!tolStr) return null;
-  return v >= std-tol && v <= std+tol;
+  /* 浮点误差：2.3+0.05=2.3500000000000001，边界值 2.35 会被误判出格。
+     按小数位数量化到 1e-9 再比较（边界含等号） */
+  const EPS = 1e-9;
+  return v >= std - tol - EPS && v <= std + tol + EPS;
 }
 
 /* ── 自动判定 PASS / FAIL ── */
@@ -4695,6 +4698,7 @@ function resetSingleEntryFormForNext() {
     client:      getVal('f_client'),
     processType: getVal('f_processType'),
     productNo:   getVal('f_productNo'),
+    deliveryNo:  getVal('f_deliveryNo'),
     type:        document.getElementById('f_type')?.value || '成品',
     aqlLevel:    getVal('f_aqlLevel'),
   };
@@ -4703,6 +4707,7 @@ function resetSingleEntryFormForNext() {
   setVal('f_client',      _keep.client);
   setVal('f_processType', _keep.processType);   /* 连续录入同加工类型居多，保留 */
   setVal('f_productNo',   _keep.productNo);     /* 连续录入同货号居多，保留 */
+  setVal('f_deliveryNo',  _keep.deliveryNo);    /* 连续录入常是同一张送货单，保留 */
   setVal('f_type',        _keep.type);
   setVal('f_aqlLevel',    _keep.aqlLevel || 'MAJ 1.0,MIN 2.5');
   syncAqlLevelPills();
