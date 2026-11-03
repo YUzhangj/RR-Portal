@@ -7,12 +7,40 @@ const $ = (id) => document.getElementById(id);
 
 const STATUS_TXT = { empty: '空', filled: '已填', approved: '已审', rejected: '驳回' };
 const STATUS_CLS = { empty: 'b-empty', filled: 'b-filled', approved: 'b-approved', rejected: 'b-rejected' };
+let quoteSaveShortcutHandler = null;
+let saveShortcutToastTimer = null;
+
+function showSaveShortcutStatus(message, isError = false) {
+  let toast = document.getElementById('save-shortcut-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'save-shortcut-toast';
+    toast.setAttribute('role', 'status');
+    toast.style.cssText = 'position:fixed;right:20px;bottom:20px;z-index:10001;padding:10px 16px;border-radius:8px;color:#fff;font-weight:600;box-shadow:0 8px 24px rgba(15,23,42,.22)';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message;
+  toast.style.background = isError ? '#b91c1c' : '#166534';
+  clearTimeout(saveShortcutToastTimer);
+  saveShortcutToastTimer = setTimeout(() => toast.remove(), 2200);
+}
+
+function bindQuoteSaveShortcut(handler) {
+  if (quoteSaveShortcutHandler) window.removeEventListener('keydown', quoteSaveShortcutHandler, true);
+  quoteSaveShortcutHandler = handler;
+  window.addEventListener('keydown', quoteSaveShortcutHandler, { capture: true });
+}
 
 // 权限工具（与 main.js 一致）
 function hasPerm(me, menu, action) {
   if (!me || !me.perms) return false;
   const p = me.perms[menu];
   return !!(p && p['can_' + action]);
+}
+function canEditDepartment(me, dept) {
+  return hasPerm(me, '报价单详情', 'view') && hasPerm(me, '报价单详情', 'edit')
+    && hasPerm(me, DEPT_MENU[dept], 'view') && hasPerm(me, DEPT_MENU[dept], 'edit')
+    && (me.dept === dept || ['sales', 'engineering'].includes(me.dept));
 }
 const DEPT_MENU = {
   sales: '业务部', engineering: '工程部', electronic: '电子部', molding: '啤机部',
@@ -21,7 +49,7 @@ const DEPT_MENU = {
 
 async function api(p, opts = {}) {
   const r = await fetch('/api' + p, { credentials: 'include', headers: { 'Content-Type': 'application/json' }, ...opts });
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+  if (!r.ok) { const error = new Error((await r.json().catch(() => ({}))).error || r.statusText); error.status = r.status; throw error; }
   return r.json();
 }
 
@@ -84,18 +112,115 @@ function requestUnsavedAction(deptName) {
   });
 }
 
-// 保存 section（带轻量并发提醒）：带上加载时的 filled_at；后端若发现被别人改过会回 conflict
-// 不挡保存，仅弹一次提示；成功后更新本地 filled_at 作为新基线（避免自己的后续保存误报）
-async function putSection(sec, payload, submit) {
-  const r = await api('/sections/' + sec.id, {
-    method: 'PUT',
-    body: JSON.stringify({ payload, submit: !!submit, base_filled_at: sec.filled_at || null }),
+// 保存时携带版本；后端拒绝覆盖已被其他窗口更新的资料。
+// 同一部门的保存串行执行，避免快捷键、页面按钮或失焦保存同时发出时，
+// 后发请求携带旧 filled_at 而被误判为其他人覆盖。
+const sectionSaveQueues = new Map();
+function putSection(sec, payload, submit) {
+  const sectionId = sec.id;
+  const previous = sectionSaveQueues.get(sectionId) || Promise.resolve();
+  const current = previous.catch(() => {}).then(async () => {
+    const r = await api('/sections/' + sectionId, {
+      method: 'PUT',
+      body: JSON.stringify({ payload, submit: !!submit, base_filled_at: sec.filled_at || null }),
+    });
+    if (r) {
+      if (r.filled_at) sec.filled_at = r.filled_at;
+      if (r.conflict) alert(`⚠️ 该部分在你打开后已被「${r.last_by || '他人'}」修改过（${r.last_at || ''}），你的保存已覆盖它。\n请刷新核对，必要时让对方重填。`);
+    }
+    return r;
   });
-  if (r) {
-    if (r.filled_at) sec.filled_at = r.filled_at;
-    if (r.conflict) alert(`⚠️ 该部分在你打开后已被「${r.last_by || '他人'}」修改过（${r.last_at || ''}），你的保存已覆盖它。\n请刷新核对，必要时让对方重填。`);
+  sectionSaveQueues.set(sectionId, current);
+  const release = () => {
+    if (sectionSaveQueues.get(sectionId) === current) sectionSaveQueues.delete(sectionId);
+  };
+  current.then(release, release);
+  return current;
+}
+
+// Business and summary views edit one draft, so returning to the business tab
+// cannot later save an older copy of shipping settings over an acknowledged save.
+const sectionDraftPayloads = new WeakMap();
+function sectionDraft(section) {
+  if (!section) return {};
+  if (!sectionDraftPayloads.has(section)) sectionDraftPayloads.set(section, JSON.parse(section.payload_json || '{}'));
+  return sectionDraftPayloads.get(section);
+}
+function quotationExchangeRates(sections, exposedRates = {}) {
+  const sales = (sections || []).find(section => section.dept === 'sales');
+  const header = sales?.payload_json != null ? sectionDraft(sales).header || {} : {};
+  const positive = value => Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : 0;
+  // A quote without a saved header is calculated by the server at the legacy
+  // fallback. Display that same rate rather than a newer costing-basis default.
+  return {
+    rmb_hkd: positive(header.fx_rmb_hkd) || positive(exposedRates?.fx_rmb_hkd) || 0.85,
+    hkd_usd: positive(header.fx_hkd_usd) || positive(exposedRates?.fx_hkd_usd) || 7.8,
+  };
+}
+const shippingSummarySavers = new WeakMap();
+function shippingSummaryEditState(section, me, locked) {
+  const permitted = canEditDepartment(me, 'sales') && hasPerm(me, '汇总分析', 'edit');
+  const reason = locked ? '原报价已锁定，请到核价中心修改。'
+    : section?.status === 'approved' ? '业务部已审核，请先解除业务部审核后再修改算价参数。' : '';
+  return { editable: !!section && permitted && !reason, reason: permitted ? reason : '' };
+}
+function shippingSummarySaver(section, payload, onStatus) {
+  let state = shippingSummarySavers.get(section);
+  if (!state) {
+    state = { dirty: false, pending: null, sequence: 0, text: '修改后自动保存到业务草稿', error: false };
+    const paint = () => state.onStatus?.({ text: state.text, error: state.error, pending: !!state.pending, dirty: state.dirty });
+    state.save = () => {
+      const sequence = ++state.sequence;
+      // Freeze exactly what this request acknowledges. Later typing must remain dirty.
+      const snapshot = JSON.stringify(payload);
+      state.dirty = true; state.error = false; state.text = '正在保存算价参数…';
+      const pending = putSection(section, JSON.parse(snapshot), false).then(() => {
+        section.payload_json = snapshot;
+        if (sequence === state.sequence) {
+          state.dirty = false; state.error = false; state.text = '✓ 算价参数已保存到业务草稿';
+        }
+        return true;
+      }, error => {
+        if (sequence === state.sequence) {
+          state.error = true; state.text = '保存失败：' + error.message + ' 当前输入已保留。';
+        }
+        return false;
+      }).finally(() => {
+        if (state.pending === pending) state.pending = null;
+        paint();
+      });
+      state.pending = pending; paint();
+      return pending;
+    };
+    state.flush = async () => {
+      if (!state.pending && state.dirty) state.save();
+      while (state.pending) await state.pending;
+      if (state.dirty) throw new Error(state.text);
+    };
+    state.paint = paint;
+    shippingSummarySavers.set(section, state);
   }
-  return r;
+  state.onStatus = onStatus; state.paint();
+  return state;
+}
+function mountShippingSummarySave(host, section, payload, editState) {
+  const bar = host.querySelector('#shipping-summary-save');
+  if (!editState.editable) {
+    bar.textContent = editState.reason;
+    host.saveShippingSummary = null;
+    return () => Promise.resolve(false);
+  }
+  bar.innerHTML = '<button type="button" class="mini" data-save-shipping-summary>保存算价参数</button> <span role="status" aria-live="polite" data-shipping-save-status></span>';
+  const button = bar.querySelector('[data-save-shipping-summary]');
+  const status = bar.querySelector('[data-shipping-save-status]');
+  const saver = shippingSummarySaver(section, payload, state => {
+    status.textContent = state.text; status.style.color = state.error ? '#b91c1c' : state.dirty ? '#475569' : '#166534';
+    button.disabled = state.pending; button.textContent = state.error ? '重试保存算价参数' : '保存算价参数';
+    host.onShippingSummaryDirty?.(state.dirty);
+  });
+  button.onclick = () => saver.save();
+  host.saveShippingSummary = () => saver.flush();
+  return () => saver.save();
 }
 
 // ==================== 通用可编辑表格 ====================
@@ -338,7 +463,7 @@ function renderTable(container, columns, rows, opts = {}) {
 }
 
 // 辅助/包装材料 类别 — 减税明细各外购项按此类别统计
-const MAT_CATEGORIES = ['吸塑', '胶袋', '彩盒/内咭', '电池', '产品利宝', '彩盒利宝', '电镀', '其他外购'];
+const MAT_CATEGORIES = ['吸塑', '胶袋', '彩盒/内咭', '电池', '产品利宝', '彩盒利宝', '电镀', '植绒', '其他外购'];
 
 // 车缝：人工若已作为明细行(名称含"人工")计入，则不再额外加 labor_amount，避免双算
 function sewLaborToAdd(g) {
@@ -349,9 +474,372 @@ function sewLaborToAdd(g) {
 }
 
 function formatNum(v) {
-  if (typeof v === 'number' && !Number.isNaN(v)) return v.toFixed(Math.abs(v) < 1 ? 4 : 2);
+  if (typeof v === 'number' && !Number.isNaN(v)) return v.toFixed(4);
   return String(v ?? '');
 }
+
+function legacyFormulaAmount(item, payload) {
+  if (item?.formula_kind === 'rmb_divided_by_fx') {
+    const salesSection = window.__data?.sections?.find(section => section.dept === 'sales');
+    let sales = {};
+    try { sales = JSON.parse(salesSection?.payload_json || '{}'); } catch {}
+    const fx = num(sales.header?.fx_rmb_hkd) || num(globalCostingBasis().exchange?.rmb_hkd);
+    return fx > 0 ? num(item.formula_rmb_value) / fx : NaN;
+  }
+  if (item?.formula_kind === 'assembly_base_per_output') {
+    const base = num(payload?.assembly_base_rate ?? defaultAssemblyBaseRateForFactory());
+    return base * num(item.people) * (num(item.team) || 1) / Math.max(num(item.output), 1);
+  }
+  if (item?.formula_kind === 'quantity_x_unit') {
+    return num(item.formula_quantity) * num(item.formula_unit_hkd);
+  }
+  return num(item?.current_hkd);
+}
+
+function renderLegacyItems(host, payload, canEdit = false, onChange = () => {}) {
+  const rows = Array.isArray(payload?.legacy_items) ? payload.legacy_items : [];
+  if (!host || !rows.length) return;
+  const money = value => value == null || value === '' || !Number.isFinite(Number(value)) ? '—' : formatNum(Number(value));
+  const formulaMode = rows.some(row => row.formula_kind);
+  const block = document.createElement('section');
+  block.className = 'card legacy-detail-card';
+  block.style.cssText = 'margin-bottom:18px;background:#fffdf2;border:1px solid #f3d98b;overflow:auto';
+  if (formulaMode) {
+    block.innerHTML = `
+      <h3 style="margin:0 0 6px">历史核价计算明细</h3>
+      <div class="muted" style="margin-bottom:10px">已核实的原表公式连接统一核价基准；其余项目沿用可调整的数量与单价，原金额仅作对照。</div>
+      <table class="wb-table" style="min-width:1040px">
+        <thead><tr><th>项目</th><th>成本类别</th><th>原始金额 HK$</th><th>系统计算公式</th><th>公式参数</th><th>当前核价 HK$</th></tr></thead>
+        <tbody>${rows.map((row, index) => {
+          const amount = legacyFormulaAmount(row, payload);
+          row.current_hkd = amount;
+          let controls = '<span class="muted">由部门明细自动计算</span>';
+          if (row.formula_kind === 'quantity_x_unit') {
+            controls = `<label>数量 <input data-legacy-quantity="${index}" type="number" step="any" value="${row.formula_quantity ?? 1}" ${canEdit ? '' : 'disabled'}></label>
+              <label>单价 <input data-legacy-unit="${index}" type="number" step="any" value="${row.formula_unit_hkd ?? 0}" ${canEdit ? '' : 'disabled'}></label>`;
+          } else if (row.formula_kind === 'rmb_divided_by_fx') {
+            const salesSection = window.__data?.sections?.find(section => section.dept === 'sales');
+            let sales = {};
+            try { sales = JSON.parse(salesSection?.payload_json || '{}'); } catch {}
+            const fx = num(sales.header?.fx_rmb_hkd) || num(globalCostingBasis().exchange?.rmb_hkd);
+            controls = `<label>人民币金额 <input data-legacy-rmb="${index}" type="number" step="any" value="${row.formula_rmb_value ?? 0}" ${canEdit ? '' : 'disabled'}></label>
+              <span class="muted">÷ 统一汇率 ${escapeHtml(String(fx || '—'))}</span>`;
+          } else if (row.formula_kind === 'assembly_base_per_output') {
+            controls = `<label>人数 <input data-legacy-people="${index}" type="number" step="any" value="${row.people ?? 0}" ${canEdit ? '' : 'disabled'}></label>
+              <label>小组 <input data-legacy-team="${index}" type="number" step="any" value="${row.team ?? 1}" ${canEdit ? '' : 'disabled'}></label>
+              <label>生产量 <input data-legacy-output="${index}" type="number" step="any" value="${row.output ?? 1}" ${canEdit ? '' : 'disabled'}></label>`;
+          }
+          return `<tr data-legacy-row="${index}">
+            <td>${escapeHtml(row.name || '')}</td><td>${escapeHtml(row.cost_category || '')}</td>
+            <td>${money(row.source_current_hkd)}</td><td>${escapeHtml(row.formula_expression || '')}${row.source_formula ? `<br><small class="muted">原表 ${escapeHtml(row.source_formula_cell || '')}: =${escapeHtml(row.source_formula)}</small>` : ''}</td>
+            <td class="legacy-formula-inputs">${controls}</td><td data-legacy-amount="${index}">${money(amount)}</td></tr>`;
+        }).join('')}</tbody>
+      </table>`;
+    if (canEdit) {
+      const bind = (selector, attribute, key) => block.querySelectorAll(selector).forEach(input => {
+        input.oninput = () => {
+          const index = Number(input.getAttribute(attribute));
+          rows[index][key] = input.value === '' ? null : Number(input.value);
+          const amount = legacyFormulaAmount(rows[index], payload);
+          rows[index].current_hkd = amount;
+          const cell = block.querySelector(`[data-legacy-amount="${index}"]`);
+          if (cell) cell.textContent = money(amount);
+          onChange();
+        };
+      });
+      bind('[data-legacy-quantity]', 'data-legacy-quantity', 'formula_quantity');
+      bind('[data-legacy-unit]', 'data-legacy-unit', 'formula_unit_hkd');
+      bind('[data-legacy-rmb]', 'data-legacy-rmb', 'formula_rmb_value');
+      bind('[data-legacy-people]', 'data-legacy-people', 'people');
+      bind('[data-legacy-team]', 'data-legacy-team', 'team');
+      bind('[data-legacy-output]', 'data-legacy-output', 'output');
+    }
+    host.prepend(block);
+    return;
+  }
+  block.innerHTML = `
+    <h3 style="margin:0 0 6px">历史核价明细（来源工作表）</h3>
+    <div class="muted" style="margin-bottom:10px">以下数据按原 Excel 行保留，用于核对本次核价、上次/参考价与差额。</div>
+    <table class="wb-table" style="min-width:860px">
+      <thead><tr><th>原表行</th><th>项目</th><th>用量/规格</th><th>本次核价 HK$</th><th>上次/参考 HK$</th><th>差额 HK$</th></tr></thead>
+      <tbody>${rows.map(row => `<tr>
+        <td>${escapeHtml(row.source_row ?? '')}</td>
+        <td>${escapeHtml(row.name || '')}</td>
+        <td>${escapeHtml(row.quantity ?? '')}</td>
+        <td>${money(row.current_hkd)}</td>
+        <td>${money(row.previous_hkd)}</td>
+        <td>${money(row.difference_hkd)}</td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+  host.prepend(block);
+}
+
+function renderLegacyPricingTail(host, legacy, live = null) {
+  const sourceRows = Array.isArray(legacy?.pricing_tail) ? legacy.pricing_tail : [];
+  // 有些旧工作表把汇总下方的新一张核价明细也读进 pricing_tail；汇总页只显示
+  // 原表底部的价格换算区，不重复展示部门明细。
+  const nextDetailIndex = sourceRows.findIndex(row => /^(?:NO\.|貨號|货号)/i.test(
+    (row.cells || []).map(value => String(value ?? '').trim()).filter(Boolean).join(' '),
+  ));
+  const rows = (nextDetailIndex > 0 ? sourceRows.slice(0, nextDetailIndex) : sourceRows)
+    .map(row => ({ ...row, cells: [...(row.cells || [])] }));
+  if (!host || !rows.length) return;
+
+  // The ZURU sheets put unrelated comparison figures to the right of the
+  // pricing column. Show only the actual A:C costing result, not that whole
+  // rectangular spreadsheet region.
+  const labelOf = row => String(row.cells?.[1] ?? '').replace(/[\s（）()＄$]/g, '').toUpperCase();
+  const findRow = pattern => rows.find(row => pattern.test(labelOf(row)));
+  const sourceNumber = row => Number(row?.cells?.[2]);
+  const baseRow = findRow(/^TOTALHK$/);
+  const freightRow = findRow(/^运费/);
+  const cabinetRow = findRow(/^吊柜费/);
+  const subtotalRow = findRow(/^小计$/);
+  const markupRow = findRow(/^X$/);
+  const hkdRow = findRow(/^TOTALHK$/) === baseRow
+    ? rows.find(row => row !== baseRow && /^TOTALHK$/.test(labelOf(row))) : null;
+  const feeRow = findRow(/^杂费$/);
+  const usdRow = findRow(/^TOTALUSD$/);
+  if (legacy?.source_sheet === '總表' && baseRow && subtotalRow && markupRow && hkdRow && feeRow && usdRow) {
+    const freight = Number.isFinite(sourceNumber(freightRow)) ? sourceNumber(freightRow) : 0;
+    const cabinet = Number.isFinite(sourceNumber(cabinetRow)) ? sourceNumber(cabinetRow) : 0;
+    const subtotal = live ? num(live.cost) : sourceNumber(subtotalRow);
+    const markup = live ? num(live.markup) : sourceNumber(markupRow);
+    const fee = sourceNumber(feeRow);
+    const hkd = live ? subtotal * markup : sourceNumber(hkdRow);
+    const adjusted = live && fee > 0 ? hkd / fee
+      : sourceNumber(rows.find(row => row.source_row === feeRow.source_row + 1));
+    const usd = live && num(live.fxHkdUsd) > 0 ? adjusted / num(live.fxHkdUsd) : sourceNumber(usdRow);
+    const metrics = [
+      ['TOTAL(HK$)', live ? subtotal - freight - cabinet : sourceNumber(baseRow), 2],
+      ['运费48%', freight, 2], ['吊柜费52%', cabinet, 2], ['小计', subtotal, 2],
+      ['利润 ×', markup, 3], ['TOTAL（HK$）', hkd, 2], ['杂费', fee, 3],
+      ['合计', adjusted, 2], ['TOTAL（USD）', usd, 3],
+    ];
+    const display = (value, digits) => Number.isFinite(value) ? value.toFixed(digits) : '—';
+    const block = document.createElement('section');
+    block.className = 'card legacy-pricing-tail';
+    block.style.cssText = 'margin-top:16px;background:#fffdf2;border:1px solid #f3d98b';
+    block.innerHTML = `<h3 style="margin:0 0 6px">核价汇总</h3>
+      <div class="muted" style="margin-bottom:10px">${live ? '部门明细与统一核价基准变化后，按原表的利润、杂费和汇率关系重算。' : '原表核价结果；历史版本保持不变。'}</div>
+      <table class="wb-table" style="max-width:580px;width:100%"><thead><tr><th>项目</th><th>核价</th></tr></thead>
+      <tbody>${metrics.map(([name, value, digits]) => `<tr><td>${escapeHtml(name)}</td><td>${display(value, digits)}</td></tr>`).join('')}
+      <tr style="background:#fff8cc;font-weight:700"><td>客户参考价</td><td>US$${display(usd, 3)}</td></tr></tbody></table>`;
+    const taxBlock = host.querySelector('#legacy-tax-deduction-block');
+    if (taxBlock) taxBlock.before(block);
+    else host.appendChild(block);
+    return;
+  }
+
+  // 可调整版本仍沿用原 Excel 的精简版式，但把“当前核价”一列替换为实时公式结果。
+  if (live) {
+    const textOf = row => (row.cells || []).map(value => String(value ?? '')).join(' ');
+    const markupIndex = rows.findIndex(row => /^\s*X(?:\s|$)/i.test(textOf(row)));
+    const divisorIndex = rows.findIndex((row, index) => index > markupIndex && /÷/.test(textOf(row)));
+    const totalHkdIndex = rows.findIndex((row, index) => index > markupIndex && /TOTAL.*HK/i.test(textOf(row)));
+    const totalUsdIndex = rows.findIndex((row, index) => index > markupIndex && /TOTAL.*US/i.test(textOf(row)));
+    const currentColumn = 2;
+    const setCurrent = (index, value) => {
+      if (index >= 0 && Number.isFinite(Number(value))) rows[index].cells[currentColumn] = Number(value);
+    };
+    const cost = num(live.cost);
+    const markup = num(live.markup) || 1;
+    const divisor = num(live.divisor)
+      || num(rows[divisorIndex]?.cells?.[currentColumn]) || 0.98;
+    const fxHkdUsd = num(live.fxHkdUsd) || 7.8;
+    const afterMarkup = cost * markup;
+    const totalHkd = afterMarkup / divisor;
+    setCurrent(markupIndex - 1, cost);
+    setCurrent(markupIndex, markup);
+    setCurrent(markupIndex + 1, afterMarkup);
+    setCurrent(divisorIndex, divisor);
+    setCurrent(totalHkdIndex, totalHkd);
+    setCurrent(totalUsdIndex, totalHkd / fxHkdUsd);
+  }
+  const columnCount = Math.max(...rows.map(row => (row.cells || []).length));
+  const display = value => {
+    if (value == null || value === '') return '';
+    return typeof value === 'number' ? formatNum(value) : String(value);
+  };
+  const block = document.createElement('section');
+  block.className = 'card legacy-pricing-tail';
+  block.style.cssText = 'margin-top:16px;background:#fffdf2;border:1px solid #f3d98b;overflow:auto';
+  block.innerHTML = `
+    <h3 style="margin:0 0 6px">核价汇总</h3>
+    <div class="muted" style="margin-bottom:10px">${live ? '保持原 Excel 的汇总格式；修改部门明细或统一核价基准后自动重算。' : '柜运费、码点、找数、港币/美元合计及客人目标价，按来源工作表原行列显示。'}</div>
+    <table class="wb-table" style="min-width:${Math.max(560, columnCount * 110)}px">
+      <thead><tr><th>原表行</th>${Array.from({ length: columnCount }, (_, index) => `<th>${String.fromCharCode(65 + index)}</th>`).join('')}</tr></thead>
+      <tbody>${rows.map(row => {
+        const cells = row.cells || [];
+        const rowText = cells.map(display).join(' ');
+        const background = /客人目标/.test(rowText) ? '#fff200' : (/TOTAL/i.test(rowText) ? '#fff8cc' : '');
+        return `<tr${background ? ` style="background:${background};font-weight:600"` : ''}><td>${escapeHtml(row.source_row ?? '')}</td>${Array.from({ length: columnCount }, (_, index) => `<td>${escapeHtml(display(cells[index]))}</td>`).join('')}</tr>`;
+      }).join('')}</tbody>
+    </table>`;
+  const taxBlock = host.querySelector('#legacy-tax-deduction-block');
+  if (taxBlock) taxBlock.before(block);
+  else host.appendChild(block);
+}
+
+// All imported valuations use one source-style costing/tax layout. The
+// 92125 historical result has an independently captured source snapshot; other
+// imported sheets show a clearly labelled unified-basis calculation.
+function renderLegacyTaxSummary(host, legacy, pricing, costSummary, live) {
+  const ref = legacy?.tax_reference;
+  if (!host || !pricing?.t1 || !pricing?.t2 || !pricing?.t3) return null;
+  const snap = ref?.snapshot;
+  const source = legacy.source_pricing_summary || pricing || {};
+  // Formula-mode imports carry a balancing amount in t2.misc so the generic
+  // cost component sum agrees with the workbook's independently imported
+  // total. That balancing amount is not a taxable miscellaneous purchase.
+  // Remove it from the tax-category view while retaining genuine item deltas.
+  let values = live ? pricing : source;
+  if (live && Number.isFinite(Number(legacy.source_cost_including_labor))) {
+    const sourceComponentTotal = ['t1', 't2', 't3'].reduce((total, table) =>
+      total + Object.entries(source[table] || {}).reduce((sum, [key, value]) =>
+        sum + (key === 'base_price' || key === 'code_before' || key === 'code_after' || key === 'inner_card'
+          || key === 'abs_cost' ? 0 : num(value)), 0), 0);
+    const reconciliation = num(legacy.source_cost_including_labor) - sourceComponentTotal;
+    values = { ...pricing, t2: { ...pricing.t2, misc: num(pricing.t2?.misc) - reconciliation } };
+  }
+  const t1 = values?.t1 || {}, t2 = values?.t2 || {}, t3 = values?.t3 || {};
+  const rmbBuyAmount = num(t1.dom_mat) + num(t1.sewing_hair) + num(t1.sewing_cloth)
+    + num(t1.hardware) + num(t1.electronic) + num(t1.motor) + num(t1.glue_bag)
+    + num(t2.color_box) + num(t2.battery) + num(t2.libao) + num(t2.plating) + num(t2.flocking)
+    + num(t2.other_buy) + num(t2.carton) + num(t2.misc) + num(t3.paint_material);
+  const tax13Amount = num(t1.dom_mat) + num(t1.hardware) + num(t1.motor)
+    + num(t2.color_box) + num(t2.battery) + num(t2.libao)
+    + num(t2.other_buy) + num(t3.paint_material) + num(t1.glue_bag)
+    + num(t2.misc);
+  const rows = [
+    ['人工类13%', num(t2.libao), 11.5],
+    ['纸箱类', num(t2.carton), 10],
+    ['含税1%', num(t2.plating), 3],
+    ['搪胶类3%', num(t1.slush), 11.5],
+    ['车发类13%', num(t1.sewing_hair), 11.5],
+    ['车衣类13%', num(t1.sewing_cloth), 0],
+    ['吸塑类6%', num(t1.suction), 8.26],
+    ['运费含税9%', num(t2.freight), 8.26],
+    ['含税13%类', tax13Amount, 11.5],
+  ];
+  const deductions = rows.map(([, amount, rate]) => amount * rate / 100);
+  const deduction = deductions.reduce((total, amount) => total + amount, 0);
+  const sourceTotal = Number(legacy.source_cost_including_labor);
+  const totalCost = live || !Number.isFinite(sourceTotal) ? num(costSummary?.totalCost) : sourceTotal;
+  const price = num(t1.base_price);
+  const labor = num(t3.injection_labor) + num(t3.painting_labor) + num(t3.assembly_labor);
+  const sourceNoLabor = Number(legacy.source_cost_excluding_labor);
+  const noLaborCost = live || !Number.isFinite(sourceNoLabor) ? totalCost - labor : sourceNoLabor;
+  const afterCost = totalCost - deduction;
+  // The first tax item reduces labor as well as total cost in the source's
+  // post-tax gross-margin calculation (row 95's blue labor reference).
+  const afterGross = price - afterCost + labor - deductions[0];
+  const afterProfit = price - afterCost;
+  const calculated = {
+    deduction, after_cost: afterCost, after_gross: afterGross,
+    gross_pct: price ? afterGross / price * 100 : 0,
+    after_profit: afterProfit, profit_pct: price ? afterProfit / price * 100 : 0,
+  };
+  const current = !live && snap ? snap : calculated;
+  const fmt = (value, suffix = '') => `${Number(value).toFixed(2)}${suffix}`;
+  const mismatches = [];
+  const compare = (name, actual, expected, tolerance = 0.005) => {
+    if (!Number.isFinite(Number(expected)) || !Number.isFinite(Number(actual))) return;
+    if (Math.abs(Number(actual) - Number(expected)) <= tolerance) return;
+    mismatches.push({ name, actual: Number(actual), expected: Number(expected) });
+  };
+  compare('货价', price, source.t1?.base_price);
+  compare('总成本', totalCost, legacy.source_cost_including_labor);
+  compare('不含人工成本', noLaborCost, legacy.source_cost_excluding_labor);
+  const sourceFields = [
+    ['t1', ['进口料', 'imp_mat'], ['国内料', 'dom_mat'], ['吹气', 'blow'], ['搪胶', 'slush'],
+      ['车发', 'sewing_hair'], ['车衣', 'sewing_cloth'], ['五金', 'hardware'], ['电子', 'electronic'],
+      ['马达', 'motor'], ['吸塑', 'suction'], ['胶袋', 'glue_bag']],
+    ['t2', ['彩盒/内咭', 'color_box'], ['电池', 'battery'], ['利宝', 'libao'], ['电镀', 'plating'], ['植绒', 'flocking'],
+      ['其他外购', 'other_buy'], ['纸箱', 'carton'], ['运费', 'freight'], ['吊柜费', 'cabinet'], ['杂项', 'misc']],
+    ['t3', ['啤工', 'injection_labor'], ['喷油工', 'painting_labor'], ['油漆', 'paint_material'],
+      ['装配工', 'assembly_labor']],
+  ];
+  for (const [table, ...fields] of sourceFields) {
+    for (const [name, key] of fields) compare(name, values[table]?.[key], source[table]?.[key], 0.0001);
+  }
+  if (snap) {
+    for (const [name, key, tolerance] of [
+      ['合计减税', 'deduction', 0.005], ['减税后成本', 'after_cost', 0.005],
+      ['减税后毛利', 'after_gross', 0.005], ['减税后毛利率', 'gross_pct', 0.05],
+      ['减税后利润', 'after_profit', 0.005], ['减税后利润率', 'profit_pct', 0.05],
+    ]) compare(name, calculated[key], snap[key], tolerance);
+  }
+  const comparisonNotice = mismatches.length
+    ? `<div role="alert" style="margin:10px 0;padding:10px 12px;background:#fff2db;border:1px solid #e8b65b;border-radius:6px">
+        <strong>⚠ 重算与原表不一致（${mismatches.length} 项）</strong>
+        <div class="muted">可调整版本修改了明细或基数也会出现差异，请核对后确认。</div>
+        <ul style="margin:6px 0 0;padding-left:20px">${mismatches.slice(0, 10).map(item =>
+          `<li>${item.name}：重算 ${item.actual.toFixed(4)} / 原表 ${item.expected.toFixed(4)}，差额 ${(item.actual - item.expected).toFixed(4)}</li>`).join('')}</ul>
+        ${mismatches.length > 10 ? `<div>另有 ${mismatches.length - 10} 项差异</div>` : ''}
+      </div>`
+    : '<div class="muted" style="margin:8px 0">已导入的货价、成本及分类金额与原表一致。</div>';
+  const missingTaxReference = snap ? ''
+    : '<div role="status" style="margin:8px 0;padding:8px 10px;background:#eef5ff;border-left:3px solid #2563eb">原表税后结果未导入，减税和税后结果暂无原表数值可核对。</div>';
+  const matrix = (title, labels, values, digits = 2) => `<div style="margin:12px 0 0;overflow-x:auto">
+    <div style="font-weight:700;margin-bottom:5px">${title}</div>
+    <table class="wb-table" style="min-width:${Math.max(580, labels.length * 94)}px;width:100%">
+      <thead><tr>${labels.map(label => `<th>${label}</th>`).join('')}</tr></thead>
+      <tbody><tr>${values.map((value, index) => `<td>${Number(value).toFixed(Array.isArray(digits) ? digits[index] : digits)}</td>`).join('')}</tr></tbody>
+    </table></div>`;
+  const t1Fields = [
+    ['货价', 'base_price'], ['进口料', 'imp_mat'], ['国内料', 'dom_mat'], ['吹气', 'blow'],
+    ['搪胶', 'slush'], ['车发', 'sewing_hair'], ['车衣', 'sewing_cloth'], ['五金', 'hardware'],
+    ['电子', 'electronic'], ['马达', 'motor'], ['吸塑', 'suction'], ['胶袋', 'glue_bag'],
+  ];
+  const t2Fields = [
+    ['彩盒/内咭', 'color_box'], ['未减税前码数', 'code_before'], ['减税后码数', 'code_after'],
+    ['电池', 'battery'], ['利宝', 'libao'], ['电镀', 'plating'], ['植绒', 'flocking'], ['其他外购', 'other_buy'],
+    ['纸箱', 'carton'], ['运费', 'freight'], ['吊柜费', 'cabinet'], ['杂项', 'misc'],
+  ];
+  const codeBefore = totalCost ? price / totalCost : 0;
+  const codeAfter = current.after_cost ? price / current.after_cost : 0;
+  const t2Values = t2Fields.map(([, key]) => key === 'code_before' ? codeBefore
+    : key === 'code_after' ? codeAfter : num(t2[key]));
+  const taxLabels = ['人民币外购件成本', '含税13%类成本', ...rows.map(([name]) => name)];
+  const taxAmounts = [rmbBuyAmount, tax13Amount, ...rows.map(([, amount]) => amount)];
+  const taxRates = ['—', '—', ...rows.map(([, , rate]) => `${fmt(rate, '%')}`)];
+  const taxDeductions = ['—', '—', ...deductions.map(value => fmt(value))];
+  const block = document.createElement('section');
+  block.className = 'card legacy-tax-summary';
+  block.style.cssText = 'margin-top:12px;background:#fffdf2;border:1px solid #f3d98b';
+  block.innerHTML = `<h3 style="margin:0 0 6px">成本与减税汇总</h3>
+    <div class="muted" style="margin-bottom:10px">${!live && snap
+      ? '原表历史税后结果；分类数据与合计按未四舍五入金额核对。'
+      : '按已导入成本和统一减税口径测算；原工作簿税后公式尚未逐格核实。'}</div>
+    ${comparisonNotice}${missingTaxReference}
+    ${matrix('一、货价与材料', t1Fields.map(([label]) => label), t1Fields.map(([, key]) => num(t1[key])))}
+    ${matrix('二、包装与外购', t2Fields.map(([label]) => label), t2Values,
+      t2Fields.map(([, key]) => key === 'code_before' || key === 'code_after' ? 3 : 2))}
+    ${matrix('三、人工与总成本',
+      ['啤工', '喷油工', '油漆', '装配工', '不含人工成本', '人工比例%', '毛利', '毛利率%', '利润', '利润率%', '总成本'],
+      [num(t3.injection_labor), num(t3.painting_labor), num(t3.paint_material), num(t3.assembly_labor),
+        noLaborCost, price ? labor / price * 100 : 0, price - noLaborCost,
+        price ? (price - noLaborCost) / price * 100 : 0, price - totalCost,
+        price ? (price - totalCost) / price * 100 : 0, totalCost],
+      [2, 2, 2, 2, 2, 1, 2, 1, 2, 1, 3])}
+    <div style="margin:12px 0 0;overflow-x:auto"><div style="font-weight:700;margin-bottom:5px">四、减税明细</div>
+      <table class="wb-table" style="min-width:1160px;width:100%"><thead><tr><th>项目</th>${taxLabels.map(label => `<th>${label}</th>`).join('')}</tr></thead>
+        <tbody><tr><th>计税金额</th>${taxAmounts.map(value => `<td>${fmt(value)}</td>`).join('')}</tr>
+          <tr><th>税率</th>${taxRates.map(value => `<td>${value}</td>`).join('')}</tr>
+          <tr><th>减税额</th>${taxDeductions.map(value => `<td>${value}</td>`).join('')}</tr></tbody></table></div>
+    <table class="wb-table" style="max-width:580px;width:100%;margin-top:12px"><thead><tr><th>项目</th><th>减税 / 核价</th></tr></thead><tbody>
+      <tr style="background:#fff8cc;font-weight:700"><td>合计减税</td><td>HK$${fmt(current.deduction)}</td></tr>
+      <tr><td>减税后成本</td><td>HK$${fmt(current.after_cost)}</td></tr>
+      <tr><td>减税后毛利 / 毛利率</td><td>HK$${fmt(current.after_gross)} · ${fmt(current.gross_pct, '%')}</td></tr>
+      <tr style="background:#fff8cc;font-weight:700"><td>减税后利润 / 利润率</td><td>HK$${fmt(current.after_profit)} · ${fmt(current.profit_pct, '%')}</td></tr>
+    </tbody></table>`;
+  const hiddenDetail = host.querySelector('#legacy-tax-deduction-block');
+  if (hiddenDetail) hiddenDetail.before(block);
+  else host.appendChild(block);
+  return { totalDeduction: num(current.deduction), afterDeduction: num(current.after_cost) };
+}
+
 function num(v) { return Number(v) || 0; }
 function sum(arr, fn) { return arr.reduce((a, r) => a + (fn(r) || 0), 0); }
 function blowUsage(row) {
@@ -485,42 +973,44 @@ function ensurePaintingProductGroups(payload) {
     row.product_group_name = current.name;
   });
 }
+function directProductGroup(payload, key) {
+  return payload.product_mix_modes?.[key] === 'direct';
+}
+function productModeSelect(payload, key, canEdit) {
+  const direct = directProductGroup(payload, key);
+  return `<select class="product-mix-mode" data-group="${escapeHtml(key)}" aria-label="计算方式" ${canEdit ? '' : 'disabled'}><option value="average" ${direct ? '' : 'selected'}>参与配比平均</option><option value="direct" ${direct ? 'selected' : ''}>直接累加</option></select>`;
+}
+function weightedProductRows(payload, rows, getter) {
+  if (payload.mixed_product_options) return sum(rows, getter);
+  const groups = rowProductGroups(payload, rows);
+  if (groups.length <= 1) return sum(rows, getter);
+  const totalRatio = sum(groups.filter(g => !directProductGroup(payload, g.key)), g => productMixRatio(payload, g.key));
+  return sum(groups, g => {
+    const subtotal = sum(g.rows, item => getter(item.row, item.index));
+    return directProductGroup(payload, g.key) ? subtotal : (totalRatio > 0 ? subtotal * productMixRatio(payload, g.key) / totalRatio : 0);
+  });
+}
 function weightedInjectionSum(payload, getter) {
-  const groups = injectionProductGroups(payload);
-  if (groups.length <= 1) return sum(payload.injection || [], getter);
-  const totalRatio = sum(groups, group => productMixRatio(payload, group.key));
-  if (totalRatio <= 0) return 0;
-  return sum(groups, group =>
-    sum(group.rows, item => getter(item.row, item.index)) * productMixRatio(payload, group.key)
-  ) / totalRatio;
+  return weightedProductRows(payload, payload.injection || [], getter);
 }
 function weightedPaintingSum(payload) {
   ensurePaintingProductGroups(payload);
-  const rows = payload.painting_items || [];
-  const groups = rowProductGroups(payload, rows);
-  if (groups.length <= 1) return sum(rows, paintingRowAmount);
-  const totalRatio = sum(groups, group => productMixRatio(payload, group.key));
-  if (totalRatio <= 0) return 0;
-  return sum(groups, group =>
-    sum(group.rows, item => paintingRowAmount(item.row)) * productMixRatio(payload, group.key)
-  ) / totalRatio;
+  return weightedProductRows(payload, payload.painting_items || [], paintingRowAmount);
 }
 function weightedPaintingProcSum(payload, procKey) {
   ensurePaintingProductGroups(payload);
-  const rows = payload.painting_items || [];
-  const groups = rowProductGroups(payload, rows);
-  if (groups.length <= 1) return sum(rows, row => num(row[procKey + '_qty']));
-  const totalRatio = sum(groups, group => productMixRatio(payload, group.key));
-  if (totalRatio <= 0) return 0;
-  return sum(groups, group =>
-    sum(group.rows, item => num(item.row[procKey + '_qty'])) * productMixRatio(payload, group.key)
-  ) / totalRatio;
+  return weightedProductRows(payload, payload.painting_items || [], row => num(row[procKey + '_qty']));
 }
 
 // ==================== 工程：模具部分（表格布局，对齐 sheet1 / 导出格式） ====================
 function syncMoldFromParts(mold) {
   const parts = Array.isArray(mold.parts) ? mold.parts : [];
-  if (!parts.length) return;
+  if (!parts.length) {
+    if (Array.isArray(mold.parts)) {
+      mold.name = ''; mold.cavity = ''; mold.weight_g = null; mold.images = [];
+    }
+    return;
+  }
   mold.name = [...new Set(parts.map(p => String(p.name || '').trim()).filter(Boolean))].join('/');
   const cavityTotal = parts.reduce((total, part) => {
     const nums = String(part.cavity || '').match(/[\d.]+/g);
@@ -532,13 +1022,73 @@ function syncMoldFromParts(mold) {
   mold.images = [...new Set(parts.flatMap(p => p.images || []).filter(Boolean))];
 }
 
+function addMoldPart(mold) {
+  // Preserve any data entered before a plain manual row becomes a multi-part mold.
+  if (!Array.isArray(mold.parts) || !mold.parts.length) {
+    mold.parts = [{ name: mold.name || '', cavity: mold.cavity ?? '', weight_g: mold.weight_g ?? null, images: [...(mold.images || [])] }];
+  }
+  const part = { name: '', cavity: '', weight_g: null, images: [] };
+  mold.parts.push(part);
+  return part;
+}
+
+function addManualMoldGroup(molds, name) {
+  name = String(name || '').trim();
+  if (!name) throw new Error('请填写产品名称');
+  if (molds.some(m => String(m.product_group_name || '').trim() === name)) {
+    throw new Error('产品分组已存在，请在该组内增加模具');
+  }
+  const row = { images: [], product_group_id: 'manual-product-' + crypto.randomUUID(), product_group_name: name };
+  molds.push(row);
+  return row;
+}
+
+function addMoldToProductGroup(molds, groupId) {
+  const leader = molds.find(m => m.product_group_id === groupId);
+  if (!leader) throw new Error('产品分组不存在');
+  const lastIndex = molds.reduce((last, m, i) => m.product_group_id === groupId ? i : last, -1);
+  const row = { images: [], product_group_id: groupId, product_group_name: leader.product_group_name, product_image: leader.product_image || '' };
+  molds.splice(lastIndex + 1, 0, row);
+  return row;
+}
+
+function canMoveMoldRow(molds, index, direction) {
+  const target = index + direction;
+  return Number.isInteger(index) && (direction === -1 || direction === 1)
+    && index >= 0 && index < molds.length && target >= 0 && target < molds.length
+    && (molds[index].product_group_id || '') === (molds[target].product_group_id || '');
+}
+
+function moveMoldRow(molds, index, direction) {
+  if (!canMoveMoldRow(molds, index, direction)) return false;
+  const target = index + direction;
+  [molds[index], molds[target]] = [molds[target], molds[index]];
+  return true;
+}
+
+function copyMoldRow(molds, index) {
+  if (!Number.isInteger(index) || index < 0 || index >= molds.length) return null;
+  const copy = JSON.parse(JSON.stringify(molds[index]));
+  const freshId = prefix => prefix + (typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID() : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
+  if (copy.id != null) copy.id = freshId('mold-');
+  for (const part of copy.parts || []) {
+    if (part.id != null) part.id = freshId('mold-part-');
+  }
+  molds.splice(index + 1, 0, copy);
+  return copy;
+}
+
 function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
+  container._moldNumberObserver?.disconnect();
+  container._moldNumberObserver = null;
+  const moldNumberInputs = new Map();
   container.innerHTML = '';
   const table = document.createElement('table'); table.className = 'wb-table mold-table';
   table.innerHTML = `<thead><tr>
     <th style="width:40px">序号</th>
+    <th class="mold-number-cell">模号</th>
     <th style="width:160px">模具名称</th>
-    <th style="width:70px">模号</th>
     <th style="width:120px">模胚类型</th>
     <th style="width:70px">材质</th>
     <th style="width:70px">颜色</th>
@@ -552,13 +1102,13 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
     <th style="width:120px">模具价格 USD</th>
     <th style="width:120px">模价 HKD</th>
     <th>备  注</th>
-    ${canEdit ? '<th style="width:40px"></th>' : ''}
+    ${canEdit ? '<th style="width:120px">操作</th>' : ''}
   </tr></thead><tbody></tbody>`;
   const tbody = table.querySelector('tbody');
 
   const fields = [
+    ['mold_no', 'textarea'],
     ['name', 'textarea'],
-    ['mold_no', 'text'],
     ['mold_type', 'textarea'],
     ['material', 'text'], ['color', 'text'], ['cavity', 'text'], ['sets', 'number'],
     ['weight_g', 'number'],
@@ -604,6 +1154,15 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
       trGroup.appendChild(tdGroup);
       tbody.appendChild(trGroup);
       if (canEdit) {
+        const addToGroup = document.createElement('button');
+        addToGroup.className = 'mini';
+        addToGroup.textContent = '＋ 本组增加模具';
+        addToGroup.onclick = () => {
+          addMoldToProductGroup(molds, groupId);
+          renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd);
+          onChange();
+        };
+        tdGroup.firstElementChild.appendChild(addToGroup);
         const groupNameInput = tdGroup.querySelector('[data-product-group-name]');
         groupNameInput.oninput = () => {
           groupMolds.forEach(item => { item.product_group_name = groupNameInput.value; });
@@ -614,7 +1173,8 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
 
     const tr = document.createElement('tr');
     // 序号
-    const tdNo = document.createElement('td'); tdNo.className = 'ro'; tdNo.textContent = idx + 1; tr.appendChild(tdNo);
+    const tdNo = document.createElement('td'); tdNo.className = 'ro'; tdNo.textContent = idx + 1;
+    tr.appendChild(tdNo);
 
     fields.forEach((f) => {
       const td = document.createElement('td');
@@ -653,11 +1213,6 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
             }
             td.appendChild(nameRow);
           });
-          if (canEdit) {
-            const addPart = document.createElement('button'); addPart.className = 'mini'; addPart.textContent = '+ 配件';
-            addPart.onclick = () => { m.parts.push({ name: '', cavity: '', weight_g: null, images: [] }); renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd); onChange(); };
-            td.appendChild(addPart);
-          }
         } else if (hasPartRows && k === 'cavity') {
           m.parts.forEach(part => {
             const cavityRow = document.createElement('div');
@@ -695,9 +1250,13 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
           td.className = 'ro'; td.style.whiteSpace = 'pre-wrap'; td.textContent = formatNum(get() ?? '');
         } else if (type === 'textarea') {
           const ta = document.createElement('textarea');
-          ta.rows = 3; ta.value = get() ?? '';
+          ta.rows = k === 'mold_no' ? 1 : 3; ta.value = get() ?? '';
           ta.style.resize = 'vertical';
           const autoSize = () => { ta.style.height = 'auto'; ta.style.height = (ta.scrollHeight + 2) + 'px'; };
+          if (k === 'mold_no') {
+            ta.setAttribute('aria-label', `第${idx + 1}行模号`);
+            moldNumberInputs.set(ta, { autoSize, width: 0 });
+          }
           ta.oninput = () => { set(ta.value); autoSize(); onChange(); };
           td.appendChild(ta);
           setTimeout(autoSize, 0);
@@ -719,14 +1278,33 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
           td.appendChild(inp);
         }
       }
+      if (canEdit && f && f[0] === 'name') {
+        const addPart = document.createElement('button');
+        addPart.type = 'button'; addPart.className = 'mini'; addPart.textContent = '+ 配件';
+        addPart.onclick = () => { addMoldPart(m); renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd); onChange(); };
+        td.appendChild(addPart);
+      }
+      if (f && f[0] === 'mold_no') td.classList.add('mold-number-cell');
       tr.appendChild(td);
     });
 
     if (canEdit) {
-      const td = document.createElement('td');
-      const b = document.createElement('button'); b.textContent = '×'; b.className = 'mini danger';
-      b.onclick = () => { molds.splice(idx, 1); renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd); onChange(); };
-      td.appendChild(b); tr.appendChild(td);
+      const td = document.createElement('td'); td.className = 'row-actions';
+      const redraw = () => { renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd); onChange(); };
+      const action = (label, title, run, danger = false) => {
+        const button = document.createElement('button');
+        button.type = 'button'; button.className = danger ? 'mini danger' : 'mini';
+        button.textContent = label; button.title = title;
+        button.setAttribute('aria-label', `${title}第${idx + 1}行模具`);
+        button.style.cssText = 'padding:2px 6px;margin-right:2px';
+        button.onclick = () => { run(); redraw(); };
+        td.appendChild(button);
+      };
+      if (canMoveMoldRow(molds, idx, -1)) action('↑', '上移', () => moveMoldRow(molds, idx, -1));
+      if (canMoveMoldRow(molds, idx, 1)) action('↓', '下移', () => moveMoldRow(molds, idx, 1));
+      action('⎘', '复制', () => copyMoldRow(molds, idx));
+      action('×', '删除', () => molds.splice(idx, 1), true);
+      tr.appendChild(td);
     }
     tbody.appendChild(tr);
 
@@ -758,12 +1336,44 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
   tbody.appendChild(trSub);
 
   container.appendChild(table);
+  if (moldNumberInputs.size && typeof ResizeObserver === 'function') {
+    const observer = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        const state = moldNumberInputs.get(entry.target);
+        const width = Math.round(entry.contentRect.width * 100);
+        if (state && state.width !== width) { state.width = width; state.autoSize(); }
+      }
+    });
+    for (const input of moldNumberInputs.keys()) observer.observe(input);
+    container._moldNumberObserver = observer;
+  }
   if (canEdit) {
     const add = document.createElement('button');
     add.textContent = '+ 新增模具行'; add.className = 'mini';
     add.style.marginTop = '8px';
     add.onclick = () => { molds.push({ images: [] }); renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd); onChange(); };
     container.appendChild(add);
+    const addGroup = document.createElement('button');
+    addGroup.className = 'mini';
+    addGroup.textContent = '＋ 添加产品分组';
+    addGroup.style.marginLeft = '8px';
+    container.appendChild(addGroup);
+    const form = document.createElement('div');
+    form.hidden = true;
+    form.style.marginTop = '10px';
+    form.innerHTML = '<input aria-label="新产品分组名称" placeholder="产品名称，如 1#产品" style="width:200px"/> <button class="mini" type="button">添加</button> <span class="muted">配比在啤机部填写</span>';
+    container.appendChild(form);
+    addGroup.onclick = () => { form.hidden = !form.hidden; if (!form.hidden) form.querySelector('input').focus(); };
+    const nameInput = form.querySelector('input');
+    nameInput.oninput = () => nameInput.setCustomValidity('');
+    const createGroup = () => {
+      try { addManualMoldGroup(molds, nameInput.value); }
+      catch (error) { nameInput.setCustomValidity(error.message); nameInput.reportValidity(); return; }
+      renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd);
+      onChange();
+    };
+    form.querySelector('button').onclick = createGroup;
+    nameInput.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); createGroup(); } };
   }
 }
 
@@ -993,6 +1603,38 @@ function buildElectronicSummaryRows(split, taxLabel) {
     _electronic_summary_role: 'pacb',
   });
   return icRows;
+}
+
+function electronicDetailFingerprint(row) {
+  return JSON.stringify([row.name || '', row.spec || '', Number(row.qty) || 0,
+    Number(Number(row.unit_price_rmb || 0).toFixed(6)), row.tax_label || '含税',
+    row.note || '', row.children?.length ? row.children : []]);
+}
+
+function syncElectronicDetailSummary(payload, freshRows) {
+  const rows = payload.electronics ||= [];
+  // Migrate an untouched summary generated by the previous version.
+  if (!payload.electronics_summary_manual && JSON.stringify(rows) === payload.electronics_summary_baseline) {
+    rows.forEach((row, index) => {
+      row._detail_summary_key = row._electronic_summary_role === 'pacb' ? 'pacb' : `ic:${index}`;
+      row._detail_summary_baseline = electronicDetailFingerprint(row);
+    });
+  }
+  const wanted = new Set();
+  freshRows.forEach((fresh, index) => {
+    const key = fresh._electronic_summary_role === 'pacb' ? 'pacb' : `ic:${index}`;
+    wanted.add(key);
+    const existing = rows.find(row => row._detail_summary_key === key);
+    // A summary row edited by the user remains authoritative.
+    if (existing && electronicDetailFingerprint(existing) !== existing._detail_summary_baseline) return;
+    const next = { ...fresh, _detail_summary_key: key };
+    next._detail_summary_baseline = electronicDetailFingerprint(next);
+    if (existing) rows[rows.indexOf(existing)] = next;
+    else rows.push(next);
+  });
+  payload.electronics = rows.filter(row => !row._detail_summary_key || wanted.has(row._detail_summary_key)
+    || electronicDetailFingerprint(row) !== row._detail_summary_baseline);
+  return true;
 }
 
 function isDerivedElectronicSummary(rows) {
@@ -1457,8 +2099,7 @@ function renderHwExtra(host, payload, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
 }
 
 // ==================== 部门工作台 ====================
-function renderMoldCosts(host, mc, onChange, canEdit) {
-  function paint() {
+function engineeringMoldCostTotals(mc) {
     const sumRmb = sum(mc.items, r => num(r.price_rmb));
     const fx = num(mc.fx_rmb_usd) || 7.75;
     const sumUsd = sumRmb / 0.85 / fx;
@@ -1475,6 +2116,13 @@ function renderMoldCosts(host, mc, onChange, canEdit) {
     const testingPerPcsUsd = testingFeeUsd / testingQty;
     const prototypePerPcsRmb = prototypePerPcsUsd * fx * 0.85;
     const testingPerPcsRmb = testingPerPcsUsd * fx * 0.85;
+    return {sumRmb,fx,sumUsd,customerUsd,netUsd,qty,prototypeFeeUsd,testingFeeUsd,prototypeQty,testingQty,
+      perPcsRmb,perPcsUsd,prototypePerPcsUsd,testingPerPcsUsd,prototypePerPcsRmb,testingPerPcsRmb};
+}
+function renderMoldCosts(host, mc, onChange, canEdit) {
+  function paint() {
+    const {sumRmb,fx,sumUsd,customerUsd,qty,prototypeFeeUsd,testingFeeUsd,prototypeQty,testingQty,
+      perPcsRmb,prototypePerPcsUsd,testingPerPcsUsd,prototypePerPcsRmb,testingPerPcsRmb} = engineeringMoldCostTotals(mc);
 
     host.innerHTML = `
       <table class="wb-table" style="max-width:680px">
@@ -1531,8 +2179,39 @@ function renderMoldCosts(host, mc, onChange, canEdit) {
   paint();
 }
 
+function legacyFormulaComponents(payloads) {
+  const sales = payloads.sales || {};
+  const legacy = sales.legacy_import || {};
+  const components = { ...(legacy.formula_offsets || {}) };
+  const add = (key, value) => { components[key] = num(components[key]) + num(value); };
+  const molding = payloads.molding || {};
+  const loss = 1 + num(molding.injection_loss_pct ?? 3) / 100;
+  (molding.injection || []).forEach(row => {
+    const material = String(row.material || '').trim();
+    const materialCost = num(row.weight_g) * loss * num(row.material_unit_price);
+    add(/^(PVC|TPR|TPE)\b/i.test(material) ? 'dom_mat' : 'imp_mat', materialCost);
+    add('injection_labor', num(row.shot_price));
+    if (/^ABS\b/i.test(material)) add('abs_cost', materialCost);
+  });
+  Object.entries(payloads).forEach(([dept, payload]) => {
+    (payload.legacy_items || []).forEach(item => {
+      if (!item.include_in_summary) return;
+      item.current_hkd = legacyFormulaAmount(item, payload);
+      add(item.cost_category || (dept === 'assembly' ? 'assembly_labor' : 'other_buy'), item.current_hkd);
+    });
+  });
+  return components;
+}
+
 // ============== 汇总面板 ==============
 function renderSummaryPane(host, sections, quote, me) {
+  if (window.__data?.mixed_quote?.enabled && window.MixedQuotation && !window.__WORKBENCH_EMBED__) {
+    return window.MixedQuotation.summary(host, quote, me);
+  }
+  const nativeSales = sections.find(section => section.dept === 'sales');
+  if (nativeSales && JSON.parse(nativeSales.payload_json || '{}').legacy_import?.excel_model && window.ExcelValuation) {
+    return window.ExcelValuation.renderSummary(host, sections);
+  }
   const get = (dept) => {
     const s = sections.find(x => x.dept === dept);
     return s && s.payload_json ? JSON.parse(s.payload_json) : {};
@@ -1541,12 +2220,91 @@ function renderSummaryPane(host, sections, quote, me) {
   const mold = get('molding');
   const pnt = get('painting');
   const asm = get('assembly');
-  const sales = get('sales');
+  const sales = sectionDraft(nativeSales);
   const slush = get('slush');
   const sewing = get('sewing');
   const electronic = get('electronic');
   const fxRH = num(sales.header?.fx_rmb_hkd) || 0.85;
   const fxHU = num(sales.header?.fx_hkd_usd) || 7.8;
+
+  if (sales.legacy_import?.formula_mode === 'itemized_v1') {
+    const legacy = sales.legacy_import;
+    const components = legacyFormulaComponents({
+      engineering: eng, molding: mold, painting: pnt, assembly: asm, sales,
+      slush, sewing, electronic,
+    });
+    const totalBeforeMarkup = Object.entries(components)
+      .filter(([key]) => key !== 'abs_cost')
+      .reduce((total, [, value]) => total + num(value), 0);
+    const autoFill = {
+      ...components,
+      base_price: totalBeforeMarkup * (num(legacy.formula_markup_x) || 1),
+    };
+    host.innerHTML = '<div id="legacy-tax-deduction-block" class="hidden"></div>';
+    renderLegacyPricingTail(host, legacy, {
+      cost: totalBeforeMarkup,
+      markup: num(legacy.formula_markup_x) || 1,
+      divisor: sales.shipping?.divisor,
+      fxHkdUsd: fxHU,
+    });
+    const salesSec = sections.find(x => x.dept === 'sales');
+    const taxSummary = renderTaxDeductionBlock(host.querySelector('#legacy-tax-deduction-block'), sales, salesSec, me, autoFill);
+    const importedTax = renderLegacyTaxSummary(host, legacy, sales.pricing_summary, taxSummary, true);
+    return {
+      material: num(autoFill.imp_mat) + num(autoFill.dom_mat) + num(autoFill.hardware)
+        + num(autoFill.electronic) + num(autoFill.motor) + num(autoFill.suction)
+        + num(autoFill.glue_bag) + num(autoFill.paint_material),
+      labor: num(autoFill.blow) + num(autoFill.slush) + num(autoFill.sewing_hair)
+        + num(autoFill.sewing_cloth) + num(autoFill.injection_labor)
+        + num(autoFill.painting_labor) + num(autoFill.assembly_labor),
+      packing: num(autoFill.color_box) + num(autoFill.battery) + num(autoFill.libao)
+        + num(autoFill.plating) + num(autoFill.flocking) + num(autoFill.other_buy) + num(autoFill.carton)
+        + num(autoFill.freight) + num(autoFill.cabinet) + num(autoFill.misc),
+      total: num(taxSummary?.totalCost),
+      totalDeduction: num(importedTax?.totalDeduction),
+      afterDeduction: num(importedTax?.afterDeduction),
+      financial: { ...taxSummary.financial, totalDeduction: num(importedTax?.totalDeduction), afterDeduction: num(importedTax?.afterDeduction) },
+    };
+  }
+
+  // 历史核价的汇总值以原表为准；若已导入货号明细，各部门页会另行显示原表逐行数据。
+  // 此时直接按导入值展示，避免旧公式差异把已确认的历史成本改写。
+  if (sales.legacy_import?.summary_only) {
+    const legacy = sales.legacy_import;
+    const pricing = sales.pricing_summary || {};
+    const from = (table, key) => num(pricing[table]?.[key]);
+    const autoFill = {
+      base_price: from('t1', 'base_price'), imp_mat: from('t1', 'imp_mat'), dom_mat: from('t1', 'dom_mat'),
+      blow: from('t1', 'blow'), slush: from('t1', 'slush'), sewing_hair: from('t1', 'sewing_hair'),
+      sewing_cloth: from('t1', 'sewing_cloth'), hardware: from('t1', 'hardware'), electronic: from('t1', 'electronic'),
+      motor: from('t1', 'motor'), suction: from('t1', 'suction'), glue_bag: from('t1', 'glue_bag'),
+      color_box: from('t2', 'color_box'), battery: from('t2', 'battery'), libao: from('t2', 'libao'),
+      plating: from('t2', 'plating'), flocking: from('t2', 'flocking'), other_buy: from('t2', 'other_buy'), carton: from('t2', 'carton'),
+      freight: from('t2', 'freight'), cabinet: from('t2', 'cabinet'), misc: from('t2', 'misc'),
+      injection_labor: from('t3', 'injection_labor'), painting_labor: from('t3', 'painting_labor'),
+      paint_material: from('t3', 'paint_material'), assembly_labor: from('t3', 'assembly_labor'),
+    };
+    const legacyDetailText = legacy.detail_imported
+      ? `已同步货号工作表明细（${num(legacy.source_detail_rows)} 行）`
+      : '部门逐行明细未在原总表中提供';
+    host.innerHTML = '<div id="legacy-tax-deduction-block" class="hidden"></div>';
+    renderLegacyPricingTail(host, legacy);
+    const salesSec = sections.find(x => x.dept === 'sales');
+    const taxSummary = renderTaxDeductionBlock(host.querySelector('#legacy-tax-deduction-block'), sales, salesSec, me, autoFill);
+    const importedTax = renderLegacyTaxSummary(host, legacy, sales.pricing_summary, taxSummary, false);
+    return {
+      material: autoFill.imp_mat + autoFill.dom_mat + autoFill.hardware + autoFill.electronic
+        + autoFill.motor + autoFill.suction + autoFill.glue_bag + autoFill.paint_material,
+      labor: autoFill.blow + autoFill.slush + autoFill.sewing_hair + autoFill.sewing_cloth
+        + autoFill.injection_labor + autoFill.painting_labor + autoFill.assembly_labor,
+      packing: autoFill.color_box + autoFill.battery + autoFill.libao + autoFill.plating + autoFill.flocking
+        + autoFill.other_buy + autoFill.carton + autoFill.freight + autoFill.cabinet + autoFill.misc,
+      total: num(legacy.source_cost_including_labor),
+      totalDeduction: num(importedTax?.totalDeduction),
+      afterDeduction: num(importedTax?.afterDeduction),
+      financial: { ...taxSummary.financial, totalCost: num(legacy.source_cost_including_labor), noLabor: num(legacy.source_cost_excluding_labor), totalDeduction: num(importedTax?.totalDeduction), afterDeduction: num(importedTax?.afterDeduction) },
+    };
+  }
 
   // 电子明细：优先用「电子部」section，回退工程部（与导出一致）
   const elecSrc = (electronic.electronics && electronic.electronics.length) ? electronic.electronics : (eng.electronics || []);
@@ -1570,8 +2328,7 @@ function renderSummaryPane(host, sections, quote, me) {
   const pkLaborTotal = sum(asm.packaging_labor || [], r => num(r.unit_price)*num(r.qty));
   // 新版 排拉工序 组装 + 包装 — 每组合计 = 基数 × 人数 ÷ 该组生产量
   const _asmBase = num(asm.assembly_base_rate ?? defaultAssemblyBaseRateForFactory());
-  const stepGroupTotal = (groups) => sum(groups || [], g =>
-    sum(g.steps || [], s => _asmBase * num(s.count) * (num(g.team ?? 1) || 1) / Math.max(num(g.qty), 1)));
+  const stepGroupTotal = groups => assemblyGroupsTotal(groups, _asmBase);
   const asmStepTotal = stepGroupTotal(asm.assembly_step_groups);
   const pkgStepTotal = stepGroupTotal(asm.packaging_step_groups);
   const combinedAsmHkd = asmLaborTotal + pkLaborTotal + asmStepTotal + pkgStepTotal;  // 装配人工为港币(基数310 HKD)
@@ -1706,6 +2463,7 @@ function renderSummaryPane(host, sections, quote, me) {
     </div>
     <h2 style="margin-top:24px">🚚 出货价算价</h2>
     <div id="wb-shipping-sum"></div>
+    <div id="shipping-summary-save" style="margin-top:12px"></div>
     <div id="tax-deduction-block" style="margin-top:24px"></div>`;
   // 出货价算价（来自业务 section）
   const salesSec = sections.find(x => x.dept === 'sales');
@@ -1728,15 +2486,14 @@ function renderSummaryPane(host, sections, quote, me) {
   };
   const freightCalcSum = sales.freight_calc;
   const freightMapSum = computeFreightMap(freightCalcSum, eCartonSum);
-  const canEditShip = me?.dept === 'sales' || me?.dept === 'engineering';
+  if (window.JazwaresFreight?.matches(quote.customer)) {
+    freightMapSum.externalRegions = window.JazwaresFreight.calculate(freightCalcSum.jazwares || {}, eCartonSum, salesHeader).regions;
+  }
+  const shippingEdit = shippingSummaryEditState(salesSec, me, window.__data?.quote_locked);
+  const canEditShip = shippingEdit.editable;
   // 模具分摊传美金（与「生产模具费用」表同口径），出货价算价直接在 USD 层加
-  // 统一保存业务 section（同步本地缓存，避免重渲染按旧 payload 还原）
-  const saveSales = () => {
-    if (canEditShip && salesSec) {
-      salesSec.payload_json = JSON.stringify(sales);
-      putSection(salesSec, sales, false).catch(() => {});
-    }
-  };
+  // Cache only acknowledged saves; display failures and keep the draft for retry.
+  const saveSales = mountShippingSummarySave(host, salesSec, sales, shippingEdit);
   // 第 7 个参数（历史手填附加税 HKD）传 null：附加税已改为 0.4% 模型，不再传入
   const shippingCalc = renderShipping(host.querySelector('#wb-shipping-sum'), sales, salesHeader, canEditShip, saveSales,
     freightMapSum, factoryHkdSum, null, {
@@ -1748,7 +2505,7 @@ function renderSummaryPane(host, sections, quote, me) {
   const markupInp = host.querySelector('#tot-markup');
   if (markupInp && canEditShip) {
     markupInp.oninput = () => { sales.shipping = sales.shipping || {}; sales.shipping.markup_x = markupInp.value === '' ? null : Number(markupInp.value); };  // 允许 0；空才回退默认
-    markupInp.onchange = () => { saveSales(); renderSummaryPane(host, sections, quote, me); };  // 失焦持久化+刷新(避免每键重渲染丢焦/录错)
+    markupInp.onchange = async () => { if (await saveSales()) renderSummaryPane(host, sections, quote, me); };  // 失焦持久化+刷新(避免每键重渲染丢焦/录错)
   } else if (markupInp) {
     markupInp.disabled = true;
   }
@@ -1821,6 +2578,7 @@ function renderSummaryPane(host, sections, quote, me) {
     other_buy: otherBuyRmb,                  // 其他外购 = 辅助材料剩余 HKD（辅助已 HKD）
     battery: batteryRmb,                     // 电池 HKD（包装已 HKD）
     libao: libaoRmb,                         // 利宝 HKD（辅助已 HKD）
+    flocking: _catSum('植绒'),
     plating: platingRmb,                     // 电镀 HKD（包装已 HKD）
     carton: toHkd(cartonRmb),                // 纸箱 HKD（来自工程纸箱计算）
     // 运费 / 吊柜费 → 盐田40柜 场景对应值（HKD）
@@ -1857,11 +2615,12 @@ function renderSummaryPane(host, sections, quote, me) {
       + num(autoFill.sewing_cloth) + num(autoFill.injection_labor)
       + num(autoFill.painting_labor) + num(autoFill.assembly_labor),
     packing: num(autoFill.color_box) + num(autoFill.battery) + num(autoFill.libao)
-      + num(autoFill.plating) + num(autoFill.other_buy) + num(autoFill.carton)
+      + num(autoFill.plating) + num(autoFill.flocking) + num(autoFill.other_buy) + num(autoFill.carton)
       + num(autoFill.freight) + num(autoFill.cabinet) + num(autoFill.misc),
     total: num(taxSummary?.totalCost),
     totalDeduction: num(taxSummary?.totalDeduction),
     afterDeduction: num(taxSummary?.afterDeduction),
+    financial: taxSummary.financial,
   };
 }
 
@@ -1875,7 +2634,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
   const applyAuto = (tbl, key, val) => {
     if (val == null) return;                    // 仅未计算(undefined/null)时跳过；0 要写回以清掉旧残留值
     ps[tbl] = ps[tbl] || {};
-    ps[tbl][key] = +val.toFixed(4);
+    ps[tbl][key] = num(val);
   };
   applyAuto('t1', 'base_price', autoFill.base_price);
   applyAuto('t1', 'imp_mat', autoFill.imp_mat);
@@ -1895,6 +2654,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
   applyAuto('t2', 'battery', autoFill.battery);
   applyAuto('t2', 'libao', autoFill.libao);
   applyAuto('t2', 'plating', autoFill.plating);
+  applyAuto('t2', 'flocking', autoFill.flocking);
   applyAuto('t2', 'other_buy', autoFill.other_buy);
   applyAuto('t2', 'carton', autoFill.carton);
   applyAuto('t2', 'freight', autoFill.freight);
@@ -1907,7 +2667,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
   // 表1 出厂货价核
   ps.t1 = ps.t1 || { base_price: 0, imp_mat: 0, dom_mat: 0, blow: 0, slush: 0, sewing_hair: 0, sewing_cloth: 0, hardware: 0, electronic: 0, motor: 0, suction: 0, glue_bag: 0 };
   // 表2 包装/外购
-  ps.t2 = ps.t2 || { color_box: 0, inner_card: 0, code_before: 0, code_after: 0, battery: 0, libao: 0, plating: 0, other_buy: 0, carton: 0, freight: 0, cabinet: 0, misc: 0 };
+  ps.t2 = ps.t2 || { color_box: 0, inner_card: 0, code_before: 0, code_after: 0, battery: 0, libao: 0, plating: 0, flocking: 0, other_buy: 0, carton: 0, freight: 0, cabinet: 0, misc: 0 };
   // 旧数据迁移：彩盒 + 内咭 合并到 color_box，inner_card 清零
   if (ps.t2.inner_card) {
     ps.t2.color_box = num(ps.t2.color_box) + num(ps.t2.inner_card);
@@ -1941,7 +2701,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
   ];
   const t2Cols = [
     ['color_box', '彩盒/内咭'], ['code_before', '未减税前码数'], ['code_after', '减税后码数'],
-    ['battery', '电池'], ['libao', '利宝'], ['plating', '电镀'], ['other_buy', '其他外购'],
+    ['battery', '电池'], ['libao', '利宝'], ['plating', '电镀'], ['flocking', '植绒'], ['other_buy', '其他外购'],
     ['carton', '纸箱'], ['freight', '运费'], ['cabinet', '吊柜费'], ['misc', '杂项'],
   ];
   const t4Cols = [
@@ -2037,7 +2797,7 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
       num(ps.t1.dom_mat) + num(ps.t1.sewing_hair) + num(ps.t1.sewing_cloth)
       + num(ps.t1.hardware) + num(ps.t1.electronic) + num(ps.t1.motor)
       + num(ps.t2.color_box) + num(ps.t2.battery) + num(ps.t2.libao)
-      + num(ps.t2.plating) + num(ps.t2.other_buy) + num(ps.t2.carton) + num(ps.t2.misc)
+      + num(ps.t2.plating) + num(ps.t2.flocking) + num(ps.t2.other_buy) + num(ps.t2.carton) + num(ps.t2.misc)
       + num(ps.t1.glue_bag)
       + num(ps.t3.paint_material);
     const laborCost = num(ps.t3.injection_labor) + num(ps.t3.painting_labor) + num(ps.t3.assembly_labor);
@@ -2054,20 +2814,25 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     const laborPct = basePrice ? laborCost / basePrice : 0;
     // 四、减税明细 各列自动填
     const setT4Amt = (key, val) => {
-      ps.t4[key].amt = +num(val).toFixed(4);
+      ps.t4[key].amt = num(val);
       const inp = host.querySelector(`[data-tbl="t4a"][data-key="${key}"]`);
       if (inp) inp.textContent = formatNum(ps.t4[key].amt);
     };
     setT4Amt('rmb_buy', rmbBuyCost);                                           // 人民币外购件成本
     // 含税13%类成本 = 国内料 + 五金 + 马达 + 彩盒/内咭 + 电池 + 利宝 + 其他外购 + 油漆 + 胶袋
     const tax13Cost = num(ps.t1.dom_mat) + num(ps.t1.hardware) + num(ps.t1.motor)
-      + num(ps.t2.color_box) + num(ps.t2.battery) + num(ps.t2.libao) + num(ps.t2.other_buy)
+      + num(ps.t2.color_box) + num(ps.t2.battery) + num(ps.t2.libao) + num(ps.t2.flocking) + num(ps.t2.other_buy)
       + num(ps.t3.paint_material) + num(ps.t1.glue_bag);
     setT4Amt('tax13', tax13Cost);
     setT4Amt('carton', num(ps.t2.carton));                                     // 纸箱类 = 纸箱
     setT4Amt('slush3', num(ps.t1.slush));                                      // 搪胶类3% = 搪胶
-    setT4Amt('sewhair13', num(ps.t1.sewing_hair));                             // 车发类13% = 车发
-    setT4Amt('sewcloth13', num(ps.t1.sewing_cloth));                           // 车衣类13% = 车衣
+    const sewingPayload = typeof window !== 'undefined' && window.__data?.sections
+      ? JSON.parse(window.__data.sections.find(section => section.dept === 'sewing')?.payload_json || '{}') : {};
+    const sewingTaxable = autoFill.sewing_taxable || (typeof window !== 'undefined' && window.SewingTax
+      ? window.SewingTax.taxableAmounts(sewingPayload, ps.t1, window.__data?.quote?.customer)
+      : { sewing_hair: num(ps.t1.sewing_hair), sewing_cloth: num(ps.t1.sewing_cloth) });
+    setT4Amt('sewhair13', sewingTaxable.sewing_hair);                             // 车发类13% = 车发
+    setT4Amt('sewcloth13', sewingTaxable.sewing_cloth);                           // 车衣类13% = 车衣
     setT4Amt('suction6', num(ps.t1.suction));                                  // 吸塑类6% = 吸塑
     setT4Amt('freight9', num(ps.t2.freight));                                  // 运费含税9% = 运费
     setT4Amt('tax1', num(ps.t2.plating));                                      // 含税1% = 电镀
@@ -2097,7 +2862,16 @@ function renderTaxDeductionBlock(host, salesPayload, salesSec, me, autoFill) {
     ps.t2.code_after = +codeAfter.toFixed(4);
     const codeAfterInp = host.querySelector('[data-tbl="t2"][data-key="code_after"]');
     if (codeAfterInp) codeAfterInp.textContent = formatNum(ps.t2.code_after);
-    calculatedSummary = { totalCost, totalDeduction: totalDed, afterDeduction: afterDed };
+    const taxLabels = { tax13: '含税13%类成本', carton: '纸箱类', tax1: '含税1%', slush3: '搪胶类3%', sewhair13: '车发类13%', sewcloth13: '车衣类13%', suction6: '吸塑类6%', freight9: '运费含税9%', tax13b: '含税13%类' };
+    calculatedSummary = { totalCost, totalDeduction: totalDed, afterDeduction: afterDed,
+      financial: {
+        fields: { ...ps.t1, ...ps.t2, ...ps.t3 },
+        totalCost, totalDeduction: totalDed, afterDeduction: afterDed, noLabor: noLaborCost,
+        taxRows: Object.entries(taxLabels).map(([key, label]) => ({ key, label,
+          base: num(ps.t4[key]?.amt), rate: num(ps.t4[key]?.rate),
+          deduction: num(ps.t4[key]?.amt) * num(ps.t4[key]?.rate) / 100 })),
+      },
+    };
   }
   recalc();
   return calculatedSummary;
@@ -2144,6 +2918,7 @@ function renderSlush(host, payload, canEdit, onChange, fxRmbHkd) {
     <div class="muted">按模板参数自动计算：料价、搪工、批工、色粉、柴油、电费、运费/胶袋 → 合计 × 码点 = 货价。</div>
     <div id="slush-import-preview"></div>
     <div id="wb-slush-table" style="margin-top:8px"></div>`;
+  renderLegacyItems(host, payload, canEdit, onChange);
   const cols = [
     { key: 'images', label: '图片', width: '150px',
       renderCell: (td, row, context) => { td.className = 'mold-img-cell'; renderImageCell(td, row, !context.readonly, context.onChange); } },
@@ -2258,11 +3033,13 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
   payload.sewing_groups = payload.sewing_groups || [];
   payload.sewing_loss_pct = payload.sewing_loss_pct ?? 1;
   const fx = num(fxRmbHkd) || 0.85;
+  const spinSewing = typeof window !== 'undefined' && window.SewingTax?.isSpin(window.__data?.quote?.customer);
 
   const itemCols = [
     { key: 'fabric', label: '布料名称', type: 'textarea', width: '240px' },
     { key: 'part', label: '部位', width: '90px' },
-    { key: 'craft', label: '工艺', type: 'select', options: ['电绣'], width: '80px' },
+    { key: 'craft', label: '工艺', type: 'select', options: spinSewing ? ['电绣', '裁床', '车缝', '手工'] : ['电绣'], width: '80px' },
+    ...(spinSewing ? [{ key: 'refund', label: '退税处理', readonly: true, calc: row => window.SewingTax.craftFor(row) || /人工/.test(String(row.fabric || row.part || row.name || '')) ? '不退税' : '按组税项', width: '100px' }] : []),
     { key: 'pieces', label: '裁片数', type: 'number', width: '70px' },
     { key: 'usage', label: '用量/码', type: 'number', width: '90px' },
     { key: 'mat_price', label: '物料价 (RMB)', type: 'number', width: '100px' },
@@ -2318,10 +3095,16 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
   function render() {
     host.innerHTML = `<h3>车缝产品报价（按产品分组）
       ${canEdit ? '<button class="mini" id="sw-add-group" style="margin-left:10px">+ 新增产品组</button>' : ''}
-      ${canEdit ? '<button class="mini" id="sw-import" type="button" style="margin-left:6px">📄 导入车缝报价单</button><input id="sw-file" type="file" accept=".xls,.xlsx" style="display:none"/>' : ''}
+      <button class="mini" id="sw-import" type="button" style="margin-left:6px" ${canEdit ? '' : 'disabled title="请先进入编辑模式"'}>📄 导入车缝报价单</button>
+      ${canEdit ? '<input id="sw-file" type="file" accept=".xls,.xlsx" style="display:none"/>' : '<small class="muted">进入编辑后可导入 Excel</small>'}
     </h3>
+    <label>车缝报价 <select id="sw-tax-label" ${canEdit ? '' : 'disabled'}>
+      <option value="含税" ${payload.tax_label !== '不含税' ? 'selected' : ''}>含税</option>
+      <option value="不含税" ${payload.tax_label === '不含税' ? 'selected' : ''}>不含税（不退税）</option>
+    </select></label><p class="muted">仅含税车缝费用参与退税；各产品组可单独选择。此选项不改变已填报价金额。${spinSewing ? 'SPIN 的电绣、裁床、车缝、手工及人工费用不参与退税，保留成本；布料等材料按所选税项计算。' : ''}</p>
     <div id="sw-import-preview"></div>
     <div id="sw-groups"></div>`;
+    renderLegacyItems(host, payload, canEdit, onChange);
     const groupsHost = host.querySelector('#sw-groups');
 
     payload.sewing_groups.forEach((g, gi) => {
@@ -2340,6 +3123,13 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
             <select class="sw-gcat" data-gi="${gi}" ${canEdit ? '' : 'disabled'}>
               <option value="车衣" ${cat==='车衣'?'selected':''}>车衣</option>
               <option value="车发" ${cat==='车发'?'selected':''}>车发</option>
+            </select>
+          </label>
+          <label style="font-size:13px">税项
+            <select class="sw-gtax" data-gi="${gi}" ${canEdit ? '' : 'disabled'}>
+              <option value="" ${!g.tax_label ? 'selected' : ''}>沿用车缝报价</option>
+              <option value="含税" ${g.tax_label==='含税'?'selected':''}>含税</option>
+              <option value="不含税" ${g.tax_label==='不含税'?'selected':''}>不含税（不退税）</option>
             </select>
           </label>
           <label style="font-size:13px">用量
@@ -2371,6 +3161,12 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
     refreshTotals();
 
     if (!canEdit) return;
+    host.querySelector('#sw-tax-label').onchange = event => { payload.tax_label = event.target.value; onChange(); };
+    host.querySelectorAll('.sw-gtax').forEach(select => select.onchange = () => {
+      const group = payload.sewing_groups[+select.dataset.gi];
+      if (select.value) group.tax_label = select.value; else delete group.tax_label;
+      onChange();
+    });
     host.querySelectorAll('.sw-gname').forEach(inp => inp.oninput = () => {
       payload.sewing_groups[+inp.dataset.gi].name = inp.value; onChange();
     });
@@ -2423,7 +3219,7 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
             items: (g.items || []).map(it => ({
               fabric: it.material || '',
               part: it.part || '',
-              craft: /电绣|绣花|embroider/i.test(String(it.material || '') + ' ' + String(it.note || '')) ? '电绣' : '',
+              craft: (spinSewing && window.SewingTax.craftFor(it)) || (/电绣|绣花|embroider/i.test(String(it.material || '') + ' ' + String(it.note || '')) ? '电绣' : ''),
               pieces: 1,
               usage: it.qty || 0,
               mat_price: it.unit_price || 0,
@@ -2431,6 +3227,7 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
               note: it.note || '',
             })),
             labor_amount: g.labor_amount || 0,
+            ...(g.tax_label ? { tax_label: g.tax_label } : {}),
           });
           impPreview.querySelector('#sw-imp-replace').onclick = () => {
             payload.sewing_groups = j.groups.map(toGroup);
@@ -2450,6 +3247,31 @@ function renderSewing(host, payload, canEdit, onChange, fxRmbHkd) {
   render();
 }
 
+function cartonBoxPrice(box, rate) {
+  return (num(box.cl) + num(box.cw) + 2) * (num(box.cw) + num(box.ch) + 1) * 2 * rate / 1000;
+}
+function cartonFlatPrice(card, box) {
+  return ((num(card.l) || num(box?.cl)) + 1) * ((num(card.w) || num(box?.cw)) + 1) * 2 / 1000 * (card.qty == null || card.qty === '' ? 1 : num(card.qty));
+}
+function engineeringSummaryTotals(payload, fxRmbHkd, fxHkdUsd) {
+  const materials = key => sum(payload[key] || [], row => freeAmountHkd(row, fxRmbHkd, fxHkdUsd));
+  const hardware = materials('hardware'), auxiliary = materials('aux_materials'), packaging = materials('packaging_materials');
+  const carton = sum(engineeringCartonDetails(payload.carton_calc || {}), row => row.amount);
+  const indo = (hardware + auxiliary + packaging) * num(payload.indo_pct) / 100;
+  return {hardware,auxiliary,packaging,carton,indo,total:hardware + auxiliary + packaging + carton + indo,
+    mold_rmb:sum(payload.mold_costs?.items || [], item => num(item.price_rmb))};
+}
+function engineeringCartonDetails(c) {
+  const boxes = c.cartons?.length ? c.cartons : (c.cl ? [{cl:c.cl,cw:c.cw,ch:c.ch,qty:c.qty,flat_cards:c.flat_card ? [{l:c.cl,w:c.cw,qty:1}] : []}] : []);
+  const rate = c.paper_rate == null ? defaultCartonRate(boxes[0]?.ka_label || c.ka_label) : c.paper_rate === '' ? 2.75 : num(c.paper_rate);
+  return boxes.filter(box => num(box.cl) || num(box.cw) || num(box.ch)).flatMap((box,index) => [
+    {type:'纸箱',name:box.name || `纸箱 ${index + 1}`,l:box.cl,w:box.cw,h:box.ch,qty:box.qty,rate,
+      ka_label:box.ka_label || c.ka_label,unit:cartonBoxPrice(box,rate),amount:cartonBoxPrice(box,rate)/Math.max(num(box.qty),1)},
+    ...(box.flat_cards || []).map((card,i) => ({type:'平卡',name:card.name || `平卡 ${i + 1}`,parent:box.name || `纸箱 ${index + 1}`,
+      l:num(card.l)||num(box.cl),w:num(card.w)||num(box.cw),h:'',qty:card.qty ?? 1,rate:'',ka_label:'',
+      unit:cartonFlatPrice({...card,qty:1},box),amount:cartonFlatPrice(card,box)}))
+  ]);
+}
 function renderCartonCalc(host, c, canEdit, onChange) {
   // 迁移：旧单纸箱 -> cartons[0]，每个纸箱内嵌 flat_cards[]
   if (!c.cartons) {
@@ -2466,7 +3288,7 @@ function renderCartonCalc(host, c, canEdit, onChange) {
   });
   // 删除老的顶层 flat_cards
   delete c.flat_cards;
-  c.paper_rate = c.paper_rate ?? 2.75;  // 纸价系数（可调）
+  c.paper_rate = c.paper_rate ?? defaultCartonRate(c.cartons?.[0]?.ka_label || c.ka_label);  // 纸价系数（可调）
 
   const rate = () => c.paper_rate == null || c.paper_rate === ''
     ? 2.75
@@ -2475,11 +3297,11 @@ function renderCartonCalc(host, c, canEdit, onChange) {
     ? b[`${key}_raw`]
     : (b[key] || '');
   const productMmInput = key => c[`${key}_mm`] || (c[`${key}_cm`] ? num(c[`${key}_cm`]) * 10 : '');
-  const productInchInput = key => c[key] == null || c[key] === '' ? '' : num(c[key]).toFixed(2);
+  const productInchInput = key => c[key] == null || c[key] === '' ? '' : num(c[key]).toFixed(3);
   const cuftOf = (b) => num(b.cl) * num(b.cw) * num(b.ch) / 1728;
-  const boxPriceOf = (b) => (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * rate() / 1000;
+  const boxPriceOf = b => cartonBoxPrice(b, rate());
   // 平卡 L/W 留空时对应所在纸箱的长/宽
-  const flatPriceOf = (f, b) => ((num(f.l) || num((b||{}).cl)) + 1) * ((num(f.w) || num((b||{}).cw)) + 1) * 2 / 1000 * (f.qty == null || f.qty === '' ? 1 : num(f.qty));
+  const flatPriceOf = cartonFlatPrice;
 
   function render() {
     // 同步首个纸箱回旧字段（运费计算/出口表使用）
@@ -2549,9 +3371,9 @@ function renderCartonCalc(host, c, canEdit, onChange) {
             </tr>
             <tr>
               <td class="muted">inch</td>
-              <td><input id="cc-pl" type="number" step="0.01" value="${productInchInput('pl')}" ${canEdit?'':'disabled'} style="width:80px"/></td>
-              <td><input id="cc-pw" type="number" step="0.01" value="${productInchInput('pw')}" ${canEdit?'':'disabled'} style="width:80px"/></td>
-              <td><input id="cc-ph" type="number" step="0.01" value="${productInchInput('ph')}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td><input id="cc-pl" type="number" step="0.001" value="${productInchInput('pl')}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td><input id="cc-pw" type="number" step="0.001" value="${productInchInput('pw')}" ${canEdit?'':'disabled'} style="width:80px"/></td>
+              <td><input id="cc-ph" type="number" step="0.001" value="${productInchInput('ph')}" ${canEdit?'':'disabled'} style="width:80px"/></td>
             </tr>
           </tbody>
         </table>
@@ -2583,7 +3405,7 @@ function renderCartonCalc(host, c, canEdit, onChange) {
         c[`${k}_mm`] = mm;
         c[`${k}_cm`] = 0;
         c[k] = mm / 25.4;
-        el.value = mmEl.value === '' ? '' : c[k].toFixed(2);
+        el.value = mmEl.value === '' ? '' : c[k].toFixed(3);
         onChange();
       };
     });
@@ -2646,7 +3468,382 @@ function renderCartonCalc(host, c, canEdit, onChange) {
   render();
 }
 
+function attachSupplierMaterialImportUI(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quoteQty, quoteCustomer, { inputId, previewId, targetKey, label, mixedConfig, mixedRoot, mixedTotalCode, getMixedTotalCode, getMixedImportTarget, onApplied }) {
+    // Build new arrays first so a conflict in one product cannot partially apply a batch.
+    const supplierSync = window.SupplierMaterialSync;
+    const mergeMaterials = (existing, incoming, byCode) => {
+      const normalize = value => String(value ?? '').normalize('NFKC').replace(/\s+/g, '').replace(/[×＊*]/g, 'X').toUpperCase();
+      const code = value => normalize(value).replace(/^BEAUTYMINI[_-]S3-(\d+)$/, (_, number) => `BEAUTYM-S3-${String(Number(number)).padStart(3, '0')}`);
+      const key = row => JSON.stringify([normalize(row.supplier_id || row.supplier_name), byCode ? code(row.product_code) : '', normalize(row.name), normalize(row.spec)]);
+      const positions = new Map(), seen = new Set(), replacements = new Map(), removed = new Set(), addedRows = [];
+      (existing || []).forEach((row, index) => {
+        if (row.is_subtotal || row.children?.length) return;
+        const identity = key(row);
+        if (!positions.has(identity)) positions.set(identity, []);
+        positions.get(identity).push(index);
+      });
+      let updated = 0, added = 0, duplicates = 0;
+      for (const row of incoming) {
+        if (!normalize(row.name)) throw Error('物料名称缺失，不能更新匹配物料');
+        const identity = key(row);
+        if (seen.has(identity)) throw Error(`${row.product_code || ''} ${row.name} 在本次报价中有多条相同名称和规格，请核对后再更新`);
+        seen.add(identity);
+        const matches = positions.get(identity) || [];
+        if (!matches.length) { addedRows.push({ ...row }); added++; continue; }
+        const replacement = { ...existing[matches[0]], ...row };
+        // Replaced numbers must not keep an older editable/exported formula.
+        for (const field of ['qty', 'unit_price_rmb', 'unit_price_usd', 'unit_price']) {
+          if (Object.hasOwn(row, field) && !Object.hasOwn(row, field + '_raw')) delete replacement[field + '_raw'];
+        }
+        replacements.set(matches[0], replacement);
+        matches.slice(1).forEach(index => removed.add(index));
+        updated++;
+        duplicates += matches.length - 1;
+      }
+      return { rows: (existing || []).flatMap((row, index) => removed.has(index) ? [] : [replacements.get(index) || row]).concat(addedRows), updated, added, duplicates };
+    };
+    const updatePlan = (items, allocation, sharedImport) => {
+      if (allocation?.unmatched.length) throw Error('存在无法分配的货号，请先核对');
+      const batches = !mixedConfig ? [{ id: null, items, existing: payload[targetKey] }]
+        : sharedImport ? [{ id: '__shared__', items, existing: mixedRoot.mixed_shared?.[targetKey] }]
+        : [
+          ...(allocation.sharedItems.length ? [{ id: '__shared__', items: allocation.sharedItems, existing: mixedRoot.mixed_shared?.[targetKey] }] : []),
+          ...allocation.groups.map(group => ({ id: group.product.id, items: group.items, existing: mixedRoot.mixed_products?.[group.product.id]?.[targetKey] })),
+        ];
+      return batches.map(batch => ({ id: batch.id, ...mergeMaterials(batch.existing, batch.items, !mixedConfig || batch.id === '__shared__') }));
+    };
+    const fileInput = host.querySelector(inputId);
+    if (!fileInput) return;
+    let importSequence = 0;
+    const onFileChange = async (e) => {
+      const sequence = ++importSequence;
+      const preview = host.querySelector(previewId);
+      const active = () => fileInput.onchange === onFileChange && sequence === importSequence && preview.isConnected !== false;
+      if (!active()) return;
+      const file = e.target.files[0];
+      if (!file) { preview.innerHTML = ''; return; }
+      const importTarget = getMixedImportTarget?.();
+      const sharedImport = !!mixedConfig && importTarget === '__shared__';
+      const importTotalCode = getMixedTotalCode ? getMixedTotalCode() : mixedTotalCode;
+      const normalizeCode = value => String(value || '').normalize('NFKC').replace(/\s+/g, '').toUpperCase();
+      const totalCodeChanged = () => mixedConfig && getMixedTotalCode && normalizeCode(getMixedTotalCode()) !== normalizeCode(importTotalCode);
+      const invalidateTotalCode = () => {
+        ++importSequence;
+        preview.innerHTML = '总货号已变更，请重新选择文件，核对导入归属。';
+        fileInput.value = '';
+      };
+      preview.innerHTML = '<i class="muted">正在识别 MOQ 与币种报价…</i>';
+      try {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('target_qty', '5000');
+        if (supplierSync) fd.append('full_supplier_snapshot', '1');
+        const response = await fetch('/api/uploads/hardware-sheet', { method: 'POST', credentials: 'include', body: fd });
+        if (!active()) return;
+        const result = await response.json();
+        if (!active()) return;
+        if (!response.ok) throw new Error(result.error || '解析失败');
+        const selections = result.items.map(item => ({
+          moqQty: item.moq_qty ?? item.price_tiers?.[0]?.moq_qty ?? null,
+          priceType: item.price_type || (item.source_currency === 'USD' ? 'USD_UNTAXED' : (item.tax_pct ? 'RMB_TAXED' : 'RMB_UNTAXED')),
+        }));
+        const tierOptions = item => {
+          const tiers = Array.isArray(item.price_tiers) ? item.price_tiers : [];
+          const map = new Map();
+          tiers.forEach(tier => { if (tier.moq_qty != null && !map.has(tier.moq_qty)) map.set(tier.moq_qty, tier.moq || tier.moq_qty); });
+          return [...map.entries()].sort((a, b) => a[0] - b[0]);
+        };
+        const selectedItem = (item, index) => {
+          const tiers = Array.isArray(item.price_tiers) ? item.price_tiers : [];
+          if (!tiers.length) return { ...item, source_currency: item.source_currency || 'RMB' };
+          const selection = selections[index];
+          const tier = tiers.find(value => value.moq_qty === selection.moqQty) || tiers[0];
+          const priceTypes = [
+            tier.unit_price_rmb_untaxed != null ? 'RMB_UNTAXED' : null,
+            tier.unit_price_rmb_taxed != null ? 'RMB_TAXED' : null,
+            tier.unit_price_usd != null ? 'USD_UNTAXED' : null,
+          ].filter(Boolean);
+          if (!priceTypes.includes(selection.priceType)) selection.priceType = priceTypes[0] || 'RMB_UNTAXED';
+          const useUsd = selection.priceType === 'USD_UNTAXED';
+          const useTaxedRmb = selection.priceType === 'RMB_TAXED';
+          const baseNote = String(item.note || '').split('；').filter(part => !/^适用MOQ：|^价格来源：/.test(part));
+          const priceSource = useUsd ? 'USD不含税' : (useTaxedRmb ? '人民币含税' : '人民币不含税');
+          return {
+            ...item,
+            moq: tier.moq,
+            moq_qty: tier.moq_qty,
+            source_currency: useUsd ? 'USD' : 'RMB',
+            price_type: selection.priceType,
+            unit_price_rmb: useUsd ? null : (useTaxedRmb ? tier.unit_price_rmb_taxed : tier.unit_price_rmb_untaxed),
+            unit_price_usd: useUsd ? tier.unit_price_usd : null,
+            tax_pct: useTaxedRmb ? 13 : 0,
+            price_source: priceSource,
+            note: [...baseNote, tier.moq ? `适用MOQ：${tier.moq}` : '', `价格来源：${priceSource}`].filter(Boolean).join('；'),
+          };
+        };
+        let supplierChoice = '', newSupplierName = '', legacyClaims = new Set(), syncPreview = null, snapshotSignature = null;
+        const scopeBatches = items => {
+          if (!mixedConfig) return [{id:'__single__',label:'当前产品',byCode:true,existing:payload[targetKey] || [],items}];
+          if (sharedImport) return [{id:'__shared__',label:'每包装共有费用',byCode:true,existing:mixedRoot.mixed_shared?.[targetKey] || [],items}];
+          const allocation = window.MixedSku.planSupplier(mixedConfig,items,importTotalCode);
+          if (allocation.unmatched.length) throw Error('存在无法分配的货号：' + allocation.unmatched.join('、'));
+          const grouped = new Map(allocation.groups.map(group=>[group.product.id,group.items]));
+          return [...mixedConfig.products.map(product=>({id:product.id,label:product.code,byCode:false,
+            existing:mixedRoot.mixed_products?.[product.id]?.[targetKey] || [],items:grouped.get(product.id) || []})),
+            {id:'__shared__',label:'每包装共有费用',byCode:true,existing:mixedRoot.mixed_shared?.[targetKey] || [],items:allocation.sharedItems}];
+        };
+        const detectedSupplier = String(result.supplier_name || '').trim();
+        const supplierNameKey = value => supplierSync.normalize(value).replace(/\s/g, '');
+        if (supplierSync && detectedSupplier) {
+          const matches = supplierSync.suppliers(scopeBatches([])).filter(supplier=>supplierNameKey(supplier.name)===supplierNameKey(detectedSupplier));
+          if (matches.length === 1) supplierChoice = matches[0].id;
+          else if (!matches.length) { supplierChoice = '__new__'; newSupplierName = detectedSupplier; }
+        }
+        const signature = batches => JSON.stringify(batches.map(batch=>[batch.id,batch.label,batch.byCode,batch.existing]));
+        const selectedSupplier = batches => {
+          if (supplierChoice !== '__new__') return supplierSync.suppliers(batches).find(supplier=>supplier.id===supplierChoice);
+          if (supplierSync.suppliers(batches).some(supplier=>supplierNameKey(supplier.name)===supplierNameKey(newSupplierName))) throw Error('该供应商已存在，请从列表选择');
+          return {name:newSupplierName};
+        };
+        const hasTrackedSuppliers = () => {
+          const targets = !mixedConfig ? [payload] : [mixedRoot.mixed_shared,...Object.values(mixedRoot.mixed_products || {})];
+          return targets.some(target=>(target?.[targetKey] || []).some(row=>row.supplier_id || row.supplier_name));
+        };
+        const syncHtml = items => {
+          if (!supplierSync) return '';
+          let batches, syncResult, error='';
+          try {
+            batches=scopeBatches(items);
+            const state=signature(batches);
+            if(snapshotSignature!==null && snapshotSignature!==state)throw Error('物料资料已变更，请重新选择文件并核对变更明细');
+            snapshotSignature=state;
+            if (result.supplier_snapshot_version !== 1) throw Error('解析服务尚未加载供应商同步，请更新或重启本地服务后再试');
+            if (result.supplier_names?.length > 1) throw Error('文件中识别到多个供应商，请按供应商分开上传完整清单');
+            if (resultSheetIncomplete()) throw Error('有物料缺少可识别报价，不能作为完整清单同步；请补齐后重新导入');
+            syncResult=supplierSync.plan({supplier:selectedSupplier(batches),batches,legacyClaims:[...legacyClaims],sourceFile:file.name || '',sourceSheet:resultSheet()});
+          } catch(e) {error=e.message;}
+          // Allocation errors must not hide the supplier selector or silently widen the scope.
+          const available=batches || scopeBatches([]), known=supplierSync.suppliers(available);
+          syncPreview=syncResult ? {plan:syncResult,signature:signature(available)} : null;
+          const legacy=available.flatMap(batch=>batch.existing.flatMap((row,index)=>!supplierSync.supplierId(row) && supplierSync.isDetail(row)
+            ? [{batch,row,token:supplierSync.legacyToken(batch.id,index)}] : []));
+          const beforeAfter=(row,field)=>row ? escapeHtml(row[field] ?? '—') : '—';
+          const price=row=>row ? escapeHtml((row.source_currency || (row.unit_price_rmb!=null?'RMB':'HKD')) + ' ' + (row.source_currency==='USD' ? row.unit_price_usd ?? '—' : row.unit_price_rmb ?? row.unit_price ?? '—')) : '—';
+          const c=syncResult?.counts;
+          return `<section class="mixed-config" data-supplier-sync><h4>整份供应商报价单同步</h4>
+            <p>同步范围：${escapeHtml(label)} · ${mixedConfig && !sharedImport ? '当前报价的全部小产品及共有费用' : sharedImport ? '当前每包装共有费用' : '当前产品'}。只更新所选供应商；其他供应商及其他物料类别保留。</p>
+            <p>${detectedSupplier?`文件识别供应商：<b>${escapeHtml(detectedSupplier)}</b>，已按名称匹配，请核对下方选择。`:result.supplier_names?.length>1?`文件含多个供应商：${result.supplier_names.map(escapeHtml).join('、')}`:'文件未识别到供应商名称，请手动选择或新增。'}整份文件中的新增、改价和删减会一起同步。</p>
+            <label>本次供应商 <select data-sync-supplier aria-label="本次供应商"><option value="">请选择供应商</option>${known.map(supplier=>`<option value="${escapeHtml(supplier.id)}" ${supplierChoice===supplier.id?'selected':''}>${escapeHtml(supplier.name)}</option>`).join('')}<option value="__new__" ${supplierChoice==='__new__'?'selected':''}>＋ 新增供应商</option></select></label>
+            ${supplierChoice==='__new__'?`<label>供应商名称 <input data-new-supplier aria-label="供应商名称" maxlength="100" value="${escapeHtml(newSupplierName)}" placeholder="填写实际供应商名称"></label>`:''}
+            ${legacy.length?`<details data-legacy-suppliers><summary>确认历史物料归属（${legacy.length} 条未标供应商）</summary><p>仅勾选确属本次供应商的旧物料。勾选后会按新清单更新或删除；未勾选的旧资料保留。新表已删减的旧物料也须手动勾选归属，才能同步删除。</p><button type="button" data-claim-matching ${supplierChoice && batches?'':'disabled'}>勾选与本次文件匹配的历史物料</button><div style="max-height:260px;overflow:auto"><table class="wb-table"><thead><tr><th>属于本次供应商</th><th>产品归属</th><th>货号</th><th>旧物料</th><th>规格</th><th>用量</th></tr></thead><tbody>${legacy.map(({batch,row,token})=>`<tr><td><input type="checkbox" data-claim-supplier="${escapeHtml(token)}" ${legacyClaims.has(token)?'checked':''} ${supplierChoice?'':'disabled'} aria-label="归属本次供应商：${escapeHtml(batch.label)} ${escapeHtml(row.name)}"></td><td>${escapeHtml(batch.label)}</td><td>${escapeHtml(row.product_code || '')}</td><td>${escapeHtml(row.name)}</td><td>${escapeHtml(row.spec)}</td><td>${escapeHtml(row.qty)}</td></tr>`).join('')}</tbody></table></div></details>`:''}
+            <p data-supplier-sync-status role="status">${error?escapeHtml(error):`预计更新 ${c.updated} 条、新增 ${c.added} 条、删除 ${c.deleted} 条；保留其他供应商 ${c.otherKept} 条、未归属历史物料 ${c.legacyKept} 条。`}</p>
+            ${c?.legacyConflicts?`<p class="mixed-error">另有 ${c.legacyConflicts} 条同名历史物料未确认供应商，仍会保留；请先核对归属，避免重复报价。</p>`:''}
+            ${syncResult?`<div style="max-height:320px;overflow:auto"><table class="wb-table"><thead><tr><th>变更</th><th>产品归属</th><th>物料</th><th>规格（旧 → 新）</th><th>用量（旧 → 新）</th><th>原币单价（旧 → 新）</th></tr></thead><tbody>${syncResult.changes.map(change=>`<tr><td>${change.type}</td><td>${escapeHtml(change.batchLabel)}</td><td>${beforeAfter(change.before,'name')} → ${beforeAfter(change.after,'name')}</td><td>${beforeAfter(change.before,'spec')} → ${beforeAfter(change.after,'spec')}</td><td>${beforeAfter(change.before,'qty')} → ${beforeAfter(change.after,'qty')}</td><td>${price(change.before)} → ${price(change.after)}</td></tr>`).join('')}</tbody></table></div>`:''}
+            <button type="button" data-action="supplier-sync" ${error?'disabled':''}>同步整份供应商报价单（新增、更新、删除）</button> <button type="button" class="mini" data-action="supplier-cancel">取消</button><p class="muted">确认后更新当前草稿，保存工程/业务草稿后生效。本次文件中未出现的该供应商旧物料将删除。</p></section>`;
+        };
+        const resultSheet=()=>result.sheet_used || '';
+        const resultSheetIncomplete=()=>!!result.unpriced_items?.length;
+        const renderPreview = () => {
+          if (!active()) return;
+          if (totalCodeChanged()) { invalidateTotalCode(); return; }
+          const normalizedItems = result.items.map(selectedItem);
+          const allocation = mixedConfig && !sharedImport ? window.MixedSku.planSupplier(mixedConfig, normalizedItems, importTotalCode) : null;
+          let updates, updateError = '';
+          try { updates = updatePlan(normalizedItems, allocation, sharedImport); } catch (error) { updateError = error.message; }
+          const updateCounts = (updates || []).reduce((sum, batch) => ({ updated: sum.updated + batch.updated, added: sum.added + batch.added, duplicates: sum.duplicates + batch.duplicates }), { updated: 0, added: 0, duplicates: 0 });
+          preview.innerHTML = `
+            <div class="card" style="background:#f0fdf4;border:1px solid #86efac;">
+              <p>从 <b>${escapeHtml(result.sheet_used || '')}</b> 解析到 <b>${normalizedItems.length}</b> 条${escapeHtml(label)}明细；可逐项选择识别到的 MOQ 与币种：</p>
+              <table class="wb-table"><thead><tr>
+                <th>货号</th><th>产品名称</th><th>规格 / 材料</th><th>用量</th><th>选择 MOQ</th><th>选择价格类型</th><th>原币单价</th><th>单价 HKD</th><th>备注</th>
+              </tr></thead><tbody>
+              ${normalizedItems.map((item, index) => {
+                const source = result.items[index];
+                const tiers = source.price_tiers || [];
+                const activeTier = tiers.find(tier => tier.moq_qty === selections[index].moqQty) || tiers[0];
+                const priceTypes = activeTier ? [
+                  activeTier.unit_price_rmb_untaxed != null ? ['RMB_UNTAXED', '人民币不含税'] : null,
+                  activeTier.unit_price_rmb_taxed != null ? ['RMB_TAXED', '人民币含税'] : null,
+                  activeTier.unit_price_usd != null ? ['USD_UNTAXED', '美金不含税'] : null,
+                ].filter(Boolean) : [[item.price_type || 'RMB_UNTAXED', item.price_source || item.source_currency || 'RMB']];
+                return `<tr>
+                  <td>${escapeHtml(item.product_code || '')}</td><td>${escapeHtml(item.name || '')}</td><td>${escapeHtml(item.spec || '')}</td><td>${escapeHtml(item.qty ?? '')}</td>
+                  <td><select data-tier-index="${index}" ${tiers.length ? '' : 'disabled'}>${tierOptions(source).map(([qty, text]) => `<option value="${qty}" ${qty === item.moq_qty ? 'selected' : ''}>${escapeHtml(text)}</option>`).join('') || `<option>${escapeHtml(item.moq || '')}</option>`}</select></td>
+                  <td><select data-price-type-index="${index}" ${priceTypes.length > 1 ? '' : 'disabled'}>${priceTypes.map(([value, text]) => `<option value="${value}" ${value === item.price_type ? 'selected' : ''}>${text}</option>`).join('')}</select></td>
+                  <td>${escapeHtml(item.source_currency === 'USD' ? item.unit_price_usd : item.unit_price_rmb)}</td>
+                  <td>${escapeHtml(formatNum(freeUnitHkd(item, fxRmbHkd, fxHkdUsd)))}</td><td>${escapeHtml(item.note || '')}</td>
+                </tr>`;
+              }).join('')}
+              </tbody></table>
+              ${sharedImport ? '<p>导入到：每包装共有费用（计一次）。表内货号保留作来源，不匹配小产品。</p>' : ''}
+              ${allocation ? `<p>${allocation.unmatched.length ? '无法分配：'+allocation.unmatched.map(escapeHtml).join('、') : '已匹配 '+allocation.groups.length+' 款小产品；总货号共用项目 '+allocation.sharedItems.length+' 条，每包装计一次。未涉及的资料保留。'}</p>` : ''}
+              ${syncHtml(normalizedItems)}
+              <div ${supplierChoice || hasTrackedSuppliers() ? 'hidden' : ''}><p>更新匹配物料：按同一产品下的物料名称和规格匹配，更新价格、用量及报价资料；未涉及的收缩膜等材料保留。新名称或新规格会新增。共有费用另按来源货号区分。</p>
+              <p data-supplier-update-status role="status">${updateError ? escapeHtml(updateError) : `预计更新 ${updateCounts.updated} 条、新增 ${updateCounts.added} 条${updateCounts.duplicates ? `，合并 ${updateCounts.duplicates} 条旧重复资料（应用前需确认）` : ''}。`}</p>
+              <div style="margin-top:10px">
+                <button data-action="update" ${updateError ? 'disabled' : ''}>仅更新匹配物料（不删除）</button>
+                <button data-action="replace" class="mini" ${allocation?.unmatched.length ? 'disabled' : ''}>${sharedImport ? '替换共有费用的'+escapeHtml(label) : allocation ? '替换匹配归属的'+escapeHtml(label) : '应用（替换全部'+escapeHtml(label)+'）'}</button>
+                <button data-action="append" class="mini" ${allocation?.unmatched.length ? 'disabled' : ''}>追加到现有列表</button>
+                <button data-action="cancel" class="mini danger">取消</button>
+              </div></div>
+            </div>`;
+          const supplierSelect=preview.querySelector('[data-sync-supplier]');
+          if(supplierSelect)supplierSelect.onchange=event=>{
+            supplierChoice=event.target.value;legacyClaims.clear();renderPreview();
+          };
+          const supplierNameInput=preview.querySelector('[data-new-supplier]');
+          if(supplierNameInput)supplierNameInput.onchange=event=>{
+            newSupplierName=event.target.value;legacyClaims.clear();renderPreview();
+          };
+          const claimMatching=preview.querySelector('[data-claim-matching]');
+          if(claimMatching)claimMatching.onclick=()=>{
+            if(!active() || !supplierChoice || !canEdit)return;
+            try {
+              const batches=scopeBatches(result.items.map(selectedItem));
+              if(signature(batches)!==snapshotSignature)throw Error('物料资料已变更，请重新选择文件并核对变更明细');
+              const tokens=batches.flatMap(batch=>{
+                const incoming=new Set(batch.items.map(row=>supplierSync.key(row,batch.byCode)));
+                return batch.existing.flatMap((row,index)=>!supplierSync.supplierId(row) && supplierSync.isDetail(row) && incoming.has(supplierSync.key(row,batch.byCode)) ? [supplierSync.legacyToken(batch.id,index)] : []);
+              });
+              if(!tokens.length)return;
+              if(!confirm(`找到 ${tokens.length} 条产品归属、物料名称和规格匹配的未标供应商旧物料。请确认它们均属于“${selectedSupplier(batches).name}”；确认后勾选归属，最终同步前仍可逐项核对。`))return;
+              tokens.forEach(token=>legacyClaims.add(token));renderPreview();
+              const details=preview.querySelector('[data-legacy-suppliers]');if(details)details.open=true;
+            }catch(error){preview.querySelector('[data-supplier-sync-status]').textContent=error.message;}
+          };
+          preview.querySelectorAll('[data-claim-supplier]').forEach(box=>box.onchange=()=>{
+            if(box.checked)legacyClaims.add(box.dataset.claimSupplier);else legacyClaims.delete(box.dataset.claimSupplier);
+            renderPreview();const details=preview.querySelector('[data-legacy-suppliers]');if(details)details.open=true;
+          });
+          preview.querySelectorAll('[data-tier-index]').forEach(select => select.onchange = () => {
+            selections[Number(select.dataset.tierIndex)].moqQty = Number(select.value);
+            renderPreview();
+          });
+          preview.querySelectorAll('[data-price-type-index]').forEach(select => select.onchange = () => {
+            selections[Number(select.dataset.priceTypeIndex)].priceType = select.value;
+            renderPreview();
+          });
+          const finish = (mode) => {
+            if (!canEdit) return;
+            if (!active()) return;
+            if (totalCodeChanged()) { invalidateTotalCode(); return; }
+            const appliedItems = result.items.map(selectedItem);
+            if (mode === 'supplier-sync') {
+              if (!supplierSync || !syncPreview) return;
+              try {
+                if (getMixedImportTarget && getMixedImportTarget() !== importTarget) throw Error('报价对象已切换，请重新选择文件，核对同步范围');
+                const batches=scopeBatches(appliedItems);
+                if(signature(batches)!==syncPreview.signature)throw Error('物料资料已变更，请重新选择文件并核对变更明细');
+                const plan=supplierSync.plan({supplier:selectedSupplier(batches),batches,legacyClaims:[...legacyClaims],sourceFile:file.name || '',sourceSheet:resultSheet()});
+                const c=plan.counts;
+                if(detectedSupplier && supplierNameKey(detectedSupplier)!==supplierNameKey(plan.supplier.name) && !confirm(`文件供应商为“${detectedSupplier}”，当前选择为“${plan.supplier.name}”。确认将整份文件同步到所选供应商？`))return;
+                if(!confirm(`供应商：${plan.supplier.name}\n类别：${label}\n将更新 ${c.updated} 条、新增 ${c.added} 条、删除 ${c.deleted} 条。其他供应商资料保留。${c.legacyConflicts?`\n另有 ${c.legacyConflicts} 条未归属同名旧物料保留，请确认它们属于其他供应商。`:''}\n确认同步完整最新清单？`))return;
+                ++importSequence;
+                for(const batch of plan.batches){
+                  if(!batch.changed)continue;
+                  const target=!mixedConfig?payload:batch.id==='__shared__'?(mixedRoot.mixed_shared ||= {}):((mixedRoot.mixed_products ||= {})[batch.id] ||= {});
+                  target[targetKey]=batch.rows;
+                }
+                fileInput.value='';onChange();
+                preview.innerHTML=`已同步供应商 ${escapeHtml(plan.supplier.name)}：更新 ${c.updated} 条、新增 ${c.added} 条、删除 ${c.deleted} 条。请保存工程/业务草稿。`;
+                if(mixedConfig)onApplied?.();else renderEngineering(host,payload,canEdit,onChange,fxRmbHkd,fxHkdUsd,quoteQty,quoteCustomer);
+              }catch(error){preview.querySelector('[data-supplier-sync-status]').textContent=error.message;}
+              return;
+            }
+            if(supplierChoice || hasTrackedSuppliers()){
+              preview.querySelector('[data-supplier-update-status]').textContent='本类物料已按供应商区分，请选择供应商并使用“同步最新清单”';return;
+            }
+            if (mode === 'update') {
+              if (getMixedImportTarget && getMixedImportTarget() !== importTarget) {
+                ++importSequence;
+                preview.innerHTML = '报价对象已切换，请重新选择文件，核对导入归属。';
+                fileInput.value = ''; return;
+              }
+              try {
+                const allocation = mixedConfig && !sharedImport ? window.MixedSku.planSupplier(mixedConfig, appliedItems, importTotalCode) : null;
+                const batches = updatePlan(appliedItems, allocation, sharedImport);
+                const duplicates = batches.reduce((sum, batch) => sum + batch.duplicates, 0);
+                if (duplicates && !confirm(`将按新报价更新匹配物料，并合并 ${duplicates} 条相同产品、名称和规格的旧重复资料，其他材料保留。确认？`)) return;
+                ++importSequence;
+                for (const batch of batches) {
+                  const target = !mixedConfig ? payload : batch.id === '__shared__' ? (mixedRoot.mixed_shared ||= {}) : ((mixedRoot.mixed_products ||= {})[batch.id] ||= {});
+                  target[targetKey] = batch.rows;
+                }
+                fileInput.value = ''; onChange();
+                if (mixedConfig) {
+                  preview.innerHTML = '已更新匹配物料，未涉及的材料已保留，请保存工程/业务草稿。';
+                  onApplied?.();
+                } else {
+                  preview.innerHTML = '';
+                  renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quoteQty, quoteCustomer);
+                }
+              } catch (error) { preview.querySelector('[data-supplier-update-status]').textContent = error.message; }
+              return;
+            }
+            if (mixedConfig) {
+              if (getMixedImportTarget && getMixedImportTarget() !== importTarget) {
+                ++importSequence;
+                preview.innerHTML = '报价对象已切换，请重新选择文件，核对导入归属。';
+                fileInput.value = ''; return;
+              }
+              if (sharedImport) {
+                if (!appliedItems.length) return;
+                const target = mixedRoot.mixed_shared ||= {};
+                if (mode === 'replace' && target[targetKey]?.length && !confirm('将替换共有费用的'+label+'明细，确认？')) return;
+                const rows = appliedItems.map(item => ({ ...item }));
+                ++importSequence;
+                target[targetKey] = mode === 'replace' ? rows : (target[targetKey] || []).concat(rows);
+                preview.innerHTML = '已导入每包装共有费用（计一次），请保存工程/业务草稿。';
+                fileInput.value = ''; onChange(); onApplied?.(); return;
+              }
+              const plan=window.MixedSku.planSupplier(mixedConfig,appliedItems,importTotalCode);
+              if(plan.unmatched.length || (!plan.groups.length && !plan.sharedItems.length))return;
+              if(mode==='replace' && (plan.groups.some(g=>mixedRoot.mixed_products?.[g.product.id]?.[targetKey]?.length) || (plan.sharedItems.length && mixedRoot.mixed_shared?.[targetKey]?.length)) && !confirm('将替换本次匹配的小产品及共有费用的'+label+'明细，确认？'))return;
+              ++importSequence;
+              if(plan.sharedItems.length){
+                const shared=mixedRoot.mixed_shared ||= {};
+                shared[targetKey]=mode==='replace'?plan.sharedItems:(shared[targetKey]||[]).concat(plan.sharedItems);
+              }
+              mixedRoot.mixed_products ||= {};
+              for(const group of plan.groups){
+                const target=mixedRoot.mixed_products[group.product.id] ||= {};
+                target[targetKey]=mode==='replace'?group.items:(target[targetKey]||[]).concat(group.items);
+              }
+              preview.innerHTML='已分配到 '+plan.groups.length+' 款小产品；'+plan.sharedItems.length+' 条总货号项目已归入共有费用（计一次），请保存工程/业务草稿。';
+              fileInput.value='';onChange();onApplied?.();return;
+            }
+            ++importSequence;
+            payload[targetKey] = mode === 'replace'
+              ? appliedItems.map(item => ({ ...item }))
+              : (payload[targetKey] || []).concat(appliedItems.map(item => ({ ...item })));
+            preview.innerHTML = '';
+            fileInput.value = '';
+            renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quoteQty, quoteCustomer);
+            onChange();
+          };
+          const syncButton=preview.querySelector('[data-action="supplier-sync"]');
+          if(syncButton)syncButton.onclick=()=>finish('supplier-sync');
+          const syncCancel=preview.querySelector('[data-action="supplier-cancel"]');
+          if(syncCancel)syncCancel.onclick=()=>preview.querySelector('[data-action="cancel"]').onclick();
+          preview.querySelector('[data-action="update"]').onclick = () => finish('update');
+          preview.querySelector('[data-action="replace"]').onclick = () => finish('replace');
+          preview.querySelector('[data-action="append"]').onclick = () => finish('append');
+          preview.querySelector('[data-action="cancel"]').onclick = () => {
+            if (!active()) return;
+            ++importSequence; preview.innerHTML = ''; fileInput.value = '';
+          };
+        };
+        renderPreview();
+      } catch (err) {
+        if (!active()) return;
+        preview.innerHTML = `<div class="card" style="background:#fef2f2;border:1px solid #fecaca">解析失败：${escapeHtml(err.message)}</div>`;
+      }
+    };
+    fileInput.onchange = onFileChange;
+  }
+
 function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quoteQty = 0, quoteCustomer = '') {
+  const showMoldCosts = window.MixedQuotation?.showsEngineeringMoldCosts?.(payload) !== false;
   payload.molds = payload.molds || [];
   payload.electronics = payload.electronics || [];
   payload.hardware = payload.hardware || [];
@@ -2661,6 +3858,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
   payload.electronics_loss_pct = payload.electronics_loss_pct ?? 1;
   payload.hardware_loss_pct = payload.hardware_loss_pct ?? 1;
   payload.aux_loss_pct = payload.aux_loss_pct ?? 1;
+  if (showMoldCosts) {
   payload.mold_costs = payload.mold_costs || {
     items: [
       { name: '模具费用', price_rmb: 0 },
@@ -2683,6 +3881,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
   if (payload.mold_costs.testing_fee_usd == null) payload.mold_costs.testing_fee_usd = num(payload.mold_costs.testing_fee_rmb);
   if (payload.mold_costs.prototype_amortization_qty == null) payload.mold_costs.prototype_amortization_qty = 50000;
   if (payload.mold_costs.testing_amortization_qty == null) payload.mold_costs.testing_amortization_qty = 2000;
+  }
   payload.electronics_extra = payload.electronics_extra || { test_repair: 0, packing_shipping: 0, profit_pct: 10, tax_diff: 0, tax_payable: 0 };
   ['profit_pct', 'tax_diff', 'tax_payable'].forEach(k => { if (payload.electronics_extra[k] == null) payload.electronics_extra[k] = k === 'profit_pct' ? 10 : 0; });
 
@@ -2695,9 +3894,9 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
     </h3>
     <div id="mold-sheet-preview"></div>
     <div id="wb-molds"></div>
+    <div id="wb-molds-shared"></div>
 
-    <h3>生产模具费用</h3>
-    <div id="wb-mold-costs"></div>
+    ${showMoldCosts ? '<h3>生产模具费用</h3><div id="wb-mold-costs"></div>' : ''}
 
     <h3>四、五金
       ${canEdit ? `<small><label class="upload-mold-sheet" style="display:inline-block;margin-left:12px">
@@ -2728,9 +3927,11 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
     <div id="wb-pkmat"></div>
     <div id="wb-carton-calc" style="margin-top:14px"></div>
   `;
+  renderLegacyItems(host, payload, canEdit, onChange);
 
   renderMolds(host.querySelector('#wb-molds'), payload.molds, onChange, canEdit, fxRmbHkd, fxHkdUsd);
-  renderMoldCosts(host.querySelector('#wb-mold-costs'), payload.mold_costs, onChange, canEdit);
+  window.MixedQuotation?.renderEngineeringSharedMolds(host.querySelector('#wb-molds-shared'), payload);
+  if (showMoldCosts) renderMoldCosts(host.querySelector('#wb-mold-costs'), payload.mold_costs, onChange, canEdit);
 
   // 上传模具报价单 → 解析 → 预览 → 应用
   const fileInp = host.querySelector('#mold-sheet-input');
@@ -2743,6 +3944,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
       const r = await fetch('/api/uploads/mold-sheet', { method: 'POST', credentials: 'include', body: fd });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || '解析失败');
+      if (window.MixedQuotation?.previewNumberedImport(preview, j, f, payload)) return;
       // 港币模板先按当前 RMB→HKD 汇率换算成系统存储的 RMB，确保只读“模价 HKD”显示原报价。
       const preferUsd = String(quoteCustomer || '').trim().toUpperCase() === 'TOMY';
       const importedMolds = () => j.molds.map(m => {
@@ -2797,118 +3999,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
   };
 
   // 五金 / 辅助材料 / 包装材料共用统一供应商报价模板；导入预览可逐项选择 MOQ 和币种。
-  const attachSupplierMaterialImport = ({ inputId, previewId, targetKey, label }) => {
-    const fileInput = host.querySelector(inputId);
-    if (!fileInput) return;
-    fileInput.onchange = async (e) => {
-      const file = e.target.files[0]; if (!file) return;
-      const preview = host.querySelector(previewId);
-      preview.innerHTML = '<i class="muted">正在识别 MOQ 与币种报价…</i>';
-      try {
-        const fd = new FormData();
-        fd.append('file', file);
-        fd.append('target_qty', '5000');
-        const response = await fetch('/api/uploads/hardware-sheet', { method: 'POST', credentials: 'include', body: fd });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || '解析失败');
-        const selections = result.items.map(item => ({
-          moqQty: item.moq_qty ?? item.price_tiers?.[0]?.moq_qty ?? null,
-          priceType: item.price_type || (item.source_currency === 'USD' ? 'USD_UNTAXED' : (item.tax_pct ? 'RMB_TAXED' : 'RMB_UNTAXED')),
-        }));
-        const tierOptions = item => {
-          const tiers = Array.isArray(item.price_tiers) ? item.price_tiers : [];
-          const map = new Map();
-          tiers.forEach(tier => { if (tier.moq_qty != null && !map.has(tier.moq_qty)) map.set(tier.moq_qty, tier.moq || tier.moq_qty); });
-          return [...map.entries()].sort((a, b) => a[0] - b[0]);
-        };
-        const selectedItem = (item, index) => {
-          const tiers = Array.isArray(item.price_tiers) ? item.price_tiers : [];
-          if (!tiers.length) return { ...item, source_currency: item.source_currency || 'RMB' };
-          const selection = selections[index];
-          const tier = tiers.find(value => value.moq_qty === selection.moqQty) || tiers[0];
-          const priceTypes = [
-            tier.unit_price_rmb_untaxed != null ? 'RMB_UNTAXED' : null,
-            tier.unit_price_rmb_taxed != null ? 'RMB_TAXED' : null,
-            tier.unit_price_usd != null ? 'USD_UNTAXED' : null,
-          ].filter(Boolean);
-          if (!priceTypes.includes(selection.priceType)) selection.priceType = priceTypes[0] || 'RMB_UNTAXED';
-          const useUsd = selection.priceType === 'USD_UNTAXED';
-          const useTaxedRmb = selection.priceType === 'RMB_TAXED';
-          const baseNote = String(item.note || '').split('；').filter(part => !/^适用MOQ：|^价格来源：/.test(part));
-          const priceSource = useUsd ? 'USD不含税' : (useTaxedRmb ? '人民币含税' : '人民币不含税');
-          return {
-            ...item,
-            moq: tier.moq,
-            moq_qty: tier.moq_qty,
-            source_currency: useUsd ? 'USD' : 'RMB',
-            price_type: selection.priceType,
-            unit_price_rmb: useUsd ? null : (useTaxedRmb ? tier.unit_price_rmb_taxed : tier.unit_price_rmb_untaxed),
-            unit_price_usd: useUsd ? tier.unit_price_usd : null,
-            tax_pct: useTaxedRmb ? 13 : 0,
-            price_source: priceSource,
-            note: [...baseNote, tier.moq ? `适用MOQ：${tier.moq}` : '', `价格来源：${priceSource}`].filter(Boolean).join('；'),
-          };
-        };
-        const renderPreview = () => {
-          const normalizedItems = result.items.map(selectedItem);
-          preview.innerHTML = `
-            <div class="card" style="background:#f0fdf4;border:1px solid #86efac;">
-              <p>从 <b>${escapeHtml(result.sheet_used || '')}</b> 解析到 <b>${normalizedItems.length}</b> 条${escapeHtml(label)}明细；可逐项选择识别到的 MOQ 与币种：</p>
-              <table class="wb-table"><thead><tr>
-                <th>产品名称</th><th>规格 / 材料</th><th>用量</th><th>选择 MOQ</th><th>选择价格类型</th><th>原币单价</th><th>单价 HKD</th><th>备注</th>
-              </tr></thead><tbody>
-              ${normalizedItems.map((item, index) => {
-                const source = result.items[index];
-                const tiers = source.price_tiers || [];
-                const activeTier = tiers.find(tier => tier.moq_qty === selections[index].moqQty) || tiers[0];
-                const priceTypes = activeTier ? [
-                  activeTier.unit_price_rmb_untaxed != null ? ['RMB_UNTAXED', '人民币不含税'] : null,
-                  activeTier.unit_price_rmb_taxed != null ? ['RMB_TAXED', '人民币含税'] : null,
-                  activeTier.unit_price_usd != null ? ['USD_UNTAXED', '美金不含税'] : null,
-                ].filter(Boolean) : [[item.price_type || 'RMB_UNTAXED', item.price_source || item.source_currency || 'RMB']];
-                return `<tr>
-                  <td>${escapeHtml(item.name || '')}</td><td>${escapeHtml(item.spec || '')}</td><td>${escapeHtml(item.qty ?? '')}</td>
-                  <td><select data-tier-index="${index}" ${tiers.length ? '' : 'disabled'}>${tierOptions(source).map(([qty, text]) => `<option value="${qty}" ${qty === item.moq_qty ? 'selected' : ''}>${escapeHtml(text)}</option>`).join('') || `<option>${escapeHtml(item.moq || '')}</option>`}</select></td>
-                  <td><select data-price-type-index="${index}" ${priceTypes.length > 1 ? '' : 'disabled'}>${priceTypes.map(([value, text]) => `<option value="${value}" ${value === item.price_type ? 'selected' : ''}>${text}</option>`).join('')}</select></td>
-                  <td>${escapeHtml(item.source_currency === 'USD' ? item.unit_price_usd : item.unit_price_rmb)}</td>
-                  <td>${escapeHtml(formatNum(freeUnitHkd(item, fxRmbHkd, fxHkdUsd)))}</td><td>${escapeHtml(item.note || '')}</td>
-                </tr>`;
-              }).join('')}
-              </tbody></table>
-              <div style="margin-top:10px">
-                <button data-action="replace">应用（替换全部${escapeHtml(label)}）</button>
-                <button data-action="append" class="mini">追加到现有列表</button>
-                <button data-action="cancel" class="mini danger">取消</button>
-              </div>
-            </div>`;
-          preview.querySelectorAll('[data-tier-index]').forEach(select => select.onchange = () => {
-            selections[Number(select.dataset.tierIndex)].moqQty = Number(select.value);
-            renderPreview();
-          });
-          preview.querySelectorAll('[data-price-type-index]').forEach(select => select.onchange = () => {
-            selections[Number(select.dataset.priceTypeIndex)].priceType = select.value;
-            renderPreview();
-          });
-          const finish = (mode) => {
-            const appliedItems = result.items.map(selectedItem);
-            payload[targetKey] = mode === 'replace'
-              ? appliedItems.map(item => ({ ...item }))
-              : (payload[targetKey] || []).concat(appliedItems.map(item => ({ ...item })));
-            preview.innerHTML = '';
-            fileInput.value = '';
-            renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quoteQty, quoteCustomer);
-            onChange();
-          };
-          preview.querySelector('[data-action="replace"]').onclick = () => finish('replace');
-          preview.querySelector('[data-action="append"]').onclick = () => finish('append');
-          preview.querySelector('[data-action="cancel"]').onclick = () => { preview.innerHTML = ''; fileInput.value = ''; };
-        };
-        renderPreview();
-      } catch (err) {
-        preview.innerHTML = `<div class="card" style="background:#fef2f2;border:1px solid #fecaca">解析失败：${escapeHtml(err.message)}</div>`;
-      }
-    };
-  };
+  const attachSupplierMaterialImport = options => attachSupplierMaterialImportUI(host,payload,canEdit,onChange,fxRmbHkd,fxHkdUsd,quoteQty,quoteCustomer,options);
 
   attachSupplierMaterialImport({ inputId: '#hardware-sheet-input', previewId: '#hardware-sheet-preview', targetKey: 'hardware', label: '五金' });
   attachSupplierMaterialImport({ inputId: '#aux-sheet-input', previewId: '#aux-sheet-preview', targetKey: 'aux_materials', label: '辅助材料' });
@@ -2978,7 +4069,24 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
       td.appendChild(input);
     },
   };
+  const supplierColumn = {
+    key: 'supplier_name', label: '供应商', width: '140px',
+    renderCell: (td, row, { readonly, onChange }) => {
+      if (readonly) { td.textContent = row.supplier_name || row.supplier_id || '未标供应商'; return; }
+      const input = document.createElement('input');
+      input.type = 'text'; input.value = row.supplier_name || row.supplier_id || '';
+      input.placeholder = '填写供应商'; input.maxLength = 100;
+      input.setAttribute('aria-label', '供应商'); input.style.minWidth = '140px';
+      input.oninput = () => {
+        window.SupplierMaterialSync.setSupplier(row, input.value,
+          [...payload.hardware, ...payload.aux_materials, ...payload.packaging_materials]);
+        onChange();
+      };
+      td.appendChild(input);
+    },
+  };
   const freeCols = [
+    supplierColumn,
     { key: 'name', label: '零件名称' },
     { key: 'spec', label: '规格' },
     { key: 'qty', label: '用量', type: 'formula', width: '80px' },
@@ -2994,6 +4102,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
   ];
   // 辅助材料：在五金列基础上插入「类别」列（减税明细按类别统计）
   const auxCols = [
+    supplierColumn,
     { key: 'name', label: '零件名称' },
     { key: 'spec', label: '规格' },
     { key: 'category', label: '类别', type: 'select', options: MAT_CATEGORIES, width: '120px' },
@@ -3030,6 +4139,7 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
 
   // 六、包装材料
   const pkCols = [
+    supplierColumn,
     { key: 'name', label: '零件名称' },
     { key: 'spec', label: '规格', type: 'textarea' },
     { key: 'category', label: '类别', type: 'select', options: MAT_CATEGORIES, width: '120px' },
@@ -3062,17 +4172,20 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
   ['profit_pct', 'tax_diff', 'tax_payable'].forEach(k => { if (payload.electronics_extra[k] == null) payload.electronics_extra[k] = k === 'profit_pct' ? 10 : 0; });
   if (payload.electronics_doc && payload.electronics_doc.parts) {
     payload.electronics_doc.parts_count = elecDetailRowCount(payload.electronics_doc.parts);
-    upgradeLegacyElecSplit(payload, fxRmbHkd);
+    // Existing summary edits must survive detail editing and re-imports.
   }
 
   host.innerHTML = `
     <h3>电子部分
-    ${canEdit ? '<button class="mini" id="el-import" type="button" style="margin-left:10px">📄 导入登信报价单</button><input id="el-file" type="file" accept=".xls,.xlsx" style="display:none"/><button class="mini" id="el-import-lianxiang" type="button" style="margin-left:6px">📄 导入联翔报价单</button><input id="el-file-lianxiang" type="file" accept=".xls,.xlsx" style="display:none"/>' : ''}
-    ${canEdit && payload.electronics_doc ? '<button class="mini" id="el-summarize" type="button" style="margin-left:6px">🔄 由明细汇总成 逐项IC + PACB</button>' : ''}
-    ${payload.electronics_doc ? `<small style="margin-left:8px;color:#16a34a">✓ 已导入 ${payload.electronics_doc.parts_count} 行 · 原币 ${payload.electronics_doc.source_currency || 'RMB'} (${payload.electronics_doc.imported_at || ''})</small>` : ''}
+    <button class="mini" id="el-import" type="button" ${canEdit ? '' : 'disabled title="请先进入编辑模式"'}>📄 导入登信报价单</button>
+    <button class="mini" id="el-import-lianxiang" type="button" ${canEdit ? '' : 'disabled title="请先进入编辑模式"'}>📄 导入联翔报价单</button>
+    ${canEdit ? '<input id="el-file" type="file" accept=".xls,.xlsx" hidden/><input id="el-file-lianxiang" type="file" accept=".xls,.xlsx" hidden/>' : '<small class="muted">进入编辑后可导入 Excel</small>'}
+    ${canEdit ? '<button class="mini" id="el-detail-add" type="button" style="margin-left:6px">+ 手动新增明细</button>' : ''}
+    ${canEdit && payload.electronics_doc ? '<button class="mini" id="el-summarize" type="button" style="margin-left:6px">🔄 汇总明细并追加到总表</button>' : ''}
+    ${payload.electronics_doc ? `<small style="margin-left:8px;color:#16a34a">✓ 明细 ${payload.electronics_doc.parts_count} 行 · 原币 ${payload.electronics_doc.source_currency || 'RMB'} (${payload.electronics_doc.imported_at || ''})</small>` : ''}
     </h3>
-    <div id="el-import-preview"></div>
     <h4 style="margin-top:14px;color:#475569">总表（报价明细 用）</h4>
+    <div id="el-import-preview"></div>
     <div id="wb-elec"></div>
     <div id="wb-elec-detail"></div>
     <div id="wb-elec-fees"></div>
@@ -3080,7 +4193,9 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
   `;
   const refreshes = [];
   const wrappedOnChange = () => { refreshes.forEach(f => f()); onChange(); };
-  renderHierElectronics(host.querySelector('#wb-elec'), payload.electronics, wrappedOnChange, canEdit, fxRmbHkd, payload, fxHkdUsd);
+  const summaryWasAutomatic = !payload.electronics_summary_manual && JSON.stringify(payload.electronics) === payload.electronics_summary_baseline;
+  renderHierElectronics(host.querySelector('#wb-elec'), payload.electronics, () => { payload.electronics_summary_manual = true; wrappedOnChange(); }, canEdit, fxRmbHkd, payload, fxHkdUsd);
+  if (summaryWasAutomatic) payload.electronics_summary_baseline = JSON.stringify(payload.electronics);
   // 总表 小计 卡片（仅 IC + PACB电子 等当前 electronics 数组的合计）
   const sumHost = document.createElement('div');
   host.querySelector('#wb-elec').appendChild(sumHost);
@@ -3107,7 +4222,7 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
     detailHost.innerHTML = `
       <details style="margin-top:14px" ${doc._open ? 'open' : ''}>
         <summary style="cursor:pointer;color:#475569;font-weight:600;padding:6px 0">
-          📋 细表（导入的 ${doc.parts_count} 行明细 · 原币 ${sourceCurrency} — 会写进 电子明细 sheet）
+          📋 细表（${doc.parts_count} 行明细 · 原币 ${sourceCurrency} — 会写进 电子明细 sheet）
         </summary>
         <table class="wb-table" style="margin-top:8px;font-size:13px">
           <thead><tr>
@@ -3170,18 +4285,14 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
     });
     if (canEdit) {
       // 总表仍是「逐项 IC + PACB电子」（由明细汇总出来的）时，细表改动自动联动。
-      const isDerivedSummary = () => isDerivedElectronicSummary(payload.electronics);
+      const isDerivedSummary = () => !payload.electronics_summary_manual && (!(payload.electronics || []).length || JSON.stringify(payload.electronics) === payload.electronics_summary_baseline);
       const autoResummarize = () => {
-        if (!isDerivedSummary()) return;
+
         const fxH = num((payload._fx_rmb_hkd) || fxRmbHkd) || 0.85;
         const sp = elecImportedSummaryRows(doc, payload.electronics_extra || doc.extras || {}, fxH);
         const taxLabel = payload.electronics[0]?.tax_label || (doc.meta && doc.meta.tax_label) || '含税';
         const freshRows = buildElectronicSummaryRows(sp, taxLabel);
-        if (freshRows.length === payload.electronics.length) {
-          freshRows.forEach((row, index) => Object.assign(payload.electronics[index], row));
-        } else {
-          payload.electronics = freshRows;
-        }
+        syncElectronicDetailSummary(payload, freshRows);
         paintSummarySubtotal();
       };
       tbody.querySelectorAll('input').forEach(inp => {
@@ -3203,14 +4314,12 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
             const tr = inp.closest('tr');
             if (tr && tr.children[5]) tr.children[5].textContent = formatNum(num(target.qty) * num(target.source_unit_price));
             if (isForeignSource && tr && tr.children[6]) tr.children[6].textContent = formatNum(electronicSourceToHkd(num(target.qty) * num(target.source_unit_price), sourceCurrency, fxRmbHkd, fxHkdUsd));
-            autoResummarize();
           }
+          autoResummarize();
           onChange();
         };
         // 失焦时整表重渲染，同步总表行单价/金额 + 成本汇总
-        if (inp.dataset.k === 'qty' || inp.dataset.k === 'unit_price' || inp.dataset.k === 'source_unit_price') {
-          inp.onchange = () => { if (isDerivedSummary()) renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd); };
-        }
+        inp.onchange = () => renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd);
       });
       tbody.querySelectorAll('.el-detail-del').forEach(btn => {
         btn.onclick = () => {
@@ -3234,7 +4343,7 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
       detailHost.querySelector('details').ontoggle = (e) => { doc._open = e.target.open; };
     }
   } else {
-    detailHost.innerHTML = '<p class="muted" style="margin-top:10px;font-size:13px">尚未导入电子细表 — 点上方"📄 导入电子报价单"</p>';
+    detailHost.innerHTML = `<p class="muted" style="margin-top:10px;font-size:13px">${canEdit ? '尚无电子细表 — 点击“手动新增明细”填写零件资料' : '尚无电子细表 — 请先进入编辑，再手动新增明细'}</p>`;
   }
   const feeHost = host.querySelector('#wb-elec-fees');
   const sourceFees = payload.electronics_doc?.extras?.other_fees || [];
@@ -3263,21 +4372,29 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
   }
   renderElecExtra(host.querySelector('#wb-elec-extra'), payload, wrappedOnChange, canEdit, fxRmbHkd, fxHkdUsd);
   if (canEdit) {
+    host.querySelector('#el-detail-add').onclick = () => {
+      const doc = payload.electronics_doc ||= { source_currency: 'RMB', parts: [], extras: {}, meta: {} };
+      doc.parts ||= [];
+      doc.parts.push({ name: '', spec: '', qty: 1, source_unit_price: 0, unit_price: 0, note: '' });
+      doc.parts_count = elecDetailRowCount(doc.parts);
+      doc._open = true;
+      const split = elecImportedSummaryRows(doc, payload.electronics_extra || {}, num(fxRmbHkd) || 0.85);
+      syncElectronicDetailSummary(payload, buildElectronicSummaryRows(split, doc.meta?.tax_label || '含税'));
+      onChange();
+      renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd);
+    };
     // 由明细一键汇总成逐项 IC + PACB电子。
     const sumBtn = host.querySelector('#el-summarize');
     if (sumBtn) sumBtn.onclick = () => {
       const doc = payload.electronics_doc;
-      if (!doc || !doc.parts) { alert('没有导入的明细数据'); return; }
-      if (payload.electronics && payload.electronics.length > 1 && !isDerivedElectronicSummary(payload.electronics)
-        && !confirm('当前总表有 ' + payload.electronics.length + ' 行，确认重置为逐项 IC + PACB电子（手填数据会丢失）？')) return;
+      if (!doc || !doc.parts) { alert('请先手动新增明细'); return; }
       const fxHere = num((payload._fx_rmb_hkd) || fxRmbHkd) || 0.85;
       const sp = elecImportedSummaryRows(doc, payload.electronics_extra || doc.extras || {}, fxHere);
       const taxLabel = (doc.meta && doc.meta.tax_label) || '含税';
-      payload.electronics = buildElectronicSummaryRows(sp, taxLabel);
+      syncElectronicDetailSummary(payload, buildElectronicSummaryRows(sp, taxLabel));
       onChange();
       renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd);
     };
-
     // 导入
     const impPreview = host.querySelector('#el-import-preview');
     const importers = [
@@ -3316,21 +4433,21 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
               ${moldFees.length ? `<p class="muted">模具费用：${moldFees.map(fee => `${escapeHtml(fee.name || '模费')} ${escapeHtml(fee.currency || detectedCurrency)} ${formatNum(fee.amount)}`).join('；')}（单独记录，不自动摊入单价）</p>` : ''}
               ${j.meta && j.meta.moq ? `<p class="muted">MOQ：${formatNum(j.meta.moq)}（作为报价条件保存，不自动摊销）</p>` : ''}
               <p class="muted">换算汇率：1 USD = ${fxHkdUsd} HKD；1 RMB = ${formatNum(1 / (num(fxRmbHkd) || 0.85))} HKD。</p>
-              <p class="muted">导入后会替换电子表；导出 Excel 时会附加“电子明细”分表。</p>
+              <p class="muted">应用后替换下方细表及费用参数；上方总表手动编辑的行会保留，自动汇总行按明细更新；导出 Excel 时会附加“电子明细”分表。</p>
               <div style="margin-top:10px;display:flex;gap:8px">
                 <button id="el-imp-apply">应用</button>
                 <button id="el-imp-cancel" class="mini danger">取消</button>
               </div>
             </div>`;
           impPreview.querySelector('#el-imp-apply').onclick = () => {
-            // 导入应用后总表重置为逐项 IC + PACB电子（IC 对应源价，其余费用归 PACB）。
+            if (payload.electronics_doc?.parts?.length && !confirm('应用导入将替换现有电子细表及费用参数，保留总表中手动编辑的行。是否继续？')) return;
             // 明细是 RMB，总表单价是 HKD：单价 HKD = RMB ÷ 汇率（与税点下拉/由明细汇总按钮口径一致）
             const fx = num(fxRmbHkd) || 0.85;
             j.source_currency = impPreview.querySelector('#el-source-currency').value;
             const normalized = normalizeElectronicImport(j, fx, fxHkdUsd);
             const sp = elecImportedSummaryRows(normalized, normalized.extras || {}, fx);
             const taxLabel = (normalized.meta && normalized.meta.tax_label) || '含税';
-            payload.electronics = buildElectronicSummaryRows(sp, taxLabel);
+            syncElectronicDetailSummary(payload, buildElectronicSummaryRows(sp, taxLabel));
             if (normalized.extras) {
               payload.electronics_extra = payload.electronics_extra || {};
               ['test_repair', 'packing_shipping', 'profit_pct', 'tax_diff', 'tax_payable', 'bonding_cost', 'smt_cost', 'labor_cost'].forEach(k => {
@@ -3350,10 +4467,12 @@ function renderElectronic(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd) 
           };
           impPreview.querySelector('#el-imp-cancel').onclick = () => { impPreview.innerHTML = ''; impFile.value = ''; };
         } catch (err) {
-          impPreview.innerHTML = `<div class="card" style="background:#fef2f2;border:1px solid #fecaca;margin-top:10px">解析失败：${err.message}</div>`;
+          impPreview.innerHTML = `<div class="card" style="background:#fef2f2;border:1px solid #fecaca;margin-top:10px">解析失败：${escapeHtml(err.message)}</div>`;
         }
       };
     });
+
+
   }
 }
 
@@ -3376,46 +4495,70 @@ const DEFAULT_MACHINE_PRICES = [
 
 // 按 机型 在机型价表里找最匹配
 function lookupMachinePrice(model, prices) {
-  if (!model || !prices || !prices.length) return null;
-  const t = String(model).replace(/\s+/g, '').toUpperCase();
-  // 精确匹配（区间，如 4A-6A → 把 t==4A or 5A or 6A 都识别）
-  const tNum = parseFloat(t);
-  for (const p of prices) {
-    const m = String(p.model).toUpperCase().replace(/\s+/g, '');
-    const rangeMatch = m.match(/^([\d.]+)A?-([\d.]+)A?$/);  // 兼容 "4A-6A" 与 "30-32A"
-    if (rangeMatch) {
-      const lo = +rangeMatch[1], hi = +rangeMatch[2];
-      if (!isNaN(tNum) && tNum >= lo && tNum <= hi) return p;
+  return window.InjectionPricing.lookupMachinePrice(model, prices);
+}
+
+function syncInjectionMolds(payload, refMolds) {
+  const key = row => [row.product_group_id || row.product_group_name || '',
+    row.mold_no || '', row.name || '', row.mold_part_index ?? 0].join('|');
+  const existingRows = new Map(payload.injection.map(row => [key(row), row]));
+  payload.injection = refMolds.map(m => {
+    const existing = existingRows.get(key(m));
+    const next = {
+      ...(existing || {}),
+      product_group_id: m.product_group_id || '',
+      product_group_name: m.product_group_name || '',
+      product_group_rows: m.product_group_rows || [],
+      product_image: m.product_image || '',
+      source_sheet_name: m.source_sheet_name || '',
+      source_sheet_index: m.source_sheet_index ?? null,
+      mold_no: m.mold_no || existing?.mold_no || '',
+      name: m.name,
+      mold_size: m.mold_size || existing?.mold_size || '',
+      material: m.material || existing?.material || '',
+      material_grade: m.material_grade || existing?.material_grade || '',
+      color: m.color || existing?.color || '',
+      cavity: m.cavity || existing?.cavity || '',
+      weight_g: m.weight_g ?? existing?.weight_g ?? null,
+      mold_part_index: m.mold_part_index ?? 0,
+      mold_part_count: m.mold_part_count ?? 1,
+      cycle_sec: m.cycle_sec ?? existing?.cycle_sec ?? null,
+      sets: existing?.sets ?? (m.sets || 1),
+      machine: m.machine || existing?.machine || '',
+      machine_model: m.machine_model || existing?.machine_model || '',
+      target: existing?.target ?? m.target ?? null,
+      material_unit_price: m.material_unit_price ?? existing?.material_unit_price ?? null,
+      shot_price: existing?.shot_price ?? m.shot_price ?? null,
+      note: m.note || existing?.note || '',
+    };
+    if (!existing || window.InjectionPricing.signature(existing, payload.machine_prices) !==
+        window.InjectionPricing.signature(next, payload.machine_prices)) {
+      window.InjectionPricing.reprice(next, payload.machine_prices);
     }
-    if (m === t) return p;
-  }
-  // 退而求其次：包含
-  return prices.find(p => t.includes(String(p.model).toUpperCase().replace(/\s+/g,''))) || null;
+    return next;
+  });
 }
 
 // 啤机部料价表默认值（HK$/Lb，2026 年）
-const DEFAULT_MATERIAL_PRICES = [
-  { name: 'ABS', model: '750SW', price: 8.50 },
-  { name: 'ABS', model: '抽粒料', price: 4.60 },
-  { name: '透明ABS', model: 'TR558/920', price: 12.50 },
-  { name: 'HIPS', model: 'HI425', price: 7.80 },
-  { name: 'GP', model: 'MW-1', price: 7.80 },
-  { name: '1#PP', model: 'JM350/K8009', price: 6.80 },
-  { name: '1#PP', model: '7032 E3', price: 6.80 },
-  { name: '透明PP', model: '5090T', price: 7.80 },
-  { name: 'POM', model: 'F3003/M9044', price: 16.50 },
-  { name: 'POM', model: 'PM820/DM220', price: 21.50 },
-  { name: 'PVC', model: '普通透明', price: 9.00 },
-  { name: 'PVC', model: '普通本白', price: 8.00 },
-  { name: 'LDPE', model: 'G812', price: 7.80 },
-  { name: 'HDPE', model: 'HMA016', price: 8.00 },
-  { name: 'TPR', model: '本白橡胶料', price: 15.00 },
-  { name: 'TPR', model: '透明橡胶料', price: 17.00 },
-  { name: 'K料', model: 'KR-03NW', price: 15.00 },
-  { name: 'PC料', model: '2605', price: 12.50 },
+const DEFAULT_MATERIAL_PRICES = window.MixedMolds?.DEFAULT_MATERIAL_PRICES || [
+  { name: 'ABS', model: '750SW', price: 6.50 },
+  { name: '透明ABS', model: 'TR558/920', price: 10.00 },
+  { name: 'HIPS', model: 'HI425', price: 6.00 },
+  { name: 'GP', model: 'MW-1', price: 6.80 },
+  { name: '1#PP', model: 'JM350/K8009', price: 5.80 },
+  { name: '1#PP', model: '7032 E3', price: 5.80 },
+  { name: '透明PP', model: '5090T', price: 6.50 },
+  { name: 'POM', model: 'F3003/M9044', price: 13.50 },
+  { name: 'POM', model: 'PM820/DM220', price: 18.00 },
+  { name: 'PVC', model: '普通透明', price: 7.20 },
+  { name: 'PVC', model: '普通本白', price: 6.20 },
+  { name: 'LDPE', model: 'G812', price: 6.50 },
+  { name: 'HDPE', model: 'HMA016', price: 6.90 },
+  { name: 'TPR', model: '本白橡胶料', price: 13.80 },
+  { name: 'TPR', model: '透明橡胶料', price: 16.10 },
+  { name: 'K料', model: 'KR-03NW', price: 12.50 },
+  { name: 'PC料', model: '2605', price: 10.80 },
 ];
-
-// 料型列在注塑主表中隐藏：有料型时优先精确匹配；无匹配时按材质取参考表首条默认价。
 function lookupMaterialPrice(material, grade, prices) {
   if (!prices || !prices.length) return null;
   if (!material) return null;
@@ -3431,6 +4574,7 @@ function lookupMaterialPrice(material, grade, prices) {
   });
   return exact || candidates[0];
 }
+
 
 function isBlankInjectionPrice(value) {
   return value === null || value === undefined || value === '';
@@ -3461,17 +4605,16 @@ function applyInjectionReferencePrices(payload, { overwrite = false, material = 
 
     if (machine) {
       const matchedMachine = lookupMachinePrice(row.machine_model, payload.machine_prices);
-      const sets = num(row.sets) || 1;
-      const target = num(row.target) || 0;
-      if ((overwrite || isBlankInjectionPrice(row.shot_price)) && matchedMachine && target > 0) {
-        const nextPrice = num(row.mold_part_index) > 0
-          ? 0
-          : +(num(matchedMachine.price) / sets / target).toFixed(4);
+      const nextPrice = window.InjectionPricing.calculate(row, payload.machine_prices);
+      if (row.catalog_raw_weight != null) continue;
+      if ((overwrite || isBlankInjectionPrice(row.shot_price)) && nextPrice !== null) {
         if (row.shot_price !== nextPrice) changed = true;
         row.shot_price = nextPrice;
         machineHits++;
-      } else if ((overwrite || isBlankInjectionPrice(row.shot_price)) && row.machine_model && (!matchedMachine || target <= 0)) {
-        machineMisses.push(`${row.machine_model}${target <= 0 ? '(无目标数)' : ''}`);
+      } else if (overwrite || isBlankInjectionPrice(row.shot_price)) {
+        if (row.shot_price !== null) changed = true;
+        row.shot_price = null;
+        machineMisses.push(`${row.machine_model || '(无机型)'}(请补齐有效机型价、套数和目标数)`);
       }
       if (!row.machine && matchedMachine && matchedMachine.normal) {
         row.machine = matchedMachine.normal;
@@ -3584,16 +4727,18 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     applyInjectionReferencePrices(payload, { overwrite: false });
   }
 
-  const canEditPrices = canEdit;
+  const canEditPrices = canEdit || payload.mixed_reference_editable === true;
   host.innerHTML = `
     <h3>二、注塑部分 <small>料损耗 %
       <input id="inj-loss" type="number" step="any" style="width:60px" value="${payload.injection_loss_pct ?? 3}" ${canEdit ? '' : 'disabled'} />
     </small>
-    ${canEdit && refMolds && refMolds.length ? `<small style="margin-left:12px"><button id="btn-sync-mold" class="mini" type="button">📥 从工程拉取/同步模具 (${refMolds.length})</button></small>` : ''}
+    ${canEdit ? `<small style="margin-left:12px"><button id="btn-sync-mold" class="mini" type="button">📥 从工程拉取/同步模具 (${refMolds?.length || 0})</button></small>` : ''}
     ${canEdit ? `<small style="margin-left:8px"><button id="btn-auto-price" class="mini" type="button">🔄 自动按材质套料价</button></small>` : ''}
     ${canEdit ? `<small style="margin-left:6px"><button id="btn-auto-shot" class="mini" type="button">🔄 自动按机型套啤价</button></small>` : ''}
     </h3>
+    <p class="muted">啤价＝本单机型台班费用 ÷ 目标数 ÷ 套数；修改机型、目标数、套数或机型费用时自动重算。修改后请保存本部门草稿。</p>
     <div id="wb-inj"></div>
+    <div id="wb-inj-shared"></div>
     <div id="wb-inj-summary"></div>
 
     <h3 id="blow-heading">二·B、吹气部分 <small class="muted">(单价含港币)</small>
@@ -3630,6 +4775,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       </div>
     </details>
   `;
+  renderLegacyItems(host, payload, canEdit, onChange);
 
   // 料价表
   const mpCols = [
@@ -3640,7 +4786,23 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
   ];
   // 参考表改动仅保存到当前报价单，不反向覆盖全局参考表。
   const onMatChange = () => { onChange(); };
-  const onMachChange = () => { onChange(); };
+  const shotRefreshers = new WeakMap();
+  const machineRefreshers = new WeakMap();
+  const priceSignatures = new WeakMap(payload.injection.map(row => [row,
+    window.InjectionPricing.signature(row, payload.machine_prices)]));
+  let refreshInjectionTotals = onChange;
+  const refreshShot = row => {
+    window.InjectionPricing.reprice(row, payload.machine_prices);
+    priceSignatures.set(row, window.InjectionPricing.signature(row, payload.machine_prices));
+    machineRefreshers.get(row)?.();
+    shotRefreshers.get(row)?.();
+  };
+  const refreshChangedMachinePrices = () => {
+    for (const row of payload.injection) {
+      if (priceSignatures.get(row) !== window.InjectionPricing.signature(row, payload.machine_prices)) refreshShot(row);
+    }
+  };
+  const onMachChange = () => { refreshChangedMachinePrices(); refreshInjectionTotals(); };
   renderTable(host.querySelector('#wb-material-prices'), mpCols, payload.material_prices, { readonly: !canEditPrices, onChange: onMatChange });
 
   // 机型价表
@@ -3662,6 +4824,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       ]);
       if (mat.length) payload.material_prices = JSON.parse(JSON.stringify(mat));
       if (mac.length) payload.machine_prices = JSON.parse(JSON.stringify(mac));
+      refreshChangedMachinePrices();
       applyInjectionReferencePrices(payload, { overwrite: false });
       onChange();
       renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, userRole);
@@ -3691,43 +4854,21 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
 
   if (canEdit) {
     const syncBtn = host.querySelector('#btn-sync-mold');
-    if (syncBtn) syncBtn.onclick = () => {
-      if (!confirm(`将根据工程已填的 ${refMolds.length} 副模具同步注塑表。已填行（按"模具名称"匹配）会保留其他字段，新增的会追加，工程已删除的会移除。继续？`)) return;
-      const syncKey = row => [
-        row.product_group_id || row.product_group_name || '',
-        row.mold_no || '', row.name || '', row.mold_part_index ?? 0,
-      ].join('|');
-      const byName = new Map(payload.injection.map(r => [syncKey(r), r]));
-      payload.injection = refMolds.map(m => {
-        const existing = byName.get(syncKey(m)) || {};
-        return {
-          ...existing,
-          product_group_id: m.product_group_id || '',
-          product_group_name: m.product_group_name || '',
-          product_group_rows: m.product_group_rows || [],
-          product_image: m.product_image || '',
-          source_sheet_name: m.source_sheet_name || '',
-          source_sheet_index: m.source_sheet_index ?? null,
-          mold_no: m.mold_no || existing.mold_no || '',
-          name: m.name,
-          mold_size: m.mold_size || existing.mold_size || '',
-          material: m.material || existing.material || '',
-          material_grade: m.material_grade || existing.material_grade || '',
-          color: m.color || existing.color || '',
-          cavity: m.cavity || existing.cavity || '',
-          weight_g: m.weight_g ?? existing.weight_g ?? null,
-          mold_part_index: m.mold_part_index ?? 0,
-          mold_part_count: m.mold_part_count ?? 1,
-          cycle_sec: m.cycle_sec ?? existing.cycle_sec ?? null,
-          sets: existing.sets ?? (m.sets || 1),
-          machine: m.machine || existing.machine || '',
-          machine_model: m.machine_model || existing.machine_model || '',
-          target: m.target ?? existing.target ?? null,
-          material_unit_price: m.material_unit_price ?? existing.material_unit_price ?? null,
-          shot_price: num(m.mold_part_index) > 0 ? 0 : (m.shot_price ?? existing.shot_price ?? null),
-          note: m.note || existing.note || '',
-        };
-      });
+    if (syncBtn) syncBtn.onclick = async () => {
+      syncBtn.disabled = true;
+      try {
+        const quoteId = window.__data?.quote?.id;
+        if (quoteId) {
+          const latest = await api('/quotes/' + quoteId);
+          refMolds = latest.engineering_molds || [];
+        }
+      } catch (error) {
+        alert('读取工程模具失败：' + error.message);
+        return;
+      } finally { syncBtn.disabled = false; }
+      if (!refMolds?.length) { alert('工程部分尚无已保存的模具，请先保存工程模具草稿。'); return; }
+      if (!confirm(`将根据工程已填的 ${refMolds.length} 副模具同步注塑表。已填行按产品组、模号及名称匹配，保留啤机已填目标数和套数；机型变化会重算啤价。新增的会追加，工程已删除的会移除。继续？`)) return;
+      syncInjectionMolds(payload, refMolds);
       applyInjectionReferencePrices(payload, { overwrite: false });
       onChange(); renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, userRole);
     };
@@ -3810,12 +4951,32 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     { key: 'material_unit_price', label: '料价 HK$/g', type: 'number', width: '110px' },
     { key: 'raw_unit', label: '原料单价 HK$', readonly: true, width: '100px',
       calc: r => num(r.weight_g) * (1 + num(payload.injection_loss_pct ?? 3)/100) * num(r.material_unit_price) },
-    { key: 'machine', label: '机台', width: '90px', className: 'molding-machine-key' },
-    { key: 'shot_price', label: '啤价(HK$/啤)', type: 'number', width: '100px' },
+    { key: 'machine', label: '机台', width: '90px', className: 'molding-machine-key',
+      renderCell: (td, row, { readonly, onChange }) => {
+        if (readonly) { td.textContent = row.machine || lookupMachinePrice(row.machine_model, payload.machine_prices)?.normal || '—'; return; }
+        const input = document.createElement('input');
+        input.type = 'text'; input.style.minWidth = '90px'; input.value = row.machine || '';
+        machineRefreshers.set(row, () => { input.value = row.machine || ''; });
+        input.oninput = () => { row.machine = input.value; onChange(); };
+        td.appendChild(input);
+      } },
+    { key: 'shot_price', label: payload.injection.some(r => r.catalog_raw_weight != null) ? '零件啤工(HK$/件)' : '啤价(HK$/啤)', type: 'number', width: '100px',
+      renderCell: (td, row, { readonly, refreshCalcs, onChange }) => {
+        const input = document.createElement('input');
+        input.type = 'number'; input.step = 'any'; input.readOnly = readonly;
+        input.style.minWidth = '100px';
+        const refresh = () => { input.value = row.shot_price ?? ''; refreshCalcs(); };
+        shotRefreshers.set(row, refresh); refresh();
+        if (!readonly) input.oninput = () => {
+          row.shot_price = input.value === '' ? null : Number(input.value);
+          refreshCalcs(); onChange();
+        };
+        td.appendChild(input);
+      } },
     { key: 'cavity', label: '出模数', width: '80px' },
-    { key: 'sets', label: '套数', type: 'number', width: '70px' },
-    { key: 'machine_model', label: '机型', width: '90px', className: 'molding-machine-key' },
-    { key: 'target', label: '目标数', type: 'number', width: '100px', className: 'molding-machine-key' },
+    { key: 'sets', label: '套数', type: 'number', width: '70px', onValue: refreshShot },
+    { key: 'machine_model', label: '机型', width: '90px', className: 'molding-machine-key', onValue: refreshShot },
+    { key: 'target', label: '目标数', type: 'number', width: '100px', className: 'molding-machine-key', onValue: refreshShot },
     { key: 'mold_size', label: '模具尺寸', width: '130px' },
     { key: 'cycle_sec', label: '周期(秒)', type: 'number', width: '80px' },
     { key: 'finished_amt', label: '成品金额 HK$', readonly: true, width: '100px',
@@ -3826,6 +4987,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     { key: 'note', label: '备注' },
   ];
   const wrappedOnChange = (() => { const fns = []; const w = () => { fns.forEach(f => f()); onChange(); }; w._fns = fns; return w; })();
+  refreshInjectionTotals = wrappedOnChange;
   const injectionGroupsForTable = injectionProductGroups(payload);
   const showInjectionGroups = injectionGroupsForTable.length > 1;
   const injectionGroupMeta = new Map(injectionGroupsForTable.map((group, index) => [group.key, {
@@ -3870,6 +5032,25 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     } : null,
   });
 
+  if (payload.mixed_group_by_mold && !canEdit) {
+    const table = host.querySelector('#wb-inj table');
+    const headers = [...table.querySelectorAll('thead th')];
+    const column = headers.findIndex(th => th.textContent.trim() === '模号');
+    const rows = [...table.querySelectorAll('tbody tr')].filter(row => row.cells.length === headers.length);
+    if (column >= 0 && rows.length === payload.injection.length) {
+      for (let start = 0; start < rows.length;) {
+        const code = String(payload.injection[start].mold_no || '').trim();
+        let end = start + 1;
+        while (code && end < rows.length && String(payload.injection[end].mold_no || '').trim() === code) end++;
+        const cell = rows[start].cells[column];
+        cell.rowSpan = end - start;
+        cell.style.cssText += ';vertical-align:middle;font-weight:600;background:#eaf0f8;white-space:nowrap';
+        for (let i = start + 1; i < end; i++) rows[i].deleteCell(column);
+        start = end;
+      }
+    }
+  }
+
   // 二、注塑 成本汇总 — 分项求和：原料单价 / 啤价 / 成品金额
   const injCard = host.querySelector('#wb-inj-summary');
   const paintInj = () => {
@@ -3877,18 +5058,22 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     const rows = payload.injection || [];
     const lossM = 1 + num(payload.injection_loss_pct ?? 3) / 100;  // 料损耗（默认3%）
     const rawSum = weightedInjectionSum(payload, r => num(r.weight_g) * lossM * num(r.material_unit_price));
-    const shotSum = weightedInjectionSum(payload, r => num(r.shot_price));
+    const allocation = window.MixedQuotation?.renderMoldingAllocation(host.querySelector('#wb-inj-shared'), payload) || { amount: 0 };
+    // Read-only allocation is included here but not saved as another injection row.
+    const directShotSum = weightedInjectionSum(payload, r => num(r.shot_price));
+    const shotSum = directShotSum + allocation.amount;
     const finishedSum = rawSum + shotSum;
+    const formatTotal = value => allocation.error ? '待完善' : formatNum(value);
     const groups = injectionProductGroups(payload);
     const hasMultipleProducts = groups.length > 1;
-    const totalRatio = sum(groups, group => productMixRatio(payload, group.key));
+    const totalRatio = sum(groups.filter(g => !directProductGroup(payload, g.key)), group => productMixRatio(payload, group.key));
     const groupCards = groups.map(group => {
       const groupRaw = sum(group.rows, item => num(item.row.weight_g) * lossM * num(item.row.material_unit_price));
       const groupShot = sum(group.rows, item => num(item.row.shot_price));
       const groupFinished = groupRaw + groupShot;
       return `<div class="ls-row" style="background:#f0f9ff;color:#075985">
         <span class="ls-label">${escapeHtml(group.name)} 小计（${group.rows.length} 行）</span>
-        <span class="ls-val">HK$ ${formatNum(groupFinished)} ${hasMultipleProducts ? `× 配比
+        <span class="ls-val">HK$ ${formatNum(groupFinished)} ${productModeSelect(payload, group.key, canEdit)} ${hasMultipleProducts && !directProductGroup(payload, group.key) ? `× 配比
           <input class="product-mix-ratio" data-group="${escapeHtml(group.key)}" type="number" min="0" step="any"
             value="${productMixRatio(payload, group.key)}" ${canEdit ? '' : 'disabled'} style="width:72px;margin:0 6px">` : ''}
           <small class="muted">原料 ${formatNum(groupRaw)} + 啤价 ${formatNum(groupShot)}</small>
@@ -3900,10 +5085,17 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       <div class="ls-title">二、注塑 成本汇总</div>
       ${groupCards}
       <div class="ls-row"><span class="ls-label">原料单价 ${hasMultipleProducts ? '加权平均' : '总'}</span><span class="ls-val">${formatNum(rawSum)}</span></div>
-      <div class="ls-row"><span class="ls-label">啤价 ${hasMultipleProducts ? '加权平均' : '总'}</span><span class="ls-val">${formatNum(shotSum)}</span></div>
-      <div class="ls-row hi"><span class="ls-label">成品金额 ${hasMultipleProducts ? `加权平均（总配比 ${formatNum(totalRatio)}）` : '总'} HK$</span><span class="ls-val">${formatNum(finishedSum)}</span></div>
-      <div class="ls-row hi"><span class="ls-label">合计 RMB</span><span class="ls-val">${formatNum(finishedSum * fxv)} <small class="muted">(汇率 ${fxv})</small></span></div>
+      ${allocation.hasRows ? `<div class="ls-row"><span class="ls-label">本款明细啤价</span><span class="ls-val">${formatNum(directShotSum)}</span></div><div class="ls-row"><span class="ls-label">共模分摊啤价</span><span class="ls-val">${formatTotal(allocation.amount)}</span></div>` : ''}
+      <div class="ls-row"><span class="ls-label">啤价 ${hasMultipleProducts ? '加权平均' : '总'}</span><span class="ls-val">${formatTotal(shotSum)}</span></div>
+      <div class="ls-row hi"><span class="ls-label">成品金额 ${hasMultipleProducts ? `配比平均 + 直接累加（总配比 ${formatNum(totalRatio)}）` : '总'} HK$</span><span class="ls-val">${formatTotal(finishedSum)}</span></div>
+      <div class="ls-row hi"><span class="ls-label">合计 RMB</span><span class="ls-val">${formatTotal(finishedSum * fxv)} <small class="muted">(汇率 ${fxv})</small></span></div>
     `;
+    injCard.querySelectorAll('.product-mix-mode').forEach(input => {
+      input.onchange = () => {
+        (payload.product_mix_modes ||= {})[input.dataset.group] = input.value;
+        paintInj(); onChange();
+      };
+    });
     injCard.querySelectorAll('.product-mix-ratio').forEach(input => {
       input.onchange = () => {
         payload.product_mix_ratios[input.dataset.group] = Math.max(0, num(input.value));
@@ -4102,12 +5294,14 @@ function renderPainting(host, payload, canEdit, onChange, fxRmbHkd) {
 
   host.innerHTML = `
     <h3 style="display:flex;align-items:center;gap:10px">三、二次加工（印喷报价）
-      ${canEdit ? `<button class="mini" id="pp-import" type="button">📄 导入喷油核价表</button>
-      <input id="pp-file" type="file" accept=".xls,.xlsx" style="display:none"/>` : ''}
+      <button class="mini" id="pp-import" type="button" ${canEdit ? '' : 'disabled title="请先进入编辑模式"'}>📄 导入喷油核价表</button>
+      ${canEdit ? '<input id="pp-file" type="file" accept=".xls,.xlsx" style="display:none"/>' : '<small class="muted">进入编辑后可导入 Excel</small>'}
     </h3>
+    <p class="muted">各工序单价按当前产品实际报价填写，金额按数量 × 单价计算。</p>
     <div id="pp-import-preview"></div>
     <div id="wb-pp"></div>
   `;
+  renderLegacyItems(host, payload, canEdit, onChange);
 
   const wrappedOnChange = (() => { const fns = []; const w = () => { fns.forEach(f => f()); onChange(); }; w._fns = fns; return w; })();
   renderPaintingTable(host.querySelector('#wb-pp'), payload, wrappedOnChange, canEdit);
@@ -4141,7 +5335,7 @@ function renderPainting(host, payload, canEdit, onChange, fxRmbHkd) {
             <p>从 <b>${escapeHtml(j.sheet_used || '')}</b> 解析到 <b>${j.count}</b> 行喷油工序${imgInfo}${j.meta && j.meta.title ? ' · ' + escapeHtml(j.meta.title) : ''}</p>
             ${j.multi_product ? `<p><b>已识别 ${j.product_groups.length} 个明确产品编号</b>，应用后按产品配比加权平均。</p>` : '<p class="muted">未识别到两个以上明确产品编号，将按单产品直接合计。</p>'}
             ${j.images_hint ? `<p class="muted">⚠️ ${escapeHtml(j.images_hint)}</p>` : ''}
-            <p class="muted">应用后会替换当前喷油明细（夹模/移印/炒货/散枪/边模/油色/浸油/抹油/擦PP水/UV 十道工序）。</p>
+            <p class="muted">应用后会替换当前喷油明细（夹模/移印/炒货/散枪/边模/油色/浸油/抹油/擦PP水/UV/热转印/滚印/烫印工序）。</p>
             <div style="margin-top:10px;display:flex;gap:8px">
               <button id="pp-imp-apply">应用</button>
               <button id="pp-imp-cancel" class="mini danger">取消</button>
@@ -4174,6 +5368,9 @@ const PAINTING_PROCS = [
   { key: 'oil',    label: '抹油' },
   { key: 'pp_water', label: '擦PP水' },
   { key: 'uv', label: 'UV' },
+  { key: 'heat_transfer', label: '热转印' },
+  { key: 'roller', label: '滚印' },
+  { key: 'hot_stamp', label: '烫印' },
 ];
 
 function currentFactoryCode() {
@@ -4183,8 +5380,28 @@ function currentFactoryCode() {
     || 'qingxi';
 }
 
+function globalCostingBasis() {
+  return window.__costingBasis || {};
+}
+
 function defaultAssemblyBaseRateForFactory() {
-  return currentFactoryCode() === 'heyuan' ? 260 : 310;
+  const configured = num(globalCostingBasis().assembly?.base_rate_hkd);
+  return configured || (currentFactoryCode() === 'heyuan' ? 260 : 310);
+}
+
+function defaultExchangeRates() {
+  return {
+    rmb_hkd: num(globalCostingBasis().exchange?.rmb_hkd) || 0.87,
+    hkd_usd: num(globalCostingBasis().exchange?.hkd_usd) || 7.8,
+  };
+}
+
+function defaultCartonRate(label) {
+  const basis = globalCostingBasis();
+  const target = String(label || basis.default_carton_label || 'A=A').replace(/\s+/g, '').toUpperCase();
+  const row = (basis.cartons || []).find(item => String(item.label || '').replace(/\s+/g, '').toUpperCase() === target)
+    || (basis.cartons || []).find(item => item.label === basis.default_carton_label);
+  return num(row?.rate) || 2.75;
 }
 
 function defaultMachinePricesForFactory() {
@@ -4198,9 +5415,36 @@ function paintingRowAmount(r) {
   return PAINTING_PROCS.reduce((s, p) => s + num(r[p.key + '_qty']) * num(r[p.key + '_unit']), 0);
 }
 
-function renderPaintingTable(container, payload, onChange, canEdit) {
+function renamePaintingProductGroup(payload, groupKey, name) {
+  name = String(name || '').trim();
+  if (!name) throw new Error('请填写产品名称');
   const rows = payload.painting_items || [];
-  const groups = rowProductGroups(payload, rows);
+  const keyOf = row => String(row.product_group_id || row.product_group_name || '__ungrouped__');
+  const members = rows.filter(row => keyOf(row) === groupKey);
+  if (!members.length) throw new Error('产品分组不存在');
+  if (rows.some(row => keyOf(row) !== groupKey && row.product_group_name === name))
+    throw new Error('该产品名称已存在，请使用其他名称');
+  const id = members[0].product_group_id || 'manual-product-' + crypto.randomUUID();
+  payload.product_mix_ratios ||= {};
+  const ratio = payload.product_mix_ratios[groupKey] ?? 1;
+  for (const row of members) {
+    const oldName = row.product_group_name || '';
+    row.product_group_id = id;
+    row.product_group_name = name;
+    if (!row.name || row.name === oldName) row.name = name;
+  }
+  if (id !== groupKey) delete payload.product_mix_ratios[groupKey];
+  payload.product_mix_ratios[id] = ratio;
+  if (id !== groupKey && payload.product_mix_modes?.[groupKey]) {
+    payload.product_mix_modes[id] = payload.product_mix_modes[groupKey];
+    delete payload.product_mix_modes[groupKey];
+  }
+}
+
+function renderPaintingTable(container, payload, onChange, canEdit) {
+  const rows = payload.painting_items ||= [];
+  payload.product_mix_ratios ||= {};
+  const groups = payload.mixed_product_options ? [] : rowProductGroups(payload, rows);
   const hasMultipleProducts = groups.length > 1;
   const groupByKey = new Map(groups.map(group => [group.key, group]));
   container.innerHTML = '';
@@ -4211,6 +5455,7 @@ function renderPaintingTable(container, payload, onChange, canEdit) {
   table.innerHTML = `<thead>
     <tr>
       <th rowspan="2" style="width:40px">#</th>
+      ${payload.mixed_product_options ? '<th rowspan="2" class="painting-product-cell">所属产品</th>' : ''}
       <th rowspan="2" style="width:120px">图片</th>
       <th rowspan="2" style="width:160px">名称</th>
       <th rowspan="2" style="width:180px">位置</th>
@@ -4228,46 +5473,107 @@ function renderPaintingTable(container, payload, onChange, canEdit) {
     const previousKey = idx > 0
       ? String(rows[idx - 1].product_group_id || rows[idx - 1].product_group_name || '__ungrouped__')
       : '';
-    if (hasMultipleProducts && groupKey !== previousKey) {
+    if (groups.length && groupKey !== previousKey) {
       const group = groupByKey.get(groupKey);
       const subtotal = group ? sum(group.rows, item => paintingRowAmount(item.row)) : 0;
       const colspan = 4 + PAINTING_PROCS.length * 2 + 2 + (canEdit ? 1 : 0);
       const groupRow = document.createElement('tr');
       groupRow.className = 'product-group-row';
+      groupRow.dataset.paintingGroup = groupKey;
       groupRow.innerHTML = `<td colspan="${colspan}" style="background:#e0f2fe;font-weight:700;text-align:left">
-        ${escapeHtml(group?.name || '未分组产品')} · 小计 HK$ ${formatNum(subtotal)} · 配比
-        ${canEdit
+        ${canEdit ? `<input data-painting-group-name aria-label="产品分组名称" maxlength="100" value="${escapeHtml(group?.name || '未分组产品')}" style="width:170px;margin-right:6px">` : escapeHtml(group?.name || '未分组产品')} · 小计 HK$ <span data-group-subtotal>${formatNum(subtotal)}</span> ${productModeSelect(payload, groupKey, canEdit)} ${directProductGroup(payload, groupKey) ? '' : ' · 配比'}
+        ${directProductGroup(payload, groupKey) ? '' : canEdit
           ? `<input class="painting-product-mix-ratio" data-group="${escapeHtml(groupKey)}" type="number" min="0" step="any" value="${productMixRatio(payload, groupKey)}" style="width:80px;margin-left:6px">`
           : formatNum(productMixRatio(payload, groupKey))}
       </td>`;
+      const nameInput = groupRow.querySelector('[data-painting-group-name]');
+      if (nameInput) {
+        nameInput.oninput = () => nameInput.setCustomValidity('');
+        nameInput.onchange = () => {
+          try { renamePaintingProductGroup(payload, groupKey, nameInput.value); }
+          catch (error) { nameInput.setCustomValidity(error.message); nameInput.reportValidity(); return; }
+          renderPaintingTable(container, payload, onChange, canEdit); onChange();
+        };
+      }
+      const modeInput = groupRow.querySelector('.product-mix-mode');
+      if (canEdit) modeInput.onchange = () => {
+        (payload.product_mix_modes ||= {})[groupKey] = modeInput.value;
+        renderPaintingTable(container, payload, onChange, canEdit); onChange();
+      };
       const ratioInput = groupRow.querySelector('.painting-product-mix-ratio');
       if (ratioInput) ratioInput.onchange = () => {
         payload.product_mix_ratios[groupKey] = Math.max(0, num(ratioInput.value));
         renderPaintingTable(container, payload, onChange, canEdit);
         onChange();
       };
+      if (canEdit) {
+        const add = document.createElement('button'); add.type = 'button'; add.className = 'mini';
+        add.textContent = '＋ 本组增加行'; add.style.marginLeft = '12px';
+        add.onclick = () => {
+          const lastIndex = rows.reduce((last, item, i) => String(item.product_group_id || item.product_group_name || '__ungrouped__') === groupKey ? i : last, -1);
+          rows.splice(lastIndex + 1, 0, {name:group?.name || '',images:[],product_group_id:row.product_group_id || '',product_group_name:row.product_group_name || ''});
+          renderPaintingTable(container,payload,onChange,canEdit); onChange();
+        };
+        groupRow.cells[0].appendChild(add);
+      }
       tbody.appendChild(groupRow);
     }
     row.images = row.images || [];
     const tr = document.createElement('tr');
     tr.innerHTML = `<td class="ro">${idx + 1}</td>`;
+    if (payload.mixed_product_options) {
+      const td=document.createElement('td'); td.className='painting-product-cell';
+      const productLabel=()=>{const p=payload.mixed_product_options.find(p=>p.id===row.mixed_product_id);return p?`${p.code} · ${p.name}`:'';};
+      td.title=productLabel();
+      if(canEdit){
+        const select=document.createElement('select');select.setAttribute('aria-label','所属产品');
+        select.innerHTML=payload.mixed_product_options.map(p=>`<option value="${escapeHtml(p.id)}" ${p.id===row.mixed_product_id?'selected':''}>${escapeHtml(p.code)}</option>`).join('');
+        select.title=productLabel();
+        select.onchange=()=>{row.mixed_product_id=select.value;td.title=select.title=productLabel();onChange();};td.appendChild(select);
+      }else {const p=payload.mixed_product_options.find(p=>p.id===row.mixed_product_id);td.textContent=p?p.code:'';}
+      tr.appendChild(td);
+    }
     // 图片
     const tdImg = document.createElement('td'); tdImg.className = 'mold-img-cell';
     renderImageCell(tdImg, row, canEdit, onChange);
     tr.appendChild(tdImg);
-    // 名称
-    tr.appendChild(makePCell('name', 'text', row, canEdit, onChange));
+    // 整体表名称限制列宽，查看和编辑均可换行。
+    const nameCell = makePCell('name', 'text', row, false, onChange);
+    if (payload.mixed_product_options) {
+      nameCell.classList.add('painting-name-cell');
+      if (canEdit) {
+        nameCell.textContent = '';
+        const input = document.createElement('textarea');
+        input.value = row.name || '';
+        input.rows = 3;
+        input.setAttribute('aria-label', '名称');
+        input.oninput = () => { row.name = input.value; onChange(); };
+        nameCell.appendChild(input);
+      }
+      tr.appendChild(nameCell);
+    } else tr.appendChild(makePCell('name', 'text', row, canEdit, onChange));
     // 位置
     tr.appendChild(makePCell('position', 'text', row, canEdit, onChange));
     // 五工序
     const calcCells = [];
     PAINTING_PROCS.forEach(p => {
-      tr.appendChild(makePCell(p.key + '_qty', 'number', row, canEdit, () => { onChange(); refreshAmt(); }));
-      tr.appendChild(makePCell(p.key + '_unit', 'number', row, canEdit, () => { onChange(); refreshAmt(); }));
+      tr.appendChild(makePCell(p.key + '_qty', 'formula', row, canEdit, () => { onChange(); refreshAmt(); }));
+      tr.appendChild(makePCell(p.key + '_unit', 'formula', row, canEdit, () => { onChange(); refreshAmt(); }));
     });
     // 报价（计算列）
     const tdAmt = document.createElement('td'); tdAmt.className = 'ro';
-    const refreshAmt = () => { tdAmt.textContent = formatNum(paintingRowAmount(row)); };
+    const refreshAmt = () => {
+      tdAmt.textContent = formatNum(paintingRowAmount(row));
+      table.querySelectorAll('[data-painting-group]').forEach(header => {
+        const members = rows.filter(item => String(item.product_group_id || item.product_group_name || '__ungrouped__') === header.dataset.paintingGroup);
+        header.querySelector('[data-group-subtotal]').textContent = formatNum(sum(members, paintingRowAmount));
+      });
+      const footer = table.querySelector('[data-painting-total]');
+      if (footer) {
+        PAINTING_PROCS.forEach((proc, i) => { footer.cells[1+i*2].textContent = formatNum(weightedPaintingProcSum(payload, proc.key)); });
+        footer.cells[1+PAINTING_PROCS.length*2].textContent = formatNum(weightedPaintingSum(payload));
+      }
+    };
     refreshAmt();
     tr.appendChild(tdAmt);
     // 备注
@@ -4288,9 +5594,9 @@ function renderPaintingTable(container, payload, onChange, canEdit) {
   // 合计行
   const totals = PAINTING_PROCS.map(p => weightedPaintingProcSum(payload, p.key));
   const totalAmt = weightedPaintingSum(payload);
-  const tr = document.createElement('tr'); tr.className = 'hi';
-  const totalRatio = sum(groups, group => productMixRatio(payload, group.key));
-  let html = `<td colspan="4" style="text-align:right">${hasMultipleProducts ? `配比加权平均（总配比 ${formatNum(totalRatio)}）` : '合计'}</td>`;
+  const tr = document.createElement('tr'); tr.className = 'hi'; tr.dataset.paintingTotal = '';
+  const totalRatio = sum(groups.filter(g => !directProductGroup(payload, g.key)), group => productMixRatio(payload, group.key));
+  let html = `<td colspan="${payload.mixed_product_options ? 5 : 4}" style="text-align:right">${payload.mixed_product_options ? '明细合计（未按混装配比）' : hasMultipleProducts ? `配比平均 + 直接累加（总配比 ${formatNum(totalRatio)}）` : '合计'}</td>`;
   PAINTING_PROCS.forEach((p, i) => { html += `<td>${formatNum(totals[i])}</td><td></td>`; });
   html += `<td>${formatNum(totalAmt)}</td><td></td>${canEdit ? '<td></td>' : ''}`;
   tr.innerHTML = html;
@@ -4301,30 +5607,77 @@ function renderPaintingTable(container, payload, onChange, canEdit) {
     const btn = document.createElement('button'); btn.textContent = '+ 增加行'; btn.className = 'mini'; btn.style.marginTop = '8px';
     btn.onclick = () => {
       const last = rows[rows.length - 1] || {};
-      rows.push({ images: [], product_group_id: last.product_group_id || '', product_group_name: last.product_group_name || '' });
+      rows.push({ ...(payload.mixed_product_options ? {mixed_product_id:last.mixed_product_id || payload.mixed_product_options[0].id} : {}), images: [], product_group_id: last.product_group_id || '', product_group_name: last.product_group_name || '' });
       renderPaintingTable(container, payload, onChange, canEdit); onChange();
     };
     container.appendChild(btn);
+    if (payload.mixed_product_options) return;
+    const addGroup = document.createElement('button'); addGroup.type = 'button'; addGroup.className = 'mini';
+    addGroup.textContent = '＋ 添加产品分组'; addGroup.style.marginLeft = '8px';
+    const form = document.createElement('div'); form.hidden = true;
+    form.style.cssText = 'margin-top:12px;padding:14px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc';
+    form.innerHTML = '<label>产品名称 <input data-group-name placeholder="例如：2#公仔" maxlength="100"></label> <label>配比 <input data-group-ratio type="number" min="0" step="any" value="1" style="width:90px"></label> <button type="button" data-create-group>添加</button> <button type="button" data-cancel-group>取消</button><p data-group-error role="status" style="color:#b91c1c"></p>';
+    addGroup.onclick = () => { form.hidden = false; form.querySelector('[data-group-name]').focus(); };
+    form.querySelector('[data-cancel-group]').onclick = () => { form.hidden = true; };
+    form.querySelector('[data-create-group]').onclick = () => {
+      const name = form.querySelector('[data-group-name]').value.trim();
+      const raw = form.querySelector('[data-group-ratio]').value, ratio = Number(raw);
+      const error = form.querySelector('[data-group-error]');
+      if (!name || raw === '' || !Number.isFinite(ratio) || ratio < 0) { error.textContent = '请填写产品名称和大于等于 0 的配比。'; return; }
+      if (groups.some(group => group.name === name)) { error.textContent = '该产品分组已存在，请使用“本组增加行”。'; return; }
+      const id = 'manual-product-' + crypto.randomUUID();
+      rows.push({name,images:[],product_group_id:id,product_group_name:name});
+      payload.product_mix_ratios[id] = ratio;
+      renderPaintingTable(container,payload,onChange,canEdit); onChange();
+    };
+    container.appendChild(addGroup); container.appendChild(form);
   }
 }
 
 function makePCell(key, type, row, canEdit, onChange) {
   const td = document.createElement('td');
-  // 数量/单价为 0 或空 → 显示空白（不显示 0.0000）
-  const blankIfZero = type === 'number' && !num(row[key]);
+  const formula = type === 'formula';
+  const blankIfZero = (formula || type === 'number') && !num(row[key]);
   if (!canEdit) {
-    td.className = 'ro'; td.textContent = blankIfZero ? '-' : formatNum(row[key] ?? '');
+    td.className = 'ro';
+    td.textContent = blankIfZero ? '-' : (type === 'text' ? (row[key] ?? '') : formatNum(row[key] ?? ''));
+    if (formula && row[key + '_raw']) td.title = row[key + '_raw'];
   } else {
     const inp = document.createElement('input');
     inp.type = type === 'number' ? 'number' : 'text';
     if (type === 'number') inp.step = 'any';
-    inp.value = blankIfZero ? '' : (row[key] ?? '');
-    inp.oninput = () => { row[key] = type === 'number' ? (inp.value === '' ? null : Number(inp.value)) : inp.value; onChange(); };
+    inp.value = formula ? (row[key + '_raw'] ?? row[key] ?? '') : (blankIfZero ? '' : (row[key] ?? ''));
+    if (formula) {
+      inp.title = '支持数字、加减乘除和括号，例如 =0.04*1.2';
+      inp.style.minWidth = '90px';
+    }
+    inp.oninput = () => {
+      if (formula) {
+        const value = parseFormulaInput(inp.value);
+        const invalid = inp.value.trim() !== '' && (value == null || value < 0);
+        inp.setCustomValidity(invalid ? '请输入有效的非负数算式，不能除以零' : '');
+        inp.style.color = invalid ? '#b91c1c' : '';
+        inp.title = invalid ? '算式无效：请输入有效的非负数算式，不能除以零' : '计算结果：' + (value ?? '');
+        row[key + '_raw'] = inp.value;
+        row[key] = invalid ? null : value;
+      } else row[key] = type === 'number' ? (inp.value === '' ? null : Number(inp.value)) : inp.value;
+      onChange();
+    };
     td.appendChild(inp);
   }
   return td;
 }
 
+function assemblyGroupFactor(group, groups) {
+  const n = value => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
+  const usage = n(group.usage ?? 1);
+  if (group.cost_mode !== 'average') return 1;
+  const denominator = (groups || []).filter(g => g.cost_mode === 'average').reduce((s, g) => s + n(g.usage ?? 1), 0);
+  return denominator > 0 ? usage / denominator : 0;
+}
+function assemblyGroupsTotal(groups, base) {
+  return (groups || []).reduce((total, g) => total + assemblyGroupFactor(g, groups) * (g.steps || []).reduce((s, step) => s + Number(base || 0) * Number(step.count || 0) * (Number(g.team ?? 1) || 1) / Math.max(Number(g.qty || 0), 1), 0), 0);
+}
 function renderAssembly(host, payload, canEdit, onChange, fxRmbHkd) {
   payload.assembly_labor = payload.assembly_labor || [];
   payload.packaging_labor = payload.packaging_labor || [];
@@ -4361,6 +5714,7 @@ function renderAssembly(host, payload, canEdit, onChange, fxRmbHkd) {
     <div id="wb-pkg-groups"></div>
     <div id="wb-pkg-grand"></div>
   `;
+  renderLegacyItems(host, payload, canEdit, onChange);
   payload.packaging_step_groups = payload.packaging_step_groups || [];
 
   // 总表：组装+包装 各产品的 总人数 / 合计人工PCS 汇总（明细在下方各段工序细表）
@@ -4373,25 +5727,42 @@ function renderAssembly(host, payload, canEdit, onChange, fxRmbHkd) {
       const team = num(g.team ?? 1) || 1;
       const people = (g.steps || []).reduce((s, x) => s + num(x.count), 0);
       const total = (g.steps || []).reduce((s, x) => s + base * num(x.count) * team / Math.max(num(g.qty), 1), 0);
-      return { type, product: g.product || '未命名', qty: num(g.qty), team, people, total };
+      return { group: g, type, product: g.product || '未命名', qty: num(g.qty), team, people, total: total * (g.cost_mode === 'average' ? num(g.usage ?? 1) : 1) };
     };
     const asm = (payload.assembly_step_groups || []).map(g => rowFor(g, '组装'));
     const pkg = (payload.packaging_step_groups || []).map(g => rowFor(g, '包装/混装'));
     const all = asm.concat(pkg);
-    const asmTotal = asm.reduce((s, r) => s + r.total, 0);
-    const pkgTotal = pkg.reduce((s, r) => s + r.total, 0);
+    const asmTotal = assemblyGroupsTotal(payload.assembly_step_groups, base);
+    const pkgTotal = assemblyGroupsTotal(payload.packaging_step_groups, base);
     const grand = asmTotal + pkgTotal;
     sumHost.innerHTML = `
-      <table class="wb-table" style="max-width:940px">
-        <thead><tr><th style="width:80px">类型</th><th>产品</th><th style="width:80px">标准工时</th><th style="width:90px">基数 HKD</th><th style="width:90px">生产量</th><th style="width:60px">小组</th><th style="width:80px">总人数</th><th style="width:140px">合计 人工/PCS HKD</th></tr></thead>
+      <p class="muted">参与配比平均：按用量加权，合计＝Σ（人工单价 × 用量）÷参与平均的总用量；直接累加项另加。</p><div style="overflow-x:auto"><table class="wb-table" style="min-width:1200px">
+        <thead><tr><th style="width:80px">类型</th><th>产品</th><th style="width:80px">标准工时</th><th style="width:90px">基数 HKD</th><th style="width:90px">生产量</th><th style="width:60px">小组</th><th style="width:80px">总人数</th><th>用量</th><th>计算方式</th><th style="width:140px">小计 人工/PCS HKD（含用量）</th></tr></thead>
         <tbody>
-          ${all.length ? all.map(r => `<tr><td>${r.type}</td><td>${escapeHtml(r.product)}</td><td>${formatNum(stdTime)}</td><td>${formatNum(base)}</td><td>${formatNum(r.qty)}</td><td>${r.team}</td><td>${r.people}</td><td style="font-weight:600;color:#0369a1">${formatNum(r.total)}</td></tr>`).join('')
-            : `<tr><td colspan="8" class="ro" style="text-align:center;color:#9ca3af;padding:14px">暂无数据，下方导入排拉工序表或新增产品组</td></tr>`}
-          ${asm.length ? `<tr class="hi"><td colspan="7" style="text-align:right">组装人工 合计</td><td style="font-weight:700">${formatNum(asmTotal)}</td></tr>` : ''}
-          ${pkg.length ? `<tr class="hi"><td colspan="7" style="text-align:right">包装/混装人工 合计</td><td style="font-weight:700">${formatNum(pkgTotal)}</td></tr>` : ''}
-          <tr class="hi"><td colspan="7" style="text-align:right;color:#16a34a">所有产品 总合计 人工/PCS</td><td style="font-weight:800;color:#16a34a">${formatNum(grand)} HKD</td></tr>
+          ${all.length ? all.map((r, index) => `<tr><td>${r.type}</td><td>${escapeHtml(r.product)}</td><td>${formatNum(stdTime)}</td><td>${formatNum(base)}</td><td>${formatNum(r.qty)}</td><td>${r.team}</td><td>${r.people}</td>
+          <td>${r.group.cost_mode !== 'average' ? '—' : canEdit ? `<input data-assembly-summary="usage" data-row="${index}" aria-label="${escapeHtml(r.product)} 用量" type="number" min="0" step="any" value="${r.group.usage ?? 1}" style="width:76px">` : formatNum(r.group.usage ?? 1)}</td>
+          <td>${canEdit ? `<select data-assembly-summary="cost_mode" data-row="${index}" aria-label="${escapeHtml(r.product)} 计算方式"><option value="direct" ${r.group.cost_mode !== 'average' ? 'selected' : ''}>直接累加</option><option value="average" ${r.group.cost_mode === 'average' ? 'selected' : ''}>参与配比平均</option></select>` : (r.group.cost_mode === 'average' ? '参与配比平均' : '直接累加')}</td>
+          <td style="font-weight:600;color:#0369a1">${formatNum(r.total)}</td></tr>`).join('')
+            : `<tr><td colspan="10" class="ro" style="text-align:center;color:#9ca3af;padding:14px">暂无数据，下方导入排拉工序表或新增产品组</td></tr>`}
+          ${asm.length ? `<tr class="hi"><td colspan="9" style="text-align:right">组装人工 合计</td><td style="font-weight:700">${formatNum(asmTotal)}</td></tr>` : ''}
+          ${pkg.length ? `<tr class="hi"><td colspan="9" style="text-align:right">包装/混装人工 合计</td><td style="font-weight:700">${formatNum(pkgTotal)}</td></tr>` : ''}
+          <tr class="hi"><td colspan="9" style="text-align:right;color:#16a34a">所有产品 合计（配比平均＋直接累加） 人工/PCS</td><td style="font-weight:800;color:#16a34a">${formatNum(grand)} HKD</td></tr>
         </tbody>
-      </table>`;
+      </table></div>`;
+    if (canEdit) sumHost.querySelectorAll('[data-assembly-summary]').forEach(input => {
+      input.onchange = () => {
+        const group = all[Number(input.dataset.row)].group;
+        const key = input.dataset.assemblySummary;
+        if (key !== 'cost_mode' && (input.value.trim() === '' || !Number.isFinite(Number(input.value)) || Number(input.value) < 0)) {
+          input.setCustomValidity('请输入非负数'); input.reportValidity(); return;
+        }
+        input.setCustomValidity('');
+        group[key] = key === 'cost_mode' ? input.value : Number(input.value);
+        onChange();
+        renderGroups(); renderPkgGroups();
+      };
+      input.oninput = () => input.setCustomValidity('');
+    });
   };
 
   const renderGroups = () => {
@@ -4419,13 +5790,15 @@ function renderAssembly(host, payload, canEdit, onChange, fxRmbHkd) {
       const team = num(g.team ?? 1) || 1;
       const groupTotal = g.steps.reduce((s, x) => s + baseRate * num(x.count) * team / Math.max(num(g.qty), 1), 0);
       const totalPeople = g.steps.reduce((s, x) => s + num(x.count), 0);
-      grand += groupTotal;
+      grand += groupTotal * assemblyGroupFactor(g, payload.assembly_step_groups);
       card.innerHTML = `
         <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
           <strong style="color:#16a34a">📦 产品：</strong>
           <input class="asg-name" data-gi="${gi}" value="${(g.product||'').replace(/"/g,'&quot;')}" placeholder="如：6寸小蜥蜴" style="width:200px" ${ro}/>
           <label>生产量 <input class="asg-qty" data-gi="${gi}" type="number" step="any" value="${g.qty}" style="width:90px" ${ro}/></label>
           <label>小组 <input class="asg-team" data-gi="${gi}" type="number" step="1" min="1" value="${g.team ?? 1}" style="width:60px" ${ro}/></label>
+          ${g.cost_mode === 'average' ? `<label>用量 <input class="asg-usage" data-gi="${gi}" type="number" min="0" step="any" value="${g.usage ?? 1}" style="width:70px" ${ro}/></label>` : ''}
+          <select class="asg-mode" data-gi="${gi}" aria-label="计算方式" ${ro}><option value="direct" ${g.cost_mode !== 'average' ? 'selected' : ''}>直接累加</option><option value="average" ${g.cost_mode === 'average' ? 'selected' : ''}>参与配比平均</option></select>
           <span class="muted">总人数：${totalPeople} · 合计 人工/PCS：<b style="color:#0369a1">${formatNum(groupTotal)} HKD</b></span>
           ${canEdit ? `<button class="mini asg-add-step" data-gi="${gi}">+ 增加工序</button>` : ''}
           ${canEdit ? `<button class="mini danger asg-del" data-gi="${gi}" style="margin-left:auto">删除整组</button>` : ''}
@@ -4452,6 +5825,13 @@ function renderAssembly(host, payload, canEdit, onChange, fxRmbHkd) {
     // 绑定
     host.querySelectorAll('.asg-name').forEach(i => i.oninput = (e) => { payload.assembly_step_groups[+i.dataset.gi].product = e.target.value; onChange(); });
     host.querySelectorAll('.asg-qty').forEach(i => { i.oninput = (e) => { payload.assembly_step_groups[+i.dataset.gi].qty = Number(e.target.value) || 1; onChange(); paintSummary(); }; i.onchange = () => renderGroups(); });
+    for (const [suffix, key] of [['usage','usage'],['mode','cost_mode']]) {
+      host.querySelectorAll('.asg-' + suffix).forEach(input => input.onchange = () => {
+        if (suffix !== 'mode' && (!Number.isFinite(Number(input.value)) || Number(input.value) < 0)) { input.setCustomValidity('请输入非负数'); input.reportValidity(); return; }
+        payload.assembly_step_groups[+input.dataset.gi][key] = suffix === 'mode' ? input.value : Number(input.value);
+        onChange(); renderGroups();
+      });
+    }
     host.querySelectorAll('.asg-team').forEach(i => { i.oninput = (e) => { payload.assembly_step_groups[+i.dataset.gi].team = Number(e.target.value) || 1; onChange(); paintSummary(); }; i.onchange = () => renderGroups(); });
     host.querySelectorAll('.asg-step-name').forEach(i => i.oninput = (e) => { payload.assembly_step_groups[+i.dataset.gi].steps[+i.dataset.i].name = e.target.value; onChange(); });
     host.querySelectorAll('.asg-step-count').forEach(i => { i.oninput = (e) => { payload.assembly_step_groups[+i.dataset.gi].steps[+i.dataset.i].count = e.target.value === '' ? null : Number(e.target.value); onChange(); paintSummary(); }; i.onchange = () => renderGroups(); });
@@ -4624,13 +6004,15 @@ function renderAssembly(host, payload, canEdit, onChange, fxRmbHkd) {
       const team = num(g.team ?? 1) || 1;
       const groupTotal = g.steps.reduce((s, x) => s + baseRate * num(x.count) * team / Math.max(num(g.qty), 1), 0);
       const totalPeople = g.steps.reduce((s, x) => s + num(x.count), 0);
-      grand += groupTotal;
+      grand += groupTotal * assemblyGroupFactor(g, payload.packaging_step_groups);
       card.innerHTML = `
         <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
           <strong style="color:#16a34a">📦 产品：</strong>
           <input class="pkg-name" data-gi="${gi}" value="${(g.product||'').replace(/"/g,'&quot;')}" placeholder="如：6寸小蜥蜴" style="width:200px" ${ro}/>
           <label>生产量 <input class="pkg-qty" data-gi="${gi}" type="number" step="any" value="${g.qty}" style="width:90px" ${ro}/></label>
           <label>小组 <input class="pkg-team" data-gi="${gi}" type="number" step="1" min="1" value="${g.team ?? 1}" style="width:60px" ${ro}/></label>
+          ${g.cost_mode === 'average' ? `<label>用量 <input class="pkg-usage" data-gi="${gi}" type="number" min="0" step="any" value="${g.usage ?? 1}" style="width:70px" ${ro}/></label>` : ''}
+          <select class="pkg-mode" data-gi="${gi}" aria-label="计算方式" ${ro}><option value="direct" ${g.cost_mode !== 'average' ? 'selected' : ''}>直接累加</option><option value="average" ${g.cost_mode === 'average' ? 'selected' : ''}>参与配比平均</option></select>
           <span class="muted">总人数：${totalPeople} · 合计 人工/PCS：<b style="color:#0369a1">${formatNum(groupTotal)} HKD</b></span>
           ${canEdit ? `<button class="mini pkg-add-step" data-gi="${gi}">+ 增加工序</button>` : ''}
           ${canEdit ? `<button class="mini danger pkg-del" data-gi="${gi}" style="margin-left:auto">删除整组</button>` : ''}
@@ -4655,6 +6037,13 @@ function renderAssembly(host, payload, canEdit, onChange, fxRmbHkd) {
     if (!canEdit) return;
     host.querySelectorAll('.pkg-name').forEach(i => i.oninput = (e) => { payload.packaging_step_groups[+i.dataset.gi].product = e.target.value; onChange(); });
     host.querySelectorAll('.pkg-qty').forEach(i => { i.oninput = (e) => { payload.packaging_step_groups[+i.dataset.gi].qty = Number(e.target.value) || 1; onChange(); paintSummary(); }; i.onchange = () => renderPkgGroups(); });
+    for (const [suffix, key] of [['usage','usage'],['mode','cost_mode']]) {
+      host.querySelectorAll('.pkg-' + suffix).forEach(input => input.onchange = () => {
+        if (suffix !== 'mode' && (!Number.isFinite(Number(input.value)) || Number(input.value) < 0)) { input.setCustomValidity('请输入非负数'); input.reportValidity(); return; }
+        payload.packaging_step_groups[+input.dataset.gi][key] = suffix === 'mode' ? input.value : Number(input.value);
+        onChange(); renderPkgGroups();
+      });
+    }
     host.querySelectorAll('.pkg-team').forEach(i => { i.oninput = (e) => { payload.packaging_step_groups[+i.dataset.gi].team = Number(e.target.value) || 1; onChange(); paintSummary(); }; i.onchange = () => renderPkgGroups(); });
     host.querySelectorAll('.pkg-step-name').forEach(i => i.oninput = (e) => { payload.packaging_step_groups[+i.dataset.gi].steps[+i.dataset.i].name = e.target.value; onChange(); });
     host.querySelectorAll('.pkg-step-count').forEach(i => { i.oninput = (e) => { payload.packaging_step_groups[+i.dataset.gi].steps[+i.dataset.i].count = e.target.value === '' ? null : Number(e.target.value); onChange(); paintSummary(); }; i.onchange = () => renderPkgGroups(); });
@@ -4764,10 +6153,17 @@ function createDepartmentExportButton(dept, quoteId) {
 function installDepartmentExport(host, dept, quoteId) {
   if (!host || !DEPARTMENT_EXPORT_NAMES[dept]) return;
   const sanitize = () => {
-    host.querySelectorAll('button').forEach(button => {
-      if (/导入/.test(button.textContent || '') || /上传.*报价/.test(button.textContent || '')) button.remove();
-    });
-    host.querySelectorAll('input[type="file"][accept*=".xls"]').forEach(input => input.remove());
+    // 喷油部、电子部和车缝部保留报价导入入口，其余部门沿用手动填写模式。
+    if (!['painting', 'electronic', 'sewing'].includes(dept)) {
+      host.querySelectorAll('button').forEach(button => {
+        if (dept === 'assembly' && button.closest('[data-mixed-assembly-import]')) return;
+        if (/导入/.test(button.textContent || '') || /上传.*报价/.test(button.textContent || '')) button.remove();
+      });
+      host.querySelectorAll('input[type="file"][accept*=".xls"]').forEach(input => {
+        if (dept === 'assembly' && input.closest('[data-mixed-assembly-import]')) return;
+        input.remove();
+      });
+    }
     if (!host.querySelector(`[data-department-export="${dept}"]`)) {
       const heading = host.querySelector('h3') || host;
       heading.appendChild(createDepartmentExportButton(dept, quoteId));
@@ -4932,6 +6328,26 @@ function computeFreightMap(f, eCarton) {
   return map;
 }
 
+function renderJazwaresFreight(host, settings, carton, header, canEdit, onChange) {
+  const fields=[['usd_rate','HKD→USD 汇率',7.75],['divisor','找数除数',0.98],['markup','加价倍数',1.25]];
+  host.innerHTML=`<div class="card"><h4>JAZWARES · 浙江 / 广东运费</h4><div class="wb-grid2">${fields.map(([key,label,value])=>`<label>${label}<input data-jazwares="${key}" type="number" min="0" step="any" value="${escapeHtml(settings[key]??value)}" ${canEdit?'':'disabled'}></label>`).join('')}</div><p class="muted">运费 HKD＝运费 RMB ÷ 上方人民币汇率；单个运费＝运费 HKD ÷ 手填装载数量。理论装载量仅供参考。</p><div id="jazwares-results"></div></div>`;
+  const editable=(key,value,label)=>canEdit?`<input data-jazwares-inline="${key}" aria-label="${label}" type="number" min="0" step="any" value="${value}" style="width:150px;max-width:100%">`:String(value);
+  const paint=()=>{
+    const m=JazwaresFreight.calculate(settings,carton,header);
+    const fmt=(v,d=3)=>v===null?'待补参数':Number(v).toLocaleString('zh-CN',{minimumFractionDigits:d,maximumFractionDigits:d});
+    host.querySelector('#jazwares-results').innerHTML=m.regions.map(r=>`<h4>${r.name}</h4><table class="wb-table"><thead><tr><th>项目</th><th>数值</th><th>换算 / 参考</th></tr></thead><tbody><tr><td>运费</td><td>RMB ${editable(r.key+'_rmb',r.rmb,r.name+'运费 RMB')}</td><td>HK$ ${fmt(r.hkd,2)}</td></tr><tr><td>体积 CBM</td><td>每箱 ${fmt(m.cbm,4)}</td><td>每个 ${fmt(m.unitCbm,4)}</td></tr><tr><td>3吨车 / ${editable('capacity_cbm',m.capacity,r.name+'车辆容量 CBM')} 方</td><td>手填 ${editable(r.key+'_quantity',r.quantity,r.name+'装载数量 PCS')} PCS</td><td>理论 ${fmt(m.theoreticalQuantity,0)} PCS</td></tr><tr><td>单个运费 HKD</td><td colspan="2">${fmt(r.perPiece)}</td></tr><tr><td>USD 价</td><td>含加价 ${fmt(r.usdMarkup)}</td><td>不加价 ${fmt(r.usdPlain)}</td></tr></tbody></table>`).join('')+`<p class="muted">USD（含加价）＝单个运费 ÷ ${m.divisor} × ${m.markup} ÷ ${m.usd}；不加价时不乘加价倍数。</p>`;
+    if(canEdit)host.querySelectorAll('[data-jazwares-inline]').forEach(input=>input.onchange=()=>{
+      if(input.value.trim()===''||!Number.isFinite(Number(input.value))||Number(input.value)<0){input.setCustomValidity('请输入非负数');input.reportValidity();return;}
+      input.setCustomValidity('');settings[input.dataset.jazwaresInline]=Number(input.value);onChange();paint();
+    });
+  };
+  host.jazwaresPaint=paint; paint();
+  if(canEdit)host.querySelectorAll('[data-jazwares]').forEach(input=>input.oninput=()=>{
+    if(!Number.isFinite(Number(input.value))||Number(input.value)<0)return;
+    settings[input.dataset.jazwares]=input.value===''?0:Number(input.value);onChange();paint();
+  });
+}
+
 function renderFreightCalc(host, f, eCarton, canEdit, onChange) {
   const ro = canEdit ? '' : 'readonly';
   const inputCell = (id, key, unit) =>
@@ -4977,6 +6393,7 @@ function renderFreightCalc(host, f, eCarton, canEdit, onChange) {
       ${resultTable('集装柜', FREIGHT_TYPES.slice(0, 4))}
       ${resultTable('卡车', FREIGHT_TYPES.slice(4))}
     </div>`;
+  host.freightPaint = paint;
   paint();
   if (!canEdit) return;
 
@@ -5006,6 +6423,12 @@ function matchFreightByName(name) {
 
 function renderShipping(host, payload, header, canEdit, onChange, freightMap, priceHkdPerPcs, surtaxHkdPerPcs, amortSharesUsd, sideItemsHkd) {
   freightMap = freightMap || {};
+  // 旧草稿或部分导入可能只保存码点/除数，没有场景数组。
+  if (!payload.shipping || typeof payload.shipping !== 'object' || Array.isArray(payload.shipping)) payload.shipping = {};
+  if (!Array.isArray(payload.shipping.scenarios)) payload.shipping.scenarios = [];
+  for (const [key, value] of Object.entries({freight_pct:48, lifting_pct:52, markup_x:1.2, divisor:.98, target_usd:0})) {
+    if (payload.shipping[key] == null) payload.shipping[key] = value;
+  }
   // 自动确保第一个场景是"出厂价"（freight/lifting = 0）
   if (!payload.shipping.scenarios.length || !payload.shipping.scenarios[0].is_factory) {
     payload.shipping.scenarios.unshift({ name: '出厂价', base_rmb: 0, mold_share_rmb: 0, is_factory: true });
@@ -5070,7 +6493,8 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
       const sewDivisor = sewMarkup / num(s.divisor);
       const elecMarkup = elecBase * elecMarkupValue();
       const elecDivisor = elecMarkup / num(s.divisor);
-      const totalHKD = afterDivisor + sewDivisor + elecDivisor;
+      const markedTotal = afterMarkup + sewMarkup + elecMarkup;
+      const totalHKD = markedTotal / num(s.divisor);
       const totalRMB = totalHKD * fxRH;
       const totalUSD = totalHKD / fxHU;
       const moldShareUSD = num(topData.mold_share);
@@ -5080,13 +6504,17 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
       const finalUSD = totalUSD + moldShareUSD + prototypeShareUSD + testingShareUSD + customerSuppliedUSD;
       // 附加税 0.4%（与导出一致）：TOTAL(USD)×0.4% → ×码点 → ÷找数，加回报客货价
       const surtaxUsd = finalUSD * 0.004;
-      const surtaxMarkup = surtaxUsd * num(s.markup_x);
+      const surtaxMarkup = surtaxUsd * num(s.surtax_markup_x ?? s.markup_x);
       const surtaxDivided = surtaxMarkup / num(s.divisor);
       const quotedUSD = finalUSD + surtaxDivided;
-      return { freight, lifting, afterShip, afterMarkup, afterDivisor, totalHKD, totalRMB, totalUSD, moldShareUSD, prototypeShareUSD, testingShareUSD, customerSuppliedUSD, finalUSD,
+      return { freight, lifting, afterShip, afterMarkup, afterDivisor, markedTotal, totalHKD, totalRMB, totalUSD, moldShareUSD, prototypeShareUSD, testingShareUSD, customerSuppliedUSD, finalUSD,
         surtaxUsd, surtaxMarkup, surtaxDivided, quotedUSD,
-        mainTotal: afterDivisor, sewBase, sewMarkup, sewDivisor, sewTotal: sewDivisor,
-        elecBase, elecMarkup, elecDivisor, elecTotal: elecDivisor };
+        ...Object.fromEntries((freightMap.externalRegions || []).flatMap(region => [
+          [region.key + 'Freight', region.usdMarkup],
+          [region.key + 'Delivered', region.usdMarkup == null ? null : quotedUSD + region.usdMarkup],
+        ])),
+        mainTotal: afterMarkup, sewBase, sewMarkup, sewDivisor, sewTotal: sewMarkup,
+        elecBase, elecMarkup, elecDivisor, elecTotal: elecMarkup };
     });
     const target = num(s.target_usd);
     // 报客货价 = 第一个非"出厂价"场景（默认 盐田40柜）；若全是出厂价则取最小
@@ -5095,7 +6523,7 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
     const customerTotalHkd = (customerIdx >= 0 && rows[customerIdx])
       ? rows[customerIdx].totalHKD
       : (rows.length ? Math.min(...rows.map(r => r.totalHKD)) : 0);
-    const customerBeforeDivisorHkd = customerTotalHkd * num(s.divisor);
+    const customerBeforeDivisorHkd = customerUSD * num(s.divisor) * fxHU;
     const customerSurtaxHkd = (customerIdx >= 0 && rows[customerIdx])
       ? rows[customerIdx].surtaxUsd * fxHU
       : (rows.length ? Math.min(...rows.map(r => r.surtaxUsd)) * fxHU : 0);
@@ -5117,6 +6545,7 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
       setC('afterShip', fmt(r.afterShip));
       setC('afterMarkup', fmt(r.afterMarkup));
       setC('afterDivisor', fmt(r.afterDivisor));
+      setC('markedTotal', fmt(r.markedTotal));
       setC('mainTotal', fmt(r.mainTotal));
       setC('sewBase', fmt(r.sewBase));
       setC('sewMarkup', fmt(r.sewMarkup));
@@ -5138,6 +6567,10 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
       setC('surtaxMarkup', fmt(r.surtaxMarkup));
       setC('surtaxDivided', fmt(r.surtaxDivided));
       setC('quotedUSD', fmt(r.quotedUSD));
+      (freightMap.externalRegions || []).forEach(region => {
+        setC(region.key + 'Freight', r[region.key + 'Freight'] == null ? '待补参数' : r[region.key + 'Freight'].toFixed(3));
+        setC(region.key + 'Delivered', fmt(r[region.key + 'Delivered']));
+      });
       // 出货底价 input：matched 则同步 + 禁用 + 上色
       const baseInp = host.querySelector(`.sc-base[data-i="${i}"]`);
       if (baseInp) {
@@ -5148,9 +6581,9 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
           baseInp.style.background = '#ecfdf5';
           baseInp.title = '已按场景名自动套用运费（' + x._freight_matched + '）';
         } else {
-          baseInp.disabled = !canEdit;
+          baseInp.disabled = true;
           baseInp.style.background = '';
-          baseInp.title = '';
+          baseInp.title = '自动取各部门已保存的成本合计；请修改对应部门明细后重新汇总';
         }
       }
     });
@@ -5194,7 +6627,7 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
       </tr>`).join('');
     host.innerHTML = `
       <p class="muted" style="font-size:12px;margin:0 0 10px 0">
-        出货底价 = 出厂价（九、合计小计） <b style="color:#7c2d12" id="sh-top-total">${fmt(num(topData.total_hkd))}</b> HK$（各场景统一用它，再 ×码点 ÷找数；附加税 0.4% 在下方 USD 层计提）
+        出货底价 = 出厂价（九、合计小计） <b style="color:#7c2d12" id="sh-top-total">${fmt(num(topData.total_hkd))}</b> HK$（主体、车缝、电子分别乘码点，合计后统一除找数；附加税 0.4% 在下方 USD 层计提）
         <span id="sh-top-combined" style="display:none">${fmt(num(topData.combined))}</span>
         <span id="sh-top-mold" style="display:none">${fmt(num(topData.mold_share))}</span>
       </p>
@@ -5205,21 +6638,20 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
           ${canEdit ? '<th style="width:30px"></th>' : ''}
         </tr></thead>
         <tbody>
-          <tr><td>小计 HK$</td>${sc.map((x, i) => `<td><input class="sc-base" data-i="${i}" type="number" step="any" value="${x.base_rmb ?? 0}" ${canEdit && !x._freight_matched ? '' : 'disabled'} style="${x._freight_matched ? 'background:#ecfdf5' : ''}"></td>`).join('')}${canEdit ? '<td></td>' : ''}</tr>
+          <tr><td>小计 HK$</td>${sc.map((x, i) => `<td><input class="sc-base" data-i="${i}" type="number" step="any" value="${x.base_rmb ?? 0}" disabled title="自动取各部门已保存的成本合计；请修改对应部门明细后重新汇总" style="${x._freight_matched ? 'background:#ecfdf5' : ''}"></td>`).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr><td>运费 (${canEdit ? `<input id="sh-freight" type="number" step="any" value="${s.freight_pct}" style="width:60px">` : s.freight_pct}%)</td>${rows.map((r, i) => cellTd(i, 'freight', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr><td>吊柜费 (${canEdit ? `<input id="sh-lifting" type="number" step="any" value="${s.lifting_pct}" style="width:60px">` : s.lifting_pct}%)</td>${rows.map((r, i) => cellTd(i, 'lifting', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr class="hi"><td>含运 HK$</td>${rows.map((r, i) => cellTd(i, 'afterShip', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr><td>码点 × (${canEdit ? `<input id="sh-markup" type="number" step="any" value="${s.markup_x}" style="width:60px">` : s.markup_x})</td>${rows.map((r, i) => cellTd(i, 'afterMarkup', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
-          <tr><td>找数 ÷ (${canEdit ? `<input id="sh-divisor" type="number" step="any" value="${s.divisor}" style="width:60px">` : s.divisor})</td>${rows.map((r, i) => cellTd(i, 'afterDivisor', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr class="hi" style="background:#FEF3C7;color:#92400E;font-weight:700"><td>TOTAL (HK$)</td>${rows.map((r, i) => cellTd(i, 'mainTotal', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr><td>车缝</td>${rows.map((r, i) => cellTd(i, 'sewBase', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr><td>码点 × (${canEdit ? `<input id="sh-sew-markup" type="number" step="any" value="${sewMarkupValue()}" style="width:60px">` : sewMarkupValue()})</td>${rows.map((r, i) => cellTd(i, 'sewMarkup', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
-          <tr><td>找数 ÷ ${s.divisor}</td>${rows.map((r, i) => cellTd(i, 'sewDivisor', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr class="hi" style="background:#FEF3C7;color:#92400E;font-weight:700"><td>TOTAL (HK$)</td>${rows.map((r, i) => cellTd(i, 'sewTotal', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr><td>电子</td>${rows.map((r, i) => cellTd(i, 'elecBase', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr><td>码点 × (${canEdit ? `<input id="sh-elec-markup" type="number" step="any" value="${elecMarkupValue()}" style="width:60px">` : elecMarkupValue()})</td>${rows.map((r, i) => cellTd(i, 'elecMarkup', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
-          <tr><td>找数 ÷ ${s.divisor}</td>${rows.map((r, i) => cellTd(i, 'elecDivisor', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr class="hi" style="background:#FEF3C7;color:#92400E;font-weight:700"><td>TOTAL (HK$)</td>${rows.map((r, i) => cellTd(i, 'elecTotal', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
+          <tr class="hi"><td>码点后合计 (HK$)</td>${rows.map((r, i) => cellTd(i, 'markedTotal', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
+          <tr><td>找数 ÷ (${canEdit ? `<input id="sh-divisor" type="number" step="any" value="${s.divisor}" style="width:60px">` : s.divisor})</td>${rows.map((r, i) => cellTd(i, 'totalHKD', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr class="hi" style="background:#DBEAFE;color:#1E40AF;font-weight:700"><td>TOTAL (HK$)</td>${rows.map((r, i) => cellTd(i, 'totalHKD', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr><td>(USD) = HK$/${fxHU}</td>${rows.map((r, i) => cellTd(i, 'totalUSD', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr><td>模具分摊 (USD)</td>${rows.map((r, i) => cellTd(i, 'moldShareUSD', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
@@ -5228,13 +6660,17 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
           ${suppliedRows}
           <tr class="usd-total-row"><td>TOTAL (USD)</td>${rows.map((r, i) => cellTd(i, 'finalUSD', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr class="surtax-row"><td>附加税0.4%</td>${rows.map((r, i) => cellTd(i, 'surtaxUsd', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
-          <tr><td>码点 × ${s.markup_x}</td>${rows.map((r, i) => cellTd(i, 'surtaxMarkup', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
+          <tr><td>码点 × ${canEdit ? `<input id="sh-surtax-markup" aria-label="附加税码点" type="number" min="0" step="any" value="${s.surtax_markup_x ?? s.markup_x}" style="width:80px">` : (s.surtax_markup_x ?? s.markup_x)}</td>${rows.map((r, i) => cellTd(i, 'surtaxMarkup', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr><td>找数 ÷ ${s.divisor}</td>${rows.map((r, i) => cellTd(i, 'surtaxDivided', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
           <tr class="hi" style="background:#DBEAFE;color:#1E40AF;font-weight:700"><td>TOTAL (USD)</td>${rows.map((r, i) => cellTd(i, 'quotedUSD', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
+          ${(freightMap.externalRegions || []).map(region => `
+            <tr><td>${region.key === 'zhejiang' ? '浙江' : '广东'}运费 (USD)</td>${rows.map((r, i) => `<td class="ro" data-i="${i}" data-k="${region.key}Freight">${region.usdMarkup == null ? '待补参数' : region.usdMarkup.toFixed(3)}</td>`).join('')}${canEdit ? '<td></td>' : ''}</tr>
+            <tr class="hi"><td>${region.key === 'zhejiang' ? '浙江' : '广东'}合计 (USD)</td>${rows.map((r, i) => cellTd(i, region.key + 'Delivered', r)).join('')}${canEdit ? '<td></td>' : ''}</tr>
+          `).join('')}
         </tbody>
       </table>
       <div class="ship-foot">
-        <label>报客货价 (USD) <input class="sh-customer" value="${fmt(customerUSD)}" disabled style="width:100px;background:#f0f9ff;font-weight:600"></label>
+        <label>报客货价${freightMap.externalRegions ? '（未含送外厂运费）' : ''} (USD) <input class="sh-customer" value="${fmt(customerUSD)}" disabled style="width:100px;background:#f0f9ff;font-weight:600"></label>
         <label>目标价 (USD) ${canEdit ? `<input id="sh-target" type="number" step="any" value="${s.target_usd}" style="width:100px">` : `<span>${s.target_usd}</span>`}</label>
         <label>相差 % <input class="sh-diff" value="${target > 0 ? diffPct.toFixed(2) + '%' : '-'}" disabled style="width:90px;background:${diffPct >= 0 ? '#fef3c7' : '#dcfce7'};font-weight:600"></label>
         ${canEdit ? `<button class="mini" id="sh-add-customer-product">+ 客供成品</button><button class="mini" id="sh-add">+ 增加场景</button>` : ''}
@@ -5252,10 +6688,9 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
       s.scenarios[i].name = inp.value;
       onChange(); refresh(); // 名字变了重新匹配运费
     });
-    bindNum('.sc-base', 'base_rmb');
     bindNum('.sc-mold', 'mold_share_rmb');
     const globalMap = { freight: 'freight_pct', lifting: 'lifting_pct', markup: 'markup_x', divisor: 'divisor', target: 'target_usd',
-      'sew-markup': 'sew_markup_x', 'elec-markup': 'elec_markup_x' };
+      'surtax-markup': 'surtax_markup_x', 'sew-markup': 'sew_markup_x', 'elec-markup': 'elec_markup_x' };
     Object.entries(globalMap).forEach(([id, key]) => {
       const el = host.querySelector('#sh-' + id);
       if (el) el.oninput = () => { s[key] = num(el.value); onChange(); refresh(); };
@@ -5302,7 +6737,10 @@ function renderShipping(host, payload, header, canEdit, onChange, freightMap, pr
 }
 
 function renderSales(host, payload, quote, canEditHeader, canEditPricing, allSections, onChange, onHeaderChange) {
-  payload.header = payload.header || { currency: 'HKD', fx_hkd_usd: 7.8, fx_rmb_hkd: 0.85 };
+  const defaultFx = quotationExchangeRates(allSections, window.__data?.quotation_rates);
+  payload.header = payload.header || { currency: 'HKD', fx_hkd_usd: defaultFx.hkd_usd, fx_rmb_hkd: defaultFx.rmb_hkd };
+  payload.header.fx_hkd_usd = payload.header.fx_hkd_usd ?? defaultFx.hkd_usd;
+  payload.header.fx_rmb_hkd = payload.header.fx_rmb_hkd ?? defaultFx.rmb_hkd;
   payload.pricing = payload.pricing || { mgmt_fee_pct: 0, profit_pct: 10, tax_pct: 13, shipping_per_pcs: 0, mold_amortization_qty: quote.qty || 10000 };
   payload.shipping = payload.shipping || {
     freight_pct: 48, lifting_pct: 52, markup_x: 1.20, divisor: 0.98,
@@ -5360,6 +6798,23 @@ function renderSales(host, payload, quote, canEditHeader, canEditPricing, allSec
     hk10t: 14900, yt10t: 11500, hk5t: 12500, yt5t: 11000,
   };
   renderFreightCalc(host.querySelector('#wb-freight'), payload.freight_calc, eCarton, canEditPricing, onChange);
+  if (JazwaresFreight.matches(quote.customer)) {
+    payload.freight_calc.jazwares = payload.freight_calc.jazwares || {};
+    const jazwaresHost = document.createElement('div');
+    jazwaresHost.id = 'wb-jazwares-freight';
+    host.querySelector('#wb-freight').appendChild(jazwaresHost);
+    renderJazwaresFreight(jazwaresHost, payload.freight_calc.jazwares, eCarton, h, canEditPricing, onChange);
+  }
+  host.dataset.refreshFreight = 'true';
+  host.refreshFreight = () => {
+    const latestSection = (allSections || []).find(section => section.dept === 'engineering');
+    const latest = latestSection?.payload_json ? JSON.parse(latestSection.payload_json) : {};
+    for (const key of Object.keys(eCarton)) delete eCarton[key];
+    Object.assign(eCarton, latest.carton_calc || {});
+    host.querySelector('#wb-freight')?.freightPaint?.();
+    host.querySelector('#wb-jazwares-freight')?.jazwaresPaint?.();
+  };
+
 
   if (canEditHeader) {
     const saveHeader = () => onHeaderChange({
@@ -5370,7 +6825,7 @@ function renderSales(host, payload, quote, canEditHeader, canEditPricing, allSec
   }
   if (canEditPricing) {
     $('h-cy').onchange = () => { h.currency = $('h-cy').value; onChange(); };
-    $('h-fxrh').oninput = () => { h.fx_rmb_hkd = num($('h-fxrh').value); onChange(); };
+    $('h-fxrh').oninput = () => { h.fx_rmb_hkd = num($('h-fxrh').value); onChange(); host.querySelector('#wb-jazwares-freight')?.jazwaresPaint?.(); };
     $('h-fxhu').oninput = () => { h.fx_hkd_usd = num($('h-fxhu').value); onChange(); };
     [['p-ship', 'shipping_per_pcs'], ['p-mgmt', 'mgmt_fee_pct'], ['p-prof', 'profit_pct'], ['p-tax', 'tax_pct'], ['p-amt', 'mold_amortization_qty']]
       .forEach(([id, k]) => $(id).oninput = () => { p[k] = num($(id).value); onChange(); });
@@ -5487,12 +6942,18 @@ async function renderQuotePage() {
   };
   const data = await api('/quotes/' + id);
   const { quote, sections } = data;
+  try {
+    const basisResponse = await api('/refs/costing_basis');
+    window.__costingBasis = basisResponse.data || {};
+  } catch {
+    window.__costingBasis = {};
+  }
   let authorizedCustomers = [];
   if (me.dept === 'engineering') {
     try { authorizedCustomers = (await api('/quotes/customers')).customers || []; }
     catch { authorizedCustomers = []; }
   }
-  window.__data = { quote, sections, me };
+  window.__data = { quote, sections, me, quotation_rates: data.quotation_rates, quote_locked: Boolean(data.quote_locked), mixed_quote: data.mixed_quote, mixed_engineering_molds: data.mixed_engineering_molds };
   // 从业务 section 读税率，给所有 loss-summary 用
   const salesSecForTax = sections.find(s => s.dept === 'sales');
   if (salesSecForTax && salesSecForTax.payload_json) {
@@ -5508,14 +6969,15 @@ async function renderQuotePage() {
   // 工作台容器
   const mySec = sections.find(s => s.dept === me.dept);
   if (!mySec) { $('sections').innerHTML = '<i>未找到本部门 section</i>'; return; }
-  const payload = mySec.payload_json ? JSON.parse(mySec.payload_json) : {};
+  const payload = sectionDraft(mySec);
   const canEdit = mySec.status !== 'approved' && me.dept !== 'sales' ? true : false;
   // 业务部门 section 永远可编辑（除非已审）
-  const canEditMine = mySec.status !== 'approved';
+  const canEditMine = mySec.status !== 'approved' && canEditDepartment(me, mySec.dept);
 
   const host = document.getElementById('sections'); host.innerHTML = '';
   const dirtyByDept = new Map();
   const saveHandlers = new Map();
+  const rateRefreshers = new Map();
   let dirtyTrackingReady = false;
   const markDirty = dept => {
     if (!dirtyTrackingReady || !dept) return;
@@ -5528,7 +6990,39 @@ async function renderQuotePage() {
     const tab = host.querySelector(`.dept-tab[data-dept="${dept}"]`);
     if (tab) tab.title = '';
   };
+  let shortcutSaving = false;
+  bindQuoteSaveShortcut(async event => {
+    const isSaveShortcut = (event.ctrlKey || event.metaKey) && !event.altKey
+      && (event.code === 'KeyS' || event.key.toLowerCase() === 's');
+    if (!isSaveShortcut) return;
+    event.preventDefault();
+    if (shortcutSaving) return;
+
+    const activeDept = host.querySelector('.dept-tab.active')?.dataset.dept || mySec.dept;
+    if (!dirtyByDept.get(activeDept)) {
+      showSaveShortcutStatus('当前没有未保存修改');
+      return;
+    }
+    const save = saveHandlers.get(activeDept);
+    if (!save) {
+      showSaveShortcutStatus('当前页面无法使用快捷键保存', true);
+      return;
+    }
+
+    shortcutSaving = true;
+    showSaveShortcutStatus('保存中…');
+    try {
+      await save();
+      showSaveShortcutStatus('✓ 已保存');
+    } catch (error) {
+      showSaveShortcutStatus(`保存失败：${error.message}`, true);
+    } finally {
+      shortcutSaving = false;
+    }
+  });
   const activateTab = (tabKey, dept) => {
+    rateRefreshers.get(dept)?.();
+    if (dept === 'engineering') window.MixedQuotation?.refreshEngineeringSharedMolds(host);
     sessionStorage.setItem(tabKey, dept);
     host.querySelectorAll('.dept-tab').forEach(tab => tab.classList.toggle('active', tab.dataset.dept === dept));
     host.querySelectorAll('.section-pane').forEach(pane => { pane.style.display = pane.dataset.dept === dept ? '' : 'none'; });
@@ -5553,7 +7047,7 @@ async function renderQuotePage() {
       }
       if (dirtyByDept.get(activeDept)) {
         const activeSection = sections.find(section => section.dept === activeDept);
-        const action = await requestUnsavedAction(activeSection?.dept_name || DEPT_MENU[activeDept] || activeDept);
+        const action = await requestUnsavedAction(activeDept === '__summary__' ? '出货价算价' : activeSection?.dept_name || DEPT_MENU[activeDept] || activeDept);
         if (action === 'cancel') return;
         if (action === 'save') {
           const save = saveHandlers.get(activeDept);
@@ -5564,6 +7058,7 @@ async function renderQuotePage() {
       }
       // 汇总不缓存：每次进入都按当前 sections 中已保存的最新数据重新计算。
       if (targetDept === '__summary__' && summaryPane) renderSummaryPane(summaryPane, sections, quote, me);
+      if (targetDept === 'sales') host.querySelectorAll('[data-refresh-freight]').forEach(panel => panel.refreshFreight?.());
       activateTab(tabKey, targetDept);
     };
     visibleDepts.forEach(s => {
@@ -5588,6 +7083,8 @@ async function renderQuotePage() {
     if (canSeeSummary) {
       summaryPane = document.createElement('div'); summaryPane.className = 'card section-pane';
       summaryPane.dataset.dept = '__summary__';
+      summaryPane.onShippingSummaryDirty = dirty => dirty ? markDirty('__summary__') : clearDirty('__summary__');
+      saveHandlers.set('__summary__', async () => { await summaryPane.saveShippingSummary?.(); });
       summaryPane.style.display = 'none';
       renderSummaryPane(summaryPane, sections, quote, me);
       host.appendChild(summaryPane);
@@ -5598,12 +7095,12 @@ async function renderQuotePage() {
   wb.innerHTML = `<h2>我的工作台 — ${mySec.dept_name} <small class="badge ${STATUS_CLS[mySec.status]}">${STATUS_TXT[mySec.status]}</small></h2>
     <div id="wb-body"></div>
     <div class="wb-bar">
-      ${canEditMine ? `<button id="btn-save">保存草稿</button>
+      ${canEditMine ? `<button id="btn-save" title="快捷键：Ctrl+S / Command+S">保存草稿（Ctrl/⌘+S）</button>
                        <button id="btn-submit">提交审核</button>` : ''}
-      ${(me.role === 'supervisor' || me.role === 'admin') && mySec.status === 'filled'
+      ${hasPerm(me, DEPT_MENU[mySec.dept], 'review') && (me.role === 'supervisor' || me.role === 'admin') && mySec.status === 'filled'
         ? `<button id="btn-approve">审核通过</button>
            <button id="btn-reject" class="danger">驳回</button>` : ''}
-      ${mySec.status === 'approved'
+      ${hasPerm(me, DEPT_MENU[mySec.dept], 'review') && mySec.status === 'approved'
         ? `<button id="btn-reopen" class="mini">🔓 解除审核 / 重新编辑</button>` : ''}
       ${mySec.review_comment ? `<span class="muted">${mySec.review_comment}</span>` : ''}
     </div>`;
@@ -5626,42 +7123,46 @@ async function renderQuotePage() {
       await api('/quotes/' + id + '/header', { method: 'PUT', body: JSON.stringify(patch) }).catch(e => alert(e.message));
     });
   } else {
-    const salesSec = sections.find(x => x.dept === 'sales');
-    const salesHdr = salesSec && salesSec.payload_json ? (JSON.parse(salesSec.payload_json).header || {}) : {};
-    const fx = num(salesHdr.fx_rmb_hkd) || 0.85;
-    const fxHU = num(salesHdr.fx_hkd_usd) || 7.8;
-    if (me.dept === 'engineering') {
-      const headerHost = document.createElement('div');
-      const engineeringHost = document.createElement('div');
-      body.append(headerHost, engineeringHost);
-      renderEngineeringQuoteHeader(headerHost, quote, authorizedCustomers, patch =>
-        api('/quotes/' + id + '/header', { method: 'PUT', body: JSON.stringify(patch) }));
-      renderEngineering(engineeringHost, payload, canEditMine, onChange, fx, fxHU, quote.qty, quote.customer);
-    }
-    else if (me.dept === 'electronic') renderElectronic(body, payload, canEditMine, onChange, fx, fxHU);
-    else if (me.dept === 'molding') renderMolding(body, payload, canEditMine, onChange, refMolds, fx, me.role);
-    else if (me.dept === 'painting') renderPainting(body, payload, canEditMine, onChange, fx);
-    else if (me.dept === 'slush') renderSlush(body, payload, canEditMine, onChange, fx);
-    else if (me.dept === 'sewing') renderSewing(body, payload, canEditMine, onChange, fx);
-    else if (me.dept === 'assembly') renderAssembly(body, payload, canEditMine, onChange, fx);
-    installDepartmentExport(body, me.dept, id);
+    let renderedRates;
+    const renderMyDepartment = () => {
+      renderedRates = quotationExchangeRates(sections, data.quotation_rates);
+      const { rmb_hkd: fx, hkd_usd: fxHU } = renderedRates;
+      body.innerHTML = '';
+      if (me.dept === 'engineering') {
+        const headerHost = document.createElement('div');
+        const engineeringHost = document.createElement('div');
+        body.append(headerHost, engineeringHost);
+        renderEngineeringQuoteHeader(headerHost, quote, authorizedCustomers, patch =>
+          api('/quotes/' + id + '/header', { method: 'PUT', body: JSON.stringify(patch) }));
+        renderEngineering(engineeringHost, payload, canEditMine, onChange, fx, fxHU, quote.qty, quote.customer);
+      }
+      else if (me.dept === 'electronic') renderElectronic(body, payload, canEditMine, onChange, fx, fxHU);
+      else if (me.dept === 'molding') renderMolding(body, payload, canEditMine, onChange, refMolds, fx, me.role);
+      else if (me.dept === 'painting') renderPainting(body, payload, canEditMine, onChange, fx);
+      else if (me.dept === 'slush') renderSlush(body, payload, canEditMine, onChange, fx);
+      else if (me.dept === 'sewing') renderSewing(body, payload, canEditMine, onChange, fx);
+      else if (me.dept === 'assembly') renderAssembly(body, payload, canEditMine, onChange, fx);
+      installDepartmentExport(body, me.dept, id);
+    };
+    renderMyDepartment();
+    rateRefreshers.set(mySec.dept, () => {
+      const rates = quotationExchangeRates(sections, data.quotation_rates);
+      if (rates.rmb_hkd !== renderedRates.rmb_hkd || rates.hkd_usd !== renderedRates.hkd_usd) renderMyDepartment();
+    });
   }
 
   // 其他部门 section 渲染（用户对哪些部门有 view 权限就渲染哪些）
   if (visibleDepts.length > 1) {
     const others = visibleDepts.filter(s => s.dept !== me.dept);
-    const salesSecForFx = sections.find(x => x.dept === 'sales');
-    const salesHdrOther = salesSecForFx && salesSecForFx.payload_json ? (JSON.parse(salesSecForFx.payload_json).header || {}) : {};
-    const fxRate = num(salesHdrOther.fx_rmb_hkd) || 0.85;
-    const fxRateUsd = num(salesHdrOther.fx_hkd_usd) || 7.8;
-
     others.forEach(s => {
-      const sectionPayload = s.payload_json ? JSON.parse(s.payload_json) : {};
+      const sectionPayload = sectionDraft(s);
       // 默认只读，避免业务/工程不小心点保存覆盖其他部门数据；点"✏️ 进入编辑"切换为可写。
       // 例外：工程/业务部门由业务查看时直接可编辑（两者同属，免点按钮）；其他部门仍只读。
       // 工程/业务直接可编辑：仅在「未提交审核」(status=empty) 时自动进入编辑；
       // 已提交(filled) 则退出编辑、露出 审核通过/驳回 按钮（否则跳不出审核界面）
-      let inEdit = (s.dept === 'engineering' && (me.dept === 'sales' || me.dept === 'engineering') && s.status === 'empty');
+      const mayEdit = canEditDepartment(me, s.dept);
+      const mayReview = hasPerm(me, DEPT_MENU[s.dept], 'review') && ['supervisor','admin'].includes(me.role);
+      let inEdit = mayEdit && (s.dept === 'engineering' && (me.dept === 'sales' || me.dept === 'engineering') && s.status === 'empty');
       const c = document.createElement('div'); c.className = 'card section-pane';
       c.dataset.dept = s.dept;
       c.style.display = 'none';
@@ -5669,18 +7170,21 @@ async function renderQuotePage() {
         ${s.reviewed_at ? `<small class="muted" style="font-weight:normal;font-size:13px">审于 ${s.reviewed_at}</small>` : ''}
         ${inEdit ? `<small style="color:#dc2626;font-weight:600;margin-left:8px">⚠️ 编辑模式</small>` : ''}</h2>`;
       const renderBar = () => `<div class="wb-bar">
-        ${s.status !== 'approved' && !inEdit ? `<button data-act="enter-edit" class="mini">✏️ 进入编辑</button>` : ''}
-        ${inEdit ? `<button data-act="save">保存草稿</button>
+        ${mayEdit && s.status !== 'approved' && !inEdit ? `<button data-act="enter-edit" class="mini">✏️ 进入编辑</button>` : ''}
+        ${inEdit ? `<button data-act="save" title="快捷键：Ctrl+S / Command+S">保存草稿（Ctrl/⌘+S）</button>
                     <button data-act="submit">提交审核</button>
                     <button data-act="exit-edit" class="mini">退出编辑（不保存）</button>` : ''}
-        ${s.status === 'filled' && !inEdit ? `<button data-act="approve">审核通过</button>
+        ${mayReview && s.status === 'filled' && !inEdit ? `<button data-act="approve">审核通过</button>
                                               <button data-act="reject" class="danger">驳回</button>` : ''}
-        ${s.status === 'approved' && !inEdit ? `<button data-act="reopen" class="mini">🔓 解除审核</button>` : ''}
+        ${mayReview && s.status === 'approved' && !inEdit ? `<button data-act="reopen" class="mini">🔓 解除审核</button>` : ''}
         ${s.review_comment ? `<span class="muted">${s.review_comment}</span>` : ''}
       </div>`;
       c.innerHTML = renderHeader() + '<div class="ro-body"></div>' + renderBar();
       const body = c.querySelector('.ro-body');
+      let renderedRates;
       const renderBody = () => {
+        renderedRates = quotationExchangeRates(sections, data.quotation_rates);
+        const { rmb_hkd: fxRate, hkd_usd: fxRateUsd } = renderedRates;
         body.innerHTML = '';
         const onChangeOther = () => markDirty(s.dept);
         if (s.dept === 'engineering') renderEngineering(body, sectionPayload, inEdit, onChangeOther, fxRate, fxRateUsd, quote.qty, quote.customer);
@@ -5694,6 +7198,11 @@ async function renderQuotePage() {
         else if (s.dept === 'sewing') renderSewing(body, sectionPayload, inEdit, onChangeOther, fxRate);
         else if (s.dept === 'assembly') renderAssembly(body, sectionPayload, inEdit, onChangeOther, fxRate);
         installDepartmentExport(body, s.dept, id);
+        // 业务/管理员在只读预览中也能看到套啤价入口；已审核时点击仅提示先解除审核。
+        if (s.dept === 'molding' && !inEdit && mayEdit) {
+          body.querySelector('h3')?.insertAdjacentHTML('beforeend',
+            '<small style="margin-left:6px"><button data-act="auto-shot" class="mini" type="button">🔄 自动按机型套啤价</button></small>');
+        }
       };
       saveHandlers.set(s.dept, async () => {
         await putSection(s, sectionPayload, false);
@@ -5701,6 +7210,10 @@ async function renderQuotePage() {
         clearDirty(s.dept);
       });
       renderBody();
+      rateRefreshers.set(s.dept, () => {
+        const rates = quotationExchangeRates(sections, data.quotation_rates);
+        if (rates.rmb_hkd !== renderedRates.rmb_hkd || rates.hkd_usd !== renderedRates.hkd_usd) renderBody();
+      });
 
       // 绑定本卡操作（每次重渲染都重新绑定）
       const bindActs = () => {
@@ -5708,11 +7221,34 @@ async function renderQuotePage() {
           btn.onclick = async () => {
             const act = btn.dataset.act;
             if (act === 'enter-edit') {
+              if (s.dept === 'molding') {
+                btn.disabled = true;
+                try {
+                  const latest = await api('/quotes/' + id);
+                  data.engineering_molds = latest.engineering_molds || [];
+                } catch (error) {
+                  alert('读取工程模具失败：' + error.message);
+                  return;
+                } finally { btn.disabled = false; }
+              }
               inEdit = true;
               c.querySelector('h2').outerHTML = renderHeader();
               c.querySelector('.wb-bar').outerHTML = renderBar();
               renderBody();
               bindActs();
+              return;
+            }
+            if (act === 'auto-shot') {
+              if (s.status === 'approved') {
+                alert('啤机部已审核，需先点击页面底部的“解除审核”，再套啤价并重新提交审核。');
+                return;
+              }
+              inEdit = true;
+              c.querySelector('h2').outerHTML = renderHeader();
+              c.querySelector('.wb-bar').outerHTML = renderBar();
+              renderBody();
+              bindActs();
+              body.querySelector('#btn-auto-shot')?.click();
               return;
             }
             if (act === 'exit-edit') {
@@ -5729,7 +7265,18 @@ async function renderQuotePage() {
             }
             try {
               if (act === 'save' || act === 'submit') {
-                if (!confirm(`确认保存到 ${s.dept_name} section？该部门已有数据会被覆盖。`)) return;
+                // 页面按钮已明确指定部门和操作；不依赖内置浏览器可能拦截的原生确认框。
+                if (btn.disabled) return;
+                btn.disabled = true;
+                let status = c.querySelector('[data-section-save-status]');
+                if (!status) {
+                  status = document.createElement('p');
+                  status.dataset.sectionSaveStatus = '';
+                  status.setAttribute('role', 'status');
+                  c.querySelector('.wb-bar').insertAdjacentElement('afterend', status);
+                }
+                status.textContent = act === 'submit' ? '正在提交审核…' : '正在保存草稿…';
+                status.style.color = '#475569';
                 await putSection(s, sectionPayload, act === 'submit');
                 s.payload_json = JSON.stringify(sectionPayload);
                 clearDirty(s.dept);
@@ -5743,7 +7290,11 @@ async function renderQuotePage() {
                 await api('/reviews/' + s.id + '/reopen', { method: 'POST', body: JSON.stringify({ reason }) });
               }
               renderQuotePage();
-            } catch (e) { alert(e.message); }
+            } catch (e) {
+              const status = c.querySelector('[data-section-save-status]');
+              if (status) { status.textContent = e.message; status.style.color = '#b91c1c'; }
+              else showSaveShortcutStatus(e.message, true);
+            } finally { btn.disabled = false; }
           };
         });
       };
@@ -5870,7 +7421,9 @@ async function renderAuditLog(host, quoteId) {
           <span class="audit-dept">${r.dept_name || r.dept || '系统'}</span>
           <span class="audit-actor">${r.actor || '匿名'}</span>
           <span class="audit-action">${ACTION_LABEL[r.action] || r.action}</span>
-          <span class="audit-detail muted">${r.detail ? escapeHtml(r.detail) : ''}</span>
+          <div class="audit-detail muted">${r.detail ? (r.detail.length > 120 || /^[\[{]/.test(r.detail.trim())
+            ? `<details class="audit-detail-fold"><summary>查看详情</summary><pre>${escapeHtml(r.detail)}</pre></details>`
+            : escapeHtml(r.detail)) : ''}</div>
         </div>`).join('');
       // 分页器
       const pager = document.createElement('div'); pager.className = 'audit-pager';
@@ -5901,6 +7454,20 @@ function escapeHtml(s) {
 }
 
 // 核价页复用报价页的部门明细渲染器，但不执行报价详情页入口。
+if (window.MixedQuotation && !window.__WORKBENCH_EMBED__) {
+  renderEngineering = window.MixedQuotation.wrap(renderEngineering, 'engineering');
+  renderElectronic = window.MixedQuotation.wrap(renderElectronic, 'electronic');
+  renderMolding = window.MixedQuotation.wrap(renderMolding, 'molding');
+  renderPainting = window.MixedQuotation.wrap(renderPainting, 'painting');
+  renderSlush = window.MixedQuotation.wrap(renderSlush, 'slush');
+  renderSewing = window.MixedQuotation.wrap(renderSewing, 'sewing');
+  renderAssembly = window.MixedQuotation.wrap(renderAssembly, 'assembly');
+  const originalSales = renderSales;
+  renderSales = function (host, payload, quote, headerEdit, pricingEdit, sections, onChange, onHeaderChange) {
+    originalSales(host, payload, quote, headerEdit, pricingEdit, sections, onChange, onHeaderChange);
+    window.MixedQuotation.salesPanel(host, payload, quote, pricingEdit, sections, onChange, putSection);
+  };
+}
 window.VerificationWorkbench = {
   renderEngineering,
   renderElectronic,
@@ -5913,4 +7480,17 @@ window.VerificationWorkbench = {
   renderSummaryPane,
 };
 
-if (!window.__WORKBENCH_EMBED__) renderQuotePage();
+if (!window.__WORKBENCH_EMBED__) renderQuotePage().catch(error => {
+  const host = document.getElementById('app') || document.body;
+  const panel = document.createElement('section');
+  panel.style.cssText = 'margin:24px 0;padding:24px;border:1px solid #d6e1eb;border-radius:12px;background:white';
+  panel.setAttribute('role', 'alert');
+  const message = document.createElement('p');
+  const signedOut = error.status === 401;
+  message.textContent = signedOut ? '登录已失效，请重新登录后打开此报价单。已保存的数据不受影响。' : '报价内容加载失败：' + error.message;
+  const action = document.createElement('a');
+  action.textContent = signedOut ? '重新登录' : '重新加载';
+  action.href = signedOut ? './index.html' : location.href;
+  action.style.cssText = 'display:inline-block;padding:10px 20px;background:#2563eb;color:white;border-radius:8px;text-decoration:none';
+  panel.append(message, action);host.appendChild(panel);
+});

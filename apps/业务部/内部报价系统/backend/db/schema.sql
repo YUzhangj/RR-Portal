@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS quote_customer_confirmations (
 
 -- 核价单：首次打开时冻结已确认报价及全部门 payload，核价结果独立保存，不回写原报价。
 CREATE TABLE IF NOT EXISTS quote_verifications (
+  origin TEXT NOT NULL DEFAULT 'quote', -- quote / direct
   quote_id           INTEGER PRIMARY KEY REFERENCES quotes(id) ON DELETE CASCADE,
   baseline_json      TEXT NOT NULL,
   verified_values_json TEXT NOT NULL DEFAULT '{}',
@@ -82,6 +83,48 @@ CREATE TABLE IF NOT EXISTS quote_verifications (
   updated_by         TEXT,
   updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- 核价版本：同一张已确认报价可以产生 V1 / V2 / V3；每个版本均独立审核和锁定。
+CREATE TABLE IF NOT EXISTS quote_verification_versions (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  quote_id          INTEGER NOT NULL REFERENCES quote_verifications(quote_id) ON DELETE CASCADE,
+  version_no        INTEGER NOT NULL,
+  label             TEXT NOT NULL,
+  category          TEXT,
+  parent_version_id INTEGER REFERENCES quote_verification_versions(id),
+  source_type       TEXT NOT NULL DEFAULT 'quote', -- quote / version
+  status            TEXT NOT NULL DEFAULT 'drafting', -- drafting / in_review / ready / completed
+  note              TEXT,
+  created_by        TEXT,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_by      TEXT,
+  completed_at      TEXT,
+  updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(quote_id, version_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_verification_versions_quote
+  ON quote_verification_versions(quote_id, version_no);
+
+-- 每个核价版本 × 每部门一行，字段和报价 section 保持一致，流程同为草稿/提交/审核/驳回。
+CREATE TABLE IF NOT EXISTS quote_verification_sections (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  version_id      INTEGER NOT NULL REFERENCES quote_verification_versions(id) ON DELETE CASCADE,
+  dept            TEXT NOT NULL REFERENCES departments(code),
+  payload_json    TEXT NOT NULL DEFAULT '{}',
+  status          TEXT NOT NULL DEFAULT 'empty', -- empty / filled / approved / rejected
+  filled_by       TEXT,
+  filled_at       TEXT,
+  reviewed_by     TEXT,
+  reviewed_at     TEXT,
+  review_comment  TEXT,
+  UNIQUE(version_id, dept)
+);
+
+CREATE INDEX IF NOT EXISTS idx_verification_sections_version
+  ON quote_verification_sections(version_id);
+CREATE INDEX IF NOT EXISTS idx_verification_sections_dept_status
+  ON quote_verification_sections(dept, status);
 
 CREATE TABLE IF NOT EXISTS audit_log (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,

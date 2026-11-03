@@ -3,9 +3,14 @@ const path = require('path');
 const bcrypt = require('bcryptjs');
 const { AsyncLocalStorage } = require('async_hooks');
 const { Pool, types } = require('pg');
+const { DEFAULT_COSTING_BASIS } = require('../services/costingBasis');
 
 // PostgreSQL COUNT(*) 是 int8；本系统数量规模在 JS 安全整数范围内，保持原 API 返回 number。
 types.setTypeParser(20, (value) => Number(value));
+
+// Keep PostgreSQL microseconds: JS Date truncates them and breaks exact save-version checks.
+// TIMESTAMPTZ strings round-trip through JSON and SQL without losing precision.
+types.setTypeParser(1184, (value) => value);
 
 if (!process.env.DATABASE_URL) {
   throw new Error('缺少 DATABASE_URL；生产环境必须配置 PostgreSQL 连接串');
@@ -56,7 +61,7 @@ function prepare(sql) {
     },
     async run(...params) {
       let statement = sql;
-      if (/^\s*INSERT\s+INTO\s+(quotes|users)\b/i.test(statement) && !/\bRETURNING\b/i.test(statement)) {
+    if (/^\s*INSERT\s+INTO\s+(quotes|users|quote_verification_versions|quote_verification_sections)\b/i.test(statement) && !/\bRETURNING\b/i.test(statement)) {
         statement = `${statement.trim().replace(/;$/, '')} RETURNING id`;
       }
       const result = await query(statement, params);
@@ -95,7 +100,7 @@ const migrationTables = [
   'factories', 'departments', 'users', 'quotes', 'quote_sections', 'audit_log',
   'ref_tables', 'app_migrations', 'factory_ref_tables', 'user_factories',
   'user_customers', 'user_perms', 'factory_material_price_control', 'factory_material_price_managers',
-  'quote_customer_confirmations', 'quote_verifications',
+  'quote_customer_confirmations', 'quote_verifications', 'quote_verification_versions', 'quote_verification_sections',
 ];
 
 async function migrateLegacySqlite() {
@@ -129,7 +134,7 @@ async function migrateLegacySqlite() {
           .run(...columns.map((column) => row[column]));
       }
     }
-    for (const table of ['quotes', 'quote_sections', 'audit_log', 'users']) {
+    for (const table of ['quotes', 'quote_sections', 'audit_log', 'users', 'quote_verification_versions', 'quote_verification_sections']) {
       await query(`SELECT setval(pg_get_serial_sequence('${table}', 'id'), COALESCE(MAX(id), 1), MAX(id) IS NOT NULL) FROM ${table}`);
     }
   });
@@ -160,14 +165,7 @@ const materialPrices = [
   ['LDPE', 'G812', 7.8], ['HDPE', 'HMA016', 8], ['TPR', '本白橡胶料', 15],
   ['C-TPR', '透明橡胶料', 17], ['K料', 'KR-03NW', 15], ['PC料', '2605', 12.5],
 ].map(([name, model, price]) => ({ name, model, price }));
-const qingxiMaterialPrices2026 = [
-  ['ABS', '750SW', 8.5], ['ABS', '抽粒料', 4.6], ['透明ABS', 'TR558/920', 12.5],
-  ['HIPS', 'HI425', 7.8], ['GP', 'MW-1', 7.8], ['1#PP', 'JM350/K8009', 6.8],
-  ['1#PP', '7032 E3', 6.8], ['透明PP', '5090T', 7.8], ['POM', 'F3003/M9044', 16.5],
-  ['POM', 'PM820/DM220', 21.5], ['PVC', '普通透明', 9], ['PVC', '普通本白', 8],
-  ['LDPE', 'G812', 7.8], ['HDPE', 'HMA016', 8], ['TPR', '本白橡胶料', 15],
-  ['TPR', '透明橡胶料', 17], ['K料', 'KR-03NW', 15], ['PC料', '2605', 12.5],
-].map(([name, model, price]) => ({ name, model, price }));
+const qingxiMaterialPrices2026 = DEFAULT_COSTING_BASIS.materials;
 function isLegacyStandardMaterialPriceTable(raw) {
   let rows;
   try { rows = JSON.parse(raw || '[]'); } catch { return false; }
@@ -229,6 +227,40 @@ async function initialize() {
     }
   }
 
+  for (const factory of factories) {
+    await prepare(`INSERT INTO factory_ref_tables (factory_code, key, data_json, updated_by)
+      VALUES (?, 'costing_basis', ?, '[factory-seed]') ON CONFLICT (factory_code, key) DO NOTHING`)
+      .run(factory.code, JSON.stringify(DEFAULT_COSTING_BASIS));
+  }
+
+  const unifiedCostingBasisMigration = 'unified_costing_basis_20260731';
+  if (!await prepare('SELECT 1 FROM app_migrations WHERE key = ?').get(unifiedCostingBasisMigration)) {
+    const migrateUnifiedBasis = transaction(async () => {
+      const actor = '[统一核价基准 2026-07-31]';
+      for (const [key, data] of [
+        ['costing_basis', DEFAULT_COSTING_BASIS],
+        ['material_prices', DEFAULT_COSTING_BASIS.materials],
+        ['machine_prices', DEFAULT_COSTING_BASIS.machines],
+      ]) {
+        if (key !== 'costing_basis') {
+          const current = await prepare('SELECT data_json FROM factory_ref_tables WHERE factory_code = ? AND key = ?')
+            .get('qingxi', key);
+          let rows = [];
+          try { rows = JSON.parse(current?.data_json || '[]'); } catch {}
+          if (!Array.isArray(rows) || rows.length < 10) continue;
+        }
+        await prepare(`INSERT INTO factory_ref_tables (factory_code, key, data_json, updated_at, updated_by)
+          VALUES ('qingxi', ?, ?, CURRENT_TIMESTAMP, ?)
+          ON CONFLICT (factory_code,key) DO UPDATE SET
+            data_json = EXCLUDED.data_json, updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by`)
+          .run(key, JSON.stringify(data), actor);
+      }
+      await prepare('INSERT INTO app_migrations (key) VALUES (?)').run(unifiedCostingBasisMigration);
+    });
+    await migrateUnifiedBasis();
+    console.log('[migrate] 清溪统一核价基准已更新为 2026-07-31 标准');
+  }
+
   // 已有数据库只更新清溪厂区参考表；河源和历史报价单内保存的料价副本保持不变。
   const qingxiMaterialPriceMigration = 'qingxi_material_prices_20260819';
   if (!await prepare('SELECT 1 FROM app_migrations WHERE key = ?').get(qingxiMaterialPriceMigration)) {
@@ -284,6 +316,23 @@ async function initialize() {
   }
   const { seedConfiguredAccounts } = require('./accountSeed');
   await seedConfiguredAccounts(db);
+  if (process.env.APPLY_LEGACY_SKY_CASTLE_IMPORT === '1') {
+    const manifest = require('./legacy-sky-castle-20260908.json');
+    const { importLegacyVerificationItems } = require('../services/legacyVerificationImport');
+    const result = await importLegacyVerificationItems(db, manifest, { apply: true, skipReady: true });
+    console.log(`[migrate] Sky Castle 历史核价：${result.status}，${result.itemCount} 个货号`);
+  }
+  if (process.env.APPLY_LEGACY_ZURU_IMPORT === '1') {
+    const manifest = require('./legacy-zuru-20260909.json');
+    const { importLegacyVerificationItems } = require('../services/legacyVerificationImport');
+    const result = await importLegacyVerificationItems(db, manifest, {
+      apply: true,
+      skipReady: true,
+      customer: 'ZURU',
+      migrationKey: 'legacy_verification_zuru_20260909',
+    });
+    console.log(`[migrate] ZURU 历史核价：${result.status}，${result.itemCount} 个货号`);
+  }
 }
 
 db.ready = initialize().catch((error) => {

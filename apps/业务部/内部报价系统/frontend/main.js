@@ -35,8 +35,9 @@ async function refreshMe() {
     factoryChip.textContent = me.active_factory_name || me.active_factory_code;
     $('factory-list-name').textContent = me.active_factory_name || me.active_factory_code;
     const factorySwitch = $('factory-switch');
-    if (me.can_switch_factory) {
-      factorySwitch.innerHTML = (me.factories || []).map(f =>
+    const availableFactories = me.factories || [];
+    if (me.can_switch_factory && availableFactories.length > 1) {
+      factorySwitch.innerHTML = availableFactories.map(f =>
         `<button type="button" class="top-factory-btn ${f.code === me.active_factory_code ? 'active' : ''}" data-code="${esc(f.code)}" aria-pressed="${f.code === me.active_factory_code}"><span class="factory-dot dot-${esc(f.code)}"></span>${esc(f.name_cn)}</button>`
       ).join('');
       factoryChip.classList.add('hidden');
@@ -286,7 +287,7 @@ if ($('btn-create')) $('btn-create').onclick = async () => {
   if (!productName) { alert('请填写产品名称'); $('q-product').focus(); return; }
   if (!customer) { alert('请选择或填写客户'); $('q-customer').focus(); return; }
   try {
-    await api('/quotes', {
+    const created = await api('/quotes', {
       method: 'POST',
       body: JSON.stringify({
         quote_no: quoteNo,
@@ -294,8 +295,10 @@ if ($('btn-create')) $('btn-create').onclick = async () => {
         version: $('q-version').value.trim() || null,
         customer,
         qty: Number($('q-qty').value) || null,
+        quote_type: $('q-type')?.value || 'single',
       }),
     });
+    if ($('q-type')?.value === 'mixed') { location.href = './quote.html?id=' + created.id; return; }
     $('q-no').value = $('q-product').value = $('q-version').value = $('q-customer').value = $('q-qty').value = '';
     $('q-customer-clear')?.classList.add('hidden');
     await loadQuotes();
