@@ -118,6 +118,36 @@ test('repeat fragments without quantity are removed when the complete same produ
   assert.deepEqual(parse(table([goodRow, ['P-001', '塑胶零件', '', '个']])).items, [item(...goodRow)]);
 });
 const htmlTable = '<table><tr><th>货号</th><th>品名</th><th>数量</th><th>单位</th></tr><tr><td>P-001</td><td>塑胶零件</td><td>1000</td><td>个</td></tr></table>';
+test('truncated HTML retains complete goods rows without inventing the unfinished row', () => {
+  const complete = htmlTable.replace(/<\/table>$/, '');
+  for (const unfinished of [
+    '<tr><td>P-002',
+    '<tr><td>P-002</td><td>半截零件</td><td>999',
+    '<tr><td>P-002</td><td>半截零件</td><td>999</td><td>个</td>',
+  ]) {
+    const fields = parse('宏福制品厂\n日期：2026-11-03\n' + complete + unfinished);
+    assert.equal(fields.supplier, '宏福制品厂');
+    assert.equal(fields.date, '2026-11-03');
+    assert.deepEqual(fields.items, [item(...goodRow)]);
+  }
+});
+test('an unfinished HTML goods row alone cannot manufacture a parsed item or quantity', () => {
+  const header = '<table><tr><th>货号</th><th>品名</th><th>数量</th><th>单位</th></tr>';
+  assert.deepEqual(parse(header + '<tr><td>P-002</td><td>半截零件</td><td>999').items, []);
+  assert.deepEqual(parse('<table><tr><th>货号</th><th>品名</th><th>数量').items, []);
+});
+test('truncated HTML rowspan does not create another goods row from its pending spans', () => {
+  const text = '<table><tr><th>货号</th><th>品名</th><th>数量</th><th>单位</th></tr>' +
+    '<tr><td rowspan="2">P001</td><td>完整零件</td><td>1000</td><td>个</td></tr>' +
+    '<tr><td>半截零件</td><td>2000</td><td>个</td>';
+  assert.deepEqual(parse(text).items, [item('P001', '完整零件', '1000')]);
+});
+test('the production OCR prompt retains its empty-row instruction without skipping nonempty goods', async () => {
+  const r = runtime([htmlTable]);
+  const result = await r.extract();
+  assert.match(r.calls[0].messages[0].content[0].text, /Skip fully empty table rows\./);
+  assert.deepEqual(plain(result.fields.items), [item(...goodRow)]);
+});
 test('HTML normalization keeps supplier, date and delivery number on their original lines', () => {
   const fields = parse('宏福制品厂\n客户：收货公司\n日期：2026-10-23\nDN-123456\n' + htmlTable);
   assert.equal(fields.supplier, '宏福制品厂'); assert.equal(fields.date, '2026-10-23'); assert.equal(fields.deliveryNo, 'DN-123456');

@@ -94,7 +94,7 @@ let AI = loadAiConfig();
    该模型指令遵循能力差（让它直接输出结构化 JSON 会抄 schema/示例），
    但它按官方提示词做「全文 OCR」非常准。所以：模型只负责把图变文字，
    字段提取由下面的 parseDeliveryNote() 确定性完成。 */
-const OCR_READ_PROMPT = 'Read all the text in the image, including the company name, title, serial number, date, customer, and all text outside the table, then the table contents.';
+const OCR_READ_PROMPT = 'Read all the text in the image, including the company name, title, serial number, date, customer, and all text outside the table, then the table contents. Skip fully empty table rows.';
 /* 表格密集型单据（如台聚）全文 OCR 易乱行/复读，解析不出明细时改用此提示词重试 */
 const OCR_TABLE_PROMPT = 'Read all the text in the image. Output the table contents as a markdown table with every column kept (including the quantity column and empty cells), one row per line.';
 /* 第二次重试仍失败时：只要求输出货品明细表（列名固定，指令简单，命中率最高） */
@@ -111,6 +111,7 @@ function parseDeliveryNote(text) {
   });
   const splitRow = l => l.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => decodeHtml(c.trim()));
   /* 模型偶发输出 HTML 表格：仅在表格内部合并单元格，保留表外全文和其他 markdown 行。 */
+  if (/<table[\s>]/i.test(rawText) && !/<\/table\s*>/i.test(rawText)) rawText += '\n</table>';
   if (/<table[\s>]/i.test(rawText)) {
     rawText = rawText
       .split(/(<table\b[^>]*>[\s\S]*?<\/table\s*>)/gi)
