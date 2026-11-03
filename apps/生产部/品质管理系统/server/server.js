@@ -253,7 +253,8 @@ function parseDeliveryNote(text) {
       if (cName === -1) { cName = head.findIndex((h, i) => /^(貨|货)$/.test(h) && head[i + 1] === '名'); splitNameHdr = cName !== -1; }   /* 「貨|名」分两列的表头（华登） */
       let   cQty   = head.findIndex(h => /^(数|數)\s*量$/.test(h));
       if (cQty === -1) cQty = find(/交货数量|交貨數量|到货数量|到貨數量|送货数量|送貨數量|实送数量|實送數量/);
-      if (cQty === -1) cQty = head.findIndex(h => /^[送发發][货貨][数數]\s*[/／]/.test(h));   /* 「送货数/总单数」「发货数/总单数」均取斜杠前的实际数量 */
+      if (cQty === -1) cQty = head.findIndex(h => /^(送货数|送貨數)\s*[/／]/.test(h));   /* 广大：「送货数/总单数」即数量列，取斜杠前 */
+      if (cQty === -1) cQty = head.findIndex(h => /^(送货数|送貨數)\s*[/／]/.test(h));   /* 广大：「送货数/总单数」即数量列，取斜杠前 */
       if (cQty === -1) cQty = find(/送货|送貨|实送|實送/, /欠|总|總/);
       if (cQty === -1) cQty = find(/数量|數量/, /欠|总|總/);
       if (cQty === -1) cQty = find(/备品|備品/);   /* 台聚：模型偶发丢「数量」表头，数量值落在备品数列 */
@@ -264,7 +265,7 @@ function parseDeliveryNote(text) {
         const cells = splitRow(row);
         if (cells.every(c => !c)) continue;   /* 空白可能是分页间隔，不能截断后续真实明细 */
         const raw = i => (i >= 0 && i < cells.length ? cells[i] : '');
-        const numeric = v => /^\d[\d,.]*(?:\s*[/／].*)?$/.test(v);
+        const numeric = v => /^\d[\d,.]*(?:\s*\/.*)?$/.test(v);
         /* 合并品名格会令后续所有列左移；短一格时即便下一列金额也是数字，也应按行宽校正。 */
         const shifted = splitNameHdr && cQty > cName && numeric(raw(cQty - 1)) &&
           (cells.length === head.length - 1 || !numeric(raw(cQty)));
@@ -273,6 +274,8 @@ function parseDeliveryNote(text) {
         const mappedName = name;
         const qtyCell = get(cQty);
         let qty = qtyCell.split(/[/／]/)[0].replace(/[^\d.]/g, '');
+        /* 针式打印用点号作千分位（8.760=8760）：形如 d{1,3}(.ddd)+ 时去点；0.06 真小数不动 */
+        if (/^\d{1,3}(\.\d{3})+$/.test(qty)) qty = qty.replace(/\./g, '');
         if (qty && (qty === no || qty === name)) qty = '';   /* 模型把货号/品名复制进数量列：清空待人工补 */
         if (!name) {   /* 品名被 OCR 错放到别的列：找第一个像品名的格子 */
           for (const c of cells) {
@@ -284,11 +287,11 @@ function parseDeliveryNote(text) {
         if (/^(DESCRIPTION|品名|名称|名稱|货名|貨名)$/i.test(name)) continue;
         if (/[：:]/.test(no) || /[：:]/.test(name)) continue;   /* 表尾标签行（胶箱：/收货人：/Q.C: 等） */
         if (!get(cQty) && /^(备注|備注|说明|說明)$/.test(no || name)) continue;
-        if (cName >= 0 && !mappedName && /^(胶箱|膠箱|胶袋|膠袋|纸箱|紙箱|平卡|大平卡|卡板|胶卡板|膠卡板|木卡板|吸塑|钙箱|鈣箱|周转箱|送货人|送貨人|收货人|收貨人|开单人|開單人|制单|制单人|製單|製單人|审核|审核人|審核|審核人)$/.test(no)) continue;   /* 仅存在品名列且该格为空时排除货号格标签；无品名列的真实货品仍保留 */
+        if (!mappedName && /^(胶箱|膠箱|胶袋|膠袋|纸箱|紙箱|平卡|卡板|吸塑|钙箱|鈣箱|周转箱)$/.test(no)) continue;   /* 包装标签占货号格且品名为空的表尾统计；包装材料货品仍保留 */
         if (/^(合计|总计|合計|總計)/.test(no) || /^(合计|总计|合計|總計)/.test(name)) continue;   /* 合计行 */
         if (/^[-—–=]+$/.test(no) || /^[-—–=]+$/.test(name)) continue;   /* 分隔线碎片行 */
         if (/^[\d\/.]+$/.test(name) && !no && !/^\d+(?:\.\d+)?$/.test(qty)) continue;   /* 仅丢弃无货号、无可靠数量的数字碎片 */
-        if (!no && !qty && /^(送货人|送貨人|收货人|收貨人|开单人|開單人|制单|制单人|製單|製單人|审核|审核人|審核|審核人)$/.test(name)) continue;   /* 无货号、无数量的独立签字标签；不按品名前缀丢弃货品 */
+        if (/^(胶箱|膠箱|钙箱|鈣箱|胶袋|膠袋|纸箱|紙箱|平卡|大平卡|卡板|胶卡板|膠卡板|木卡板|吸塑|周转箱|送货人|送貨人|收货人|收貨人|开单人|開單人|制单|审核|審核)/.test(name)) continue;   /* 包装统计/签字区 */
         if (/^(数量|數量|单位|單位|备注|備注|箱数|箱數|总数|總數|完成)$/.test(name)) continue;   /* 表头/备注单词碎片 */
         if (/送货数|送貨数/.test(name) && /箱数|箱數|总单|總單|总数|總數/.test(name)) continue;   /* 表头混合碎片（已送货数/总箱数/总数） */
         if (!qty && !/\s\d{2,}$/.test(name) && /查验|签收|收妥|逾期|差错|通知|不负责|拒不退换/.test(name)) continue;   /* 无货品数量依据的表尾说明；签收贴纸等正常货品保留 */
@@ -303,6 +306,8 @@ function parseDeliveryNote(text) {
           const pm = name.match(/^([A-Za-z0-9][A-Za-z0-9#\-]{2,})[一-鿿]/);
           if (pm) { no = pm[1]; name = name.slice(pm[1].length); }
         }
+        /* 品名格是纯编号（晶源「品名及规格」列就是货号 0254/C031）：当货号用 */
+        if (!no && /^[A-Za-z]?[\d#][A-Za-z0-9#\-.]{2,}$/.test(name)) { no = name; name = ''; }
         if (/-+$/.test(no)) no = no.replace(/-+$/, '');   /* 货号尾部多余横杠（77772- → 77772） */
         if (!no) no = lastNo;   /* 合并单元格：货号向下继承 */
         if (no) lastNo = no;
@@ -366,10 +371,10 @@ function parseDeliveryNote(text) {
     if (hiP !== -1) {
       let lastNoP = '';
       for (const ln of lines.slice(hiP + 1)) {
-        let m2 = ln.match(/^(.*?)\s+(\d{1,3}(?:,\d{3})+|\d{2,})\s+(个|PCS|pcs|件|套|卷|张|張|桶|KG|kg|米|箱|包|条|條|颗|顆)(?=\s|$)/);
+        let m2 = ln.match(/^(.*?)\s+(\d{1,3}(?:[,\.]\d{3})+|\d{2,})\s+(个|PCS|pcs|件|套|卷|张|張|桶|KG|kg|米|箱|包|条|條|颗|顆)(?=\s|$)/);
         if (!m2) {
           /* 单位在数量前（港正/莞力/鸿滨洋）：捕获组换成同序（前缀/数量/单位） */
-          const ma = ln.match(/^(.*?)\s+(个|PCS|pcs|件|套|卷|张|張|桶|KG|kg|米|箱|包|条|條|颗|顆)\s+(\d{1,3}(?:,\d{3})+|\d{2,})(?=\s|$)/);
+          const ma = ln.match(/^(.*?)\s+(个|PCS|pcs|件|套|卷|张|張|桶|KG|kg|米|箱|包|条|條|颗|顆)\s+(\d{1,3}(?:[,\.]\d{3})+|\d{2,})(?=\s|$)/);
           if (ma) m2 = [ma[0], ma[1], ma[3], ma[2]];
         }
         if (!m2) continue;
@@ -394,7 +399,8 @@ function parseDeliveryNote(text) {
         if (!no) no = lastNoP;   /* 合并单元格：货号向下继承 */
         if (no) lastNoP = no;
         if (!no && !name) continue;
-        fields.items.push({ productNo: no, productName: name, qty: m2[2].replace(/,/g, ''), unit: m2[3] });
+        const plainQty = m2[2].replace(/,/g, '');
+        fields.items.push({ productNo: no, productName: name, qty: /^\d{1,3}(\.\d{3})+$/.test(plainQty) ? plainQty.replace(/\./g, '') : plainQty, unit: m2[3] });
       }
     }
   }
