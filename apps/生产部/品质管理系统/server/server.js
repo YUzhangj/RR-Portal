@@ -100,10 +100,36 @@ const OCR_TABLE_PROMPT = 'Read all the text in the image. Output the table conte
 /* 第二次重试仍失败时：只要求输出货品明细表（列名固定，指令简单，命中率最高） */
 const OCR_ITEMS_PROMPT = 'This is a delivery note photo. Output ONLY a markdown table of the goods rows with exactly these columns: | 订单号 | 货号 | 品名 | 数量 | 单位 |. One row per goods item. No other text.';
 
+/* qwen3.5-ocr 遇到旋转/复杂版式时偶发切换成「定位 JSON」输出（rotate_rect + text）。
+   还原其中的文本碎片，并统计主导旋转角度（≥70% 碎片同向才算数，防止直立图误判）。 */
+function _parseGrounding(content) {
+  const s = String(content || '');
+  if (!s.includes('rotate_rect')) return null;
+  const texts = [], angles = [];
+  const unesc = v => v.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  const reFull = /"rotate_rect"\s*:\s*\[\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*([\d.]+)\s*\][^{}]*?"text"\s*:\s*"((?:\\.|[^"\\])*)"/g;
+  let m;
+  while ((m = reFull.exec(s))) { angles.push(Number(m[1])); texts.push(unesc(m[2])); }
+  if (!texts.length) {   /* 残缺定位 JSON：rotate_rect 后面直接跟字符串 */
+    const reBare = /"rotate_rect"\s*:\s*"((?:\\.|[^"\\])*)"/g;
+    while ((m = reBare.exec(s))) texts.push(unesc(m[1]));
+  }
+  if (!texts.length) return null;
+  const bins = { 0: 0, 90: 0, 180: 0, 270: 0 };
+  angles.forEach(a => { bins[Math.round(a / 90) * 90 % 360]++; });
+  const total = angles.length || 1;
+  let angle = 0;
+  for (const k of [90, 180, 270]) if (bins[k] / total >= 0.7 && bins[k] > (bins[angle] || 0)) angle = Number(k);
+  return { text: texts.join('\n'), angle };
+}
+
 /* ── 送货单 OCR 文本 → 结构化字段（确定性解析，不依赖模型指令遵循）── */
 function parseDeliveryNote(text) {
   const fields = { date: '', supplier: '', deliveryNo: '', orderNo: '', type: '来料', items: [] };
   let rawText = String(text || '');
+  /* 定位 JSON 输出先还原成纯文本，避免 JSON 行被误判成表格/明细产生垃圾行 */
+  const grounding = _parseGrounding(rawText);
+  if (grounding) rawText = grounding.text;
   const decodeHtml = value => value.replace(/&(#x[\da-f]+|#\d+|nbsp|amp|lt|gt|quot|apos);/gi, (entity, code) => {
     if (code[0] !== '#') return { nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[code.toLowerCase()];
     const point = /^#x/i.test(code) ? parseInt(code.slice(2), 16) : Number(code.slice(1));
@@ -202,7 +228,7 @@ function parseDeliveryNote(text) {
   }
 
   /* 送货单号：送货单号/发货单号/单号/NO. */
-  const deliveryLabels = /(?:送\s*[货貨]\s*[单單]\s*[号號](?:\s*[（(][^）)]*[）)])?|[发發]\s*[货貨]\s*[单單]\s*[号號](?:\s*[（(][^）)]*[）)])?|[单單]\s*[号號]|NO\.?)\s*[：:]\s*((?=[A-Za-z0-9.\-\/]*\d)[A-Za-z0-9][A-Za-z0-9.\-\/]{3,})/ig;   /* 完整4+字符值必须含数字；保留DN12、1ABC及括号标签 */
+  const deliveryLabels = /(?:送\s*[货貨]\s*[单單]\s*(?:[号號]|[编編]\s*[号號])(?:\s*[（(][^）)]*[）)])?|[发發]\s*[货貨]\s*[单單]\s*(?:[号號]|[编編]\s*[号號])(?:\s*[（(][^）)]*[）)])?|[单單]\s*[号號]|NO\.?)\s*[：:]\s*((?=[A-Za-z0-9.\-\/]*\d)[A-Za-z0-9][A-Za-z0-9.\-\/]{3,})/ig;   /* 完整4+字符值必须含数字；保留DN12、1ABC及括号标签；含「編號」写法 */
   for (const candidate of joined.matchAll(deliveryLabels)) {
     if (/[订訂]\s*$/.test(joined.slice(0, candidate.index))) continue;   /* 订单号/訂單號不属于送货单号 */
     fields.deliveryNo = candidate[1]; break;
@@ -481,6 +507,64 @@ function parseDeliveryNote(text) {
     }
   }
 
+  /* 分栏输出兜底（显达硅胶这类嵌套/合并单元格表格，横拍照片也常触发）：模型按列读出——
+     Description 下方连续 N 行品名，Qty 下方连续 N 行数量，行关系丢失。
+     品名行数与数量行数一致时按顺序配对；不一致就放弃，宁可手工也不错配。 */
+  if (!fields.items.length) {
+    const UNIT_RE = '(?:PCS|pcs|个|件|套|卷|张|張|桶|KG|kg|米|箱|包|条|條|颗|顆)';
+    const isQtyLine = l => {
+      const t = l.trim();
+      return new RegExp('^\\d{1,3}(?:[,\\.]\\d{3})+\\s*' + UNIT_RE + '?$').test(t)
+          || new RegExp('^\\d{2,}\\s+' + UNIT_RE + '$').test(t);
+    };
+    const hiD = lines.findIndex(l => /^\s*(Description|DESCRIPTION|品名|名称|名稱|货名|貨名|ITEM)\s*$/i.test(l));
+    let hiQ = hiD === -1 ? -1 : lines.findIndex((l, idx) => idx > hiD && /^\s*(Qty|QTY|Quantity|数量|數量)\s*[.:：]?\s*$/i.test(l));
+    let qtyFrom = -1;
+    if (hiQ !== -1) {
+      qtyFrom = hiQ + 1;
+    } else if (hiD !== -1) {
+      /* 横拍/旋转图：模型常把 Qty 表头丢掉，数量块裸奔在品名块后面——找第一段连续数量行 */
+      for (let i = hiD + 1; i < lines.length; i++) {
+        if (isQtyLine(lines[i])) { qtyFrom = i; break; }
+      }
+    }
+    if (hiD !== -1 && qtyFrom !== -1) {
+      const qtys = [];
+      for (const ln of lines.slice(qtyFrom)) {
+        if (isQtyLine(ln)) qtys.push(ln.trim());
+        else if (qtys.length || ln.trim()) break;   /* 数量块必须连续 */
+      }
+      /* 品名块：跳过 PO 行（顺便抓订单号）和 #编号/纯编码行 */
+      const block = lines.slice(hiD + 1, qtyFrom);
+      for (const ln of block) {
+        const po = ln.match(/P\s*\/?\s*O\s*(?:NO|No|no)\.?\s*[:#]?\s*([A-Za-z]{1,4}[A-Za-z0-9\-]{4,})/);
+        if (po && !fields.orderNo) fields.orderNo = po[1];
+      }
+      const cjkCount = s => (s.match(/[一-鿿]/g) || []).length;
+      let names = block.map(l => l.trim())
+        .filter(t => t && !/P\s*\/?\s*O/i.test(t) && !/^[#＃]?[A-Za-z0-9][A-Za-z0-9\-]*$/.test(t) && cjkCount(t) >= 2);
+      if (names.length !== qtys.length) {
+        const stricter = names.filter(t => cjkCount(t) >= 3);   /* 合并单元格碎片（如「鸭子」）再过滤一轮 */
+        if (stricter.length === qtys.length) names = stricter;
+      }
+      if (qtys.length && names.length === qtys.length) {
+        names.forEach((name, i) => {
+          const qm = qtys[i].match(/^(\d{1,3}(?:[,\.]\d{3})+|\d+)\s*(.*)$/);
+          fields.items.push({ productNo: '', productName: name, qty: quantityText(qm ? qm[1] : '', (qm && qm[2]) || ''), unit: (qm && qm[2]) || '' });
+        });
+      }
+    }
+  }
+
+  /* 页眉公司名/单据标题/表尾 END 标记被误当货品行（特征：无数量）时剔除，避免垃圾行进表单 */
+  fields.items = fields.items.filter(it => {
+    if (it.qty) return true;
+    const n = String(it.productName || '');
+    if (!/[一-鿿]/.test(n)) return false;   /* END 等纯英文碎片 */
+    if (/公司|有限|DELIVERY|送货单|送貨單|NOTE/i.test(n)) return false;
+    return true;
+  });
+
 
   /* 模型偶发「复读」：把同一行明细输出多次，甚至整份单据重复 N 遍。
      两级去重：完全相同的行只留一条；品名+数量+单位仍重复的行只保留第一次出现
@@ -567,10 +651,20 @@ async function aiVisionExtract(dataUrl) {
   let content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || '';
   if (Array.isArray(content)) content = content.map(c => (typeof c === 'string' ? c : (c && c.text) || '')).join('');
   content = String(content).trim();
-  let fields = parseDeliveryNote(content);
+  /* 模型输出定位 JSON 且碎片角度明显偏向 90/180/270：图片拍横/拍倒了。
+     这种输出还原的文本行序错乱、极易解析出垃圾行，直接丢弃本次结果，
+     告诉客户端旋转后重传，也不再换提示词重试同一张图。 */
+  let needRotate = 0;
+  const g1 = _parseGrounding(content);
+  if (g1 && g1.angle) needRotate = g1.angle;
+  let fields = needRotate
+    ? { date: '', supplier: '', deliveryNo: '', orderNo: '', type: '来料', items: [] }
+    : parseDeliveryNote(content);
+  /* 「可用」标准：至少一条明细带数量。全是无数量碎片行（旋转图乱序/表尾垃圾行）视为失败继续重试 */
+  const usable = f => f.items.some(it => it.qty);
   /* 表格密集型单据（如台聚）全文 OCR 易乱行/复读导致解析不出明细：
      换「输出 markdown 表格」提示词再识别一次，解析出明细才采用 */
-  if (!fields.items.length) {
+  if (!usable(fields) && !needRotate) {
     console.warn('[AI] 首次 OCR 未解析出明细，换表格提示词重试');
     payload.messages[0].content[0].text = OCR_TABLE_PROMPT;
     let r2 = await callModel(payload.model);
@@ -581,8 +675,10 @@ async function aiVisionExtract(dataUrl) {
         let content2 = data2 && data2.choices && data2.choices[0] && data2.choices[0].message && data2.choices[0].message.content || '';
         if (Array.isArray(content2)) content2 = content2.map(c => (typeof c === 'string' ? c : (c && c.text) || '')).join('');
         content2 = String(content2).trim();
-        const fields2 = parseDeliveryNote(content2);
-        if (fields2.items.length) {
+        const g2 = _parseGrounding(content2);
+        if (g2 && g2.angle) needRotate = g2.angle;
+        const fields2 = needRotate ? null : parseDeliveryNote(content2);
+        if (fields2 && usable(fields2)) {
           if (!fields2.date && fields.date) fields2.date = fields.date;
           if (!fields2.supplier && fields.supplier) fields2.supplier = fields.supplier;
           if (!fields2.deliveryNo && fields.deliveryNo) fields2.deliveryNo = fields.deliveryNo;
@@ -592,7 +688,7 @@ async function aiVisionExtract(dataUrl) {
       } catch (e) { console.warn('[AI] 表格提示词重试响应异常：', e.message); }
     }
     /* 仍无明细：第三次，只让模型输出货品明细表（列名固定） */
-    if (!fields.items.length) {
+    if (!usable(fields) && !needRotate) {
       console.warn('[AI] 二次重试仍无明细，换明细表提示词再试');
       payload.messages[0].content[0].text = OCR_ITEMS_PROMPT;
       let r3 = await callModel(payload.model);
@@ -603,8 +699,10 @@ async function aiVisionExtract(dataUrl) {
           let content3 = data3 && data3.choices && data3.choices[0] && data3.choices[0].message && data3.choices[0].message.content || '';
           if (Array.isArray(content3)) content3 = content3.map(c => (typeof c === 'string' ? c : (c && c.text) || '')).join('');
           content3 = String(content3).trim();
-          const fields3 = parseDeliveryNote(content3);
-          if (fields3.items.length) {
+          const g3 = _parseGrounding(content3);
+          if (g3 && g3.angle) needRotate = g3.angle;
+          const fields3 = needRotate ? null : parseDeliveryNote(content3);
+          if (fields3 && usable(fields3)) {
             if (!fields3.date && fields.date) fields3.date = fields.date;
             if (!fields3.supplier && fields.supplier) fields3.supplier = fields.supplier;
             if (!fields3.deliveryNo && fields.deliveryNo) fields3.deliveryNo = fields.deliveryNo;
@@ -615,7 +713,7 @@ async function aiVisionExtract(dataUrl) {
       }
     }
   }
-  return { fields, usage: data.usage || null, rawText: content };
+  return { fields, usage: data.usage || null, rawText: content, needRotate };
 }
 
 /* ── 记录表列顺序（写入/读取都按这个顺序）── */
@@ -1427,7 +1525,7 @@ const server = http.createServer(async (req, res) => {
       if (!body || !body.image) return sendJson(res, 400, { ok: false, error: '缺少 image 字段（base64 dataURL）' });
       try {
         const r = await aiVisionExtract(body.image);
-        return sendJson(res, 200, { ok: true, fields: r.fields, usage: r.usage, rawText: r.rawText });
+        return sendJson(res, 200, { ok: true, fields: r.fields, usage: r.usage, rawText: r.rawText, needRotate: r.needRotate || 0 });
       } catch (e) {
         const code = e.code === 'NO_AI' ? 503 : 502;
         return sendJson(res, code, { ok: false, error: String(e && e.message || e), code: e.code || 'ERR' });

@@ -153,6 +153,29 @@
     return items.length;
   }
 
+  function rotateDataUrl(dataUrl, degCw) {
+    return new Promise(function (resolve) {
+      try {
+        var img = new Image();
+        img.onload = function () {
+          try {
+            var d = ((degCw % 360) + 360) % 360;
+            var cv = document.createElement('canvas');
+            cv.width = d === 180 ? img.width : img.height;
+            cv.height = d === 180 ? img.height : img.width;
+            var ctx = cv.getContext('2d');
+            ctx.translate(cv.width / 2, cv.height / 2);
+            ctx.rotate(d * Math.PI / 180);
+            ctx.drawImage(img, -img.width / 2, -img.height / 2);
+            resolve(cv.toDataURL('image/jpeg', 0.92));
+          } catch (e) { resolve(dataUrl); }
+        };
+        img.onerror = function () { resolve(dataUrl); };
+        img.src = dataUrl;
+      } catch (e) { resolve(dataUrl); }
+    });
+  }
+
   function aiStartOcr() {
     var imgEl = document.getElementById('ocrPreview');
     var dataUrl = imgEl && imgEl.src && imgEl.src.indexOf('data:image') === 0 ? imgEl.src : '';
@@ -160,6 +183,8 @@
       toast('请先上传图片', 'error');
       return Promise.resolve();
     }
+    /* 换图时重置旋转重试计数 */
+    if (window.__qcRotSrc !== dataUrl) { window.__qcRotSrc = dataUrl; window.__qcRotTries = 0; }
 
     var btn = document.getElementById('btnStartOcr');
     if (btn) btn.disabled = true;
@@ -182,6 +207,22 @@
       .then(function (res) {
         if (!res.ok || !res.j || !res.j.ok) {
           throw new Error((res.j && res.j.error) || ('HTTP ' + res.status));
+        }
+        /* 服务端检测到图片横拍/倒置：自动转正后重试（最多 2 次，第二次换反方向） */
+        var hasItems = res.j.fields && Array.isArray(res.j.fields.items) && res.j.fields.items.length > 0;
+        if (res.j.needRotate && !hasItems) {
+          var tries = window.__qcRotTries || 0;
+          if (tries < 2) {
+            window.__qcRotTries = tries + 1;
+            var deg = res.j.needRotate === 180 ? 180 : (res.j.needRotate === 270 ? 90 : -90);
+            if (tries === 1 && deg !== 180) deg = -deg;
+            setT('ocrStatus', '检测到图片旋转，自动转正重试（第 ' + (tries + 1) + ' 次）...');
+            return rotateDataUrl(imgEl.src, deg).then(function (nd) {
+              imgEl.src = nd;
+              window.__qcRotSrc = nd;   /* 旋转后的图不算「换图」，保留重试计数 */
+              return aiStartOcr();
+            });
+          }
         }
         var n = applyFields(res.j.fields || {});
         if (res.j.rawText) setV('ocrRawText', res.j.rawText);   // 原文框给完整 OCR 文字，便于人工核对/修改后重新提取
@@ -254,6 +295,26 @@
         aiDispatch();
       }, true);
       btn.__qcAiClickPatched = true;
+    }
+
+    /* 手动旋转按钮：横拍/倒置的单据转正后再识别 */
+    var rotBtn = document.getElementById('btnRotateOcr');
+    if (rotBtn && !rotBtn.__qcRotPatched) {
+      rotBtn.addEventListener('click', function (e) {
+        e.preventDefault();
+        var imgEl2 = document.getElementById('ocrPreview');
+        if (!imgEl2 || !imgEl2.src || imgEl2.src.indexOf('data:image') !== 0) {
+          toast('请先上传图片', 'error');
+          return;
+        }
+        rotateDataUrl(imgEl2.src, 90).then(function (nd) {
+          imgEl2.src = nd;
+          window.__qcRotSrc = nd;       /* 视为新图，重置自动旋转重试计数 */
+          window.__qcRotTries = 0;
+          setT('ocrStatus', '图片已旋转 90°，点击"开始识别"重新识别');
+        });
+      });
+      rotBtn.__qcRotPatched = true;
     }
 
     if (typeof window.applyOcrToForm === 'function' && !window.applyOcrToForm.__qcWrapped) {
