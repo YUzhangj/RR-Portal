@@ -148,3 +148,33 @@ test('known description selection updates defaults in place without replacing th
   assert.deepEqual(selects.map(x=>x.value),['MIN 2.5','尺寸/测量']);
   assert.equal(b.json('_defectRows[0]').qty,3); assert.equal(b.elements.get('f_result').value,'PASS');
 });
+
+
+test('editing structured defects regenerates the summary and removing the last row clears it', () => {
+  const b = browser(); b.element('f_defect', 'old defect3');
+  b.run(`state.records=[{id:1,date:'2026-10-20',supplier:'Test Supplier',qty:3000,sampleQty:125,result:'PASS',status:'rejected',
+    defect:'old defect3',defects:[{desc:'old defect',qty:3,level:'MIN 2.5'}]}];`);
+  b.ctx.openEditModal(1); b.ctx._loadDefectRows([defect(2)]); b.ctx.saveRecord();
+  assert.equal(b.json('state.records[0]').defect, 'synthetic defect2');
+  b.ctx.openEditModal(1); b.ctx.removeDefectRow(0); b.ctx.saveRecord();
+  assert.equal(b.json('state.records[0]').defect, ''); assert.deepEqual(b.json('state.records[0]').defects, []);
+});
+
+test('free-text legacy defect notes survive editing without structured rows', () => {
+  const b = browser(); b.element('f_defect');
+  b.run(`state.records=[{id:1,date:'2026-10-20',supplier:'Test Supplier',qty:3000,sampleQty:125,result:'PASS',status:'pending',defect:'legacy note'}];`);
+  b.ctx.openEditModal(1); b.ctx.saveRecord(); assert.equal(b.json('state.records[0]').defect, 'legacy note');
+});
+
+test('continue entry retains supplier customer process product type and AQL but clears prior document values', () => {
+  const b = browser();
+  for (const [id,value] of Object.entries({ f_client:'Synthetic Client', f_processType:'Synthetic Process', f_productNo:'P-001',
+    f_productName:'Prior Name', f_orderNo:'PO-OLD', f_deliveryNo:'DL-OLD', f_remark:'Prior Note', f_defect:'Prior Defect' })) b.element(id,value);
+  b.ctx.getCustomerOptions=()=>['Synthetic Client']; b.ctx.getProcessTypeOptions=()=>['Synthetic Process'];
+  b.ctx._loadDefectRows([defect(2)]); b.ctx.saveRecord({continueEntry:true});
+  assert.equal(b.json('state.records[0]').processType, 'Synthetic Process');
+  for (const [id,value] of Object.entries({ f_supplier:'Test Supplier', f_client:'Synthetic Client', f_processType:'Synthetic Process',
+    f_productNo:'P-001', f_type:'成品', f_aqlLevel:'MAJ 0.65' })) assert.equal(b.elements.get(id).value, value);
+  for (const id of ['f_productName','f_orderNo','f_deliveryNo','f_remark','f_defect','f_qty','f_sampleQty']) assert.equal(b.elements.get(id).value, '');
+  assert.deepEqual(b.json('_defectRows'), []); assert.deepEqual(b.json('_measRows'), []); assert.equal(b.json('editingId'), null);
+});

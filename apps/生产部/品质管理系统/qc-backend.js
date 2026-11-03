@@ -55,6 +55,7 @@
     return copy;
   }
   function notice(message, error) {
+    if (blockedRecovery && recoveryIsCurrent() && message && message.indexOf('草稿') === -1) { message = recoveryMessage(); error = true; }
     window.__QC_SYNC_NOTICE = message;
     /* 例行成功不弹 toast：应用自身已有「记录已添加 ✓」等提示，
        同步层的「服务器已保存修改」会把它覆盖掉。错误状态照常提示。 */
@@ -74,7 +75,14 @@
          横幅只留给错误/草稿等需要用户处理的状态。 */
       banner.style.display = (message && error) ? '' : 'none';
       var hasRecordFailure = Object.keys(failedWrites).some(function (url) { return url.indexOf('/api/records') !== -1; });
-      if (error && hasRecordFailure && document.createElement) {
+      if (error && blockedRecovery && document.createElement) {
+        ['下载原草稿', '放弃待恢复草稿'].forEach(function (label, index) {
+          var button = document.createElement('button');
+          button.type = 'button'; button.textContent = label; button.className = 'btn-secondary'; button.style.marginLeft = '12px';
+          button.onclick = index ? discardBlockedDraft : downloadBlockedDraft;
+          banner.appendChild(button);
+        });
+      } else if (error && hasRecordFailure && document.createElement) {
         var retry = document.createElement('button');
         retry.type = 'button'; retry.textContent = '重试同步'; retry.className = 'btn-primary'; retry.style.marginLeft = '12px';
         retry.onclick = function () { window.__QC_SYNC_NOW(); };
@@ -158,6 +166,71 @@
   function newRecordToken() { return window.crypto && typeof window.crypto.randomUUID === 'function' ? window.crypto.randomUUID() : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2); }
   var recordQueueEpoch = 0;
   var draftOwner = null;
+  var recordBaseline = null;
+  var blockedRecovery = null;
+  window.__QC_DRAFT_RECOVERY_BLOCKED = false;
+  function baselineOf(st) {
+    var versions = Object.create(null);
+    (st.records || []).forEach(function (r) { versions[r.id] = r.updatedAt == null ? null : r.updatedAt; });
+    return { versions: versions, nextId: st.nextId };
+  }
+  function sameBaseline(baseline, st, replacement) {
+    if (!baseline || !baseline.versions || typeof baseline.versions !== 'object') return false;
+    var current = baselineOf(st), ids = Object.keys(baseline.versions);
+    if (replacement && (ids.length !== Object.keys(current.versions).length || baseline.nextId !== st.nextId)) return false;
+    return ids.every(function (id) { return Object.prototype.hasOwnProperty.call(current.versions, id) && current.versions[id] === baseline.versions[id]; });
+  }
+  function recoveryMessage() {
+    return '当前公司、账号「' + (blockedRecovery ? blockedRecovery.owner : '') + '」的验货草稿与服务器记录存在冲突或缺少原始断点，已显示服务器最新数据并保留原草稿；验货修改和重试已暂停。请先下载原草稿核对，或明确放弃待恢复草稿；不会覆盖或恢复已删除记录。' +
+      (blockedRecovery && !blockedRecovery.backupKey ? ' 独立备份未写入，原草稿仍保留，请勿清理浏览器数据。' : '');
+  }
+  function recoveryIsCurrent() {
+    return blockedRecovery && window.__QC_AUTH && window.__QC_AUTH.company === COMPANY && window.__QC_AUTH.user.username === blockedRecovery.owner;
+  }
+  function blockDraftRecovery(draft, originalRaw) {
+    var raw = originalRaw || JSON.stringify(draft), key = draftKey(draft.owner) + '_conflict_' + encodeURIComponent(draft.token || newRecordToken());
+    blockedRecovery = { owner: draft.owner, raw: raw, backupKey: null };
+    // Backups are immutable. Keep the original pending key too until an explicit discard.
+    try {
+      var previous = localStorage.getItem(key);
+      if (previous && previous !== raw) key += '_' + newRecordToken();
+      if (!localStorage.getItem(key)) localStorage.setItem(key, raw);
+      if (localStorage.getItem(key) === raw) blockedRecovery.backupKey = key;
+    } catch (_) {}
+    window.__QC_DRAFT_RECOVERY_BLOCKED = true;
+    notice(recoveryMessage(), true);
+  }
+  function downloadBlockedDraft() {
+    if (!recoveryIsCurrent()) return false;
+    try {
+      var blob = new Blob([blockedRecovery.raw], { type: 'application/json;charset=utf-8' });
+      var url = URL.createObjectURL(blob), link = document.createElement('a');
+      link.href = url; link.download = '品质未同步草稿-' + COMPANY + '-' + blockedRecovery.owner + '.json';
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      return true;
+    } catch (_) { notice(recoveryMessage() + ' 下载失败，请保留此页面并联系管理员。', true); return false; }
+  }
+  function discardBlockedDraft() {
+    if (!recoveryIsCurrent() || !window.confirm('确定放弃当前公司、账号「' + blockedRecovery.owner + '」的这份待恢复草稿？服务器记录不会改变。请先下载并核对原草稿。')) return false;
+    var recovery = blockedRecovery, key = draftKey(recovery.owner), volatile = volatileRecordDrafts[recovery.owner];
+    try {
+      var stored = localStorage.getItem(key);
+      if (volatile && JSON.stringify(volatile.draft) !== recovery.raw) throw new Error('draft changed');
+      if (!volatile && stored !== recovery.raw) throw new Error('draft changed');
+      // A newer draft from another tab must never be cleared by this page.
+      if (stored && stored !== recovery.raw) {
+        var prior = JSON.parse(stored);
+        if (!volatile || prior.token !== volatile.previousToken || prior.revision !== volatile.previousRevision) throw new Error('draft changed');
+      }
+      if (stored) localStorage.removeItem(key);
+      delete volatileRecordDrafts[recovery.owner]; updateUnloadGuard();
+      blockedRecovery = null; window.__QC_DRAFT_RECOVERY_BLOCKED = false;
+      location.reload(); return true;
+    } catch (_) { notice(recoveryMessage() + ' 草稿已在其他页面变化，未清除；请重新加载后核对。', true); return false; }
+  }
+  window.__QC_DOWNLOAD_BLOCKED_DRAFT = downloadBlockedDraft;
+  window.__QC_DISCARD_BLOCKED_DRAFT = discardBlockedDraft;
   // Storage quota failures still need an owner-bound copy during this page's life.
   // This is not durable storage: leaving the page must warn until it is saved.
   var volatileRecordDrafts = Object.create(null);
@@ -187,7 +260,7 @@
     var draft, previous;
     try {
       draft = { owner: owner, company: COMPANY, revision: recordRevision, token: recordToken,
-        state: JSON.parse(localStorage.getItem(KEY.records) || '{}'), deletedIds: window.__QC_PENDING_DELETES.slice(),
+        state: JSON.parse(localStorage.getItem(KEY.records) || '{}'), baseline: recordBaseline, deletedIds: window.__QC_PENDING_DELETES.slice(),
         deleteRevisions: Object.assign({}, deleteRevisions), nextDeleteRevision: nextDeleteRevision, replacement: window.__QC_FORCE_REPLACE || false };
       try { previous = JSON.parse(localStorage.getItem(draftKey(owner)) || 'null'); } catch (_) {}
       localStorage.setItem(draftKey(owner), JSON.stringify(draft));
@@ -202,57 +275,68 @@
       return false;
     }
   }
-  function restoreRecordDraft() {
+  function restoreRecordDraft(serverState) {
     recordQueueEpoch++;
     var owner = window.__QC_AUTH.user.username;
     var changedOwner = draftOwner !== owner;
     draftOwner = owner;
+    blockedRecovery = null; window.__QC_DRAFT_RECOVERY_BLOCKED = false;
     if (changedOwner) { failedWrites = Object.create(null); notice('', false); }
     window.__QC_PENDING_DELETES = []; deleteRevisions = Object.create(null); nextDeleteRevision = 0;
     window.__QC_FORCE_REPLACE = false; recordRevision = 0; recordToken = null;
     try {
       var volatile = volatileRecordDrafts[owner];
-      var draft = volatile ? volatile.draft : JSON.parse(localStorage.getItem(draftKey(owner)) || 'null');
-      if (!draft || draft.owner !== owner || draft.company !== COMPANY || !draft.state || !Array.isArray(draft.state.records)) return;
+      var originalRaw = volatile ? JSON.stringify(volatile.draft) : localStorage.getItem(draftKey(owner));
+      var draft = originalRaw ? JSON.parse(originalRaw) : null;
+      recordBaseline = baselineOf(serverState);
+      if (!draft || draft.owner !== owner || draft.company !== COMPANY) return;
+      if (!draft.state || !Array.isArray(draft.state.records)) { blockDraftRecovery(draft, originalRaw); return; }
+      var serverById = Object.create(null), indexOfId = Object.create(null), merged = serverState.records.slice();
+      merged.forEach(function (r, i) { serverById[r.id] = r; indexOfId[r.id] = i; });
+      var conflict = !sameBaseline(draft.baseline, serverState, !!draft.replacement);
+      var baseline = draft.baseline && draft.baseline.versions || Object.create(null);
+      var seen = new Set();
+      draft.state.records.forEach(function (r) {
+        if (!Number.isSafeInteger(r.id) || r.id <= 0 || seen.has(r.id)) { conflict = true; return; }
+        seen.add(r.id);
+        if (!Object.prototype.hasOwnProperty.call(baseline, r.id) &&
+            (serverById[r.id] || (!draft.replacement && r.id < Math.max(Number(serverState.nextId) || 31, Number(draft.baseline && draft.baseline.nextId) || 31)))) conflict = true;
+      });
+      var deleted = (Array.isArray(draft.deletedIds) ? draft.deletedIds : []).filter(function (id) { return Number.isSafeInteger(id) && id > 0; });
+      if (!draft.replacement) deleted.forEach(function (id) {
+        if (serverById[id] && !Object.prototype.hasOwnProperty.call(baseline, id)) conflict = true;
+      });
+      if (conflict) { blockDraftRecovery(draft, originalRaw); return; }
+      // Baseline IDs and exact server revisions prove these edits are still applicable.
+      // An absent baseline row is never interpreted as a new unsynced record.
+      if (draft.replacement) merged = draft.state.records.slice();
+      else {
+        draft.state.records.forEach(function (r) {
+          if (Object.prototype.hasOwnProperty.call(indexOfId, r.id)) merged[indexOfId[r.id]] = r;
+          else merged.push(r);
+        });
+        merged = merged.filter(function (r) { return deleted.indexOf(r.id) === -1; });
+      }
+      localStorage.setItem(KEY.records, JSON.stringify({ records: merged,
+        nextId: Math.max(Number(serverState.nextId) || 31, Number(draft.state.nextId) || 31, merged.reduce(function (n, r) { return Math.max(n, r.id + 1); }, 31)) }));
       recordToken = typeof draft.token === 'string' ? draft.token : newRecordToken();
       recordRevision = Number.isSafeInteger(draft.revision) && draft.revision > 0 ? draft.revision : 1;
       nextDeleteRevision = Number.isSafeInteger(draft.nextDeleteRevision) ? draft.nextDeleteRevision : 0;
-      (Array.isArray(draft.deletedIds) ? draft.deletedIds : []).forEach(function (id) {
-        if (!Number.isSafeInteger(id) || id <= 0) return;
+      deleted.forEach(function (id) {
         window.__QC_PENDING_DELETES.push(id);
         var rev = draft.deleteRevisions && draft.deleteRevisions[id];
         deleteRevisions[id] = Number.isSafeInteger(rev) ? rev : ++nextDeleteRevision;
         nextDeleteRevision = Math.max(nextDeleteRevision, deleteRevisions[id]);
       });
       window.__QC_FORCE_REPLACE = draft.replacement || false;
-      /* 草稿恢复用「合并」而不是「整包覆盖」：
-         草稿里每条记录若服务器已有且更新（如审核人已在别处审核/修改），以服务器为准；
-         只有服务器没有的（真正未同步的本地新记录）才从草稿补进来。
-         否则旧草稿会把页面永久定格在旧状态（已审核的记录还显示待审核）。 */
-      try {
-        var serverState = JSON.parse(localStorage.getItem(KEY.records) || '{}');
-        var serverById = Object.create(null);
-        (serverState.records || []).forEach(function (r) { serverById[r.id] = r; });
-        var merged = (serverState.records || []).slice();
-        var indexOfId = Object.create(null);
-        merged.forEach(function (r, i) { indexOfId[r.id] = i; });
-        (draft.state.records || []).forEach(function (dr) {
-          var sr = serverById[dr.id];
-          if (!sr) { indexOfId[dr.id] = merged.length; merged.push(dr); return; }
-          if (String(dr.updatedAt || '') > String(sr.updatedAt || '')) merged[indexOfId[dr.id]] = dr;
-        });
-        localStorage.setItem(KEY.records, JSON.stringify({
-          records: merged,
-          nextId: Math.max(Number(serverState.nextId) || 31, Number(draft.state.nextId) || 31),
-        }));
-      } catch (_) {
-        localStorage.setItem(KEY.records, JSON.stringify(draft.state));   /* 合并失败退回原逻辑 */
-      }
       failedWrites[apiUrl('/api/records')] = true;
       notice(volatile
         ? '当前账号有未同步验货记录，仅保留在当前页面，本地草稿备份不可用。请勿关闭或刷新，核对后点击“重试同步”；系统不会自动重发。'
         : '当前账号有未同步的本地验货草稿，已保留。请核对后点击“重试同步”，系统不会自动重发。', true);
-    } catch (_) { notice('本地草稿读取失败，请保留浏览器数据并联系管理员。', true); }
+    } catch (_) {
+      if (originalRaw) blockDraftRecovery(draft || { owner: owner }, originalRaw);
+      else notice('本地草稿读取失败，请保留浏览器数据并联系管理员。', true);
+    }
   }
   window.__QC_MARK_DELETED = function (ids) {
     if (!Array.isArray(ids)) return;
@@ -287,13 +371,12 @@
       var data = JSON.parse(xhr.responseText);
       acceptAuth(data);
       if (!Array.isArray(data.records)) throw new Error('服务器数据格式不正确');
-      var volatile = currentVolatileDraft();
-      // Never replace this actor's unprotected records with an older server snapshot.
-      localStorage.setItem(KEY.records, JSON.stringify(volatile ? volatile.draft.state : { records: data.records, nextId: data.nextId || 31 }));
+      var serverState = { records: data.records, nextId: data.nextId || 31 };
+      localStorage.setItem(KEY.records, JSON.stringify(serverState));
       localStorage.setItem(KEY.users, JSON.stringify(Array.isArray(data.users) ? data.users.map(publicUser) : []));
       if (Array.isArray(data.defectLib)) localStorage.setItem(KEY.defectLib, JSON.stringify(data.defectLib));
       if (Array.isArray(data.partners)) localStorage.setItem(KEY.partners, JSON.stringify(data.partners));
-      restoreRecordDraft();
+      restoreRecordDraft(serverState);
       return true;
     } catch (e) {
       clearAuth(e.message);
@@ -341,6 +424,7 @@
   function pushRecords() {
     var owner = window.__QC_AUTH && window.__QC_AUTH.user.username;
     if (!owner) return Promise.resolve(false);
+    if (recoveryIsCurrent()) { notice(recoveryMessage(), true); return Promise.resolve(false); }
     var epoch = recordQueueEpoch;
     recordRevision++; recordToken = newRecordToken();
     /* 草稿备份失败（如浏览器存储满）只降级为「无草稿保护」，绝不能因此中止发送：
@@ -412,6 +496,7 @@
       var origPersist = window.persist;
       window.persist = function () {
         if (!window.__QC_AUTH) { notice('请先登录当前公司，记录尚未保存。', true); return false; }
+        if (recoveryIsCurrent()) { notice(recoveryMessage(), true); return false; }
         var ret = origPersist.apply(this, arguments);
         if (ret !== false) pushRecords();
         return ret;

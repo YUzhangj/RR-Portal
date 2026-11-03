@@ -181,6 +181,7 @@ function _clearSession() {
 
 /* ── 权限判断（基于权限矩阵；jc 主账号保底全权）── */
 function can(action) {
+  if (window.__QC_DRAFT_RECOVERY_BLOCKED && ['createRecord','editRecord','deleteRecord','batchDelete','importData','reviewRecord'].includes(action)) return false;
   const u = _liveUser();
   if (!u) return false;
   if (u.username === 'jc' && u.role === 'admin') return true;
@@ -4839,6 +4840,8 @@ function saveRecord(options = {}) {
   let defect = getVal('f_defect');
   if (hasDefects) {
     defect = _genDefectText();
+  } else if (editingRecord && Array.isArray(editingRecord.defects) && editingRecord.defects.length) {
+    defect = '';  /* 删除最后一条结构化不良后清除旧汇总，纯文字历史记录仍保留。 */
   }
 
   /* ── 组装 defects 数组（只保留有实质内容的行）── */
