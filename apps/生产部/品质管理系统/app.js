@@ -2155,6 +2155,9 @@ function filterRecords() {
 
     setText('recordCount', `共 ${filteredRecs.length} 条`);
 
+    /* 渲染上限：数据量大时只渲染前 300 行，避免整表 innerHTML 卡死页面 */
+    const renderRows = _renderedRecordRows();
+
     const wrap = document.getElementById('recordsTableWrap');
     if (!wrap) return;
 
@@ -2168,12 +2171,22 @@ function filterRecords() {
     }
 
     /* 过滤后清掉在当前结果集中不存在的选中 id */
-    const visibleIds = new Set(filteredRecs.map(r => r.id));
+    const visibleIds = new Set(renderRows.map(r => r.id));
     for (const id of [..._selectedIds]) {
       if (!visibleIds.has(id)) _selectedIds.delete(id);
     }
 
-    wrap.innerHTML = `<table id="recordsTable" style="table-layout:fixed;width:100%;min-width:1778px">
+    const capBar = (!_recordsShowAll && filteredRecs.length > RECORDS_PAGE_SIZE)
+      ? `<div style="display:flex;align-items:center;gap:10px;padding:6px 4px;font-size:12px;color:var(--text-dim)">
+           已显示前 ${RECORDS_PAGE_SIZE} 条（共 ${filteredRecs.length} 条）
+           <button class="action-btn" onclick="_recordsShowAll=true;filterRecords()">显示全部</button>
+         </div>`
+      : (_recordsShowAll && filteredRecs.length > RECORDS_PAGE_SIZE
+          ? `<div style="display:flex;align-items:center;gap:10px;padding:6px 4px;font-size:12px;color:var(--text-dim)">
+               全部 ${filteredRecs.length} 条（数据量大时可能卡顿）
+               <button class="action-btn" onclick="_recordsShowAll=false;filterRecords()">只显示前 ${RECORDS_PAGE_SIZE} 条</button>
+             </div>` : '');
+    wrap.innerHTML = capBar + `<table id="recordsTable" style="table-layout:fixed;width:100%;min-width:1778px">
       <colgroup>
         <col style="width:36px"/>   <!-- 复选框 -->
         <col style="width:44px"/>   <!-- # -->
@@ -2199,7 +2212,7 @@ function filterRecords() {
       <thead><tr>
         <th class="col-check">
           <input type="checkbox" class="check-all" id="checkAll"
-                 onchange="_onCheckAll(this)" title="全选/取消全选" />
+                 onchange="_onCheckAll(this)" title="全选/取消当前显示记录" />
         </th>
         <th style="text-align:right">#</th>
         <th style="text-align:left">来料日期</th>
@@ -2221,7 +2234,7 @@ function filterRecords() {
         <th style="text-align:center">检验员</th>
         <th style="text-align:center">操作</th>
       </tr></thead>
-      <tbody>${filteredRecs.map(r => {
+      <tbody>${renderRows.map(r => {
         const bc       = isPass(r) ? 'badge-pass' : isFail(r) ? 'badge-rej' : r.result==='COND' ? 'badge-cond' : 'badge-hold';
         const rt       = parseRate(r.defectRate) ?? 0;
         const checked  = _selectedIds.has(r.id) ? 'checked' : '';
@@ -2348,10 +2361,14 @@ function applyColLock() {
 /* 窗口尺寸变化后表格列宽会变，需要重算冻结位置 */
 window.addEventListener('resize', () => { if (colLockOn) applyColLock(); });
 
-/* ── 全选 checkbox 变化 ── */
+function _renderedRecordRows() {
+  return _recordsShowAll ? filteredRecs : filteredRecs.slice(0, RECORDS_PAGE_SIZE);
+}
+
+/* ── 全选 checkbox 变化：仅操作当前实际显示的记录 ── */
 function _onCheckAll(el) {
   const checked = el.checked;
-  filteredRecs.forEach(r => {
+  _renderedRecordRows().forEach(r => {
     if (checked) _selectedIds.add(r.id);
     else         _selectedIds.delete(r.id);
   });
@@ -2380,8 +2397,9 @@ function _onRowCheck(el, id) {
 function _syncCheckAllState() {
   const ca = document.getElementById('checkAll');
   if (!ca) return;
-  const total    = filteredRecs.length;
-  const selCount = filteredRecs.filter(r => _selectedIds.has(r.id)).length;
+  const displayed = _renderedRecordRows();
+  const total    = displayed.length;
+  const selCount = displayed.filter(r => _selectedIds.has(r.id)).length;
   if (selCount === 0) {
     ca.checked = false;
     ca.classList.remove('indeterminate');
@@ -4981,6 +4999,8 @@ const REVIEW_STATUS_META = {
   approved: { label: '已审核', cls: 'rs-approved' },
 };
 let _reviewTab   = 'pending';
+let _recordsShowAll = false;          /* 验货明细：是否显示全部（默认只渲染前 300 条防卡死） */
+const RECORDS_PAGE_SIZE = 300;
 let _reviewSelected = new Set();   /* 审核中心批量操作选中集 */
 let _reviewBatchObserver = null;
 let _rejectingId = null;
@@ -6152,6 +6172,7 @@ function _startImport(file) {
       const ws  = wb.Sheets[sheetName];
       const aoa = XLSX.utils.sheet_to_json(ws, {
         header:   1,        /* 返回二维数组，不自动处理表头 */
+        range:    0,        /* 从工作表第 1 行计数，保留实际行号（含开头空行） */
         defval:   '',
         raw:      true,
       });
@@ -6182,17 +6203,16 @@ function _startImport(file) {
 
       /* 取数据行：表头后面所有非空行 */
       _setProgress(85, '清洗数据行…');
-      const dataRows = aoa.slice(headerRowIdx + 1).filter(row =>
-        row.some(v => String(v || '').trim() !== '')
-      );
+      const dataRows = _importDataRows(aoa, headerRowIdx);
 
       if (dataRows.length === 0) {
         _importErrors.push({ fatal: true, msg: '表格中没有找到数据行（表头下方全为空行）' });
       }
 
       /* 把数据行转成对象数组 */
-      _importParsedRows = dataRows.map(row => {
+      _importParsedRows = dataRows.map(({ cells: row, sourceRow }) => {
         const obj = {};
+        Object.defineProperty(obj, '__sourceRow', { value: sourceRow });
         headerRow.forEach((h, i) => {
           if (h) obj[h] = row[i] != null ? row[i] : '';
         });
@@ -6547,6 +6567,12 @@ function _importHtml(v) {
     .replace(/'/g, '&#39;');
 }
 
+/* Preserve worksheet row numbers before empty rows and skipped records are removed. */
+function _importDataRows(aoa, headerRowIdx) {
+  return aoa.slice(headerRowIdx + 1).map((cells, index) => ({ cells, sourceRow: headerRowIdx + index + 2 }))
+    .filter(({ cells }) => cells.some(v => String(v ?? '').trim() !== ''));
+}
+
 function _buildImportPlan(mode) {
   const M      = _importMappedFields;
   const getCol = f => Object.keys(M).find(k => M[k] === f);
@@ -6576,15 +6602,16 @@ function _buildImportPlan(mode) {
   let nextId = mode === 'replace' ? 1 : state.nextId;
   let skipped = 0;
   let dateWarn = 0;
+  const dateWarnRows = [];   /* 日期异常的行号，方便用户定位 */
 
-  _importParsedRows.forEach(row => {
+  _importParsedRows.forEach((row, rowIndex) => {
     const rawDate = dateCol ? String(row[dateCol] ?? '').trim() : '';
     const rawSup  = supCol  ? String(row[supCol]  ?? '').trim() : '';
 
     if (!rawDate && !rawSup) { skipped++; return; }
 
     const parsedDate = _parseDate(rawDate);
-    if (rawDate && !parsedDate) dateWarn++;
+    if (rawDate && !parsedDate) { dateWarn++; dateWarnRows.push({ row: row.__sourceRow || (_importHeaderRowIdx + rowIndex + 2), value: rawDate }); }
     const date     = parsedDate || '';
     const inspDate = inspCol ? (_parseDate(String(row[inspCol] ?? '').trim()) || date) : date;
 
@@ -6621,7 +6648,7 @@ function _buildImportPlan(mode) {
       orderNo:     ordCol ? String(row[ordCol] ?? '').trim() : '',
       productNo,
       productName: nameCol  ? String(row[nameCol]  ?? '').trim() : '',
-      type:        typeCol  ? _normalizeType(String(row[typeCol] ?? '').trim()) : '成品',
+      type:        typeCol  ? _normalizeType(String(row[typeCol] ?? '').trim()) : '来料',
       qty,
       sampleQty:   smpQty,
       pass:        passFinal,
@@ -6646,6 +6673,7 @@ function _buildImportPlan(mode) {
   const warningTexts = [
     ..._importWarnings.map(w => w.msg),
     ...(dateWarn ? ['有 ' + dateWarn + ' 行日期无法识别，导入后日期会留空，请确认是否继续。'] : []),
+    ...(dateWarnRows.length ? ['日期异常位置：' + dateWarnRows.slice(0, 10).map(x => '第 ' + x.row + ' 行「' + x.value + '」').join('，') + (dateWarnRows.length > 10 ? ' 等 ' + dateWarnRows.length + ' 行' : '')] : []),
     ...(skipped ? ['有 ' + skipped + ' 行为空行或缺少关键内容，已自动跳过。'] : []),
     ...(mode === 'replace' ? ['当前选择「替换全部数据」，确认后会覆盖现有 ' + state.records.length + ' 条验货记录。'] : []),
   ];
@@ -6921,7 +6949,7 @@ function _normalizeResult(raw) {
 
 /* 类型标准化 */
 function _normalizeType(raw) {
-  if (!raw) return '成品';
+  if (!raw) return '来料';   /* 未提供类型时默认来料（与新增记录一致） */
   if (raw.includes('半') || raw.includes('Semi')) return '半成品';
   if (raw.includes('成品') || raw.includes('Finish')) return '成品';
   return raw;

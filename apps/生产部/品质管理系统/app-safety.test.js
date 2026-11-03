@@ -313,3 +313,29 @@ test('mobile modal controls keep a 16px font to avoid iOS focus zoom', () => {
   assert.match(mobileCss, /html\.qc-mobile \.modal textarea\s*\{[^}]*font-size:\s*16px\s*!important/s);
   assert.match(mobileCss, /html\.qc-narrow \.modal textarea\s*\{[^}]*font-size:\s*16px\s*!important/s);
 });
+
+
+test('capped records select only displayed rows and show-all explicitly expands selection', () => {
+  const records = Array.from({ length: 305 }, (_, id) => ({ id: id + 1 }));
+  const selected = new Set();
+  const ctx = vm.createContext({ filteredRecs: records, _recordsShowAll: false, RECORDS_PAGE_SIZE: 300,
+    _selectedIds: selected, document: { querySelectorAll: () => [] }, _updateBatchBtn() {} });
+  ctx._renderedRecordRows = loadFunction(appSource, '_renderedRecordRows', ctx);
+  const check = loadFunction(appSource, '_onCheckAll', ctx);
+  check({ checked: true });
+  assert.equal(selected.size, 300); assert.equal(selected.has(301), false);
+  ctx._recordsShowAll = true; check({ checked: true }); assert.equal(selected.size, 305);
+  ctx._recordsShowAll = false;
+  const displayed = new Set(ctx._renderedRecordRows().map(r => r.id));
+  for (const id of selected) if (!displayed.has(id)) selected.delete(id);
+  assert.equal(selected.size, 300);
+  assert.match(appSource, /const visibleIds = new Set\(renderRows.map/);
+});
+
+test('import source rows retain header and blank-row offsets before date diagnostics', () => {
+  const rows = loadFunction(appSource, '_importDataRows')([['Title'], ['date', 'supplier'],
+    ['2026-11-03', 'Fixture'], [], ['', '', 0], ['not-a-date', 'Fixture']], 1);
+  assert.deepEqual(Array.from(rows, row => row.sourceRow), [3, 5, 6]);
+  assert.match(appSource, /Object.defineProperty\(obj, '__sourceRow'/);
+  assert.match(appSource, /row: row.__sourceRow \|\|/);
+});
