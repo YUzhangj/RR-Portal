@@ -114,6 +114,7 @@ test('AI OCR carries the PO number through single and queued entry', () => {
 test('clearing OCR also clears the PO number', () => {
   const cleared = [];
   let canceled = 0;
+  const applyButton = { textContent: '应用 2 条（逐条录入）' };
   const context = {
     _ocrImageFile: null,
     _ocrImageRevision: 0,
@@ -121,7 +122,7 @@ test('clearing OCR also clears the PO number', () => {
     _ocrImageAngle: 90,
     window: { __QC_OCR_CANCEL: () => { canceled++; }, __qcAiResult: { items: [] } },
     document: {
-      getElementById: id => id === 'ocrPreview' ? { src: 'data:image/png', style: {} } : { value: 'set' },
+      getElementById: id => id === 'btnApplyOcrToForm' ? applyButton : id === 'ocrPreview' ? { src: 'data:image/png', style: {} } : { value: 'set' },
       querySelector: () => ({ style: {} }),
     },
     setVal: (id, value) => { if (value === '') cleared.push(id); },
@@ -139,6 +140,7 @@ test('clearing OCR also clears the PO number', () => {
   assert.equal(context._ocrOriginalImage, '');
   assert.equal(context._ocrImageAngle, 0);
   assert.equal(context.window.__qcAiResult, null);
+  assert.equal(applyButton.textContent, '应用到单条录入');
 });
 
 test('import mapping keeps customer order numbers separate from delivery numbers', () => {

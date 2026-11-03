@@ -20,7 +20,6 @@ const fs   = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const Auth = require('./auth');
-const sessions = Auth.createSessions();
 
 const ROOT      = path.join(__dirname, '..');           // 前端静态根目录
 const DATA_DIR  = process.env.DATA_PATH || path.join(__dirname, 'data');
@@ -28,6 +27,7 @@ const LEGACY_DB = path.join(__dirname, 'qc.db');        // 本地开发的旧版
 const SEED_PATH = path.join(__dirname, 'seed.json');
 const AI_CONFIG_PATH = path.join(__dirname, 'ai-config.json');
 const PORT      = process.env.PORT === undefined ? 8765 : Number(process.env.PORT);
+const sessions  = Auth.createSessions({ storeFile: path.join(DATA_DIR, 'sessions.json') });   // 会话落盘，重启不掉线
 
 /* ════════ 厂区 → 子公司清单（数据隔离边界；每家子公司一个独立库 server/data/<id>/qc.db）════════
    新增子公司：在这里加一行 + 前端 app.js 的 QC_COMPANIES 加一行即可 */
@@ -351,11 +351,41 @@ function parseDeliveryNote(text, options = {}) {
       if (cQty === -1) cQty = find(/数量|數量/, /欠|总|總/);
       if (cQty === -1) cQty = find(/备品|備品/);   /* 台聚：模型偶发丢「数量」表头，数量值落在备品数列 */
       const cUnit  = find(/单位|單位/, /数量|數量/);
+      /* 新增的订单/货号/货品名称/单位布局只接受真实保列来源。
+         精确唯一的本次交货列优先，订单/总交货/累计/未交数量都不能作兜底。 */
+      const headKeys = head.map(value => value.replace(/\s+/g, ''));
+      const deliveryLayoutHeaders = [/^(序号|序號|序|NO\.?)$/i, /^(订单编号|订单号|訂單編號|訂單號)$/,
+        /^(货号|貨號)$/, /^(货品名称|貨品名稱|品名|名称|名稱)$/, /^(单位|單位)$/];
+      const deliveryColumnsLayout = deliveryLayoutHeaders.every((pattern, index) => pattern.test(headKeys[index] || ''));
+      if (deliveryColumnsLayout) {
+        const delivered = headKeys.map((name, index) => /^(本次交[货貨]|交[货貨]|送[货貨]|实送|實送)[数數]量$/.test(name) ? index : -1).filter(index => index >= 0);
+        if (delivered.length !== 1 || deliveryLayoutHeaders.some(pattern => headKeys.filter(name => pattern.test(name)).length !== 1)) {
+          fields.items = [_pendingOcrItem(String(text || ''))];
+          fields.orderNo = '';
+          fields.manualReviewRequired = true;
+          return fields;
+        }
+        cQty = delivered[0];
+      }
       let lastNo = '', lastOrder = '';
       const seenFull = new Set();   /* 已出现的完整明细（货号|品名），用于复读残行识别 */
       for (const row of tbl.slice(hi + 1)) {
         const cells = splitRow(row);
         if (cells.every(c => !c)) continue;   /* 空白可能是分页间隔，不能截断后续真实明细 */
+        if (deliveryColumnsLayout) {
+          if (cells.every((value, index) => value.replace(/\s+/g, '') === headKeys[index])) continue;
+          if (/^(合计|合計|总计|總計|TOTAL)(?:[：:]|$)/i.test(cells[0] || '')) continue;
+          const quantity = cells[cQty] || '', unit = cells[4] || '';
+          if (cells.length !== head.length || !/^\d+$/.test(cells[0]) || (!cells[2] && !cells[3]) ||
+              !/^(?:\d{1,3}(?:[,，]\d{3})+|\d+)(?:\.\d+)*$/.test(quantity) ||
+              !/^(个|個|PCS|件|套|卷|张|張|桶|KG|米|箱|包|条|條|颗|顆|千克|克|G)$/i.test(unit)) {
+            fields.items.push(_pendingOcrItem(row));
+          } else {
+            fields.items.push({ productNo: cells[2], productName: cells[3], qty: quantityText(quantity, unit),
+              unit, orderNo: cells[1], _seq: cells[0] });
+          }
+          continue;
+        }
         const raw = i => (i >= 0 && i < cells.length ? cells[i] : '');
         const numeric = v => /^\d[\d,.]*(?:\s*[/／].*)?$/.test(v);
         /* 合并品名格会令后续所有列左移；短一格时即便下一列金额也是数字，也应按行宽校正。 */
@@ -440,6 +470,10 @@ function parseDeliveryNote(text, options = {}) {
         fields.items.push({ productNo: no, productName: name, qty, unit, _seq: sequence,
           ...(rowOrder && rowOrder !== no ? { orderNo: rowOrder } : {}) });
       }
+      if (deliveryColumnsLayout) {
+        const orders = fields.items.map(item => item.orderNo || '');
+        fields.orderNo = orders.length && orders.every(order => order && order === orders[0]) ? orders[0] : '';
+      }
     }
   }
 
@@ -480,6 +514,15 @@ function parseDeliveryNote(text, options = {}) {
          品名可含空格；数量、尺寸、重量从明确尾列定位，PO与货号取明确前列。 */
       const plainHeader = lines[hiP];
       const fixedColumns = /^(?:序号|序號|序|NO\.?)\s+(?:订单号|訂單號|PO(?:\s*NO\.?)?|P\/I(?:\s*NO\.?)?)\s+(?:货号|貨號|ITEM(?:\s*NO\.?)?)\s+(?:品名|名称|名稱|货名|貨名|Description)\s+(?:数量|數量|QTY)\s+(?:尺寸|SIZE)(?:[（(](?:MM|CM|M)[）)])?\s+(?:重量|WEIGHT)(?:[（(](?:KG|G)[）)])?$/i.test(plainHeader);
+      /* 艾美斯类：序号 订单编号 货号 货品名称 单位 订单数量 交货数量 … —— 数量取「交货数量」列 */
+      const orderNameUnit = /^(?:序号|序號|序|NO\.?)\s+(?:订单编号|订单号|訂單編號|訂單號)\s+(?:货号|貨號)\s+(?:货品名称|貨品名稱|品名|名称|名稱)\s+(?:单位|單位)(?:\s|$)/i.test(plainHeader);
+      if (orderNameUnit) {
+        /* 空白分词丢失了空货号/换行单元格的边界，不能拼接 PO 或过滤数字凑列。 */
+        fields.items = [_pendingOcrItem(String(text || ''))];
+        fields.orderNo = '';
+        fields.manualReviewRequired = true;
+        return fields;
+      }
       const hasOtherNumericColumns = /尺寸|重量|单价|單價|金额|金額|SIZE|WEIGHT|PRICE|AMOUNT/i.test(plainHeader);
       const hasExplicitOrderColumn = /[订訂][单單]|(?:^|\s)PO(?:\s|$)|P\/I/i.test(plainHeader);
       const numericToken = /^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)*$/;
@@ -1435,11 +1478,11 @@ const server = http.createServer(async (req, res) => {
       Auth.requirePermission(user, 'users', 'm');
       const previous = db.prepare('SELECT username,password,enabled FROM users').all();
       const users = validatedUsers(db, body.users);
-      replaceUsers(db, users);
       for (const old of previous) {
         const next = users.find(item => item.username === old.username);
-        if (!next || !next.enabled || next.password !== old.password) sessions.revoke(companyId, old.username);
+        if (!next || next.enabled !== !!old.enabled || next.password !== old.password) sessions.revoke(companyId, old.username);
       }
+      replaceUsers(db, users);
       return sendJson(res, 200, { ok: true, count: db.prepare('SELECT COUNT(*) c FROM users').get().c });
     }
     if (p === '/api/partners' && req.method === 'POST') {

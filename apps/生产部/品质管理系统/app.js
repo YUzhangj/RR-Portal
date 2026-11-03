@@ -2788,6 +2788,8 @@ function _sameOcrImage(snapshot) {
 function _clearOcrPreviewFields() {
   window.__qcAiResult = null;
   window.__qcOcrResultContext = null;
+  const applyButton = document.getElementById('btnApplyOcrToForm');
+  if (applyButton) applyButton.textContent = '应用到单条录入';
   setVal('ocrRawText', '');
   ['ocrDate','ocrInspDate','ocrSupplier','ocrClient','ocrProductNo',
    'ocrProductName','ocrDeliveryNo','ocrOrderNo','ocrQty','ocrType','ocrRemark']
