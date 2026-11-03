@@ -206,3 +206,101 @@ test('tolerance guard scales down and preserves exact zero, negative and missing
   for (const args of [['2.3','2.3',''],['','2.3','0.05'],['2.3','','0.05'],['Infinity','2.3','0.05']])
     assert.equal(b.ctx._inTol(...args),null);
 });
+
+test('one-sided tolerances retain decimal EPS boundaries but never admit the forbidden side or widen zero', () => {
+  const b=browser();
+  for (const [dir,passed,failed] of [
+    ['+', ['2.3','2.35'], ['2.2999999999999994','2.3500000001']],
+    ['-', ['2.25','2.3'], ['2.2499999999','2.3000000000000003']],
+    [undefined, ['2.25','2.35'], ['2.2499999999','2.3500000001']],
+  ]) {
+    for (const value of passed) assert.equal(b.ctx._inTol(value,'2.3','0.05',dir),true);
+    for (const value of failed) assert.equal(b.ctx._inTol(value,'2.3','0.05',dir),false);
+    assert.equal(b.ctx._inTol('2.3000000000000003','2.3',0,dir),false);
+    assert.equal(b.ctx._inTol(0,0,0,dir),true);
+  }
+  assert.equal(b.ctx._inTol('1.05e-12','1e-12','5e-14','+'),true);
+  assert.equal(b.ctx._inTol('1.0500000001e-12','1e-12','5e-14','+'),false);
+  assert.equal(b.ctx._inTol('1e308','1e308','1e308'),false);
+});
+
+test('actual rendered numeric input preserves signed/scientific text and refuses malformed or nonfinite saves', () => {
+  for (const raw of ['-2.35','1e3','2..3','1,25','Infinity','NaN','0x10','2.3mm']) {
+    const b=browser();
+    b.ctx._loadMeasRows([{item:'Numeric',standard:raw==='1e3'?'1000':'-2.35',tolerance:0,values:[''],result:'PASS'}]);
+    b.element('meas-result-0','PASS');
+    const handler=b.elements.get('measRows').innerHTML.match(/oninput="(updateMeasCell\(0,'values',0,[^"]+)"/)[1];
+    b.ctx.numericInput={value:raw};b.run(`(function(){${handler}}).call(numericInput)`);
+    assert.equal(b.ctx.numericInput.value,raw);
+    assert.equal(b.json('_measRows[0].values[0]'),raw);
+    const valid=raw==='-2.35'||raw==='1e3';
+    assert.equal(b.ctx._autoJudgeMeas(b.json('_measRows[0]')),valid?'PASS':null);
+    if (!valid) {
+      assert.equal(b.json('_measRows[0].result'),'');
+      assert.equal(b.ctx.saveRecord(),false);assert.equal(b.writes.length,0);assert.deepEqual(b.json('state.records'),[]);
+    }
+  }
+});
+
+test('LW/LWH evaluate filled numeric zero and reject malformed dimensions instead of silently passing', () => {
+  const b=browser();
+  for (const type of ['LW','LWH']) {
+    const row={item:type,measureType:type,standardL:0,standardW:0,standardH:0,toleranceL:0,toleranceW:0,toleranceH:0,lValues:[0],wValues:[0],hValues:[0]};
+    assert.equal(b.ctx._autoJudgeMeas(row),'PASS');
+    row.wValues=['2x'];assert.equal(b.ctx._autoJudgeMeas(row),null);
+    row.wValues=['Infinity'];assert.equal(b.ctx._autoJudgeMeas(row),null);
+    row.wValues=[0];row.toleranceW=-.1;assert.equal(b.ctx._autoJudgeMeas(row),'FAIL');
+    b.ctx._loadMeasRows([row]);assert.equal(b.ctx.saveRecord(),false);assert.equal(b.writes.length,0);
+  }
+});
+
+test('direction handler, save, SQLite round trip and reopen preserve direction and numeric zero; report agrees', () => {
+  const core=vm.runInNewContext(server.slice(server.indexOf('const RECORD_COLS'),server.indexOf('function replaceUsers'))+';({SCHEMA_SQL,upsertRecords,rowToRecord})');
+  for (const type of ['single','LW','LWH']) for (const dir of ['±','+','-']) {
+    const b=browser(),row={item:type,measureType:type,standard:0,standardL:0,standardW:0,standardH:0,tolerance:0,toleranceL:0,toleranceW:0,toleranceH:0,values:[0],lValues:[0],wValues:[0],hValues:[0]};
+    b.ctx._loadMeasRows([row]);
+    const html=b.elements.get('measRows').innerHTML;
+    assert.match(html,/value="0"/);
+    const handler=html.match(/onchange="(updateMeasField\(0,'tolDir',[^"]+)"/)[1];
+    b.run(`(function(){${handler}}).call({value:${JSON.stringify(dir)}})`);
+    assert.equal(b.json('_measRows[0].tolDir'),dir);
+    b.ctx.saveRecord();const saved=b.json('state.records[0]');
+    assert.equal(saved.measurements[0].tolDir,dir);assert.equal(saved.measurements[0].tolerance,0);
+    const db=new DatabaseSync(':memory:');
+    try {
+      db.exec(core.SCHEMA_SQL);core.upsertRecords(db,[saved]);
+      const stored=core.rowToRecord(db.prepare('SELECT * FROM records WHERE id=501').get());
+      b.ctx._loadMeasRows(stored.measurements);
+      assert.equal(b.json('_measRows[0].tolDir'),dir);assert.equal(b.json('_measRows[0].standard'),type==='single'?0:type==='LW'?'0×0':'0×0×0');
+      assert.equal(b.json('_measRows[0].values[0]'),0);
+      const report=b.ctx._buildIQCCanvas(stored).innerHTML;
+      const cells=Array.from(report.match(/<tr class="meas-row">([\s\S]*?)<\/tr>/)[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g),m=>m[1].replace(/<[^>]*>/g,'').replace(/&nbsp;/g,''));
+      assert.equal(cells[1],Array(type==='LW'?2:type==='LWH'?3:1).fill('0'+dir+'0').join('*'));
+      assert.equal(cells[2],Array(type==='LW'?2:type==='LWH'?3:1).fill('0').join('*'));
+    } finally {db.close();}
+  }
+});
+
+test('legacy rows without direction keep plus-minus behavior and their original caller data', () => {
+  const b=browser(),old={item:'Old',standard:'2.3',tolerance:'0.05',values:['2.25']},before=JSON.stringify(old);
+  b.ctx._loadMeasRows([old]);assert.equal(b.json('_measRows[0].tolDir'),'±');
+  assert.equal(b.ctx._autoJudgeMeas(b.json('_measRows[0]')),'PASS');
+  assert.equal(JSON.stringify(old),before);
+});
+
+test('actual tolerance field keeps a negative input visible, fails judgment and blocks saving rather than making it positive', () => {
+  const b=browser();b.ctx._loadMeasRows([{item:'Numeric',standard:5,tolerance:0,values:['5']}]);
+  const handler=b.elements.get('measRows').innerHTML.match(/oninput="(updateMeasField\(0,'tolerance',[^"]+)"/)[1];
+  b.ctx.toleranceInput={value:'-0.1'};b.run(`(function(){${handler}}).call(toleranceInput)`);
+  assert.equal(b.ctx.toleranceInput.value,'-0.1');assert.equal(b.json('_measRows[0].tolerance'),'-0.1');
+  assert.equal(b.ctx._autoJudgeMeas(b.json('_measRows[0]')),'FAIL');assert.equal(b.ctx.saveRecord(),false);assert.equal(b.writes.length,0);
+});
+
+test('a numeric zero only on the active H axis survives save/report and inactive old arrays do not add empty rows', () => {
+  const b=browser();b.ctx._loadMeasRows([{measureType:'LWH',standardH:0,toleranceH:0,hValues:[0]}]);b.ctx.saveRecord();
+  const record=b.json('state.records[0]');assert.equal(record.measurements.length,1);assert.equal(record.measurements[0].hValues[0],0);
+  assert.match(b.ctx._buildIQCCanvas(record).innerHTML,/0±0/);
+  const c=browser();c.ctx._loadMeasRows([{measureType:'single',values:[],lValues:['42']}]);c.ctx.saveRecord();
+  assert.deepEqual(c.json('state.records[0].measurements'),[]);
+  assert.equal(c.ctx._autoJudgeMeas({measureType:'unknown',standard:0,tolerance:0,values:[0]}),null);
+});

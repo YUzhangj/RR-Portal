@@ -1934,14 +1934,16 @@ function _buildIQCCanvas(r) {
       ${(() => {
         /* 格式化：整数不留小数，小数保留两位；仅改变报告显示，不修改原始测量数据 */
         function _fmt(v) {
-          const n=parseFloat(v); if(isNaN(n)) return v||'';
+          const text=String(v??'').trim(), n=Number(text);
+          if (!text||!Number.isFinite(n)||!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text)) return v??'';
           return Number.isInteger(n)?String(n):n.toFixed(2);   /* 测量数值保留两位小数 */
         }
         function _ra(arr) {
-          const f=(arr||[]).filter(v=>v!=='');
-          const n=f.map(Number).filter(x=>!isNaN(x));
-          return (n.length>0&&n.length===f.length)
-            ?(n.reduce((a,b)=>a+b,0)/n.length).toFixed(2):null;   /* 平均值保留两位小数 */
+          const f=(arr||[]).filter(v=>v!=null&&String(v).trim()!=='');
+          const n=f.map(v=>Number(String(v).trim()));
+          if (!n.length||n.some(x=>!Number.isFinite(x))||f.some(v=>!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(String(v).trim()))) return null;
+          const average=n.reduce((a,b)=>a+b,0)/n.length;
+          return Number.isFinite(average)?average.toFixed(2):null;   /* 平均值保留两位小数 */
         }
         function _stdTol(std,tol,dir) {
           const s=String(std??'').trim(),t=String(tol??'').trim();
@@ -2007,7 +2009,7 @@ function _buildIQCCanvas(r) {
         }
 
         const meas=Array.isArray(r.measurements)
-          ?r.measurements.filter(m=>m.item||(m.lValues||m.values)?.some(v=>v!==''))
+          ?r.measurements.filter(m=>m.item||(m.measureType==='LW'?['lValues','wValues']:m.measureType==='LWH'?['lValues','wValues','hValues']:['values']).some(field=>(m[field]||[]).some(v=>v!=null&&String(v).trim()!=='')))
           :[];
         /* 每个测量项目占一行；多维(长宽高)在各单元格内用 * 横排连接，带公差 */
         const rd=meas.slice(0,2).map(m=>{
