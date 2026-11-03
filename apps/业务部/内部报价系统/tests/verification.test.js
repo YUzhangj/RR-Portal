@@ -32,6 +32,8 @@ test('task list exposes the compact status choices and every visible column filt
   assert.match(html, /option\[data-precision-detail\]/);
   assert.match(script, /status === 'unfinished'/);
   assert.match(script, /verification-clear-filters/);
+  assert.doesNotMatch(html, /verification-records|verification-export/);
+  assert.doesNotMatch(script, /verification-records|verification-export/);
 });
 
 test('quotation and valuation pages retain matching account controls and contextual admin return links', () => {

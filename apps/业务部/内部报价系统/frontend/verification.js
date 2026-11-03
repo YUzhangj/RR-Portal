@@ -1516,28 +1516,6 @@ $('verification-preview').addEventListener('click', event => {
   if (event.target.closest('#verification-open-detail')) openDetail('workflow');
   if (event.target.closest('#verification-open-compare')) openDetail('compare');
 });
-$('verification-records').onclick = () => {
-  $('verification-status-filter').value = $('verification-status-filter').value === 'completed' ? '' : 'completed';
-  $('verification-records').classList.toggle('active', $('verification-status-filter').value === 'completed');
-  applyListFilter('verification-status-filter');
-};
-$('verification-export').onclick = () => {
-  const rows = [['货号', '产品', '版本', '客户', '当前核价版本', '部门进度', '核价状态'], ...filteredList().map(row => [
-    row.quote_no, row.product_name, row.version || '', row.customer || '',
-    versionTitle({ label: row.current_version_label || '待创建', category: row.current_version_category }), `${num(row.approved_count)}/${num(row.total_depts)}`,
-    VERSION_STATUS[row.verification_status] || '待创建',
-  ])];
-  const csv = '\ufeff' + rows.map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(',')).join('\n');
-  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `核价任务_${new Date().toISOString().slice(0, 10)}.csv`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-};
-
 const linkedQuoteId=Number(new URLSearchParams(window.location.search).get('quote_id'));
 if(Number.isSafeInteger(linkedQuoteId)&&linkedQuoteId>0)selectedQuoteId=linkedQuoteId;
 $('btn-change-pwd').onclick = event => {

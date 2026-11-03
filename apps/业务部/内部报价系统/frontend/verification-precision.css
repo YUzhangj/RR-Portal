@@ -240,8 +240,6 @@ html[data-verification-ui="precision"] #verification-list .verification-center-i
 html[data-verification-ui="precision"] #verification-list .verification-center-title h1 { color: var(--precision-ink); font-size: 18px; letter-spacing: -.01em; }
 html[data-verification-ui="precision"] #verification-list .verification-center-title p { color: var(--precision-muted); font-size: 11px; }
 html[data-verification-ui="precision"] #verification-list .verification-center-actions { gap: 5px; }
-html[data-verification-ui="precision"] #verification-records,
-html[data-verification-ui="precision"] #verification-export { display: none; }
 html[data-verification-ui="precision"] #verification-list .verification-center-actions > button,
 html[data-verification-ui="precision"] #verification-list .verification-center-actions > a,
 html[data-verification-ui="precision"] button,
@@ -748,9 +746,7 @@ html[data-verification-ui="precision"] .verification-preview-actions button {
   html[data-verification-ui="precision"] .verification-preview-task-head h2 { font-size: 24px; }
 }
 
-/* The approved reference keeps these actions and the import/basis tools visible. */
-html[data-verification-ui="precision"] #verification-records,
-html[data-verification-ui="precision"] #verification-export { display: inline-flex; }
+/* The approved reference keeps the import/basis tools visible. */
 html[data-verification-ui="precision"] .verification-tools {
   display: grid;
   margin-bottom: 20px;
