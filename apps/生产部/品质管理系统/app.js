@@ -4833,9 +4833,11 @@ function saveRecord(options = {}) {
     pass = parseInt(getVal('f_pass')) || (sample != null ? Math.max(0, sample - fail) : 0);
   }
 
-  /* ── defect 简要文本自动生成 ── */
+  /* ── defect 简要文本自动生成 ──
+     有不良明细行时一律按行重新生成（编辑退回记录改了明细后，
+     列表「不良现象」列不会停留在旧文本；报告本来就按明细行出） */
   let defect = getVal('f_defect');
-  if (!defect && hasDefects) {
+  if (hasDefects) {
     defect = _genDefectText();
   }
 
