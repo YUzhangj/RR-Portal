@@ -22,6 +22,7 @@ test('task list exposes the compact status choices and every visible column filt
   for (const id of [
     'verification-no-filter', 'verification-product-filter', 'verification-table-customer-filter',
     'verification-version-filter', 'verification-progress-filter', 'verification-table-status-filter',
+    'verification-table-workshop-filter',
   ]) {
     assert.match(html, new RegExp(`id="${id}"`));
     assert.match(script, new RegExp(id));

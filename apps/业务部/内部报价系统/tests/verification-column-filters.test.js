@@ -26,7 +26,7 @@ test('uncreated versions, missing workshops and category progress remain filtera
 });
 test('paired filters synchronize; clearing resets all conditions and workshop selection',()=>{
   const f=fixture(),selected=new Set([1]),revisions=new Map([[1,'r1']]),count={renders:0};
-  const listFilterIds=['verification-search','verification-status-filter','verification-customer-filter','verification-no-filter','verification-product-filter','verification-table-customer-filter','verification-version-filter','verification-progress-filter','verification-table-status-filter','workshop-filter'];
+  const listFilterIds=['verification-search','verification-status-filter','verification-customer-filter','verification-no-filter','verification-product-filter','verification-table-customer-filter','verification-version-filter','verification-progress-filter','verification-table-status-filter','workshop-filter','verification-table-workshop-filter'];
   Object.assign(f.context,{listFilterIds,workshopSelected:selected,workshopRevisions:revisions,renderList:()=>count.renders++});
   vm.runInContext(source.slice(source.indexOf('const pairedListFilters='),source.indexOf("$('workshop-select-visible').onchange")),f.context);
   const previewBinding=source.indexOf("$('verification-preview').addEventListener");
@@ -34,7 +34,9 @@ test('paired filters synchronize; clearing resets all conditions and workshop se
   vm.runInContext(source.slice(filterBinding,previewBinding),f.context);
   f.$('verification-table-customer-filter').value='A';f.$('verification-table-customer-filter').onchange();
   assert.equal(f.$('verification-customer-filter').value,'A');assert.equal(selected.size,0);assert.equal(revisions.size,0);
+  f.$('verification-table-workshop-filter').value='兴信B';f.$('verification-table-workshop-filter').onchange();
+  assert.equal(f.$('workshop-filter').value,'兴信B');
   f.$('verification-no-filter').value='AB';f.$('verification-progress-filter').value='ratio:4/8';selected.add(2);
   f.$('verification-clear-filters').onclick();
-  assert.ok(listFilterIds.every(id=>f.$(id).value===''));assert.equal(selected.size,0);assert.equal(revisions.size,0);assert.equal(count.renders,2);assert.deepEqual(f.ids(),[1,2,3,4]);
+  assert.ok(listFilterIds.every(id=>f.$(id).value===''));assert.equal(selected.size,0);assert.equal(revisions.size,0);assert.equal(count.renders,3);assert.deepEqual(f.ids(),[1,2,3,4]);
 });

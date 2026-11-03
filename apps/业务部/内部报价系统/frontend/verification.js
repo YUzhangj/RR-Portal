@@ -488,9 +488,11 @@ const workshopSelected = new Set();
 const workshopRevisions = new Map();
 const listFilterIds=['verification-search','verification-status-filter','verification-customer-filter',
   'verification-no-filter','verification-product-filter','verification-table-customer-filter',
-  'verification-version-filter','verification-progress-filter','verification-table-status-filter','workshop-filter'];
+  'verification-version-filter','verification-progress-filter','verification-table-status-filter',
+  'workshop-filter','verification-table-workshop-filter'];
 const pairedListFilters={'verification-status-filter':'verification-table-status-filter','verification-table-status-filter':'verification-status-filter',
-  'verification-customer-filter':'verification-table-customer-filter','verification-table-customer-filter':'verification-customer-filter'};
+  'verification-customer-filter':'verification-table-customer-filter','verification-table-customer-filter':'verification-customer-filter',
+  'workshop-filter':'verification-table-workshop-filter','verification-table-workshop-filter':'workshop-filter'};
 function updateWorkshopSelection() {
   const selectable=filteredList().filter(row=>row.current_version_id&&row.workshop_revision);
   const all=$('workshop-select-visible');
