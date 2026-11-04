@@ -24,8 +24,6 @@ export function latestPatrolGrades(records: PatrolRating[], start: string, end: 
   return result
 }
 
-export function lowerGrade(monthly?: Grade, patrol?: Grade): Grade | undefined {
-  if (!monthly) return patrol
-  if (!patrol) return monthly
-  return GRADES[Math.max(GRADES.indexOf(monthly), GRADES.indexOf(patrol))]
+export function preferredPatrolGrade(monthly?: Grade, patrol?: Grade): Grade | undefined {
+  return patrol ?? monthly
 }

@@ -99,23 +99,23 @@ describe('批量自动评分', () => {
     } finally { state.extraOrders = []; wrapper.unmount() }
   })
 
-  it('综合评级纳入当月最新巡查且已提交评分无需重新计算', async () => {
+  it.each([95, 75])('综合评级优先显示最新巡查，不受月度分数 %s 高低影响', async (monthlyScore) => {
     setActivePinia(createPinia())
     const previous = records[0].score_items[0].score
-    records[0].score_items[0].score = 95
+    records[0].score_items[0].score = monthlyScore
     records[0].status = 'submitted'
     state.patrols = [
       { id: 'early', factory: 'factory-1', check_date: '2026-08-01', grade: 'D' },
-      { id: 'latest', factory: 'factory-1', check_date: '2026-08-25', grade: 'C' },
+      { id: 'latest', factory: 'factory-1', check_date: '2026-08-25', grade: 'A' },
       { id: 'future', factory: 'factory-1', check_date: '2026-09-01', grade: 'D' },
     ]
     const wrapper = mount(MonthlyScoringView)
     try {
       await flushPromises()
       const cell = wrapper.findAll('tbody tr')[0].findAll('td')[2]
-      expect(cell.text()).toBe('C')
-      expect(cell.attributes('title')).toContain('月度评分等级：A')
-      expect(cell.attributes('title')).toContain('2026-08-25 C级')
+      expect(cell.text()).toBe('A')
+      expect(cell.attributes('title')).toContain(`月度评分等级：${monthlyScore === 95 ? 'A' : 'B'}`)
+      expect(cell.attributes('title')).toContain('2026-08-25 A级')
     } finally {
       records[0].score_items[0].score = previous
       records[0].status = 'draft'

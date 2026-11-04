@@ -13,7 +13,7 @@ import { useScoreTemplatesStore } from '../stores/scoreTemplates'
 import { useAuthStore } from '../stores/auth'
 import { pb } from '../pb'
 import { computeFactoryStats } from '../utils/factoryStats'
-import { latestPatrolGrades, lowerGrade, type PatrolRating } from '../utils/scoringPatrolGrade'
+import { latestPatrolGrades, preferredPatrolGrade, type PatrolRating } from '../utils/scoringPatrolGrade'
 import {
   factoryIdsWithOrdersInRange,
   filterMonthlyScoringData,
@@ -110,7 +110,7 @@ const scoreByFactory = computed(() => {
     return [factoryId, {
       ...summary,
       monthlyGrade: summary.grade,
-      grade: patrolLoadError.value ? undefined : lowerGrade(summary.grade, patrol?.grade),
+      grade: patrolLoadError.value ? undefined : preferredPatrolGrade(summary.grade, patrol?.grade),
     }]
   }))
 })
@@ -118,7 +118,7 @@ const gradeTitle = (id: string) => {
   if (patrolLoadError.value) return patrolLoadError.value
   const summary = scoreByFactory.value[id]
   const patrol = patrolByFactory.value[id]
-  return `月度评分等级：${summary?.monthlyGrade ?? '无评分'}；巡查现场：${patrol ? `${patrol.date} ${patrol.grade}级` : '所选范围内无有效评级'}；综合评级取较低等级`
+  return `月度评分等级：${summary?.monthlyGrade ?? '无评分'}；巡查现场：${patrol ? `${patrol.date} ${patrol.grade}级` : '所选范围内无有效评级'}；综合评级优先采用巡查现场，无巡查评级时采用月度评分`
 }
 
 // 产值与产值管理一致，按下单月份；货期与自动评分一致，按交货月份。
@@ -379,7 +379,7 @@ load()
       <p v-if="autoProgress" class="auto-progress">{{ autoProgress }}</p>
       <p v-if="loadError" role="alert" class="load-error">{{ loadError }} <button class="ghost mini" :disabled="loadingScores || autoScoring" @click="load(true)">重新加载指标</button></p>
       <p v-if="patrolLoadError" class="patrol-error" role="alert">{{ patrolLoadError }} <button class="ghost mini" :disabled="loadingScores" @click="load(true)">重试</button></p>
-      <p class="metrics-hint">综合评级取月度评分与所选范围内最新巡查评级中较低等级，无巡查评级沿用月度评分；加工值按下单月份汇总产值；成本按下单月份汇总核价工价 × 数量；货期按交货月份统计延期订单数（按订单号去重，无延期为0）；合格率直接采用品质检验明细，按所选月份的合格单数 ÷ 验货总单数统计；IP管控与加工类型取工厂资料。缺少数据时显示“—”。</p>
+      <p class="metrics-hint">综合评级优先采用所选范围内最新有效巡查评级，无巡查评级时采用月度评分等级；加工值按下单月份汇总产值；成本按下单月份汇总核价工价 × 数量；货期按交货月份统计延期订单数（按订单号去重，无延期为0）；合格率直接采用品质检验明细，按所选月份的合格单数 ÷ 验货总单数统计；IP管控与加工类型取工厂资料。缺少数据时显示“—”。</p>
       <div class="table-scroll" tabindex="0" aria-label="工厂月度评分表格">
       <table>
         <thead><tr><th>工厂</th><th>部门</th><th>综合评级</th><th>加工值</th><th>成本</th><th>货期</th><th>合格率</th><th>IP管控</th><th>加工类型</th><th>{{ isRange ? '评分月份' : '状态' }}</th><th>操作</th></tr></thead>
