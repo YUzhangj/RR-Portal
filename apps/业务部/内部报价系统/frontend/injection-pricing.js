@@ -29,7 +29,6 @@
   }
 
   function calculate(row, prices) {
-    if (Number(row.mold_part_index) > 0) return 0;
     const p = parameters(row, prices);
     return p.valid ? +(p.price / p.sets / p.target).toFixed(4) : null;
   }

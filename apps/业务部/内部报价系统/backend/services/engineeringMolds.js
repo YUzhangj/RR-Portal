@@ -43,7 +43,7 @@ function expandEngineeringMolds(molds) {
           note: part.note || mold.note || '',
           mold_part_index: partIndex,
           mold_part_count: mold.parts.length,
-          shot_price: partIndex === 0 ? common.shot_price : 0,
+          shot_price: part.shot_price ?? common.shot_price,
         };
       });
     }

@@ -30,15 +30,46 @@ test('01M目标数、套数、机型、台班价变化均重新计算，不保�
   assert.equal(row.shot_price, 0.4);
 });
 
-test('无效公式输入清除旧价，0费用有效，同模次行不重复收费', () => {
+test('无效公式输入清除旧价，0费用有效，后续零件也按公式计价', () => {
   for (const patch of [{ target: 0 }, { target: null }, { sets: 0 }, { sets: -1 },
     { machine_model: '未知' }, { machine_model: '200A' }]) {
     const row = { machine_model: '20A', target: 2600, sets: 1, shot_price: 0.7769, ...patch };
     Pricing.reprice(row, prices); assert.equal(row.shot_price, null);
   }
   assert.equal(Pricing.calculate({ machine_model: '20A', target: 1 }, [{ model: '20A', price: 0 }]), 0);
-  assert.equal(Pricing.calculate({ mold_part_index: 1 }, prices), 0);
+  assert.equal(Pricing.calculate({ mold_part_index: 1, machine_model: '20A', target: 2800, sets: 1 },
+    [{ model: '20A', price: 1920 }]), 0.6857);
   assert.equal(Pricing.lookupMachinePrice('120A', prices), null);
+});
+
+test('工程拆分后每条零件继承待算价，同步核价基准逐条重算', () => {
+  const { expandEngineeringMolds } = require('../backend/services/engineeringMolds');
+  const { applyCostingBasisPayload } = require('../backend/services/costingBasis');
+  const rows = expandEngineeringMolds([{ mold_no: 'INDEX-2', machine_model: '20A',
+    target: 2800, sets: 1, parts: [{ name: '左大身' }, { name: '右大身' }] }]);
+  assert.deepEqual(rows.map(row => row.shot_price), [null, null]);
+  const result = applyCostingBasisPayload('molding', { injection: rows.map(row => ({ ...row, shot_price_mode: 'auto' })) }, {
+    machines: [{ model: '20A', price: 1920 }] });
+  assert.deepEqual(result.payload.injection.map(row => row.shot_price), [0.6857, 0.6857]);
+});
+
+test('编辑及同步时补算旧版后续零件零价，并计入总啤工', () => {
+  const payload = { injection: [
+    { mold_part_index: 0, machine_model: '20A', target: 2800, sets: 1, shot_price: 0.6857 },
+    { mold_part_index: 1, machine_model: '20A', target: 2800, sets: 1, shot_price: 0 },
+    { mold_part_index: 1, machine_model: '20A', target: 3000, sets: 1, shot_price: 0 },
+    { mold_part_index: 1, shot_price_mode: 'manual', machine_model: '20A', target: 3000, shot_price: 0 },
+    { mold_part_index: 1, catalog_raw_weight: 1, machine_model: '20A', target: 3000, shot_price: 0.12 },
+  ], machine_prices: [{ model: '20A', price: 1920 }] };
+  const context = { window: { InjectionPricing: Pricing }, num: value => Number(value) || 0 };
+  vm.runInNewContext(source.slice(source.indexOf('function lookupMachinePrice('),
+    source.indexOf('function syncInjectionMolds(')), context);
+  vm.runInNewContext(source.slice(source.indexOf('function isBlankInjectionPrice('),
+    source.indexOf('function renderMolding(')), context);
+  const result = context.applyInjectionReferencePrices(payload, { material: false });
+  assert.equal(result.changed, true);
+  assert.deepEqual(payload.injection.map(row => row.shot_price), [0.6857, 0.6857, 0.64, 0, 0.12]);
+  assert.equal(payload.injection.slice(0, 3).reduce((total, row) => total + row.shot_price, 0), 2.0114);
 });
 
 test('共模分阶段成本不被普通套数公式覆盖', () => {
@@ -101,7 +132,7 @@ test('导出引用真实2020费用且四舍五入与缓存一致；历史手填�
     { mold_no: '01M', machine_model: '20A', sets: 1, target: 2600, shot_price: 0.7769 },
     { mold_no: '02M', machine_model: '20A', sets: 1, target: 1760, shot_price: 0.7769 },
     { mold_no: '03M', machine_model: '20A', sets: 1, target: 1760, shot_price: 1.1477, shot_price_mode: 'auto' },
-    { mold_no: '04M', machine_model: '20A', sets: 1, target: 1760, shot_price: 0, mold_part_index: 1 },
+    { mold_no: '04M', machine_model: '20A', sets: 1, target: 1760, shot_price: 1.1477, mold_part_index: 1, shot_price_mode: 'auto' },
     { mold_no: '05M', machine_model: '20A', sets: 1, target: 1760, shot_price: 0.5, catalog_raw_weight: 1 },
     { mold_no: '06M', machine_model: '20A', sets: 1, target: 1760, shot_price: 1.1477, shot_price_mode: 'manual' },
   ];
@@ -121,7 +152,8 @@ test('导出引用真实2020费用且四舍五入与缓存一致；历史手填�
     assert.match(ws.getCell(start + 1, 9).note, /固定值/);
     assert.equal(ws.getCell(start + 2, 9).formula, `ROUND(2020/J${start + 2}/L${start + 2},4)`);
     assert.equal(ws.getCell(start + 2, 9).result, 1.1477);
-    assert.equal(ws.getCell(start + 3, 9).value, 0);
+    assert.equal(ws.getCell(start + 3, 9).formula, `ROUND(2020/J${start + 3}/L${start + 3},4)`);
+    assert.equal(ws.getCell(start + 3, 9).result, 1.1477);
     assert.equal(ws.getCell(start + 4, 9).value, 0.5);
     assert.equal(ws.getCell(start + 5, 9).value, 1.1477);
     assert.match(ws.getCell(start + 5, 9).note, /固定值/);
