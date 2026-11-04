@@ -194,7 +194,7 @@ it('undo across a committed row snapshot stays dirty and a later explicit save p
   response.resolve({}); expect(await pending).toBe(false); expect(databaseQty).toBe(2)
   f.run('undoSheetEdit()'); f.publish(); f.run('undoSheetEdit()'); f.publish()
   expect(s.rawItems[0].qty).toBe(1); expect(s.editorDirty).toBe(true); expect(databaseQty).toBe(2)
-  expect(s.message.info).toHaveBeenCalledWith('部分内容已保存，撤回后需再次保存。')
+  expect(s.message.info).toHaveBeenCalledWith('本次保存尚未完整确认，撤回后需再次保存。')
   f.run('requestCloseEditor()'); expect(s.Modal.confirm).toHaveBeenCalledWith(expect.objectContaining({ title: '保存后退出？' }))
   expect(await f.run('save()')).toBe(true); expect(databaseQty).toBe(1); expect(s.editorDirty).toBe(false)
   expect(s.unacknowledgedSave.current).toBe(false)
