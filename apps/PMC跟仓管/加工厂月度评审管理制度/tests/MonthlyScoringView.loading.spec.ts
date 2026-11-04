@@ -74,6 +74,20 @@ describe('monthly scoring request snapshots', () => {
     expect(useScoresStore().items[0]?.year_month).toBe('2026-09')
   })
 
+  it('ignores a late patrol rating response after the newer month has rendered', async () => {
+    const oldPatrols = deferred<unknown[]>()
+    let patrolCalls = 0
+    state.read = async name => {
+      if (name === 'quality_patrols') return patrolCalls++ === 0 ? oldPatrols.promise : [{ factory: 'f', check_date: '2026-09-20', grade: 'A' }]
+      return records(name)
+    }
+    const w = view(); await flushPromises()
+    await w.find('input[type=month]').setValue('2026-09'); await flushPromises()
+    expect(w.findAll('tbody tr')[0].findAll('td')[2].text()).toBe('A')
+    oldPatrols.resolve([{ factory: 'f', check_date: '2026-09-20', grade: 'D' }]); await flushPromises()
+    expect(w.findAll('tbody tr')[0].findAll('td')[2].text()).toBe('A')
+  })
+
   it('commits factories, scores, templates, orders and quality only from the latest complete request', async () => {
     const old = new Map<string, ReturnType<typeof deferred<unknown[]>>>()
     let initial = true

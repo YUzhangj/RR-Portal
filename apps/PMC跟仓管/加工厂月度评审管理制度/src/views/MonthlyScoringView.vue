@@ -13,6 +13,7 @@ import { useScoreTemplatesStore } from '../stores/scoreTemplates'
 import { useAuthStore } from '../stores/auth'
 import { pb } from '../pb'
 import { computeFactoryStats } from '../utils/factoryStats'
+import { latestPatrolGrades, lowerGrade, type PatrolRating } from '../utils/scoringPatrolGrade'
 import {
   factoryIdsWithOrdersInRange,
   filterMonthlyScoringData,
@@ -56,6 +57,16 @@ const autoScoring = ref(false)
 const autoProgress = ref('')
 const scoringOrders = ref<Order[]>([])
 const scoringInspections = ref<QualityInspection[]>([])
+const scoringPatrols = ref<PatrolRating[]>([])
+const patrolLoadError = ref('')
+async function loadPatrols() {
+  try {
+    const records = await pb.collection('quality_patrols').getFullList<PatrolRating>({ fields: 'id,factory,check_date,grade' })
+    return { records, error: '' }
+  } catch {
+    return { records: [] as PatrolRating[], error: '巡查评级加载失败，综合评级暂不可用，请重试。' }
+  }
+}
 const myRegions = computed(() => (auth.role ? allowedRegions(auth.role) : REGIONS))
 
 const gradeCls: Record<string, string> = { A: 'badge-A', B: 'badge-B', C: 'badge-C', D: 'badge-D' }
@@ -88,16 +99,32 @@ const monthlyScoreByFactory = computed(() => {
   return m
 })
 
+const patrolByFactory = computed(() => latestPatrolGrades(scoringPatrols.value, selectedRange.value.start, selectedRange.value.end))
 const scoreByFactory = computed(() => {
   const grouped: Record<string, MonthlyScore[]> = {}
   for (const score of scores.items) (grouped[score.factory] ??= []).push(score)
-  return Object.fromEntries(Object.entries(grouped).map(([factoryId, values]) => [factoryId, summarizeFactoryScores(values)]))
+  const ids = new Set([...Object.keys(grouped), ...Object.keys(patrolByFactory.value)])
+  return Object.fromEntries([...ids].map((factoryId) => {
+    const summary = summarizeFactoryScores(grouped[factoryId] ?? [])
+    const patrol = patrolByFactory.value[factoryId]
+    return [factoryId, {
+      ...summary,
+      monthlyGrade: summary.grade,
+      grade: patrolLoadError.value ? undefined : lowerGrade(summary.grade, patrol?.grade),
+    }]
+  }))
 })
+const gradeTitle = (id: string) => {
+  if (patrolLoadError.value) return patrolLoadError.value
+  const summary = scoreByFactory.value[id]
+  const patrol = patrolByFactory.value[id]
+  return `月度评分等级：${summary?.monthlyGrade ?? '无评分'}；巡查现场：${patrol ? `${patrol.date} ${patrol.grade}级` : '所选范围内无有效评级'}；综合评级取较低等级`
+}
 
 // 产值与产值管理一致，按下单月份；货期与自动评分一致，按交货月份。
 const metricsByFactory = computed(() => {
-  const grouped: Record<string, { output?: number; cost?: number; orderCount: number; delayed: boolean }> = {}
-  const metric = (id: string) => grouped[id] ??= { orderCount: 0, delayed: false }
+  const grouped: Record<string, { output?: number; cost?: number; delayedOrders: Set<string> }> = {}
+  const metric = (id: string) => grouped[id] ??= { delayedOrders: new Set<string>() }
   const inRange = (month: string) => !!month && month >= selectedRange.value.start && month <= selectedRange.value.end
   for (const order of scoringOrders.value) {
     const row = metric(order.factory)
@@ -108,8 +135,9 @@ const metricsByFactory = computed(() => {
       }
     }
     if (inRange(orderMonth(order)) && order.status !== 'cancelled') {
-      row.orderCount += 1
-      row.delayed ||= !!order.is_delayed || Number(order.delay_days) > 0
+      if (order.is_delayed || Number(order.delay_days) > 0) {
+        row.delayedOrders.add(order.order_no?.trim() || `record:${order.id}`)
+      }
     }
   }
   return grouped
@@ -164,18 +192,25 @@ async function load(force = false) {
   loadedContext.value = ''
   scoringOrders.value = []
   scoringInspections.value = []
+  scoringPatrols.value = []
+  patrolLoadError.value = ''
   try {
     if (cachedOrders) {
-      const inspections = await pb.collection('quality_inspections').getFullList<QualityInspection>()
+      const [inspections, patrols] = await Promise.all([
+        pb.collection('quality_inspections').getFullList<QualityInspection>(),
+        loadPatrols(),
+      ])
       if (!current()) return
       scoringOrders.value = cachedOrders
       scoringInspections.value = inspections
+      scoringPatrols.value = patrols.records
+      patrolLoadError.value = patrols.error
       loadedContext.value = context
       return
     }
     // Read into temporary snapshots: the stores' fetch helpers write their
     // shared state before returning, so checking only afterwards is too late.
-    const [factoryRecords, scoreRecords, templateRecords, orders, inspections] = await Promise.all([
+    const [factoryRecords, scoreRecords, templateRecords, orders, inspections, patrols] = await Promise.all([
       pb.collection('factories').getFullList<Factory>({ sort: 'name' }),
       pb.collection('monthly_scores').getFullList<MonthlyScore>({
         filter: range.start === range.end ? `year_month = "${range.start}"` : `year_month >= "${range.start}" && year_month <= "${range.end}"`,
@@ -184,6 +219,7 @@ async function load(force = false) {
       pb.collection('score_templates').getFullList<ScoreTemplate>({ sort: 'sort_order' }),
       pb.collection('orders').getFullList<Order>(),
       pb.collection('quality_inspections').getFullList<QualityInspection>(),
+      loadPatrols(),
     ])
     if (!current()) return
     factories.items = factoryRecords.filter(factory => canViewCraft(factory.craft))
@@ -194,6 +230,8 @@ async function load(force = false) {
     templates.items = templateRecords
     scoringOrders.value = orders
     scoringInspections.value = inspections
+    scoringPatrols.value = patrols.records
+    patrolLoadError.value = patrols.error
     scores.rememberScoringList(range.start, range.end, orders)
     const owners = scoringCacheOwners.get(scores) ?? new Map<string, string>()
     owners.set(rangeKey(range.start, range.end), identityKey())
@@ -216,6 +254,8 @@ function invalidateIdentity() {
   loadedContext.value = ''
   scoringOrders.value = []
   scoringInspections.value = []
+  scoringPatrols.value = []
+  patrolLoadError.value = ''
   loadingScores.value = false
   loadError.value = '账号或权限已变更，请重新加载评分指标。'
 }
@@ -321,7 +361,8 @@ load()
       </div>
       <p v-if="autoProgress" class="auto-progress">{{ autoProgress }}</p>
       <p v-if="loadError" role="alert" class="load-error">{{ loadError }} <button class="ghost mini" :disabled="loadingScores || autoScoring" @click="load(true)">重新加载指标</button></p>
-      <p class="metrics-hint">加工值按下单月份汇总产值；成本按下单月份汇总核价工价 × 数量；货期按交货月份判断是否有延期订单；合格率直接采用品质检验明细，按所选月份的合格单数 ÷ 验货总单数统计；IP管控与加工类型取工厂资料。缺少数据时显示“—”。</p>
+      <p v-if="patrolLoadError" class="patrol-error" role="alert">{{ patrolLoadError }} <button class="ghost mini" :disabled="loadingScores" @click="load(true)">重试</button></p>
+      <p class="metrics-hint">综合评级取月度评分与所选范围内最新巡查评级中较低等级，无巡查评级沿用月度评分；加工值按下单月份汇总产值；成本按下单月份汇总核价工价 × 数量；货期按交货月份统计延期订单数（按订单号去重，无延期为0）；合格率直接采用品质检验明细，按所选月份的合格单数 ÷ 验货总单数统计；IP管控与加工类型取工厂资料。缺少数据时显示“—”。</p>
       <div class="table-scroll" tabindex="0" aria-label="工厂月度评分表格">
       <table>
         <thead><tr><th>工厂</th><th>部门</th><th>综合评级</th><th>加工值</th><th>成本</th><th>货期</th><th>合格率</th><th>IP管控</th><th>加工类型</th><th>{{ isRange ? '评分月份' : '状态' }}</th><th>操作</th></tr></thead>
@@ -335,13 +376,13 @@ load()
               >{{ f.name }}</RouterLink>
             </td>
             <td class="muted">{{ CRAFT_LABELS[f.craft] }}</td>
-            <td>
+            <td :title="gradeTitle(f.id)">
               <span v-if="scoreByFactory[f.id]?.grade" class="badge" :class="gradeCls[scoreByFactory[f.id].grade!]">{{ scoreByFactory[f.id].grade }}</span>
               <span v-else class="muted">—</span>
             </td>
             <td>{{ formatAmount(metricsByFactory[f.id]?.output) }}</td>
             <td>{{ formatAmount(metricsByFactory[f.id]?.cost) }}</td>
-            <td>{{ !metricsByFactory[f.id]?.orderCount ? '—' : metricsByFactory[f.id]?.delayed ? '有延期订单' : '无延期订单' }}</td>
+            <td>{{ metricsByFactory[f.id]?.delayedOrders.size ?? 0 }}</td>
             <td :title="qualityTitle(f.id)">{{ passRate(f.id) }}</td>
             <td>{{ f.ip_control?.trim() || '—' }}</td>
             <td>{{ f.processable_types?.trim() || '—' }}</td>
@@ -367,6 +408,7 @@ load()
   </AppLayout>
 </template>
 <style scoped>
+.patrol-error { color: #b91c1c; font-size: .85rem; }
 .metrics-hint { color: var(--text-soft); font-size: .82rem; line-height: 1.6; }
 .table-scroll { overflow-x: auto; }
 .table-scroll table { min-width: 1400px; }
