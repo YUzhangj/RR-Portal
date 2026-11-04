@@ -57,6 +57,13 @@ const STORAGE_KEYS = {
 };
 const LS_KEY = STORAGE_KEYS.records;   /* 主数据 key */
 let state        = { records: [], nextId: 31 };
+/* 新记录 ID：53 位安全整数范围内纯随机。
+   旧逻辑用本地 nextId 顺序号，多台电脑/多个浏览器同时录入会撞号，
+   后同步的会把先同步的同号记录覆盖掉（记录「不见了」的根因）。
+   列表排序按日期/更新时间，不依赖 id 顺序，随机 id 无副作用。 */
+function _newRecordId() {
+  return Math.floor(Math.random() * 0x100000000) * 0x200000 + Math.floor(Math.random() * 0x200000) + 1;
+}
 let editingId    = null;
 let chartInst    = {};          // { chartId: echartsInstance }
 let currentPage  = 'dashboard';
@@ -3444,7 +3451,7 @@ function confirmBatchImport() {
   if (!_batchRows.length) { showToast('请先解析预览', 'error'); return; }
 
   _batchRows.forEach(r => {
-    r.id = state.nextId++;
+    r.id = _newRecordId();
     state.records.push(r);
   });
   persist();
@@ -5089,7 +5096,7 @@ function saveRecord(options = {}) {
       state.records[idx] = { ...prev, ...rec };
     }
   } else {
-    rec.id = state.nextId++;
+    rec.id = _newRecordId();
     rec.status = 'pending';   /* 新记录先进入待审核，审核通过后才进验货明细 */
     state.records.push(rec);
   }
@@ -5977,7 +5984,7 @@ function _backupDoImport(incoming, mode) {
   try {
     /* 标准化每条记录 */
     const normalized = incoming.map(r => ({
-      id:          state.nextId++,
+      id:          r.id || _newRecordId(),   /* 备份恢复保留原 id 便于去重；新导入用随机 id 防多机撞号 */
       date:        r.date        || '',
       inspDate:    r.inspDate    || r.date || '',
       supplier:    r.supplier    || r.厂名 || '',
