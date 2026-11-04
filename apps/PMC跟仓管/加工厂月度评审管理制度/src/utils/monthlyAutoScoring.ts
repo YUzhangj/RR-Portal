@@ -94,7 +94,8 @@ function ipControlScore(factory: Factory, maxScore: number): AutoScoreResult {
 function uniqueOrders(orders: Order[]): Order[][] {
   const groups = new Map<string, Order[]>()
   for (const order of orders) {
-    const key = text(order.order_no) || `record:${order.id}`
+    const orderNo = text(order.order_no)
+    const key = orderNo ? `order:${orderNo}` : `record:${order.id}`
     const group = groups.get(key)
     if (group) group.push(order)
     else groups.set(key, [order])

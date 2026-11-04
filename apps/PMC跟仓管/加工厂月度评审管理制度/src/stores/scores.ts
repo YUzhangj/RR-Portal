@@ -24,12 +24,12 @@ export const useScoresStore = defineStore('scores', () => {
     })
   }
 
-  async function fetchByMonth(yearMonth: string) {
+  async function fetchByMonth(yearMonth: string, isCurrent?: () => boolean) {
     const records = await pb.collection('monthly_scores').getFullList<MonthlyScore>({
       filter: `year_month = "${yearMonth}"`,
       expand: 'factory',
     })
-    items.value = keepViewableCrafts(records)
+    if (!isCurrent || isCurrent()) items.value = keepViewableCrafts(records)
   }
   async function fetchByRange(startMonth: string, endMonth: string) {
     const records = await pb.collection('monthly_scores').getFullList<MonthlyScore>({
@@ -79,14 +79,20 @@ export const useScoresStore = defineStore('scores', () => {
     }
   }
 
-  async function save(factoryId: string, yearMonth: string, data: Partial<MonthlyScore>) {
+  async function save(factoryId: string, yearMonth: string,
+    source: Partial<MonthlyScore> | ((existing: MonthlyScore | null) => Partial<MonthlyScore>),
+    isCurrent?: () => boolean) {
     const existing = await getOne(factoryId, yearMonth)
+    if (isCurrent && !isCurrent()) throw new Error('账号、月份或指标范围已变更，已停止自动评分')
+    // Automatic callers can recheck the fresh record and preserve manual items
+    // before the existing authenticated save and cache update paths run.
+    const data = typeof source === 'function' ? source(existing) : source
     const saved = existing
       ? await pb.collection('monthly_scores').update<MonthlyScore>(existing.id, data)
       : await pb.collection('monthly_scores').create<MonthlyScore>({
         factory: factoryId, year_month: yearMonth, status: 'draft', flag: 'none', ...data,
       })
-    updateCachedScore(saved)
+    if (!isCurrent || isCurrent()) updateCachedScore(saved)
     return saved
   }
   return {

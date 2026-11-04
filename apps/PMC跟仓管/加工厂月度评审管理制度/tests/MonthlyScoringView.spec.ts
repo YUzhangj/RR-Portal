@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 
-const state = vi.hoisted(() => ({ update: vi.fn() }))
+const state = vi.hoisted(() => ({ update: vi.fn(), extraOrders: [] as Record<string, unknown>[], patrols: [] as Record<string, unknown>[], patrolFailure: false }))
 const factoryItems = [
   { id: 'factory-1', name: '工厂甲', craft: 'injection', region: 'dongguan', ip_control: '已受控', processable_types: '塑胶注塑' },
   { id: 'factory-2', name: '工厂乙', craft: 'injection', region: 'dongguan' },
@@ -40,9 +40,13 @@ vi.mock('../src/pb', () => ({ pb: { collection: (name: string) => ({
   getFullList: async (options?: { filter?: string }) => {
     if (name === 'factories') return factoryItems
     if (name === 'score_templates') return templates
-    if (name === 'orders') return [...orders,
+    if (name === 'orders') return [...orders, ...state.extraOrders,
       { id: 'old-order', factory: 'factory-1', order_date: '2026-07-01', delivery_date: '2026-07-10', amount: 300, quote_labor_price: 1, quantity: 100 },
     ]
+    if (name === 'quality_patrols') {
+      if (state.patrolFailure) throw new Error('offline')
+      return state.patrols
+    }
     if (name === 'quality_inspections') return [
       { factory: 'factory-1', inspect_date: '2026-08-10', internal_result: 'PASS' },
       { factory: 'factory-1', inspect_date: '2026-08-11', internal_result: 'FAIL' },
@@ -67,17 +71,84 @@ describe('批量自动评分', () => {
     const headers = wrapper.findAll('th').map((cell) => cell.text())
     expect(headers).toEqual(['工厂', '部门', '综合评级', '加工值', '成本', '货期', '合格率', 'IP管控', '加工类型', '状态', '操作'])
     const cells = () => wrapper.findAll('tbody tr')[0].findAll('td').map((cell) => cell.text())
-    expect(cells().slice(3, 9)).toEqual(['1,200.00', '200.00', '有延期订单', '33.33%', '已受控', '塑胶注塑'])
+    expect(cells().slice(3, 9)).toEqual(['1,200.00', '200.00', '1', '33.33%', '已受控', '塑胶注塑'])
     expect(wrapper.findAll('tbody tr')[1].findAll('td').slice(3, 9).map((cell) => cell.text()))
-      .toEqual(['—', '—', '无延期订单', '—', '—', '—'])
+      .toEqual(['—', '—', '0', '—', '—', '—'])
     expect(wrapper.text()).not.toContain('红黄牌')
     expect(wrapper.findAll('tbody tr')[0].findAll('td')[6].attributes('title')).toContain('品质检验明细：合格 1 / 验货 3 条')
     await wrapper.find('select[aria-label="评分时间范围"]').setValue('two_months')
     await flushPromises()
-    expect(cells().slice(3, 7)).toEqual(['1,500.00', '300.00', '有延期订单', '50.00%'])
+    expect(cells().slice(3, 7)).toEqual(['1,500.00', '300.00', '1', '50.00%'])
     wrapper.unmount()
   })
 
+
+  it('货期统计去重的延期单数，排除已取消和范围外订单', async () => {
+    setActivePinia(createPinia())
+    state.extraOrders = [
+      { id: 'line-a', factory: 'factory-1', delivery_date: '2026-08-12', order_no: 'PO-DUP', is_delayed: true },
+      { id: 'line-b', factory: 'factory-1', delivery_date: '2026-08-12', order_no: 'PO-DUP', delay_days: 2 },
+      { id: 'cancelled', factory: 'factory-1', delivery_date: '2026-08-12', order_no: 'PO-CANCEL', is_delayed: true, status: 'cancelled' },
+      { id: 'outside', factory: 'factory-1', delivery_date: '2026-09-12', order_no: 'PO-SEP', is_delayed: true },
+    ]
+    const wrapper = mount(MonthlyScoringView)
+    try {
+      await flushPromises()
+      expect(wrapper.findAll('tbody tr')[0].findAll('td')[5].text()).toBe('2')
+      expect(wrapper.findAll('tbody tr')[1].findAll('td')[5].text()).toBe('0')
+    } finally { state.extraOrders = []; wrapper.unmount() }
+  })
+
+  it('综合评级纳入当月最新巡查且已提交评分无需重新计算', async () => {
+    setActivePinia(createPinia())
+    const previous = records[0].score_items[0].score
+    records[0].score_items[0].score = 95
+    records[0].status = 'submitted'
+    state.patrols = [
+      { id: 'early', factory: 'factory-1', check_date: '2026-08-01', grade: 'D' },
+      { id: 'latest', factory: 'factory-1', check_date: '2026-08-25', grade: 'C' },
+      { id: 'future', factory: 'factory-1', check_date: '2026-09-01', grade: 'D' },
+    ]
+    const wrapper = mount(MonthlyScoringView)
+    try {
+      await flushPromises()
+      const cell = wrapper.findAll('tbody tr')[0].findAll('td')[2]
+      expect(cell.text()).toBe('C')
+      expect(cell.attributes('title')).toContain('月度评分等级：A')
+      expect(cell.attributes('title')).toContain('2026-08-25 C级')
+    } finally {
+      records[0].score_items[0].score = previous
+      records[0].status = 'draft'
+      state.patrols = []
+      wrapper.unmount()
+    }
+  })
+
+  it('真实订单号不与缺单号记录的备用标识碰撞', async () => {
+    setActivePinia(createPinia())
+    state.extraOrders = [{ id: 'named-order', factory: 'factory-1', delivery_date: '2026-08-12', order_no: 'record:order-0', is_delayed: true }]
+    const wrapper = mount(MonthlyScoringView)
+    try {
+      await flushPromises()
+      expect(wrapper.findAll('tbody tr')[0].findAll('td')[5].text()).toBe('2')
+    } finally { state.extraOrders = []; wrapper.unmount() }
+  })
+
+  it('巡查加载失败时不展示缺少巡查的综合评级，重试后恢复', async () => {
+    setActivePinia(createPinia())
+    state.patrolFailure = true
+    const wrapper = mount(MonthlyScoringView)
+    try {
+      await flushPromises()
+      expect(wrapper.find('[role="alert"]').text()).toContain('巡查评级加载失败')
+      expect(wrapper.findAll('tbody tr')[0].findAll('td')[2].text()).toBe('—')
+      state.patrolFailure = false
+      await wrapper.find('[role="alert"] button').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+      expect(wrapper.findAll('tbody tr')[0].findAll('td')[2].text()).toBe('D')
+    } finally { state.patrolFailure = false; wrapper.unmount() }
+  })
 
   it('保存后列表重新排序仍对每家工厂仅计算一次', async () => {
     setActivePinia(createPinia())
