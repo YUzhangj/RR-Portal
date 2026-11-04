@@ -345,7 +345,7 @@ export default function ShipmentsPage() {
       form.setFieldsValue({ customer: previous.customer })
     setEditorDirty(previous.editorDirty || formRevision.current !== previous.formRevision || unacknowledgedSave.current)
     setCartonSelection([])
-    if (unacknowledgedSave.current) message.info('部分内容已保存，撤回后需再次保存。')
+    if (unacknowledgedSave.current) message.info('本次保存尚未完整确认，撤回后需再次保存。')
   }
 
   // All index-based edits, deletion and fill-down operate on the displayed order.
