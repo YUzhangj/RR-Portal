@@ -84,7 +84,7 @@ it.each([
 })
 
 it.each(['close', 'discard'])('pending quantity validation blocks %s without opening a destructive confirmation', action => {
-  const context = createContext({ sheetWritePending: { current: true }, editorDirty: true, creating: false, editing: { id: 11 },
+  const context = createContext({ savePending: { current: null }, sheetWritePending: { current: true }, editorDirty: true, creating: false, editing: { id: 11 },
     message: { info: vi.fn() }, closeEditor: vi.fn(), Modal: { confirm: vi.fn() } })
   runInContext(compile(close + '\n' + discard), context)
   runInContext(action === 'close' ? 'requestCloseEditor()' : 'requestDiscardChanges()', context)
