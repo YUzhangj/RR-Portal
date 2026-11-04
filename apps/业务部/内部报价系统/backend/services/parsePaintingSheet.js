@@ -66,16 +66,17 @@ function sheetjsToRows(sheet) {
   });
 }
 
-// 按表头定位列：名称 / 位置 / 备注 / 各工序数量列(+右邻单价列)
+// 总报价之后可能还有同名的模具费用列，只在工序明细区读取数量和单价。
 function indexHeader(values) {
   const map = { name: null, sku: null, position: null, note: null, procs: {} };
+  const totalColumn = values.findIndex(value => toStr(value).replace(/\s+/g, '') === '总报价');
   values.forEach((v, i) => {
     const s = toStr(v);
     if (s === '名称') map.name = i;
     else if (s === '货号') { map.name = i; map.sku = i; }
     else if (s === '位置') map.position = i;
     else if (/^备注/.test(s)) map.note = i;
-    else {
+    else if (totalColumn === -1 || i + 1 < totalColumn) {
       const p = PROCS.find(p => p.label === s || (p.key === 'uv' && s === 'UV打印'));
       if (p) map.procs[p.key] = { qty: i, unit: i + 1 };
     }

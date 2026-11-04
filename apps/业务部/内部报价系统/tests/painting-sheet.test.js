@@ -43,6 +43,24 @@ test('painting import reads roast and UV prices from the new template', async ()
   assert.equal(result.items[0].note, '测试');
 });
 
+test('painting import separates clamp operations from tooling fees after the total quote', async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('恐龙报价');
+  sheet.addRow(['图片', '名称', '位置', '夹模', '夹模\n单价', '移印', '移印单价',
+    '总报价', '夹模', '钢板', '边模费', '合计', '备注']);
+  sheet.addRow([null, '头上盖', '眼睛黑色', null, null, 2, 0.08, 0.16, null, 180]);
+  sheet.addRow([null, '身', '左右身紫红色', 2, 0.03, null, null, 0.06, 600, null, null, 600, '按原报价']);
+  sheet.addRow([null, '脚', '左脚橙色', 1, 0.13, null, null, 0.13, 165]);
+
+  const result = await parseWorkbook(await workbook.xlsx.writeBuffer());
+
+  assert.equal(result.error, undefined);
+  assert.deepEqual(result.items.map(row => [row.clamp_qty, row.clamp_unit]),
+    [[0, 0], [2, 0.03], [1, 0.13]]);
+  assert.equal(result.items[0].pad_unit, 0.08);
+  assert.equal(result.items[1].note, '按原报价');
+});
+
 test('painting import enables product ratios only for two or more explicit numbered products', async () => {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('多产品喷油');
