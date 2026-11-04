@@ -53,11 +53,11 @@ test('工程拆分后每条零件继承待算价，同步核价基准逐条重�
   assert.deepEqual(result.payload.injection.map(row => row.shot_price), [0.6857, 0.6857]);
 });
 
-test('编辑及同步时补算旧版后续零件零价，并计入总啤工', () => {
+test('编辑及同步时补算明确自动的后续零件零价，并计入总啤工', () => {
   const payload = { injection: [
     { mold_part_index: 0, machine_model: '20A', target: 2800, sets: 1, shot_price: 0.6857 },
-    { mold_part_index: 1, machine_model: '20A', target: 2800, sets: 1, shot_price: 0 },
-    { mold_part_index: 1, machine_model: '20A', target: 3000, sets: 1, shot_price: 0 },
+    { mold_part_index: 1, machine_model: '20A', target: 2800, sets: 1, shot_price: 0, shot_price_mode: 'auto' },
+    { mold_part_index: 1, machine_model: '20A', target: 3000, sets: 1, shot_price: 0, shot_price_mode: 'auto' },
     { mold_part_index: 1, shot_price_mode: 'manual', machine_model: '20A', target: 3000, shot_price: 0 },
     { mold_part_index: 1, catalog_raw_weight: 1, machine_model: '20A', target: 3000, shot_price: 0.12 },
   ], machine_prices: [{ model: '20A', price: 1920 }] };

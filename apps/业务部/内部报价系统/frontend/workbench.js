@@ -4673,7 +4673,7 @@ function engineeringImagesForInjection(row, refMolds) {
   ].filter(Boolean))];
 }
 
-// 补齐自动空价及旧版后续零件的自动零价；明确手填值保留，按钮套价可传 overwrite=true。
+// 仅补齐明确自动行的空价及后续零件零价；历史未标记/手填值保留，按钮套价可传 overwrite=true。
 function applyInjectionReferencePrices(payload, { overwrite = false, material = true, machine = true } = {}) {
   let materialHits = 0;
   let machineHits = 0;
@@ -4700,9 +4700,9 @@ function applyInjectionReferencePrices(payload, { overwrite = false, material = 
       const matchedMachine = lookupMachinePrice(row.machine_model, payload.machine_prices);
       const nextPrice = window.InjectionPricing.calculate(row, payload.machine_prices);
       if (row.catalog_raw_weight != null) continue;
-      const legacyPartZero = num(row.mold_part_index) > 0 && !isBlankInjectionPrice(row.shot_price) &&
-        num(row.shot_price) === 0 && row.shot_price_mode !== 'manual';
-      const shouldPrice = overwrite || legacyPartZero || (isBlankInjectionPrice(row.shot_price) && row.shot_price_mode === 'auto');
+      const autoPartZero = num(row.mold_part_index) > 0 && !isBlankInjectionPrice(row.shot_price) &&
+        num(row.shot_price) === 0 && row.shot_price_mode === 'auto';
+      const shouldPrice = overwrite || autoPartZero || (isBlankInjectionPrice(row.shot_price) && row.shot_price_mode === 'auto');
       if (shouldPrice && nextPrice !== null) {
         if (row.shot_price !== nextPrice) changed = true;
         row.shot_price = nextPrice;

@@ -33,7 +33,7 @@ test('engineering mold expansion preserves material and color for each part', ()
     shot_price: row.shot_price,
   })), [
     { name: 'shell', material: 'ABS', color: 'red', mold_size: '300*400*320', shot_price: 120 },
-    { name: 'base', material: 'PP', color: 'blue', mold_size: '300*400*320', shot_price: 0 },
+    { name: 'base', material: 'PP', color: 'blue', mold_size: '300*400*320', shot_price: 120 },
   ]);
   assert.deepEqual(rows.map(row => ({
     product_group_id: row.product_group_id,
