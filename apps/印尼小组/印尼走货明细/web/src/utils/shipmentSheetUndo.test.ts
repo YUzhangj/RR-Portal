@@ -7,6 +7,7 @@ import { shipmentDeclarationSaveError } from './shipmentDeclarationSaveValidatio
 import { shipmentPackingAverageQty, shipmentWeightQuantity, shipmentKgWeight } from './shipmentWeight'
 import { applyMergedShipmentEdits } from './shipmentMergedEditor'
 import { consolidateShipmentItems } from './shipmentConsolidation'
+import { shipmentSheetFields, sheetFillDownEdits } from './shipmentSheet'
 
 const source = readFileSync(new URL('../pages/ShipmentsPage.tsx', import.meta.url), 'utf8')
 const tree = ts.createSourceFile('ShipmentsPage.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
@@ -303,4 +304,42 @@ it('an unknown new-shipment result preserves the draft and asks for a list check
   expect(s.undoHistory.current).toHaveLength(1); expect(s.editorDirty).toBe(true)
   expect(s.message.info).toHaveBeenCalledWith(expect.stringContaining('请先在列表核对后再保存'))
   expect(s.message.success).not.toHaveBeenCalled()
+})
+
+
+it('actual Table fill-down over用途/合同 restores both original cells through Page undo', async () => {
+  const f = fixture(), s = f.state
+  s.rawItems = [
+    { _rowKey: 671001, material_id: 8, qty: 1, kg: 1, product_use: 'UI1067-原始用途-671001', contract_no: 'UI1067-合同-671001' },
+    { _rowKey: 671002, material_id: -671002, material_snapshot: { id: 67102, name_zh: 'UI1067-A本单独立快照', unit_kg: 'KGM', net_per_pc: 0.2, import_source: { row: 7 } }, qty: 1, kg: 1, product_use: 'UI1067-原始用途-671002', contract_no: 'UI1067-合同-671002' },
+    { _rowKey: 671003, material_id: 10, qty: 1, kg: 1, product_use: 'UI1067-原始用途-671003', contract_no: 'UI1067-合同-671003' },
+  ]
+  s.editorDirty = false; f.publish()
+  const before = structuredClone(s.rawItems)
+  const tableTree = ts.createSourceFile('ShipmentSheetTable.tsx', readFileSync(new URL('../components/ShipmentSheetTable.tsx', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const batchDeclarations: string[] = []
+  function findBatch(node: ts.Node) {
+    if (ts.isVariableDeclaration(node) && ['runBatch', 'fillDown'].includes(node.name.getText(tableTree))) batchDeclarations.push(`const ${node.getText(tableTree)};`)
+    ts.forEachChild(node, findBatch)
+  }
+  findBatch(tableTree)
+  const onEdits = async (edits: any[]) => {
+    s.edits = edits
+    const result = await f.run('writeMergedCells(edits, true)')
+    f.publish()
+    return result
+  }
+  const tableState = { batchPending: { current: false }, drafts: { current: new Set() }, message: s.message,
+    latest: { current: { rowOrder: '671001,671002,671003', onEdits, valueAt: (row: number, field: string) => s.consolidatedItems[row][field] } },
+    sheetFillDownEdits, anchor: { row: 0, col: 20 }, end: { row: 1, col: 21 }, count: 3, fields: shipmentSheetFields }
+  const tableContext = createContext(tableState)
+  runInContext(ts.transpileModule(batchDeclarations.join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, tableContext)
+  runInContext('fillDown()', tableContext); await settle()
+  expect(s.rawItems[1]).toMatchObject({ product_use: before[0].product_use, contract_no: before[0].contract_no })
+  expect(s.undoHistory.current).toHaveLength(1)
+  expect(s.undoHistory.current[0].rawItems).toEqual(before)
+  f.run('undoSheetEdit()'); f.publish()
+  expect(s.rawItems).toEqual(before)
+  expect(s.consolidatedItems[1]).toMatchObject({ product_use: before[1].product_use, contract_no: before[1].contract_no })
+  expect(s.editorDirty).toBe(false); expect(s.undoHistory.current).toHaveLength(0)
 })
