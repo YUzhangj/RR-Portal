@@ -85,6 +85,8 @@ collect(tree)
 const code = ts.transpileModule(handlers.join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText
 it('实际页面输入后刷新快照缓存，保存仅调用走货 API，重读保持新编码', async () => {
   const state = {
+    savePending: { current: null }, editorSession: { current: 1 }, formRevision: { current: 0 },
+    unacknowledgedSave: { current: false }, writtenMaterials: { current: new Map() },
     items: structuredClone(rows), matMap: new Map(materials), consolidatedItems: consolidateShipmentItems(rows, materials),
     applyMergedShipmentEdits, outRows: [], editing: { id: 9 }, creating: false, editorLoadState: { current: 'ready' }, sheetEditing: false,
     sheetWritePending: { current: false }, sheetRevision: { current: { rawItems: rows, matMap: materials, session: 1 } },
@@ -92,7 +94,7 @@ it('实际页面输入后刷新快照缓存，保存仅调用走货 API，重读
     api: { put: vi.fn(async (..._args: any[]) => { void _args; return {} }), get: vi.fn() },
     form: { validateFields: async () => ({ container_no: 'HS-LOCAL', customer: 'RRI' }) },
     setItems: vi.fn(), setMatMap: vi.fn(), setEditorDirty: vi.fn(), setSheetEditing: vi.fn(),
-    setSaving: vi.fn(), setEditing: vi.fn(), closeEditor: vi.fn(), load: vi.fn(),
+    resetSheetUndo: vi.fn(), setSaving: vi.fn(), setEditing: vi.fn(), closeEditor: vi.fn(), load: vi.fn(),
     message: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
     shipmentPackingAverageQty, shipmentWeightQuantity, shipmentDeclarationSaveError,
     num: (v: unknown) => Number(v) || 0,

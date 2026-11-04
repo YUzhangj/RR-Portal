@@ -9,7 +9,7 @@ const source = readFileSync(new URL('../pages/ShipmentsPage.tsx', import.meta.ur
 const tree = ts.createSourceFile('page.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
 const handlers: string[] = []
 function collect(node: ts.Node) {
-  if (ts.isFunctionDeclaration(node) && ['openEdit', 'save'].includes(node.name?.text || '')) handlers.push(node.getText(tree))
+  if (ts.isFunctionDeclaration(node) && ['openEdit', 'save', 'recordSheetUndo', 'resetSheetUndo', 'undoSheetEdit'].includes(node.name?.text || '')) handlers.push(node.getText(tree))
   ts.forEachChild(node, collect)
 }
 collect(tree)
@@ -22,7 +22,9 @@ function deferred() {
 function setup() {
   const detail = deferred(), metadata = deferred()
   const state = {
-    dayjs, editorSession: { current: 0 }, editorLoadState: { current: 'ready' },
+    dayjs, editorSession: { current: 0 }, editorLoadState: { current: 'ready' }, savePending: { current: null },
+    unacknowledgedSave: { current: false }, writtenMaterials: { current: new Map() },
+    undoHistory: { current: ['previous shipment edit'] }, setUndoCount: vi.fn(),
     setEditorLoad: vi.fn(), setCreating: vi.fn(), setEditing: vi.fn(), setItems: vi.fn(),
     setMatMap: vi.fn(), setDirtyMatIds: vi.fn(), setEditorDirty: vi.fn(),
     form: { resetFields: vi.fn(), setFieldsValue: vi.fn(), validateFields: vi.fn() },
@@ -40,6 +42,7 @@ const record = { id: 11, customer: 'RRI', rate: .93, ship_date: '2026-11-02', it
 it('pending detail or material requests cannot validate or save an empty editor', async () => {
   const f = setup(), pending = f.open()
   expect(f.state.editorLoadState.current).toBe('loading')
+  expect(f.state.undoHistory.current).toEqual([])
   expect(await f.save()).toBe(false)
   f.detail.resolve({ data: record }); await Promise.resolve(); await Promise.resolve()
   expect(f.state.api.get).toHaveBeenLastCalledWith('/materials/by-ids', { params: { ids: '8' } })
@@ -50,7 +53,7 @@ it('pending detail or material requests cannot validate or save an empty editor'
   expect(f.state.setItems).toHaveBeenCalledTimes(1) // reset only
   f.metadata.resolve({ data: [{ id: 8, name_zh: '测试物料' }] }); await pending
   expect(f.state.editorLoadState.current).toBe('ready')
-  expect(f.state.setItems).toHaveBeenLastCalledWith(record.items)
+  expect(f.state.setItems).toHaveBeenLastCalledWith(record.items, false)
   expect(f.state.form.setFieldsValue).toHaveBeenCalledWith(expect.objectContaining({ customer: 'RRI', ship_date: '2026-11-02' }))
   expect(f.state.api.get.mock.calls.map(call => call[0])).toEqual(['/shipments/11', '/materials/by-ids'])
 })
@@ -66,7 +69,7 @@ it.each(['detail', 'metadata'])('failed %s remains blocked and can be retried wi
   f.state.api.get.mockImplementation(async url => ({ data: url.startsWith('/shipments/') ? record : [{ id: 8 }] }))
   await f.open()
   expect(f.state.editorLoadState.current).toBe('ready')
-  expect(f.state.setItems).toHaveBeenLastCalledWith(record.items)
+  expect(f.state.setItems).toHaveBeenLastCalledWith(record.items, false)
 })
 
 it.each([{}, { ...record, id: 99 }, { ...record, items: null }])('malformed or wrong-shipment response does not become a savable empty record', async data => {
@@ -89,7 +92,7 @@ it('import-only records use saved snapshots and make no outbound or material loo
   const item = { material_id: 8, qty: 10, material_snapshot: JSON.stringify({ name_zh: '导入快照', hs_id: '001234' }) }
   f.detail.resolve({ data: { ...record, items: [item] } }); await pending
   expect(f.state.api.get).toHaveBeenCalledTimes(1)
-  expect(f.state.setItems).toHaveBeenLastCalledWith([{ ...item, material_snapshot: { name_zh: '导入快照', hs_id: '001234' } }])
+  expect(f.state.setItems).toHaveBeenLastCalledWith([{ ...item, material_snapshot: { name_zh: '导入快照', hs_id: '001234' } }], false)
   expect(f.state.editorLoadState.current).toBe('ready')
 })
 
@@ -117,7 +120,7 @@ it('switching shipments ignores an old master-data response and keeps the new fo
   f.metadata.resolve({ data: [{ id: 8 }] }); await old
   expect(f.state.form.setFieldsValue).toHaveBeenCalledTimes(1)
   expect(f.state.form.setFieldsValue).toHaveBeenLastCalledWith(expect.objectContaining({ customer: 'RRM' }))
-  expect(f.state.setItems).toHaveBeenLastCalledWith([])
+  expect(f.state.setItems).toHaveBeenLastCalledWith([], false)
   expect(f.state.editorLoadState.current).toBe('ready')
 })
 
@@ -158,4 +161,42 @@ it('pending quantity validation blocks save before form validation or persistenc
 it('loading and failure states offer status and retry controls', () => {
   expect(source).toContain('role="status"')
   expect(source).toContain('重新加载')
+})
+
+it('undo restores a complete previous table edit and keeps later header edits', () => {
+  const rawItems = [{ material_id: -1, qty: 10, outbound_id: 4 }, { material_id: 8, qty: 3, outbound_id: 5 }]
+  const baseMatMap = new Map([[-1, { hs_cn: '012345' }]])
+  const dirtyMatIds = new Set<number>()
+  const state = {
+    Map, Set, structuredClone, latestUndoState: { current: { rawItems, baseMatMap, dirtyMatIds, editorDirty: false } },
+    unacknowledgedSave: { current: false }, writtenMaterials: { current: new Map() },
+    undoHistory: { current: [] },
+    formRevision: { current: 0 },
+    customerRevision: { current: 0 },
+    form: { getFieldValue: vi.fn(() => 'RRI'), setFieldsValue: vi.fn() },
+    editorLoadState: { current: 'ready' },
+    sheetWritePending: { current: false },
+    saving: false,
+    setUndoCount: vi.fn(), setRawItems: vi.fn(), setMatMap: vi.fn(), setDirtyMatIds: vi.fn(),
+    setEditorDirty: vi.fn(), setCartonSelection: vi.fn(),
+  }
+  const context = createContext(state)
+  runInContext(code, context)
+  runInContext('recordSheetUndo()', context)
+  const loadedMaterial = { hs_cn: '987654' }
+  state.latestUndoState.current.baseMatMap = new Map([...baseMatMap, [8, loadedMaterial]])
+  state.formRevision.current++
+  state.customerRevision.current++
+  state.form.getFieldValue.mockReturnValue('RRM')
+  state.sheetWritePending.current = true
+  runInContext('undoSheetEdit()', context)
+  expect(state.setRawItems).not.toHaveBeenCalled()
+  state.sheetWritePending.current = false
+  runInContext('undoSheetEdit()', context)
+  expect(state.setRawItems).toHaveBeenCalledWith(rawItems)
+  expect(state.setMatMap).toHaveBeenCalledWith(new Map([...baseMatMap, [8, loadedMaterial]]))
+  expect(state.setDirtyMatIds).toHaveBeenCalledWith(dirtyMatIds)
+  expect(state.setUndoCount).toHaveBeenLastCalledWith(0)
+  expect(state.setEditorDirty).toHaveBeenCalledWith(true)
+  expect(state.form.setFieldsValue).not.toHaveBeenCalled()
 })

@@ -9,6 +9,7 @@ import { linkShipmentOutbound } from './shipmentOutboundLink'
 import { linkShipmentOutboundBatches } from './shipmentOutboundBatchLink'
 import { applyMergedShipmentEdits } from './shipmentMergedEditor'
 import { shipmentDeclarationSaveError } from './shipmentDeclarationSaveValidation'
+import { shipmentSaveTestRefs } from './shipmentSaveTestRefs'
 
 // Execute the actual page save handler against a mock API. No business records
 // are created while verifying that the one-row view still saves both batches.
@@ -35,10 +36,11 @@ it.each([true, false])('换算单价落库会改变金额时保留草稿，拒�
   const original = structuredClone(items)
   const api = { post: vi.fn(), put: vi.fn() }
   const state = {
+    ...shipmentSaveTestRefs(items, new Map()),
     items, creating, editing: creating ? null : { id: 9 }, editorLoadState: { current: 'ready' }, sheetEditing: false,
     matMap: new Map(), dirtyMatIds: new Set([974]), api,
     form: { validateFields: vi.fn(async () => ({ container_no: 'PRICE-PRECISION-TEST' })) },
-    shipmentDeclarationSaveError, setSaving: vi.fn(), setEditing: vi.fn(), setCreating: vi.fn(),
+    shipmentDeclarationSaveError, resetSheetUndo: vi.fn(), setSaving: vi.fn(), setEditing: vi.fn(), setCreating: vi.fn(),
     setEditorDirty: vi.fn(), setDirtyMatIds: vi.fn(), closeEditor: vi.fn(), load: vi.fn(),
     message: { success: vi.fn(), error: vi.fn() },
   }
@@ -62,10 +64,11 @@ it.each([true, false])('汇总视图保存仍逐批保留出库数量（新建=%
   expect(consolidatedItems[0].carton_no).toBe('1-82 / 83')
   const api = { post: vi.fn(async (..._args: any[]) => { void _args; return { data: { id: 9 } } }), put: vi.fn(async (..._args: any[]) => { void _args; return {} }) }
   const context = createContext({
+    ...shipmentSaveTestRefs(items, materials),
     items, consolidatedItems, showConsolidated: true, creating, editing: creating ? null : { id: 9 }, editorLoadState: { current: 'ready' }, sheetEditing: false,
     matMap: materials, dirtyMatIds: new Set(), api,
     form: { validateFields: async () => ({ container_no: 'TEST-ONLY', customer: 'RRI' }) },
-    setSaving: vi.fn(), setEditing: vi.fn(), setCreating: vi.fn(), setEditorDirty: vi.fn(),
+    resetSheetUndo: vi.fn(), setSaving: vi.fn(), setEditing: vi.fn(), setCreating: vi.fn(), setEditorDirty: vi.fn(),
     setDirtyMatIds: vi.fn(), closeEditor: vi.fn(), load: vi.fn(), message: { success: vi.fn() },
     shipmentPackingAverageQty, shipmentWeightQuantity, shipmentDeclarationSaveError, num: (value: any) => Number(value) || 0,
   })
@@ -99,10 +102,11 @@ it('表格批量编辑后保存仍保留每批关联，并将导入物料修改�
   ])
   const api = { put: vi.fn(async (..._args: any[]) => { void _args; return {} }) }
   const context = createContext({
+    ...shipmentSaveTestRefs(result.items, result.materials),
     items: result.items, creating: false, editing: { id: 9 }, editorLoadState: { current: 'ready' }, sheetEditing: false,
     matMap: result.materials, dirtyMatIds: result.dirtyMaterials, api,
     form: { validateFields: async () => ({ container_no: 'TEST-ONLY', customer: 'RRI' }) },
-    setSaving: vi.fn(), setEditing: vi.fn(), setCreating: vi.fn(), setEditorDirty: vi.fn(),
+    resetSheetUndo: vi.fn(), setSaving: vi.fn(), setEditing: vi.fn(), setCreating: vi.fn(), setEditorDirty: vi.fn(),
     setDirtyMatIds: vi.fn(), closeEditor: vi.fn(), load: vi.fn(), message: { success: vi.fn() },
     shipmentPackingAverageQty, shipmentWeightQuantity, shipmentDeclarationSaveError, num: (value: any) => Number(value) || 0,
   })
@@ -123,9 +127,10 @@ it('在合并行修改合同和箱号后，保留两批原数量重量，再打�
   ])
   const api = { put: vi.fn(async (..._args: any[]) => { void _args; return {} }) }
   const context = createContext({
+    ...shipmentSaveTestRefs(result.items, result.materials),
     items: result.items, creating: false, editing: { id: 9 }, editorLoadState: { current: 'ready' }, sheetEditing: false, matMap: result.materials, dirtyMatIds: new Set(), api,
     form: { validateFields: async () => ({ container_no: 'TEST-ONLY', customer: 'RRI' }) },
-    setSaving: vi.fn(), setEditing: vi.fn(), setEditorDirty: vi.fn(), load: vi.fn(), message: { success: vi.fn() },
+    resetSheetUndo: vi.fn(), setSaving: vi.fn(), setEditing: vi.fn(), setEditorDirty: vi.fn(), load: vi.fn(), message: { success: vi.fn() },
     shipmentPackingAverageQty, shipmentWeightQuantity, shipmentDeclarationSaveError, num: (value: any) => Number(value) || 0,
   })
   runInContext(executable, context)
@@ -145,9 +150,10 @@ it('导入行确认关联后保存真实物料 ID、出库来源和装箱快照�
     materials.get(974)!, new Map([[-3, snapshot]]))
   const api = { put: vi.fn(async (..._args: any[]) => { void _args; return {} }) }
   const context = createContext({
+    ...shipmentSaveTestRefs(linked, new Map([[-3, linked[0].material_snapshot]])),
     items: linked, creating: false, editing: { id: 9 }, editorLoadState: { current: 'ready' }, sheetEditing: false, matMap: new Map([[-3, linked[0].material_snapshot]]), dirtyMatIds: new Set(), api,
     form: { validateFields: async () => ({ container_no: 'TEST-ONLY' }) },
-    setSaving: vi.fn(), setEditing: vi.fn(), setEditorDirty: vi.fn(), load: vi.fn(), message: { success: vi.fn() },
+    resetSheetUndo: vi.fn(), setSaving: vi.fn(), setEditing: vi.fn(), setEditorDirty: vi.fn(), load: vi.fn(), message: { success: vi.fn() },
     shipmentPackingAverageQty, shipmentWeightQuantity, shipmentDeclarationSaveError, num: (value: any) => Number(value) || 0,
   })
   runInContext(executable, context)
@@ -171,10 +177,11 @@ it('一条导入明细多批关联后只保存原始批次，重开仍汇总且�
   const mats = new Map(items.map(item => [item.material_id, item.material_snapshot]))
   const api = { put: vi.fn(async (..._args: any[]) => { void _args; return {} }) }
   const context = createContext({
+    ...shipmentSaveTestRefs(items, mats),
     items, creating: false, editing: { id: 9 }, editorLoadState: { current: 'ready' }, sheetEditing: false,
     matMap: mats, dirtyMatIds: new Set(), api,
     form: { validateFields: async () => ({ container_no: 'TEST-ONLY' }) },
-    setSaving: vi.fn(), setEditing: vi.fn(), setEditorDirty: vi.fn(), load: vi.fn(), message: { success: vi.fn() },
+    resetSheetUndo: vi.fn(), setSaving: vi.fn(), setEditing: vi.fn(), setEditorDirty: vi.fn(), load: vi.fn(), message: { success: vi.fn() },
     shipmentPackingAverageQty, shipmentWeightQuantity, shipmentDeclarationSaveError, num: (value: any) => Number(value) || 0,
   })
   runInContext(executable, context)

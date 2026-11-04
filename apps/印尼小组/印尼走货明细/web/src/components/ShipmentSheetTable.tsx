@@ -9,6 +9,8 @@ import { ShipmentSheetDraftContext, ShipmentSheetFillContext, type ShipmentDraft
 type Props<T extends object> = TableProps<T> & {
   fields: readonly string[]
   onEdits: (edits: SheetEdit[]) => void | boolean | Promise<void | boolean>
+  onUndo: () => void
+  undoDisabled: boolean
   rowOrder: string
   valueAt: (row: number, field: string) => string | number | undefined
   editableAt?: (row: number, field: string) => boolean
@@ -30,7 +32,7 @@ function cellText(cell: HTMLElement | null): string {
 const quote = (value: string) => /[\t\n"]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value
 
 /** Spreadsheet interaction layer; the page retains ownership of data and saving. */
-export default function ShipmentSheetTable<T extends object>({ fields, onEdits, rowOrder, valueAt, editableAt, displayAt, extraEditorAt, viewportOffset = 400, columns = [], ...props }: Props<T>) {
+export default function ShipmentSheetTable<T extends object>({ fields, onEdits, onUndo, undoDisabled, rowOrder, valueAt, editableAt, displayAt, extraEditorAt, viewportOffset = 400, columns = [], ...props }: Props<T>) {
   const { message } = App.useApp()
   const root = useRef<HTMLDivElement>(null)
   const table = useRef<GetRef<typeof Table>>(null)
@@ -361,9 +363,17 @@ export default function ShipmentSheetTable<T extends object>({ fields, onEdits, 
         if (!event.repeat) fillDown()
         return
       }
-      const p = point(event.target) || anchor; if (!p) return
+      const p = point(event.target) || anchor
       const target = event.target as HTMLElement
-      const isEditing = editingCell?.row === p.row && editingCell.col === p.col
+      const isEditing = !!p && editingCell?.row === p.row && editingCell.col === p.col
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'z') {
+        const textEditor = target.closest('input:not([readonly]),textarea:not([readonly]),[contenteditable="true"]')
+        if (textEditor && (isEditing || !point(target))) return
+        event.preventDefault(); event.stopPropagation()
+        if (!undoDisabled && !event.repeat) onUndo()
+        return
+      }
+      if (!p) return
       // A selected input stays mounted: native typing/selection, including the
       // very first character, starts editing without forwarding synthetic keys.
       if (!isEditing && !event.ctrlKey && !event.metaKey && !event.altKey
@@ -425,6 +435,7 @@ export default function ShipmentSheetTable<T extends object>({ fields, onEdits, 
       <Typography.Text aria-live="polite">{anchor && end
         ? `已选 ${Math.abs(anchor.row - end.row) + 1} 行 × ${Math.abs(anchor.col - end.col) + 1} 列（${(Math.abs(anchor.row - end.row) + 1) * (Math.abs(anchor.col - end.col) + 1)} 格）`
         : '尚未选择单元格'}</Typography.Text>
+      <Button size="small" onClick={onUndo} disabled={undoDisabled} aria-keyshortcuts="Control+Z Meta+Z" title="Ctrl+Z / ⌘Z：撤回上一步表格操作">撤回</Button>
       <Button size="small" onClick={fillDown} title="Ctrl/⌘D：单选复制上一行；多行选区按首行向下填充">向下填充选区</Button>
       <Button size="small" onClick={clearSelection} disabled={!anchor || !end} title="Delete / Backspace：清空所选可编辑单元格，不删除明细行">清空选区</Button>
     </Space>

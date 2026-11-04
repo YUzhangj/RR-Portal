@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { createContext, runInContext } from 'node:vm'
 import ts from 'typescript'
 import { expect, it, vi } from 'vitest'
+import { shipmentSaveTestRefs } from './shipmentSaveTestRefs'
 import * as XLSX from 'xlsx'
 import { DOMParser } from '@xmldom/xmldom'
 import { isShipmentCountUnit, normalizeShipmentDeclarations } from './shipmentDeclaration'
@@ -290,8 +291,9 @@ it('实际页面保存使用按单位校正的申报量，采购日期展示去�
   const api = { put: vi.fn(async (..._args: any[]) => { void _args; return {} }) }
   const context = createContext({
     items, consolidatedItems: consolidateShipmentItems(items, materials), matMap: materials, api, creating: false, editing: { id: 9001 },
+    ...shipmentSaveTestRefs(items, materials),
     editorLoadState: { current: 'ready' }, sheetEditing: false, dirtyMatIds: new Set(), form: { validateFields: async () => ({ customer: 'RRI' }) },
-    setSaving: vi.fn(), setEditing: vi.fn(), setEditorDirty: vi.fn(), closeEditor: vi.fn(), load: vi.fn(),
+    resetSheetUndo: vi.fn(), setSaving: vi.fn(), setEditing: vi.fn(), setEditorDirty: vi.fn(), closeEditor: vi.fn(), load: vi.fn(),
     shipmentPurchaseDates, shipmentPackingAverageQty, shipmentWeightQuantity, shipmentDeclarationSaveError, message: { success: vi.fn() },
   })
   runInContext(ts.transpileModule(handlers.join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context)
@@ -322,9 +324,10 @@ it('整行粘贴换单位和数量后，实际保存、真实模板导出及重�
   const api = { put: vi.fn(async (..._args: any[]) => { void _args; return {} }) }
   const context = createContext({
     items, matMap: edited.materials, api, creating: false, editing: { id: 9001 },
+    ...shipmentSaveTestRefs(items, edited.materials),
     editorLoadState: { current: 'ready' }, sheetEditing: false, dirtyMatIds: edited.dirtyMaterials,
     form: { validateFields: async () => ({ customer: 'RRM', container_no: 'PASTE-TEST' }) },
-    setSaving: vi.fn(), setEditing: vi.fn(), setEditorDirty: vi.fn(), setDirtyMatIds: vi.fn(), closeEditor: vi.fn(), load: vi.fn(),
+    resetSheetUndo: vi.fn(), setSaving: vi.fn(), setEditing: vi.fn(), setEditorDirty: vi.fn(), setDirtyMatIds: vi.fn(), closeEditor: vi.fn(), load: vi.fn(),
     shipmentPackingAverageQty, shipmentWeightQuantity, shipmentDeclarationSaveError, message: { success: vi.fn() },
   })
   runInContext(ts.transpileModule(handlers.join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context)
