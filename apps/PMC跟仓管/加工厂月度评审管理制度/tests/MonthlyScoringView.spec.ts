@@ -124,6 +124,16 @@ describe('批量自动评分', () => {
     }
   })
 
+  it('真实订单号不与缺单号记录的备用标识碰撞', async () => {
+    setActivePinia(createPinia())
+    state.extraOrders = [{ id: 'named-order', factory: 'factory-1', delivery_date: '2026-08-12', order_no: 'record:order-0', is_delayed: true }]
+    const wrapper = mount(MonthlyScoringView)
+    try {
+      await flushPromises()
+      expect(wrapper.findAll('tbody tr')[0].findAll('td')[5].text()).toBe('2')
+    } finally { state.extraOrders = []; wrapper.unmount() }
+  })
+
   it('巡查加载失败时不展示缺少巡查的综合评级，重试后恢复', async () => {
     setActivePinia(createPinia())
     state.patrolFailure = true

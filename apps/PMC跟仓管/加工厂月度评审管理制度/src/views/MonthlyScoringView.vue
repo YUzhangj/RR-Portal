@@ -136,7 +136,7 @@ const metricsByFactory = computed(() => {
     }
     if (inRange(orderMonth(order)) && order.status !== 'cancelled') {
       if (order.is_delayed || Number(order.delay_days) > 0) {
-        row.delayedOrders.add(order.order_no?.trim() || `record:${order.id}`)
+        row.delayedOrders.add(order.order_no?.trim() ? `order:${order.order_no.trim()}` : `record:${order.id}`)
       }
     }
   }
@@ -277,7 +277,15 @@ async function changeMonth() {
 }
 
 async function calculateMonthScores() {
-  if (autoScoring.value || loadingScores.value) return
+  if (autoScoring.value || loadingScores.value || !snapshotReady.value || loadError.value || isRange.value) return
+  const context = contextKey(), request = loadRequest, scoringMonth = month.value, submittedBy = auth.userId ?? undefined
+  const current = () => request === loadRequest && context === contextKey() && snapshotReady.value
+  const requireCurrent = () => { if (!current()) throw new Error('账号、月份或指标范围已变更，已停止自动评分；已保存的结果保留') }
+  // Keep the clicked scope even if requests settle after navigation or login.
+  const factoriesToScore = rows.value.map(factory => ({ ...factory }))
+  const existing = { ...monthlyScoreByFactory.value }
+  const factoryTemplates = new Map(factoriesToScore.map(factory => [factory.id, templates.applicable(factory.craft).map(template => ({ ...template }))]))
+  class ProtectedScore extends Error {}
   autoScoring.value = true
   autoProgress.value = '读取货期和品质数据...'
   try {
@@ -286,17 +294,16 @@ async function calculateMonthScores() {
       pb.collection('quality_inspections').getFullList<QualityInspection>(),
       pb.collection('quality_5s_checks').getFullList<Quality5sCheck>(),
     ])
+    requireCurrent()
     scoringOrders.value = orders
     scoringInspections.value = inspections
-    const existing = monthlyScoreByFactory.value
-    // 保存会更新缓存并触发分数排序；本次计算始终遍历固定的工厂列表。
-    const factoriesToScore = [...rows.value]
     let saved = 0
     let skipped = 0
     for (let index = 0; index < factoriesToScore.length; index += 1) {
       const factory = factoriesToScore[index]
-      const current = existing[factory.id]
-      if (current && current.status !== 'draft') {
+      requireCurrent()
+      const original = existing[factory.id]
+      if (original && original.status !== 'draft') {
         skipped += 1
         continue
       }
@@ -305,18 +312,28 @@ async function calculateMonthScores() {
         orders: orders.filter((item) => item.factory === factory.id),
         inspections: inspections.filter((item) => item.factory === factory.id),
         checks: checks.filter((item) => item.factory === factory.id),
-      }, month.value)
-      const scoreItems = mergeAutomaticScores(
-        templates.applicable(factory.craft),
-        current?.score_items ?? [],
-        factory,
-        monthlyData,
-      )
-      await scores.save(factory.id, month.value, { score_items: scoreItems, status: 'submitted', submitted_by: auth.userId ?? undefined })
+      }, scoringMonth)
+      try {
+        await scores.save(factory.id, scoringMonth, fresh => {
+          // Do not recreate a deleted snapshot or overwrite a newer protected
+          // record. This is a fresh-read guard, not a server transaction/CAS.
+          if ((original ? fresh?.id !== original.id : fresh !== null) || (fresh && fresh.status !== 'draft')) throw new ProtectedScore()
+          return {
+            score_items: mergeAutomaticScores(factoryTemplates.get(factory.id) ?? [], fresh?.score_items ?? [], factory, monthlyData),
+            status: 'submitted', submitted_by: submittedBy,
+          }
+        }, current)
+      } catch (error) {
+        if (!(error instanceof ProtectedScore)) throw error
+        skipped += 1
+        continue
+      }
+      requireCurrent()
       saved += 1
     }
-    await scores.fetchByMonth(month.value)
-    scores.rememberScoringList(month.value, month.value, orders)
+    await scores.fetchByMonth(scoringMonth, current)
+    requireCurrent()
+    scores.rememberScoringList(scoringMonth, scoringMonth, orders)
     autoProgress.value = `自动评分完成：已提交 ${saved} 家${skipped ? `，跳过已提交/已审批 ${skipped} 家` : ''}`
   } catch (error) {
     autoProgress.value = `自动评分失败：${error instanceof Error ? error.message : '未知错误'}`

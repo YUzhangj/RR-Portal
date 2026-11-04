@@ -46,6 +46,16 @@ describe('monthly automatic scoring', () => {
     expect(calculateAutoScore('delivery', 20, factory, { orders, inspections: [], checks: [] })?.score).toBe(10)
   })
 
+  it('does not merge a real order number with another record fallback identifier', () => {
+    const orders = [
+      { id: 'legacy', factory: 'factory-1', product: '甲', is_delayed: true },
+      { id: 'named', factory: 'factory-1', product: '乙', order_no: 'record:legacy', is_delayed: false },
+    ]
+    const result = calculateAutoScore('delivery', 20, factory, { orders, inspections: [], checks: [] })
+    expect(result?.score).toBe(10)
+    expect(result?.notes).toContain('订单 2 单，准时 1 单，延期 1 单')
+  })
+
   it('uses REJ ratio and PASS ratio for quality scores', () => {
     const inspections = [
       { id: '1', inspect_date: '2026-07-01', internal_result: 'PASS' },
