@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { createContext, runInContext } from 'node:vm'
 import ts from 'typescript'
 import { expect, it, vi } from 'vitest'
+import { shipmentSaveTestRefs } from './shipmentSaveTestRefs'
 import { applyShipmentImport } from './shipmentImportApply'
 import { planShipmentImport, type ShipmentImportItem } from './shipmentImport'
 import { consolidateShipmentItems } from './shipmentConsolidation'
@@ -116,7 +117,7 @@ it('实际页面导入、保存及重读保留真实出库 ID 与采购金额，
     ts.forEachChild(node, walk)
   }
   walk(tree)
-  const context = createContext({ items: [{ ...old }], matMap: new Map(materials), imported: [incoming], targets: [0],
+  const context = createContext({ ...shipmentSaveTestRefs([old], materials), items: [{ ...old }], matMap: new Map(materials), imported: [incoming], targets: [0],
     applyShipmentImport, shipmentDeclarationSaveError, shipmentPackingAverageQty, shipmentWeightQuantity,
     sheetWritePending: { current: false }, editorLoadState: { current: 'ready' }, sheetEditing: false,
     form: { validateFields: async () => ({ customer: 'RRM' }) }, creating: false, editing: { id: 9 }, dirtyMatIds: new Set(),

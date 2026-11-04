@@ -22,7 +22,8 @@ function deferred() {
 function setup() {
   const detail = deferred(), metadata = deferred()
   const state = {
-    dayjs, editorSession: { current: 0 }, editorLoadState: { current: 'ready' },
+    dayjs, editorSession: { current: 0 }, editorLoadState: { current: 'ready' }, savePending: { current: null },
+    unacknowledgedSave: { current: false }, writtenMaterials: { current: new Map() },
     undoHistory: { current: ['previous shipment edit'] }, setUndoCount: vi.fn(),
     setEditorLoad: vi.fn(), setCreating: vi.fn(), setEditing: vi.fn(), setItems: vi.fn(),
     setMatMap: vi.fn(), setDirtyMatIds: vi.fn(), setEditorDirty: vi.fn(),
@@ -167,7 +168,8 @@ it('undo restores a complete previous table edit and keeps later header edits', 
   const baseMatMap = new Map([[-1, { hs_cn: '012345' }]])
   const dirtyMatIds = new Set<number>()
   const state = {
-    Map, latestUndoState: { current: { rawItems, baseMatMap, dirtyMatIds, editorDirty: false } },
+    Map, Set, structuredClone, latestUndoState: { current: { rawItems, baseMatMap, dirtyMatIds, editorDirty: false } },
+    unacknowledgedSave: { current: false }, writtenMaterials: { current: new Map() },
     undoHistory: { current: [] },
     formRevision: { current: 0 },
     customerRevision: { current: 0 },

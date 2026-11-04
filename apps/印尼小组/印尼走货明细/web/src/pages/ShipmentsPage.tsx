@@ -209,6 +209,9 @@ export default function ShipmentsPage() {
   const [form] = Form.useForm<ShipmentForm>()
   const [drawerFull, setDrawerFull] = useState(false)
   const [saving, setSaving] = useState(false)
+  const savePending = useRef<number | null>(null)
+  const unacknowledgedSave = useRef(false)
+  const writtenMaterials = useRef(new Map<number, Material>())
   const [sheetEditing, setSheetEditing] = useState(false)
   const editorSession = useRef(0)
   useEffect(() => () => { editorSession.current++ }, [])
@@ -297,7 +300,7 @@ export default function ShipmentsPage() {
   function recordSheetUndo() {
     const history = undoHistory.current
     history.push({
-      ...latestUndoState.current,
+      ...structuredClone(latestUndoState.current),
       formRevision: formRevision.current,
       customerRevision: customerRevision.current,
       customer: form.getFieldValue('customer'),
@@ -308,28 +311,41 @@ export default function ShipmentsPage() {
 
   function resetSheetUndo() {
     undoHistory.current = []
+    unacknowledgedSave.current = false
+    writtenMaterials.current = new Map()
     setUndoCount(0)
   }
 
   function undoSheetEdit() {
     if (saving || sheetWritePending.current || editorLoadState.current !== 'ready') return
-    const previous = undoHistory.current.pop()
+    const previous = undoHistory.current.at(-1)
     if (!previous) return
-    setUndoCount(undoHistory.current.length)
-    setRawItems(previous.rawItems)
     const materials = new Map(previous.baseMatMap)
     // A material lookup may have completed after the snapshot was taken.
     const current = latestUndoState.current
     for (const { material_id: id } of previous.rawItems) {
-      if (id != null && id > 0 && !materials.has(id) && !current.dirtyMatIds.has(id) && current.baseMatMap.has(id))
+      if (id != null && id > 0 && !materials.has(id) && !writtenMaterials.current.has(id)
+        && !current.dirtyMatIds.has(id) && current.baseMatMap.has(id))
         materials.set(id, current.baseMatMap.get(id))
     }
+    // A partial save may already have written these master dimensions. A local
+    // undo must keep their restored values pending for the next explicit Save.
+    for (const id of writtenMaterials.current.keys()) {
+      if (!materials.has(id)) {
+        message.info('部分物料已保存，当前步骤缺少原始物料资料，无法完整撤回。请先重试保存，或保留草稿后重新打开。')
+        return
+      }
+    }
+    undoHistory.current.pop()
+    setUndoCount(undoHistory.current.length)
+    setRawItems(previous.rawItems)
     setMatMap(materials)
-    setDirtyMatIds(previous.dirtyMatIds)
+    setDirtyMatIds(new Set([...previous.dirtyMatIds, ...writtenMaterials.current.keys()]))
     if (customerRevision.current === previous.customerRevision && form.getFieldValue('customer') !== previous.customer)
       form.setFieldsValue({ customer: previous.customer })
-    setEditorDirty(previous.editorDirty || formRevision.current !== previous.formRevision)
+    setEditorDirty(previous.editorDirty || formRevision.current !== previous.formRevision || unacknowledgedSave.current)
     setCartonSelection([])
+    if (unacknowledgedSave.current) message.info('部分内容已保存，撤回后需再次保存。')
   }
 
   // All index-based edits, deletion and fill-down operate on the displayed order.
@@ -781,13 +797,23 @@ export default function ShipmentsPage() {
     }
   }
   async function save(closeAfterSave = false): Promise<boolean> {
+    if (savePending.current != null) { message.info('正在保存，请完成后再继续'); return false }
     if (editorLoadState.current !== 'ready') { message.info('明细尚未完整加载，请加载成功后再保存'); return false }
-    if (sheetEditing) { message.info('数量正在校验，请完成后再保存'); return false }
+    if (sheetEditing || sheetWritePending.current) { message.info('数量正在校验，请完成后再保存'); return false }
+    const session = editorSession.current
+    const original = { ...sheetRevision.current }
+    const originalFormRevision = formRevision.current
+    const sameSession = () => editorSession.current === session
+    const unchanged = () => sameSession() && sheetRevision.current.rawItems === original.rawItems
+      && sheetRevision.current.matMap === original.matMap && formRevision.current === originalFormRevision
+    savePending.current = session
+    setSaving(true)
+    let createResultUnknown = false
     try {
       const v = await form.validateFields()
+      if (!unchanged()) { message.info('资料已变化，本次尚未保存，请重新核对后保存'); return false }
       const priceError = shipmentDeclarationSaveError(items)
       if (priceError) { message.error(priceError); return false }
-      setSaving(true)
       // 空字符串日期 → null，否则后端 DateTime? 绑定失败 400
       const dOrNull = (x: any) => (x ? x : null)
       const cleanItems = items.map(it => ({
@@ -812,50 +838,69 @@ export default function ShipmentsPage() {
         items:        cleanItems,
       }
       if (creating) {
+        unacknowledgedSave.current = true
+        createResultUnknown = true
         const { data } = await api.post<{ id: number }>('/shipments', body)
-        setEditing(prev => ({
-          ...(prev ?? { id: data.id }),
-          id: data.id,
-          customer: v.customer ?? '',
-          container_no: v.container_no ?? '',
-          status: v.status ?? 'draft',
-        }))
+        createResultUnknown = false
+        if (!sameSession()) { load(); return true }
+        // Keep the new server ID even if later material writes fail, so retry
+        // updates this shipment instead of creating a second one.
+        setEditing(prev => ({ ...(prev ?? {}), id: data.id }))
         setCreating(false)
-        message.success('已新建')
       } else if (editing) {
+        unacknowledgedSave.current = true
         await api.put(`/shipments/${editing.id}`, body)
-        setEditing(prev => prev ? {
-          ...prev,
-          customer: v.customer ?? '',
-          container_no: v.container_no ?? '',
-          status: v.status ?? 'draft',
-        } : prev)
-        message.success('已更新')
+      } else {
+        return false
+      }
+      if (!sameSession()) { load(); return true }
+      if (!unchanged()) {
+        message.info('部分内容已保存，后续修改和撤回历史仍保留；撤回后需再次保存')
+        load(); return false
       }
       // 写回货号库：被改过尺寸/毛净重/单位的物料
+      let dimensionsFailed = false
       if (dirtyMatIds.size) {
         await Promise.all([...dirtyMatIds].map(id => {
           if (id < 0) return Promise.resolve()
           const m = matMap.get(id)
-          if (!m) return Promise.resolve()
-          return api.put(`/materials/${id}/dims`, {
+          if (!m) { dimensionsFailed = true; return Promise.resolve() }
+          const dimensions = {
             length: num(m.length), width: num(m.width), height: num(m.height),
             weight_per_carton: num(m.weight_per_carton),
             gross_per_pc: num(m.gross_per_pc), net_per_pc: num(m.net_per_pc),
             unit_kg: m.unit_kg || 'KGM',
-          }).catch(() => {})
+          }
+          // A rejected response does not prove the server did not write. Keep
+          // the exact undo target pending until a complete explicit save.
+          writtenMaterials.current.set(id, structuredClone({ ...m, ...dimensions }))
+          return api.put(`/materials/${id}/dims`, dimensions).catch(() => { dimensionsFailed = true })
         }))
-        setDirtyMatIds(new Set())
       }
+      if (!sameSession()) { load(); return true }
+      if (!unchanged() || dimensionsFailed) {
+        message.info(dimensionsFailed
+          ? '部分内容已保存，物料资料尚未完整写回；撤回后需再次保存，请重试'
+          : '部分内容已保存，后续修改和撤回历史仍保留；撤回后需再次保存')
+        load(); return false
+      }
+      setEditing(prev => prev ? {
+        ...prev, customer: v.customer ?? '', container_no: v.container_no ?? '', status: v.status ?? 'draft',
+      } : prev)
+      if (dirtyMatIds.size) setDirtyMatIds(new Set())
       resetSheetUndo()
       setEditorDirty(false)
+      message.success(creating ? '已新建' : '已更新')
       if (closeAfterSave) closeEditor()
       load()
       return true
-    } catch {
+    } catch (error: any) {
+      if (createResultUnknown && sameSession() && !error?.response)
+        message.info('新建请求结果尚未确认，请先在列表核对后再保存；当前内容和撤回历史已保留。')
       /* 拦截器已提示 */
       return false
     } finally {
+      if (savePending.current === session) savePending.current = null
       setSaving(false)
     }
   }
@@ -872,6 +917,7 @@ export default function ShipmentsPage() {
   }
 
   function requestCloseEditor() {
+    if (savePending.current != null) { message.info('正在保存，请完成后再关闭'); return }
     if (sheetWritePending.current) { message.info('数量正在校验，请完成后再关闭'); return }
     if (!editorDirty) { closeEditor(); return }
     Modal.confirm({
@@ -887,6 +933,7 @@ export default function ShipmentsPage() {
   }
 
   function requestDiscardChanges() {
+    if (savePending.current != null) { message.info('正在保存，请完成后再取消修改'); return }
     if (sheetWritePending.current) { message.info('数量正在校验，请完成后再取消修改'); return }
     if (!editorDirty) {
       message.info('当前没有未保存的修改')
@@ -1413,8 +1460,8 @@ export default function ShipmentsPage() {
         {editorLoad === 'loading' && <div className="shipment-editor-loading" role="status"><Spin /><Typography.Text>正在加载走货明细和物料资料，请稍候…</Typography.Text></div>}
         {editorLoad === 'error' && <Alert type="error" showIcon message="走货资料加载失败，尚未修改原数据" description="请重试。详情和物料完整载入前不能编辑、保存或导出。" action={<Button onClick={() => editing && openEdit(editing)}>重新加载</Button>} />}
         {sheetEditing && <div role="status">正在校验数量，请稍候再继续编辑…</div>}
-        <div hidden={editorLoad !== 'ready'} inert={sheetEditing}>
-        <Form form={form} layout="vertical" disabled={editorLoad !== 'ready'} onValuesChange={changed => {
+        <div hidden={editorLoad !== 'ready'} inert={sheetEditing || saving}>
+        <Form form={form} layout="vertical" disabled={editorLoad !== 'ready' || saving} onValuesChange={changed => {
           formRevision.current++
           if ('customer' in changed) customerRevision.current++
           setEditorDirty(true)
