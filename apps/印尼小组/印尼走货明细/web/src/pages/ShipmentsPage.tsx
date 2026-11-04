@@ -281,8 +281,60 @@ export default function ShipmentsPage() {
   ].filter((value): value is string => typeof value === 'string' && !!value.trim()).map(value => value.trim()))]
     .sort((a, b) => a.localeCompare(b, 'zh-CN')).map(value => ({ value, label: value })), [items, matMap, customsNames])
   const cartonRows = useMemo(() => cartonLayout(items, matMap), [items, matMap])
+  const [dirtyMatIds, setDirtyMatIds] = useState<Set<number>>(new Set())
+  const [undoCount, setUndoCount] = useState(0)
+  const formRevision = useRef(0)
+  const customerRevision = useRef(0)
+  const undoState = { rawItems, baseMatMap, dirtyMatIds, editorDirty }
+  const latestUndoState = useRef(undoState)
+  useLayoutEffect(() => { latestUndoState.current = undoState })
+  const undoHistory = useRef<Array<typeof undoState & {
+    formRevision: number
+    customerRevision: number
+    customer: ShipmentForm['customer']
+  }>>([])
+
+  function recordSheetUndo() {
+    const history = undoHistory.current
+    history.push({
+      ...latestUndoState.current,
+      formRevision: formRevision.current,
+      customerRevision: customerRevision.current,
+      customer: form.getFieldValue('customer'),
+    })
+    if (history.length > 30) history.shift()
+    setUndoCount(history.length)
+  }
+
+  function resetSheetUndo() {
+    undoHistory.current = []
+    setUndoCount(0)
+  }
+
+  function undoSheetEdit() {
+    if (saving || sheetWritePending.current || editorLoadState.current !== 'ready') return
+    const previous = undoHistory.current.pop()
+    if (!previous) return
+    setUndoCount(undoHistory.current.length)
+    setRawItems(previous.rawItems)
+    const materials = new Map(previous.baseMatMap)
+    // A material lookup may have completed after the snapshot was taken.
+    const current = latestUndoState.current
+    for (const { material_id: id } of previous.rawItems) {
+      if (id != null && id > 0 && !materials.has(id) && !current.dirtyMatIds.has(id) && current.baseMatMap.has(id))
+        materials.set(id, current.baseMatMap.get(id))
+    }
+    setMatMap(materials)
+    setDirtyMatIds(previous.dirtyMatIds)
+    if (customerRevision.current === previous.customerRevision && form.getFieldValue('customer') !== previous.customer)
+      form.setFieldsValue({ customer: previous.customer })
+    setEditorDirty(previous.editorDirty || formRevision.current !== previous.formRevision)
+    setCartonSelection([])
+  }
+
   // All index-based edits, deletion and fill-down operate on the displayed order.
-  function setItems(update: React.SetStateAction<ShipmentItem[]>) {
+  function setItems(update: React.SetStateAction<ShipmentItem[]>, trackUndo = true) {
+    if (trackUndo) recordSheetUndo()
     setRawItems(current => {
       const next = typeof update === 'function' ? update(orderedItems(current)) : update
       return next.map(it => {
@@ -323,7 +375,6 @@ export default function ShipmentsPage() {
     return new Set(consolidatedItems.filter(row => cartonSelection.includes(row._rowKey!))
       .flatMap(row => row.sources.map(source => source._rowKey!)))
   }
-  const [dirtyMatIds, setDirtyMatIds] = useState<Set<number>>(new Set())
   // material_id → 出库总量（按货号选物料时带入数量）
   const outByMat = useMemo(() => {
     const m = new Map<number, number>()
@@ -677,7 +728,8 @@ export default function ShipmentsPage() {
     const session = ++editorSession.current
     editorLoadState.current = 'ready'; setEditorLoad('ready')
     setCreating(true); setEditing({ id: 0, status: 'draft', rate: 0.93, container_count: 1 })
-    setItems([]); setMatMap(new Map()); setDirtyMatIds(new Set())
+    resetSheetUndo()
+    setItems([], false); setMatMap(new Map()); setDirtyMatIds(new Set())
     setEditorDirty(false)
     form.resetFields()
     setTimeout(() => { if (editorSession.current !== session) return; form.setFieldsValue({
@@ -691,7 +743,8 @@ export default function ShipmentsPage() {
     const session = ++editorSession.current
     editorLoadState.current = 'loading'; setEditorLoad('loading')
     setCreating(false); setEditing(s)
-    form.resetFields(); setItems([]); setMatMap(new Map()); setDirtyMatIds(new Set())
+    resetSheetUndo()
+    form.resetFields(); setItems([], false); setMatMap(new Map()); setDirtyMatIds(new Set())
     setEditorDirty(false)
     try {
       const { data } = await api.get<ShipmentDetail>(`/shipments/${s.id}`)
@@ -718,7 +771,7 @@ export default function ShipmentsPage() {
         rate: data.rate,
         status: data.status,
       })
-      setItems(its)
+      setItems(its, false)
       setEditorDirty(false)
       editorLoadState.current = 'ready'; setEditorLoad('ready')
     } catch (e: any) {
@@ -794,6 +847,7 @@ export default function ShipmentsPage() {
         }))
         setDirtyMatIds(new Set())
       }
+      resetSheetUndo()
       setEditorDirty(false)
       if (closeAfterSave) closeEditor()
       load()
@@ -807,6 +861,7 @@ export default function ShipmentsPage() {
   }
 
   function closeEditor() {
+    resetSheetUndo()
     editorSession.current++
     editorLoadState.current = 'ready'; setEditorLoad('ready')
     closeOutboundLink()
@@ -1144,6 +1199,7 @@ export default function ShipmentsPage() {
       if (row >= 0) return writeMergedCells([{ row, field: 'material:unit_kg', value: String(value || 'KGM') }], false)
       return
     }
+    recordSheetUndo()
     setEditorDirty(true)
     const newM = { ...(matMap.get(materialId) || {}), [field]: value }
     setMatMap(prev => new Map(prev).set(materialId, newM))
@@ -1151,7 +1207,7 @@ export default function ShipmentsPage() {
     if (field === 'net_per_pc')
       setItems(its => its.map(it => it.material_id === materialId
         ? { ...it, kg: kgForItem(it, newM) }
-        : it))
+        : it), false)
   }
   function addItem() {
     setEditorDirty(true)
@@ -1358,7 +1414,11 @@ export default function ShipmentsPage() {
         {editorLoad === 'error' && <Alert type="error" showIcon message="走货资料加载失败，尚未修改原数据" description="请重试。详情和物料完整载入前不能编辑、保存或导出。" action={<Button onClick={() => editing && openEdit(editing)}>重新加载</Button>} />}
         {sheetEditing && <div role="status">正在校验数量，请稍候再继续编辑…</div>}
         <div hidden={editorLoad !== 'ready'} inert={sheetEditing}>
-        <Form form={form} layout="vertical" disabled={editorLoad !== 'ready'} onValuesChange={() => setEditorDirty(true)}>
+        <Form form={form} layout="vertical" disabled={editorLoad !== 'ready'} onValuesChange={changed => {
+          formRevision.current++
+          if ('customer' in changed) customerRevision.current++
+          setEditorDirty(true)
+        }}>
           <Row gutter={12}>
             <Col span={5}>
               <Form.Item name="customer" label="客户（分区 RRI/RRM，按 PO 前缀自动判定）">
@@ -1470,6 +1530,8 @@ export default function ShipmentsPage() {
                 && (!field.startsWith('snapshot:') || (!!item?.material_snapshot && item.material_id != null && item.material_id < 0))
             }}
             onEdits={editSheetCells}
+            onUndo={undoSheetEdit}
+            undoDisabled={!undoCount || saving || sheetEditing}
             rowOrder={consolidatedItems.map(item => item.sources.map(source => source._rowKey).join('-')).join(',')}
             valueAt={mergedCellValue}
             displayAt={sheetDisplayValue}

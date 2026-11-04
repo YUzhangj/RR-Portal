@@ -72,7 +72,7 @@ function setup(key: string, at = { row: 1, col: 1 }) {
     cellAt: () => ({ querySelector: () => null }), hasCell: () => true,
     canEdit: (p: { row: number; col: number }): boolean => p.col === 0 ? !!state.editorAt() : state.editableAt(),
     editorAt: vi.fn(() => ({} as HTMLElement | null)), focus: vi.fn(),
-    setAnchor: vi.fn(), setEnd: vi.fn(), fillDown: vi.fn(), clearSelection: vi.fn(),
+    setAnchor: vi.fn(), setEnd: vi.fn(), fillDown: vi.fn(), clearSelection: vi.fn(), onUndo: vi.fn(), undoDisabled: false,
     editingCell: null as { row: number; col: number } | null, setEditingCell: vi.fn(),
     batchPending: { current: false }, anchor: at, end: at,
     event: { key, target: input, nativeEvent: { isComposing: false },
@@ -281,4 +281,19 @@ it('F2可进入批量保护列中的已有选择器，禁止进入合并只读�
   expect(merged.state.focus).not.toHaveBeenCalled()
   const display = setup('F2', { row: 1, col: 0 }); display.state.editorAt.mockReturnValue(null); display.run()
   expect(display.state.focus).not.toHaveBeenCalled()
+})
+
+it.each(['ctrlKey', 'metaKey'] as const)('%s+Z 撤回已提交的表格操作，输入中保留原生撤回', modifier => {
+  const { state, run } = setup('z')
+  state.event[modifier] = true
+  run()
+  expect(state.onUndo).toHaveBeenCalledOnce()
+  expect(state.event.preventDefault).toHaveBeenCalledOnce()
+
+  state.event.preventDefault.mockClear()
+  state.editingCell = { row: 1, col: 1 }
+  state.event.target.closest = ((selector: string) => selector.startsWith('input:not') ? {} : null) as typeof state.event.target.closest
+  run()
+  expect(state.onUndo).toHaveBeenCalledOnce()
+  expect(state.event.preventDefault).not.toHaveBeenCalled()
 })

@@ -92,7 +92,7 @@ it('实际页面输入后刷新快照缓存，保存仅调用走货 API，重读
     api: { put: vi.fn(async (..._args: any[]) => { void _args; return {} }), get: vi.fn() },
     form: { validateFields: async () => ({ container_no: 'HS-LOCAL', customer: 'RRI' }) },
     setItems: vi.fn(), setMatMap: vi.fn(), setEditorDirty: vi.fn(), setSheetEditing: vi.fn(),
-    setSaving: vi.fn(), setEditing: vi.fn(), closeEditor: vi.fn(), load: vi.fn(),
+    resetSheetUndo: vi.fn(), setSaving: vi.fn(), setEditing: vi.fn(), closeEditor: vi.fn(), load: vi.fn(),
     message: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
     shipmentPackingAverageQty, shipmentWeightQuantity, shipmentDeclarationSaveError,
     num: (v: unknown) => Number(v) || 0,
