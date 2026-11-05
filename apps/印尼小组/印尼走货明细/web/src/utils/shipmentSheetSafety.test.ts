@@ -62,8 +62,8 @@ function scrollDraft({ cellTop = 0, cellBottom = 20, virtual = true, picker = fa
     // its row; the test invokes the real capture handler first, as DOM does.
     blur: () => { blur(); committed('UNSAVED-DRAFT') },
   }
-  const holder = { matches: () => virtual, getBoundingClientRect: () => ({ top: 100, bottom: 500 }) }
-  const context = createContext({ root: { current: { contains: () => belongs } }, document: { activeElement: active }, event: { target: holder } })
+  const holder = { matches: (selector: string) => selector === '.ant-table-tbody-virtual-holder' && virtual, getBoundingClientRect: () => ({ top: 100, bottom: 500 }) }
+  const context = createContext({ topScroll: { current: null }, root: { current: { contains: () => belongs } }, document: { activeElement: active }, event: { target: holder } })
   runInContext(compile(`(${scroll})(event)`), context)
   return { blur, committed }
 }

@@ -36,6 +36,27 @@ export default function ShipmentSheetTable<T extends object>({ fields, onEdits, 
   const { message } = App.useApp()
   const root = useRef<HTMLDivElement>(null)
   const table = useRef<GetRef<typeof Table>>(null)
+  const topScroll = useRef<HTMLDivElement>(null)
+  const [scrollSize, setScrollSize] = useState({ width: 0, contentWidth: 0 })
+  const measureScroll = useCallback(() => {
+    const header = root.current?.querySelector<HTMLElement>('.ant-table-header')
+    if (!header) return
+    const width = header.clientWidth
+    const contentWidth = header.scrollWidth
+    setScrollSize(current => current.width === width && current.contentWidth === contentWidth
+      ? current : { width, contentWidth })
+    if (topScroll.current && topScroll.current.scrollLeft !== header.scrollLeft)
+      topScroll.current.scrollLeft = header.scrollLeft
+  }, [])
+  useLayoutEffect(measureScroll)
+  useEffect(() => {
+    const header = root.current?.querySelector<HTMLElement>('.ant-table-header')
+    const observer = new ResizeObserver(measureScroll)
+    for (const element of [root.current, header, header?.querySelector('table')])
+      if (element) observer.observe(element)
+    return () => observer.disconnect()
+  }, [measureScroll])
+
   const drafts = useRef(new Set<ShipmentDraftCommit>())
   const batchPending = useRef(false)
   const latest = useRef({ onEdits, valueAt, rowOrder, editableAt })
@@ -227,6 +248,9 @@ export default function ShipmentSheetTable<T extends object>({ fields, onEdits, 
   return <ShipmentSheetDraftContext.Provider value={registerDraft}><ShipmentSheetFillContext.Provider value={fillFrom}><div className="shipment-sheet" ref={root} tabIndex={-1} style={{ '--sheet-fixed-width': `${fixedWidth}px` } as React.CSSProperties}
     onScrollCapture={event => {
       const holder = event.target as HTMLElement
+      if (holder.matches('.ant-table-header') && topScroll.current
+        && topScroll.current.scrollLeft !== holder.scrollLeft)
+        topScroll.current.scrollLeft = holder.scrollLeft
       if (!holder.matches('.ant-table-tbody-virtual-holder')) return
       const active = document.activeElement as HTMLElement | null
       if (!root.current?.contains(active) || !active?.matches('input,textarea') || active.closest('.ant-select,.ant-picker')) return
@@ -316,6 +340,7 @@ export default function ShipmentSheetTable<T extends object>({ fields, onEdits, 
     }}
     onMouseDownCapture={event => { if (selectionGesture.current || (event.shiftKey && anchor && point(event.target))) event.preventDefault() }}
     onPasteCapture={event => {
+      if ((event.target as HTMLElement).closest('.shipment-sheet-top-scroll')) return
       if (batchPending.current) { event.preventDefault(); event.stopPropagation(); return }
       const multiple = !!anchor && !!end && (anchor.row !== end.row || anchor.col !== end.col)
       const start = multiple ? anchor : point(event.target) || anchor
@@ -332,6 +357,7 @@ export default function ShipmentSheetTable<T extends object>({ fields, onEdits, 
       catch (error) { message.error((error as Error).message) }
     }}
     onCopyCapture={event => {
+      if ((event.target as HTMLElement).closest('.shipment-sheet-top-scroll')) return
       if (!anchor || !end) return
       const editor = (event.target as HTMLElement).closest<HTMLInputElement | HTMLTextAreaElement>('input,textarea')
       if (anchor.row === end.row && anchor.col === end.col && editor && editor.selectionStart !== editor.selectionEnd) return
@@ -350,6 +376,7 @@ export default function ShipmentSheetTable<T extends object>({ fields, onEdits, 
       event.clipboardData.setData('text/plain', values.join('\n'))
     }}
     onKeyDownCapture={event => {
+      if ((event.target as HTMLElement).closest('.shipment-sheet-top-scroll')) return
       if (batchPending.current) { event.preventDefault(); event.stopPropagation(); return }
       // Never intercept the first key of an IME session or recreate its input.
       if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
@@ -439,6 +466,20 @@ export default function ShipmentSheetTable<T extends object>({ fields, onEdits, 
       <Button size="small" onClick={fillDown} title="Ctrl/⌘D：单选复制上一行；多行选区按首行向下填充">向下填充选区</Button>
       <Button size="small" onClick={clearSelection} disabled={!anchor || !end} title="Delete / Backspace：清空所选可编辑单元格，不删除明细行">清空选区</Button>
     </Space>
+    <div ref={topScroll} className="shipment-sheet-top-scroll" tabIndex={0} role="region" aria-label="横向滚动走货明细"
+      style={{ width: scrollSize.width || '100%', display: scrollSize.contentWidth > scrollSize.width ? undefined : 'none' }}
+      onKeyDown={event => event.stopPropagation()}
+      onScroll={event => {
+        const left = event.currentTarget.scrollLeft
+        const header = root.current?.querySelector<HTMLElement>('.ant-table-header')
+        if (header && header.scrollLeft !== left) {
+          header.scrollLeft = left
+          const position: { left: number; top?: number } = { left }
+          table.current?.scrollTo(position)
+        }
+      }}>
+      <div style={{ width: scrollSize.contentWidth, height: 1 }} />
+    </div>
     <Table<T> {...props} ref={table} virtual bordered columns={mapped}
       scroll={{ ...props.scroll, y: viewportHeight, x: mapped.reduce((total, col) => total + Number(col.width), 40) }} />
   </div></ShipmentSheetFillContext.Provider></ShipmentSheetDraftContext.Provider>
