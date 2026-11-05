@@ -71,10 +71,16 @@ test('真实隔离保存接口保留自动/手填/历史来源及供应商精确
     { ...historical, mold_no: 'SAME-MOLD', name: 'Synthetic left', mold_part_index: 0, sets: 2, shot_price: null, shot_price_mode: 'auto' },
     { ...historical, mold_no: 'SAME-MOLD', name: 'Synthetic right', mold_part_index: 1, sets: 2, shot_price: 0, shot_price_mode: 'auto' },
     { ...historical, mold_no: 'STAGED', mold_part_index: 1, catalog_raw_weight: 0, shot_price: .1234, shot_price_mode: 'auto' },
+    { ...historical, mold_no: 'SAME-MOLD', name: 'Second run first', mold_part_index: 7,
+      injection_run_id: 'row:28', injection_run_part_index: 0, injection_run_name: '袖圈',
+      shot_price: .6312, target: 3200, shot_price_mode: 'auto' },
+    { ...historical, mold_no: 'SAME-MOLD', name: 'Second run next', mold_part_index: 8,
+      injection_run_id: 'row:28', injection_run_part_index: 1, injection_run_name: '袖圈',
+      shot_price: 0, target: 3200, shot_price_mode: 'auto' },
   ] };
   Pricing.reprice(auto, molding.machine_prices);
   openMolding(molding);
-  assert.deepEqual(molding.injection.map(row => row.shot_price), [1.01, 2.02, 0, 0, 0, null, .505, .505, .1234]);
+  assert.deepEqual(molding.injection.map(row => row.shot_price), [1.01, 2.02, 0, 0, 0, null, .505, 0, .1234, .6312, 0]);
   const first = await api('/sections/' + section('molding').id, 'PUT', { payload: molding, base_filled_at: section('molding').filled_at });
   quote = await read();
   assert.deepEqual(JSON.parse(section('molding').payload_json), JSON.parse(JSON.stringify(molding)),
@@ -99,9 +105,13 @@ test('真实隔离保存接口保留自动/手填/历史来源及供应商精确
     sheet.eachRow(row => { if (row.getCell(1).value === '模号' && row.getCell(2).value === '模具名称') start = row.number + 1; });
     assert.ok(start);
     for (const index of [2, 3, 4]) { assert.equal(sheet.getCell(start + index, 9).value, 0); assert.equal(sheet.getCell(start + index, 9).formula, undefined); }
-    assert.equal(sheet.getCell(start + 5, 9).value, null);
-    for (const index of [6, 7]) { assert.equal(sheet.getCell(start + index, 9).formula, `ROUND(2020/J${start + index}/L${start + index},4)`); assert.equal(sheet.getCell(start + index, 9).result, .505); }
+    assert.equal(sheet.getCell(start + 5, 9).value, 0);
+    for (const index of [6]) { assert.equal(sheet.getCell(start + index, 9).formula, `ROUND(2020/J${start + index}/L${start + index},4)`); assert.equal(sheet.getCell(start + index, 9).result, .505); }
+    assert.equal(sheet.getCell(start + 7, 9).value, 0);
     assert.equal(sheet.getCell(start + 8, 9).value, .1234);
+    assert.equal(sheet.getCell(start + 9, 9).formula, `ROUND(2020/J${start + 9}/L${start + 9},4)`);
+    assert.equal(sheet.getCell(start + 9, 9).result, .6312);
+    assert.equal(sheet.getCell(start + 10, 9).value, 0);
   }
   const row = { name: '隔离物料', supplier_id: 'A', supplier_name: '同名供应商', qty: 1 };
   const other = { name: '其他供应商物料', supplier_id: 'B', supplier_name: '同名供应商', qty: 5 };

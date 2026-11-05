@@ -387,7 +387,17 @@ function tryParseSheet(wb, sheetName) {
   const hasPartDetailCols = cols.product_code >= 0 || cols.part_name >= 0
     && (cols.part_name_cn >= 0 || (cols.name >= 0 && cols.part_name !== cols.name));
   if (hasPartDetailCols) {
-    const detailMolds = applyProductGroups(buildPartDetailMolds(dataRows, cell, machineHeader), productGroups);
+    // 同模可分多次啤；原表中独立纵向合并的名称/模号块表示独立啤次。
+    // 普通空白或逐行重复模号本身不构成另一次啤。
+    const runRanges = (ws['!merges'] || []).filter(range =>
+      range.s.r >= dataStart && range.e.r > range.s.r && range.s.c === range.e.c &&
+      [cols.name, cols.mold_no].includes(range.s.c));
+    const runStart = ri => {
+      const range = runRanges.find(range => range.s.c === cols.name && ri >= range.s.r && ri <= range.e.r)
+        || runRanges.find(range => range.s.c === cols.mold_no && ri >= range.s.r && ri <= range.e.r);
+      return range ? range.s.r : null;
+    };
+    const detailMolds = applyProductGroups(buildPartDetailMolds(dataRows, cell, machineHeader, runStart), productGroups);
     if (detailMolds.length) {
       return {
         sheets: wb.SheetNames,
@@ -545,7 +555,7 @@ function tryParseSheet(wb, sheetName) {
   };
 }
 
-function buildPartDetailMolds(dataRows, cell, machineHeader = '') {
+function buildPartDetailMolds(dataRows, cell, machineHeader = '', runStart = () => null) {
   const groups = new Map();
   const state = {};
   const keep = (k, v) => {
@@ -620,14 +630,29 @@ function buildPartDetailMolds(dataRows, cell, machineHeader = '') {
         shot_price: state.shot_price ?? null,
         parent_name: groupName,
         parts: [],
+        runs: new Map(),
         rowStart: ri,
         rowEnd: ri,
       });
     }
 
     const g = groups.get(key);
+    const runRow = runStart(ri) ?? g.rowStart;
+    const runId = `row:${runRow + 1}`;
+    if (!g.runs.has(runId)) g.runs.set(runId, {
+      name: groupName, count: 0, sets: state.sets ?? 1,
+      cycle_sec: state.cycle ?? null, target: state.target ?? null,
+      machine, machine_model: machineTonToModel(machine, machineHeader),
+      shot_price: state.shot_price ?? null,
+    });
+    const run = g.runs.get(runId);
     g.parts.push({
       name: partName,
+      injection_run_id: runId,
+      injection_run_name: run.name,
+      injection_run_part_index: run.count++,
+      sets: run.sets, cycle_sec: run.cycle_sec, target: run.target,
+      machine: run.machine, machine_model: run.machine_model, shot_price: run.shot_price,
       ...(cell(r, 'product_code') ? {source_product_code:cell(r, 'product_code')} : {}),
       production_demand: parseDemand(cell(r, 'production_demand')),
       name_en: partNameEn,

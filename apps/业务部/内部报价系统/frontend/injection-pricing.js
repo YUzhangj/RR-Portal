@@ -28,7 +28,17 @@
       price !== null && Number.isFinite(price) && price >= 0 && positive(row.target) && positive(sets) };
   }
 
+  // 工程明确标记的同次啤后续零件不重复计啤工；目录分阶段分摊另行计算。
+  function isAdditionalPart(row) {
+    return row.catalog_raw_weight == null && Number(row.injection_run_part_index ?? row.mold_part_index) > 0;
+  }
+
+  function laborPrice(row) {
+    return isAdditionalPart(row) ? 0 : row.shot_price;
+  }
+
   function calculate(row, prices) {
+    if (isAdditionalPart(row)) return 0;
     const p = parameters(row, prices);
     return p.valid ? +(p.price / p.sets / p.target).toFixed(4) : null;
   }
@@ -45,8 +55,8 @@
   function signature(row, prices) {
     const p = parameters(row, prices);
     return JSON.stringify([normalize(row.machine_model), p.price, p.sets,
-      blank(row.target) ? null : row.target, Number(row.mold_part_index) || 0]);
+      blank(row.target) ? null : row.target, Number(row.injection_run_part_index ?? row.mold_part_index) || 0]);
   }
 
-  return { lookupMachinePrice, parameters, calculate, reprice, signature };
+  return { lookupMachinePrice, parameters, isAdditionalPart, laborPrice, calculate, reprice, signature };
 });

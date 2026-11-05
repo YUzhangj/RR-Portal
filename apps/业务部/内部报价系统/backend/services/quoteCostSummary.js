@@ -1,5 +1,6 @@
 'use strict';
 
+const InjectionPricing = require('../../frontend/injection-pricing');
 const { ensureExplicitProductGroups, weightedRowsSum, weightedInjectionSum } = require('./productMix');
 
 const MAT_CATEGORIES = ['吸塑', '胶袋', '彩盒/内咭', '电池', '产品利宝', '彩盒利宝', '电镀', '植绒', '其他外购'];
@@ -92,7 +93,7 @@ function calculateSingleQuoteCosts(quote, sections, options = {}) {
     return material && !/^(PVC|TPR|TPE)\b/i.test(material) ? materialCost(row) : 0;
   });
   const absMaterial = weightedInjectionSum(mold, row => /^ABS\b/i.test(String(row.material || '').trim()) ? materialCost(row) : 0);
-  const injectionLabor = weightedInjectionSum(mold, row => num(row.shot_price));
+  const injectionLabor = weightedInjectionSum(mold, row => num(InjectionPricing.laborPrice(row)));
   const blow = sum(mold.blow_items, blowTotal);
 
   const paintingRows = painting.painting_items || painting.second_proc || [];

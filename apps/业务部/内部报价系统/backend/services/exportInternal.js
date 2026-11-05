@@ -3,6 +3,7 @@
 // Keep the long-standing internal quotation renderer unchanged.  The contract
 // check rejects a new blob larger than 50 KB, so new formula sections live in
 // this small post-processor instead of growing exportXlsx.js further.
+const InjectionPricing = require('../../frontend/injection-pricing');
 const { buildWorkbook: buildBaseWorkbook } = require('./exportXlsx');
 const { isSpinCustomer } = require('./customerProfiles');
 const { toExcelFormulaInput, fractionNumberFormat } = require('../../frontend/formula-input');
@@ -905,7 +906,7 @@ function injectionSubtotal(molding) {
   const payload = molding || {};
   const lossM = 1 + num(payload.injection_loss_pct ?? 3) / 100;
   return weightedInjectionSum(payload, row =>
-    num(row.weight_g) * lossM * num(row.material_unit_price) + num(row.shot_price));
+    num(row.weight_g) * lossM * num(row.material_unit_price) + num(InjectionPricing.laborPrice(row)));
 }
 
 function blowSubtotal(molding) {

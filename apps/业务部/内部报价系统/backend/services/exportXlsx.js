@@ -1418,7 +1418,7 @@ function renderInjection(ws, row, payload, fxRH, refs, sequenceForMix=false) {
   (payload.injection || []).forEach((r, i) => {
     const wg = num(r.weight_g);
     const up = num(r.material_unit_price);
-    const sp = num(r.shot_price);
+    const sp = num(InjectionPricing.laborPrice(r));
     const rawUnit = wg * lossM * up;
     const finished = rawUnit + sp;
 
@@ -1440,14 +1440,18 @@ function renderInjection(ws, row, payload, fxRH, refs, sequenceForMix=false) {
     // 使用本单真实机型费用，禁止用保存啤价反推费用。历史/手填价不静默改价。
     const pricing = InjectionPricing.parameters(r, payload.machine_prices);
     const autoPrice = InjectionPricing.calculate(r, payload.machine_prices);
-    const formulaPrice = r.shot_price_mode === 'auto' && r.catalog_raw_weight == null &&
+    const additionalPart = InjectionPricing.isAdditionalPart(r);
+    const formulaPrice = !additionalPart && r.shot_price_mode === 'auto' && r.catalog_raw_weight == null &&
       pricing.valid && r.shot_price != null && r.shot_price !== '' && autoPrice === sp;
-    ws.getCell(row, 9).value = formulaPrice
+    ws.getCell(row, 9).value = additionalPart ? 0 : formulaPrice
       ? { formula: `ROUND(${pricing.price}/J${row}/L${row},4)`, result: sp }
       : (r.shot_price == null || r.shot_price === '' ? null : sp);
-    if (!formulaPrice) {
+    if (additionalPart) {
+      ws.getCell(row, 9).note = '同模同次啤的啤工已计入首条零件，此行不重复计费。';
+    } else if (!formulaPrice) {
       ws.getCell(row, 9).note = '保存啤价（固定值）：历史导入、手动调整或共模分摊。未按普通机型公式重算；如需联动，请在系统中核对机型、套数、目标数后重新套啤价并保存。';
     }
+    if (r.injection_run_name) ws.getCell(row, 9).note = `啤次：${r.injection_run_name}。${ws.getCell(row, 9).note || ''}`;
     ws.getCell(row, 9).numFmt = '0.0000';
     ws.getCell(row, 10).value = r.sets == null || r.sets === '' ? 1 : r.sets;
     ws.getCell(row, 11).value = r.machine_model || '';
@@ -1466,7 +1470,7 @@ function renderInjection(ws, row, payload, fxRH, refs, sequenceForMix=false) {
   const cnt = (payload.injection || []).length;
   if (cnt) {
     const rawSumVal = weightedInjectionSum(payload, r => num(r.weight_g) * lossM * num(r.material_unit_price));
-    const shotSumVal = weightedInjectionSum(payload, r => num(r.shot_price));
+    const shotSumVal = weightedInjectionSum(payload, r => num(InjectionPricing.laborPrice(r)));
     const finSumVal = rawSumVal + shotSumVal;
     // 合计行：按产品配比分别加权原料单价(G) / 啤价(I) / 成品金额(N)
     const totalRow = row;
@@ -1529,7 +1533,7 @@ function materialCost(r) {
 function injectionSubtotal(p) {
   // 与注塑表"成品金额"一致 = 原料单价(啤净重×(1+料损耗%)×料价) + 啤价；用于出厂价成本
   const lossM = 1 + num(p.injection_loss_pct ?? 3) / 100;
-  return weightedInjectionSum(p, r => num(r.weight_g) * lossM * num(r.material_unit_price) + num(r.shot_price));
+  return weightedInjectionSum(p, r => num(r.weight_g) * lossM * num(r.material_unit_price) + num(InjectionPricing.laborPrice(r)));
 }
 
 function renderSecondProc(ws, row, payload, fxRH, refs) {

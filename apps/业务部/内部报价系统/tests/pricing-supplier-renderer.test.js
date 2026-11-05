@@ -163,6 +163,46 @@ test('未标记历史价即使等于计算值，也不随参考费用变化；�
   ui.editFee(0, '3000'); assert.equal(row.shot_price, 3);
 });
 
+
+test('同模后续零件显示只读零啤工，原料照算，重开及改目标不恢复重复价', () => {
+  const first = { mold_no: 'INDEX-2', mold_part_index: 0, machine_model: '20A', target: 2800,
+    sets: 1, shot_price: .7214, shot_price_mode: 'auto', weight_g: 10, material_unit_price: .1 };
+  const later = { ...first, mold_part_index: 1, name: '右大身', shot_price: .7214,
+    shot_price_mode: 'manual', weight_g: 20 };
+  const payload = payloadWith(first); payload.injection.push(later);
+  const before = JSON.stringify(payload), ui = molding(payload);
+  assert.equal(JSON.stringify(payload), before, '显示规则不改历史保存值');
+  assert.equal(ui.cell('shot_price', 1).children.length, 0);
+  assert.equal(ui.cell('shot_price', 1).textContent, '0.0000');
+  assert.match(ui.cell('shot_price', 1).title, /同模/);
+  assert.equal(ui.cell('finished_amt', 1).textContent, '2.0600');
+  assert.equal(ui.cell('indo_amt', 1).textContent, '0.2060');
+  ui.edit('target', '3000', 1);
+  assert.equal(later.shot_price, 0);
+  assert.equal(later.target, 3000);
+  ui.edit('target', '2000'); assert.equal(first.shot_price, 1.01);
+  ui.editFee(0, '4000'); assert.equal(first.shot_price, 2); assert.equal(later.shot_price, 0);
+  const reopened = molding(JSON.parse(JSON.stringify(payload)));
+  assert.equal(reopened.cell('shot_price', 1).textContent, '0.0000');
+});
+
+test('同模第二次啤首件可单独计价并联动，后续零件仍为只读零价', () => {
+  const secondRun = { mold_no: 'INDEX-260309-05', mold_part_index: 7, injection_run_id: 'row:28',
+    injection_run_name: '袖圈', injection_run_part_index: 0, target: 3200, sets: 1,
+    machine_model: '20A', shot_price: .6313, weight_g: 8.1, material_unit_price: .1 };
+  const payload = payloadWith(secondRun);
+  payload.injection.push({ ...secondRun, mold_part_index: 8, injection_run_part_index: 1, shot_price: 0 });
+  const ui = molding(payload);
+  assert.equal(ui.cell('injection_run_name').textContent, '袖圈');
+  assert.equal(ui.input('shot_price').value, '0.6313');
+  ui.edit('target', '4000');
+  assert.equal(secondRun.shot_price, .505);
+  assert.equal(ui.input('shot_price').value, '0.505');
+  assert.equal(ui.cell('shot_price', 1).textContent, '0.0000');
+  const reopened = molding(JSON.parse(JSON.stringify(payload)));
+  assert.equal(reopened.input('shot_price').value, '0.505');
+});
+
 test('真实供应商输入保留同名原标识，改名歧义恢复原归属，JSON重载可继续同步', () => {
   const row = { supplier_id: 'A', supplier_name: '同名厂', name: '吸塑', qty: 1, unit_price_rmb: .1 };
   const payload = { hardware: [row, { supplier_id: 'B', supplier_name: '同名厂' }],
