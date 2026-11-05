@@ -409,3 +409,37 @@ test('same-session refresh during rotation/recognition is accepted, but same use
   x.b.ctx.__QC_AUTH={...x.b.ctx.__QC_AUTH,csrfToken:'different-login'};
   complete(valid('SHOULD-NOT-APPLY'));await obsolete;assert.equal(x.value('ocrProductNo'),'');
 });
+
+
+test('manual fallback keeps the exact original response image and angle after every hinted orientation fails', async () => {
+  const x=fixture();x.upload();
+  const pending={ok:true,needRotate:90,rawText:'COMPLETE FIRST ORIENTATION RAW',fields:{supplier:'Test Supplier',
+    items:[{productNo:'',productName:'待核对原文：complete source row',qty:'',quantityNeedsReview:true}]}};
+  x.responses.push(pending,empty(90),empty(90));
+  await x.b.ctx.startOcr();
+  assert.deepEqual(x.canvasCalls.map(r=>r.angle),[0,270,90]);assert.equal(x.requests.length,3);
+  assert.equal(x.preview(),x.requests[0].body.image);assert.notEqual(x.preview(),x.requests.at(-1).body.image);
+  assert.equal(x.b.ctx.__QC_OCR_IMAGE.snapshot().angle,0);assert.equal(x.value('ocrRawText'),pending.rawText);
+  assert.match(x.status(),/人工核对/);assert.equal(x.b.ctx.__qcAiResult.items[0].productName,pending.fields.items[0].productName);
+  x.b.ctx.openAddModal();x.b.ctx.applyOcrToForm();assert.equal(x.b.ctx.saveRecord(),false);
+  x.b.elements.get('f_qty').value='12';assert.equal(x.b.ctx.saveRecord(),true);
+  assert.equal(x.b.json('state.records[0].qty'),12);assert.deepEqual(x.controls(),[false,false,false]);
+});
+
+test('an explicit manual result without a rotation hint is retained without inventing another model call', async () => {
+  const x=fixture();x.upload();const pending={ok:true,needsManualReview:true,rawText:'EXPLICIT MANUAL RAW',fields:{
+    supplier:'Test Supplier',items:[{productName:'待核对原文：unpositioned supplier row',qty:'',quantityNeedsReview:true}]}};
+  x.responses.push(empty(90),pending,valid('MUST-NOT-REPLACE-MANUAL'));
+  await x.b.ctx.startOcr();assert.equal(x.requests.length,2);assert.equal(x.preview(),x.requests[1].body.image);
+  assert.equal(x.b.ctx.__QC_OCR_IMAGE.snapshot().angle,270);assert.equal(x.value('ocrRawText'),pending.rawText);
+  assert.equal(x.b.ctx.__qcAiResult.items.length,1);assert.match(x.status(),/人工核对/);
+});
+
+test('valid and manual rows remain together after a successful rotation instead of dropping the uncertain row', async () => {
+  const x=fixture();x.upload();x.responses.push(empty(90),{ok:true,rawText:'BOTH FULL ROWS',fields:{supplier:'Test Supplier',items:[
+    {productNo:'EXACT',productName:'exact row',qty:'12'},
+    {productNo:'',productName:'待核对原行：uncertain row',qty:'',quantityNeedsReview:true},
+  ]}});
+  await x.b.ctx.startOcr();assert.equal(x.requests.length,2);assert.equal(x.b.ctx.__qcAiResult.items.length,2);
+  assert.equal(x.b.ctx.__qcAiResult.items[1].quantityNeedsReview,true);assert.match(x.status(),/人工核对/);
+});

@@ -299,8 +299,10 @@
       draft.state.records.forEach(function (r) {
         if (!Number.isSafeInteger(r.id) || r.id <= 0 || seen.has(r.id)) { conflict = true; return; }
         seen.add(r.id);
-        if (!Object.prototype.hasOwnProperty.call(baseline, r.id) &&
-            (serverById[r.id] || (!draft.replacement && r.id < Math.max(Number(serverState.nextId) || 31, Number(draft.baseline && draft.baseline.nextId) || 31)))) conflict = true;
+        // Random IDs are not an allocation sequence. Only an actual existing
+        // server row proves this new draft ID is occupied; tombstones remain
+        // authoritative when the server checks the explicit creation intent.
+        if (!Object.prototype.hasOwnProperty.call(baseline, r.id) && serverById[r.id]) conflict = true;
       });
       var deleted = (Array.isArray(draft.deletedIds) ? draft.deletedIds : []).filter(function (id) { return Number.isSafeInteger(id) && id > 0; });
       if (!draft.replacement) deleted.forEach(function (id) {
@@ -444,9 +446,16 @@
       var deleted = window.__QC_PENDING_DELETES.slice();
       var revisions = deleted.map(function (id) { return deleteRevisions[id]; });
       var replacement = window.__QC_FORCE_REPLACE;
+      var baselineVersions = recordBaseline && recordBaseline.versions || Object.create(null);
+      var createdIds = (st.records || []).filter(function (row) {
+        return !Object.prototype.hasOwnProperty.call(baselineVersions, row.id);
+      }).map(function (row) { return row.id; });
       function acknowledge(ok) {
         // A response from an old actor/session must never clear another actor's draft.
         if (!ok || !window.__QC_AUTH || window.__QC_AUTH.user.username !== owner || draftOwner !== owner || epoch !== recordQueueEpoch) return ok;
+        // Advance only to this exact acknowledged snapshot, not to later local
+        // edits which may have happened while this request was in flight.
+        recordBaseline = baselineOf(st);
         window.__QC_PENDING_DELETES = window.__QC_PENDING_DELETES.filter(function (id) {
           var index = deleted.indexOf(id);
           return index === -1 || deleteRevisions[id] !== revisions[index];
@@ -469,7 +478,7 @@
         return ok;
       }
       if (replacement) return post(apiUrl('/api/records/replace'), { records: st.records || [] }).then(acknowledge);
-      return post(apiUrl('/api/records'), { records: st.records || [], deletedIds: deleted }).then(acknowledge);
+      return post(apiUrl('/api/records'), { records: st.records || [], deletedIds: deleted, newIds: createdIds }).then(acknowledge);
     } catch (e) { console.warn('[QC后端] 读本地记录失败', e); }
     return Promise.resolve(false);
   }

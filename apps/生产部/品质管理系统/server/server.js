@@ -517,44 +517,10 @@ function parseDeliveryNote(text, options = {}) {
       /* 艾美斯类：序号 订单编号 货号 货品名称 单位 订单数量 交货数量 … —— 数量取「交货数量」列 */
       const orderNameUnit = /^(?:序号|序號|序|NO\.?)\s+(?:订单编号|订单号|訂單編號|訂單號)\s+(?:货号|貨號)\s+(?:货品名称|貨品名稱|品名|名称|名稱)\s+(?:单位|單位)(?:\s|$)/i.test(plainHeader);
       if (orderNameUnit) {
-        /* 逐行解析艾美斯类版式：序号 订单编号 [换行折断位] 货品名称… 单位 数量…
-           每一行都必须结构完整（有名称、有单位、有数量列）才采用；
-           任一行对不上就整张单退回人工核对（保留审查要求的兜底语义）。 */
-        const headToks2 = plainHeader.split(/\s+/);
-        const unitHeadAt = headToks2.findIndex(t => /^(单位|單位)$/.test(t));
-        const qtyHeads = unitHeadAt === -1 ? [] : headToks2.slice(unitHeadAt + 1).filter(t => /数量|數量/.test(t));
-        const deliverAt = qtyHeads.findIndex(t => /交货|交貨|送货|送貨/.test(t));
-        const pick = deliverAt !== -1 ? deliverAt : 0;
-        const numTok = /^(?:\d{1,3}(?:,\d{3})+|\d+)$/;
-        const unitTok = /^(个|個|PCS|件|套|卷|张|張|桶|KG|米|箱|包|条|條|颗|顆)$/i;
-        const rows2 = [];
-        let badRow = false;
-        for (const ln of lines.slice(hiP + 1)) {
-          const toks = ln.trim().split(/\s+/);
-          if (!ln.trim()) continue;
-          if (/^(合计|合計|总计|總計|备注|備注)/.test(ln.trim())) break;
-          if (toks.length === 1 && /^\d+$/.test(toks[0])) continue;   /* 空序号行 */
-          if (!/^\d+$/.test(toks[0])) continue;
-          let ci = 1;
-          let rowOrder = toks[ci++] || '';
-          /* 订单号换行折断（BBC2025285-0 下行剩 1）：拼回后必须符合 字母+数字-两位数字 才接受 */
-          if (/^[A-Za-z]{2,}\d{4,}-\d$/.test(rowOrder) && /^\d{1,2}$/.test(toks[ci] || '') &&
-              /^[A-Za-z]{2,}\d{4,}-\d{2}$/.test(rowOrder + toks[ci])) rowOrder += toks[ci++];
-          const unitAt2 = toks.findIndex((t, k) => k >= ci && unitTok.test(t));
-          const name2 = unitAt2 > ci ? toks.slice(ci, unitAt2).join(' ') : '';
-          const nums2 = unitAt2 === -1 ? [] : toks.slice(unitAt2 + 1).filter(t => numTok.test(t));
-          const qty2 = nums2[pick] || '';
-          if (!name2 || unitAt2 === -1 || !qty2) { badRow = true; break; }
-          rows2.push({ productNo: '', productName: name2, qty: quantityText(qty2, toks[unitAt2]), unit: toks[unitAt2], orderNo: rowOrder, _seq: toks[0] });
-        }
-        if (!badRow && rows2.length) {
-          fields.items = rows2;
-          if (rows2[0].orderNo) fields.orderNo = rows2[0].orderNo;
-        } else {
-          fields.items = [_pendingOcrItem(String(text || ''))];
-          fields.orderNo = '';
-          fields.manualReviewRequired = true;
-        }
+        /* 空白分词丢失了空货号/换行单元格的边界，不能拼接 PO 或过滤数字凑列。 */
+        fields.items = [_pendingOcrItem(String(text || ''))];
+        fields.orderNo = '';
+        fields.manualReviewRequired = true;
         return fields;
       }
       const hasOtherNumericColumns = /尺寸|重量|单价|單價|金额|金額|SIZE|WEIGHT|PRICE|AMOUNT/i.test(plainHeader);
@@ -620,56 +586,8 @@ function parseDeliveryNote(text, options = {}) {
     }
   }
 
-  /* 分栏输出配对（显达硅胶类：Description 品名块 + Qty 数量块，横拍照片常触发）：
-     仅当品名行数与数量行数完全一致才按顺序配对；数量对不上就交回人工核对兜底。 */
-  if (!fields.items.length) {
-    const UNIT_RE = '(?:PCS|pcs|个|件|套|卷|张|張|桶|KG|kg|米|箱|包|条|條|颗|顆)';
-    const isQtyLine = l => {
-      const t = l.trim();
-      return new RegExp('^\\d{1,3}(?:[,\\.]\\d{3})+\\s*' + UNIT_RE + '?$').test(t)
-          || new RegExp('^\\d{2,}\\s+' + UNIT_RE + '$').test(t);
-    };
-    const hiD = lines.findIndex(l => /^\s*(Description|DESCRIPTION|品名|名称|名稱|货名|貨名|ITEM)\s*$/i.test(l));
-    let hiQ = hiD === -1 ? -1 : lines.findIndex((l, idx) => idx > hiD && /^\s*(Qty|QTY|Quantity|数量|數量)\s*[.:：]?\s*$/i.test(l));
-    let qtyFrom = -1;
-    if (hiQ !== -1) {
-      qtyFrom = hiQ + 1;
-    } else if (hiD !== -1) {
-      /* 横拍/旋转图：模型常把 Qty 表头丢掉，数量块裸奔在品名块后面——找第一段连续数量行 */
-      for (let i = hiD + 1; i < lines.length; i++) {
-        if (isQtyLine(lines[i])) { qtyFrom = i; break; }
-      }
-    }
-    if (hiD !== -1 && qtyFrom !== -1) {
-      const qtys = [];
-      for (const ln of lines.slice(qtyFrom)) {
-        if (isQtyLine(ln)) qtys.push(ln.trim());
-        else if (qtys.length || ln.trim()) break;   /* 数量块必须连续 */
-      }
-      /* 品名块：跳过 PO 行（顺便抓订单号）和 #编号/纯编码行 */
-      const block = lines.slice(hiD + 1, qtyFrom);
-      for (const ln of block) {
-        const po = ln.match(/P\s*\/?\s*O\s*(?:NO|No|no)\.?\s*[:#]?\s*([A-Za-z]{1,4}[A-Za-z0-9\-]{4,})/);
-        if (po && !fields.orderNo) fields.orderNo = po[1];
-      }
-      const cjkCount = s => (s.match(/[一-鿿]/g) || []).length;
-      let names = block.map(l => l.trim())
-        .filter(t => t && !/P\s*\/?\s*O/i.test(t) && !/^[#＃]?[A-Za-z0-9][A-Za-z0-9\-]*$/.test(t) && cjkCount(t) >= 2);
-      if (names.length !== qtys.length) {
-        const stricter = names.filter(t => cjkCount(t) >= 3);   /* 合并单元格碎片（如「鸭子」）再过滤一轮 */
-        if (stricter.length === qtys.length) names = stricter;
-      }
-      if (qtys.length && names.length === qtys.length) {
-        names.forEach((name, i) => {
-          const qm = qtys[i].match(/^(\d{1,3}(?:[,\.]\d{3})+|\d+)\s*(.*)$/);
-          fields.items.push({ productNo: '', productName: name, qty: quantityText(qm ? qm[1] : '', (qm && qm[2]) || ''), unit: (qm && qm[2]) || '' });
-        });
-      }
-    }
-    /* 有独立 Description/品名 表头行但配对失败：典型的分栏乱序/横拍特征，
-       提示客户端转正重试（两个方向都会试，转错方向无损失） */
-    if (hiD !== -1 && !fields.items.length) fields.columnScrambled = true;
-  }
+  /* 无来源行对应的分栏仍交人工核对，仅给未携带定位方向的原文一次转正机会。 */
+  if (!fields.items.length && !grounding && lines.some(line => /^(Description|品名|名称|名稱|货名|貨名|ITEM)\s*$/i.test(line.trim()))) fields.columnScrambled = true;
 
   /* 分栏缺少逐行来源关联时不按数量/品名字数猜配对。保留完整原文供人工核对。 */
   if (!fields.items.length && (grounding || lines.some(line => /^(Description|品名|名称|名稱|货名|貨名|ITEM)\s*$/i.test(line.trim())))) {
@@ -773,7 +691,7 @@ async function aiVisionExtract(dataUrl) {
       ? { date: '', supplier: '', deliveryNo: '', orderNo: '', type: '来料', items: [] }
       : parseDeliveryNote(content, { truncated });
     /* 分栏乱序特征（品名块/数量块对不上）：即使模型没给角度也让客户端转正试试 */
-    if (!needRotate && fields.columnScrambled) needRotate = 90;
+    if (!needRotate && !grounding && fields.columnScrambled) needRotate = 90;
     return { content, fields, needRotate };
   };
   let { content, fields, needRotate } = decode(data);
@@ -923,9 +841,17 @@ function deleteRecords(db, ids, transaction = true) {
   return count;
 }
 
-function mergeRecordChanges(db, records, ids) {
-  db.exec('BEGIN');
+function mergeRecordChanges(db, records, ids, newIds = []) {
+  db.exec('BEGIN IMMEDIATE');
   try {
+    // Recheck creation intent under the write transaction. A second writer
+    // cannot turn a new ID into an edit between authorization and insertion.
+    const created = new Set(newIds);
+    const current = db.prepare('SELECT id FROM records WHERE id=?');
+    const tomb = db.prepare('SELECT id FROM record_tombstones WHERE id=?');
+    for (const row of records) if (created.has(Number(row.id)) && (current.get(row.id) || tomb.get(row.id))) {
+      Auth.fail(409, '新记录编号已被占用或删除，整批修改未保存；请保留草稿并核对');
+    }
     const deleted = deleteRecords(db, ids, false);
     const result = upsertRecords(db, records, false);
     db.exec('COMMIT');
@@ -1168,9 +1094,19 @@ function validIds(ids) {
     return id;
   });
 }
-function authorizeRecordBatch(db, input, ids, user, replace = false) {
+function authorizeRecordBatch(db, input, ids, user, replace = false, newIds = []) {
   if (!Array.isArray(input)) Auth.fail(400, 'records须为数组');
   const deleted = validIds(ids), seen = new Set();
+  if (!Array.isArray(newIds) || newIds.some(id => typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) || new Set(newIds).size !== newIds.length) {
+    Auth.fail(400, '新记录编号须为不重复的安全整数');
+  }
+  const created = new Set(newIds);
+  const submitted = new Set(input.map(raw => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) Auth.fail(400, '记录格式不正确');
+    return validIds([raw.id])[0];
+  }));
+  if (newIds.some(id => !submitted.has(id) || deleted.includes(id))) Auth.fail(400, '新记录编号须对应本次资料且不能同时删除');
+  if (!replace && newIds.length) Auth.requirePermission(user, 'records', 'e');
   if (replace) Auth.requirePermission(user, 'import', 'm');
   if (deleted.length) Auth.requirePermission(user, 'records', 'm');
   const get = db.prepare('SELECT * FROM records WHERE id=?');
@@ -1188,6 +1124,18 @@ function authorizeRecordBatch(db, input, ids, user, replace = false) {
     if (seen.has(id)) Auth.fail(400, '记录编号重复');
     seen.add(id);
     const currentRow = get.get(id), current = currentRow && rowToRecord(currentRow);
+    if (!replace && created.has(id)) {
+      if (tomb.get(id)) Auth.fail(409, '新记录编号已被删除，整批修改未保存；请保留草稿并核对');
+      if (current) {
+        const retry = { ...raw, id, status: raw.status || 'pending' };
+        if (retry.status === 'pending') for (const col of REVIEW_FIELDS.slice(1)) if (retry[col] == null) retry[col] = '';
+        const before = canonicalValues(current), after = canonicalValues(retry);
+        if (!before.every((value, index) => value === after[index])) {
+          Auth.fail(409, '新记录编号已被占用，整批修改未保存；请保留草稿并核对');
+        }
+        return null; // An identical retry is a no-op, never an update.
+      }
+    }
     // These rows cannot be written by upsertRecords. Preserve the stale and
     // tombstone rules without requiring edit rights on somebody else's row.
     if (!replace && (deleted.includes(id) || tomb.get(id) || current?.updatedAt &&
@@ -1229,7 +1177,7 @@ function authorizeRecordBatch(db, input, ids, user, replace = false) {
     }
     return record;
   });
-  return { records: output.filter(Boolean), deletedIds: deleted };
+  return { records: output.filter(Boolean), deletedIds: deleted, newIds };
 }
 function validatedUsers(db, input) {
   if (!Array.isArray(input)) Auth.fail(400, 'users须为数组');
@@ -1543,8 +1491,8 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/records' && req.method === 'POST') {
       const body = await readBody(req);
-      const allowed = authorizeRecordBatch(db, body.records, body.deletedIds || [], user);
-      const r = mergeRecordChanges(db, allowed.records, allowed.deletedIds);
+      const allowed = authorizeRecordBatch(db, body.records, body.deletedIds || [], user, false, body.newIds === undefined ? [] : body.newIds);
+      const r = mergeRecordChanges(db, allowed.records, allowed.deletedIds, allowed.newIds);
       return sendJson(res, 200, { ok: true, count: db.prepare('SELECT COUNT(*) c FROM records').get().c,
         ...r });
     }

@@ -601,13 +601,54 @@ test('unreadable or invalid own draft is preserved and blocks replay: '+raw.slic
 });
 
 
-test('a remotely allocated then deleted id cannot be mistaken for a new unsynced row',async()=>{
+test('a random draft below the numeric high-water mark stays protected while explicit tombstone retry is rejected',async()=>{
+  let failStatus=500;
+  const b=browser({handler:url=>url.includes('/api/records')?Promise.resolve({ok:false,status:failStatus}):undefined});
+  b.store.set(prefix+'records',JSON.stringify({records:[versioned(41,'local-random-new')],nextId:502}));
+  await b.ctx.__QC_SYNC_NOW();const key=prefix+'pending_records_qc-admin',original=b.store.get(key);
+  b.setBootstrap({...bootstrap(),records:[],nextId:9000000000000});b.ctx.__QC_BOOTSTRAP();b.ctx.initData();
+  assert.equal(b.ctx.__QC_DRAFT_RECOVERY_BLOCKED,false);assert.equal(b.run('state.records[0].id'),41);
+  assert.equal(b.store.get(key),original);assert.equal(b.calls.filter(c=>c.method==='POST').length,1);
+  failStatus=409;assert.equal(await b.ctx.__QC_SYNC_NOW(),false);
+  const last=b.calls.filter(c=>c.method==='POST').at(-1);assert.deepEqual(last.parsed.newIds,[41]);
+  assert.equal(JSON.parse(b.store.get(key)).state.records[0].productNo,'local-random-new');
+  assert.equal(b.ctx.__QC_FORCE_REPLACE,false);assert.equal(b.ctx.__QC_LAST_SYNC.status,409);
+});
+
+
+test('successful new-row acknowledgement advances only the exact sent baseline before later edits',async()=>{
+  let finish,postCount=0;
+  const b=browser({handler:url=>url.includes('/api/records')?++postCount===1?new Promise(resolve=>{finish=resolve;}):Promise.resolve({ok:false,status:500}):undefined});
+  const old=versioned(41,'first-new','2026-11-05T01:00:00Z');
+  b.store.set(prefix+'records',JSON.stringify({records:[old],nextId:9000000000000}));
+  const first=b.ctx.__QC_SYNC_NOW();await tick();
+  const local=[{...old,productNo:'later-edit',updatedAt:'2026-11-05T02:00:00Z'},versioned(42,'second-new','2026-11-05T02:00:00Z')];
+  b.store.set(prefix+'records',JSON.stringify({records:local,nextId:9000000000000}));const second=b.ctx.__QC_SYNC_NOW();
+  finish({ok:true,status:200});await first;await second;
+  const posts=b.calls.filter(c=>c.method==='POST');assert.deepEqual(posts[0].parsed.newIds,[41]);assert.deepEqual(posts[1].parsed.newIds,[42]);
+  const draft=JSON.parse(b.store.get(prefix+'pending_records_qc-admin'));
+  assert.equal(draft.baseline.versions['41'],old.updatedAt);assert.equal('42'in draft.baseline.versions,false);
+  assert.deepEqual(draft.state.records,local);
+});
+
+test('a failed new-row request never advances the original baseline or loses creation intent',async()=>{
   const b=browser({handler:url=>url.includes('/api/records')?Promise.resolve({ok:false,status:500}):undefined});
-  b.store.set(prefix+'records',JSON.stringify({records:[versioned(501,'local-new')],nextId:502}));
-  await b.ctx.__QC_SYNC_NOW(); const original=b.store.get(prefix+'pending_records_qc-admin');
-  b.setBootstrap({...bootstrap(),records:[],nextId:502}); b.ctx.__QC_BOOTSTRAP(); b.ctx.initData();
-  assert.equal(b.ctx.__QC_DRAFT_RECOVERY_BLOCKED,true); assert.deepEqual(plain(b.run('state.records')),[]);
-  assert.equal(b.store.get(prefix+'pending_records_qc-admin'),original);
-  const before=b.calls.filter(c=>c.method==='POST').length; assert.equal(await b.ctx.__QC_SYNC_NOW(),false);
-  assert.equal(b.calls.filter(c=>c.method==='POST').length,before);
+  b.store.set(prefix+'records',JSON.stringify({records:[versioned(41,'first-new')],nextId:502}));
+  assert.equal(await b.ctx.__QC_SYNC_NOW(),false);assert.equal(await b.ctx.__QC_SYNC_NOW(),false);
+  const posts=b.calls.filter(c=>c.method==='POST');assert.deepEqual(posts.map(p=>p.parsed.newIds),[[41],[41]]);
+  const draft=JSON.parse(b.store.get(prefix+'pending_records_qc-admin'));
+  assert.equal('41'in draft.baseline.versions,false);assert.equal(draft.state.records[0].productNo,'first-new');
+});
+
+test('a low unused random draft restores alongside another creator without automatic replay',async()=>{
+  const initial=[versioned(9000000000000,'existing')],local=[...initial,versioned(41,'low-random-new')];
+  const {b,key,original}=await recoveryDraft({initial,local,server:[...initial,versioned(9000000000001,'other-creator')]});
+  assert.equal(b.ctx.__QC_DRAFT_RECOVERY_BLOCKED,false);assert.equal(b.store.get(key),original);
+  assert.deepEqual(plain(b.run('state.records')).map(r=>r.id),[9000000000000,9000000000001,41]);
+  assert.equal(b.calls.filter(c=>c.method==='POST').length,1);
+});
+
+test('normal HTML selects all matching modern creation-intent and OCR scripts without changing their load order',()=>{
+  const html=source('index.html');const scripts=[...html.matchAll(/<script src="(qc-backend|app|ai-ocr)\.js\?v=([^"]+)"/g)].map(m=>[m[1],m[2]]);
+  assert.deepEqual(scripts,[['qc-backend','20261105-safe-ids-ocr-r1'],['app','20261105-safe-ids-ocr-r1'],['ai-ocr','20261105-safe-ids-ocr-r1']]);
 });

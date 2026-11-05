@@ -227,10 +227,16 @@
   }
 
   function usableItems(fields) {
-    /* 必须至少一条明细带数量才算「可用」：「待核对原文/原行」不算，
-       否则转正重试永远不会触发（ pending 行有名无量就被当成成功）。 */
-    return fields && Array.isArray(fields.items) && fields.items.some(function (item) {
-      return item && typeof item === 'object' && String(item.qty == null ? '' : item.qty).trim();
+    return fields && Array.isArray(fields.items) && fields.items.length > 0 && fields.items.every(function (item) {
+      return item && typeof item === 'object' &&
+        (item.quantityNeedsReview === true || String(item.productNo || '').trim() ||
+         String(item.productName || '').trim() || String(item.qty == null ? '' : item.qty).trim());
+    });
+  }
+
+  function hasQuantity(fields) {
+    return usableItems(fields) && fields.items.some(function (item) {
+      return String(item.qty == null ? '' : item.qty).trim();
     });
   }
 
@@ -249,10 +255,12 @@
           return response.json().catch(function () { return {}; }).then(function (body) {
             requireCurrent(op);
             if (!response.ok || !body || !body.ok) throw new Error((body && body.error) || ('HTTP ' + response.status));
-            if (!usableItems(body.fields)) {
+            var rotatedPending = usableItems(body.fields) && !hasQuantity(body.fields) &&
+              [90, 180, 270].indexOf(body.needRotate) !== -1;
+            if (!usableItems(body.fields) || rotatedPending) {
               /* 有内容但解析不出明细（待核对原文）：留底，转正尝试全部失败后回退到它，不丢原文 */
-              if (!pendingFallback && body.fields && Array.isArray(body.fields.items) && body.fields.items.length) {
-                pendingFallback = { fields: body.fields, rawText: body.rawText };
+              if (!pendingFallback && usableItems(body.fields)) {
+                pendingFallback = { fields: body.fields, rawText: body.rawText, image: small, angle: angle };
               }
               if ([90, 180, 270].indexOf(body.needRotate) !== -1 && !candidates) {
                 var correction = body.needRotate === 180 ? 180 : (body.needRotate === 270 ? 90 : 270);
@@ -267,6 +275,8 @@
               }
               if (pendingFallback) {
                 body = { ok: true, fields: pendingFallback.fields, rawText: pendingFallback.rawText, needsManualReview: true };
+                small = pendingFallback.image;
+                angle = pendingFallback.angle;
               } else {
                 throw new Error('未识别到货品明细，请核对图片方向或手动录入；原有更正已保留');
               }
