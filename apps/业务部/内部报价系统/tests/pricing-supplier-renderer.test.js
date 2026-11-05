@@ -38,6 +38,7 @@ function contextFor(payload) {
   });
   vm.runInContext(source.slice(source.indexOf('function renderTable('), source.indexOf('// 辅助/包装材料 类别')), context);
   vm.runInContext(source.slice(source.indexOf('function formatNum('), source.indexOf('function legacyFormulaAmount(')), context);
+  vm.runInContext(source.slice(source.indexOf('function changeInjectionStructure('), source.indexOf('function engineeringMoldSyncKey(')), context);
   return { context, changes, alerts };
 }
 function molding(payload, readonly = false) {
@@ -50,7 +51,8 @@ function molding(payload, readonly = false) {
     source.slice(columnsStart, source.indexOf('  const wrappedOnChange =', columnsStart)) +
     '\nglobalThis.injectionColumns = cols; globalThis.machineChanged = onMachChange;', context);
   const container = new Element('div');
-  context.renderTable(container, context.injectionColumns, payload.injection, { readonly, onChange: context.onChange, showRowNumber: false });
+  context.renderTable(container, context.injectionColumns, payload.injection, { readonly, onChange: context.onChange,
+    onStructureChange: context.changeInjectionStructure, showRowNumber: false });
   const cells = container.querySelectorAll('tbody')[0].children.map(row => row.children);
   const cell = (key, index = 0) => cells[index][context.injectionColumns.findIndex(col => col.key === key)];
   const input = (key, index = 0) => cell(key, index).children[0];
@@ -64,7 +66,12 @@ function molding(payload, readonly = false) {
     const node = machines.querySelectorAll('tbody')[0].children[index].children[2].children[0];
     node.value = value; node.oninput();
   };
-  return { ...fixture, cell, input, edit, editFee };
+  const action = (title, index = 0) => {
+    const tr = container.querySelectorAll('tbody')[0].children[index];
+    const button = tr.children.at(-1).children.find(item => item.title === title);
+    assert.ok(button, title); button.onclick();
+  };
+  return { ...fixture, cell, input, edit, editFee, action };
 }
 function payloadWith(row) {
   return { injection: [row], injection_loss_pct: 3, indo_pct: 10, material_prices: [],
@@ -166,8 +173,10 @@ test('未标记历史价即使等于计算值，也不随参考费用变化；�
 
 test('同模后续零件显示只读零啤工，原料照算，重开及改目标不恢复重复价', () => {
   const first = { mold_no: 'INDEX-2', mold_part_index: 0, machine_model: '20A', target: 2800,
+    source_sheet_name: '合成工程表', source_sheet_index: 0, injection_run_id: 'row:2', injection_run_part_index: 0,
     sets: 1, shot_price: .7214, shot_price_mode: 'auto', weight_g: 10, material_unit_price: .1 };
   const later = { ...first, mold_part_index: 1, name: '右大身', shot_price: .7214,
+    injection_run_part_index: 1,
     shot_price_mode: 'manual', weight_g: 20 };
   const payload = payloadWith(first); payload.injection.push(later);
   const before = JSON.stringify(payload), ui = molding(payload);
@@ -188,6 +197,7 @@ test('同模后续零件显示只读零啤工，原料照算，重开及改目�
 
 test('同模第二次啤首件可单独计价并联动，后续零件仍为只读零价', () => {
   const secondRun = { mold_no: 'INDEX-260309-05', mold_part_index: 7, injection_run_id: 'row:28',
+    source_sheet_name: '合成工程表', source_sheet_index: 0,
     injection_run_name: '袖圈', injection_run_part_index: 0, target: 3200, sets: 1,
     machine_model: '20A', shot_price: .6313, weight_g: 8.1, material_unit_price: .1 };
   const payload = payloadWith(secondRun);
@@ -201,6 +211,54 @@ test('同模第二次啤首件可单独计价并联动，后续零件仍为只�
   assert.equal(ui.cell('shot_price', 1).textContent, '0.0000');
   const reopened = molding(JSON.parse(JSON.stringify(payload)));
   assert.equal(reopened.input('shot_price').value, '0.505');
+});
+
+test('实际注塑表复制和删除准确啤次计费行，不重复收费且精确保留手填价', () => {
+  const first = { mold_no: 'M', source_sheet_name: '工程表', source_sheet_index: 0,
+    product_group_id: 'A', injection_run_id: 'row:2', injection_run_part_index: 0,
+    mold_part_index: 0, name: '首件', machine_model: '20A', machine: '200T',
+    target: 2000, sets: 1, cycle_sec: 31, shot_price: .3142, shot_price_mode: 'manual' };
+  const later = { ...first, name: '后续件', mold_part_index: 1, injection_run_part_index: 1,
+    target: 9999, sets: 9, shot_price: 0, shot_price_mode: 'auto', weight_g: 8 };
+  const other = { ...first, product_group_id: 'B', name: '其他产品', shot_price: .9 };
+  const payload = payloadWith(first); payload.injection.push(later, other);
+  const otherBefore = JSON.stringify(other), ui = molding(payload);
+  ui.action('在下方插入副本（用于拆分）');
+  assert.deepEqual(payload.injection.map(row => row.injection_run_part_index), [0, 2, 1, 0]);
+  assert.equal(payload.injection.reduce((sum, row) => sum + Number(Pricing.laborPrice(row) || 0), 0), 1.2142);
+  ui.action('删除');
+  assert.equal(payload.injection.length, 3);
+  assert.equal(later.injection_run_part_index, 0);
+  for (const field of ['shot_price', 'shot_price_mode', 'target', 'sets', 'cycle_sec', 'machine_model', 'machine']) {
+    assert.equal(later[field], first[field], field + ' transferred exactly from this run');
+  }
+  assert.equal(later.name, '后续件'); assert.equal(later.weight_g, 8);
+  assert.equal(JSON.stringify(other), otherBefore);
+  const reopened = molding(JSON.parse(JSON.stringify(payload)));
+  assert.equal(reopened.input('shot_price', 1).value, '0.3142');
+  assert.equal(reopened.cell('shot_price', 0).textContent, '0.0000');
+  reopened.action('上移', 1);
+  assert.equal(payload.injection[1].shot_price, .3142, 'moving the reopened copy does not change saved payload');
+});
+
+test('缺准确来源或啤次计费行歧义时，结构按钮保持原数组；旧手填行不猜归组', () => {
+  const base = { mold_no: 'M', source_sheet_name: '工程表', source_sheet_index: 0,
+    injection_run_id: 'row:2', injection_run_part_index: 0, shot_price: .3, shot_price_mode: 'manual' };
+  for (const rows of [
+    [{ ...base, source_sheet_index: null }, { ...base, injection_run_part_index: 1 }],
+    [{ ...base }, { ...base }],
+    [{ ...base, injection_run_part_index: 1 }],
+  ]) {
+    const payload = payloadWith(rows[0]); payload.injection = rows;
+    const before = JSON.stringify(payload), ui = molding(payload);
+    ui.action('在下方插入副本（用于拆分）'); ui.action('删除');
+    assert.equal(JSON.stringify(payload), before);
+    assert.equal(ui.changes.length, 0); assert.equal(ui.alerts.length, 2);
+  }
+  const legacy = payloadWith({ mold_no: 'M', mold_part_index: 3, shot_price: .7, shot_price_mode: 'manual' });
+  const ui = molding(legacy); assert.equal(ui.input('shot_price').value, '0.7');
+  ui.action('在下方插入副本（用于拆分）');
+  assert.deepEqual(legacy.injection.map(row => row.shot_price), [.7, .7], 'legacy rows retain their existing independent/manual behavior');
 });
 
 test('真实供应商输入保留同名原标识，改名歧义恢复原归属，JSON重载可继续同步', () => {

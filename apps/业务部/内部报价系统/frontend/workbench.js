@@ -274,6 +274,7 @@ function renderTable(container, columns, rows, opts = {}) {
     beforeRow = null,
     rowStyle = null,
     showRowNumber = true,
+    onStructureChange = () => true,
   } = opts;
   container.innerHTML = '';
 
@@ -300,6 +301,15 @@ function renderTable(container, columns, rows, opts = {}) {
   });
 
   const tbody = document.createElement('tbody');
+  function changeStructure(type, row, mutate) {
+    const previousRows = rows.slice();
+    const detail = mutate() || {};
+    if (onStructureChange({ type, row, rows, previousRows, ...detail }) === false) {
+      rows.splice(0, rows.length, ...previousRows);
+      return;
+    }
+    rebuild(); onChange();
+  }
   function rebuild() {
     tbody.innerHTML = '';
     rows.forEach((row, idx) => {
@@ -424,18 +434,20 @@ function renderTable(container, columns, rows, opts = {}) {
         };
         // 上移
         if (idx > 0) td.appendChild(mkBtn('↑', '上移', () => {
-          [rows[idx - 1], rows[idx]] = [rows[idx], rows[idx - 1]]; rebuild(); onChange();
+          changeStructure('move', row, () => { [rows[idx - 1], rows[idx]] = [rows[idx], rows[idx - 1]]; });
         }));
         // 下移
         if (idx < rows.length - 1) td.appendChild(mkBtn('↓', '下移', () => {
-          [rows[idx + 1], rows[idx]] = [rows[idx], rows[idx + 1]]; rebuild(); onChange();
+          changeStructure('move', row, () => { [rows[idx + 1], rows[idx]] = [rows[idx], rows[idx + 1]]; });
         }));
         // 复制此行（拆分用）→ 在下方插入一份副本
         td.appendChild(mkBtn('⎘', '在下方插入副本（用于拆分）', () => {
-          rows.splice(idx + 1, 0, JSON.parse(JSON.stringify(rows[idx]))); rebuild(); onChange();
+          changeStructure('copy', row, () => {
+            const copy = JSON.parse(JSON.stringify(row)); rows.splice(idx + 1, 0, copy); return { copy };
+          });
         }));
         // 删除
-        const delBtn = mkBtn('×', '删除', () => { rows.splice(idx, 1); rebuild(); onChange(); });
+        const delBtn = mkBtn('×', '删除', () => { changeStructure('delete', row, () => { rows.splice(idx, 1); }); });
         delBtn.className = 'mini danger';
         td.appendChild(delBtn);
         tr.appendChild(td);
@@ -4681,6 +4693,12 @@ function isBlankInjectionPrice(value) {
   return value === null || value === undefined || value === '';
 }
 
+function changeInjectionStructure(change) {
+  const result = window.InjectionPricing.applyRunStructureChange(change);
+  if (!result.allowed) alert(result.message || '啤次资料不完整，请核对后重试。');
+  return result.allowed;
+}
+
 function engineeringMoldSyncKey(row) {
   return [
     row?.product_group_id || row?.product_group_name || '',
@@ -4726,7 +4744,9 @@ function applyInjectionReferencePrices(payload, { overwrite = false, material = 
       if (row.catalog_raw_weight != null) continue;
       const autoPartDuplicate = window.InjectionPricing.isAdditionalPart(row) &&
         !isBlankInjectionPrice(row.shot_price) && num(row.shot_price) !== 0 && row.shot_price_mode === 'auto';
-      const shouldPrice = overwrite || autoPartDuplicate || (isBlankInjectionPrice(row.shot_price) && row.shot_price_mode === 'auto');
+      const legacyAutoPartZero = !window.InjectionPricing.hasRunIdentity(row) && num(row.mold_part_index) > 0 &&
+        !isBlankInjectionPrice(row.shot_price) && num(row.shot_price) === 0 && row.shot_price_mode === 'auto';
+      const shouldPrice = overwrite || autoPartDuplicate || legacyAutoPartZero || (isBlankInjectionPrice(row.shot_price) && row.shot_price_mode === 'auto');
       if (shouldPrice && nextPrice !== null) {
         if (row.shot_price !== nextPrice) changed = true;
         row.shot_price = nextPrice;
@@ -4863,7 +4883,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     ${canEdit ? `<small style="margin-left:8px"><button id="btn-auto-price" class="mini" type="button">🔄 自动按材质套料价</button></small>` : ''}
     ${canEdit ? `<small style="margin-left:6px"><button id="btn-auto-shot" class="mini" type="button">🔄 自动按机型套啤价</button></small>` : ''}
     </h3>
-    <p class="muted">按实际啤次计费：同一次啤只在首条零件计一次啤工；同一模具分两次啤则各计一次。各条原料费分别计算。啤价＝本单机型台班费用 ÷ 目标数 ÷ 套数。修改本行机型、目标数、套数或点击“自动按机型套啤价”后使用自动计算；手填啤价及历史固定值保留，机型费用变化只更新自动计算行。修改后请保存本部门草稿。</p>
+    <p class="muted">按实际啤次计费：同一次啤只在首条零件计一次啤工；同一模具分两次啤则各计一次。未记录准确啤次的历史行保留原口径，重新导入源表并同步模具后才应用啤次计费。各条原料费分别计算。啤价＝本单机型台班费用 ÷ 目标数 ÷ 套数。修改本行机型、目标数、套数或点击“自动按机型套啤价”后使用自动计算；手填啤价及历史固定值保留，机型费用变化只更新自动计算行。修改后请保存本部门草稿。</p>
     <div id="wb-inj"></div>
     <div id="wb-inj-shared"></div>
     <div id="wb-inj-summary"></div>
@@ -5158,6 +5178,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
   renderTable(host.querySelector('#wb-inj'), cols, payload.injection, {
     readonly: !canEdit,
     onChange: wrappedOnChange,
+    onStructureChange: changeInjectionStructure,
     showRowNumber: false,
     beforeRow: showInjectionGroups ? (row, index, allRows) => {
       const key = injectionGroupKey(row);

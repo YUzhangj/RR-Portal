@@ -8,6 +8,24 @@ const { buildWorkbook } = require('../backend/services/exportInternal');
 const source = fs.readFileSync(require.resolve('../frontend/workbench.js'), 'utf8');
 const prices = [{ model: '20A', normal: '200T', price: 2020 },
   { model: '10A-12A', normal: '120T', price: 1210 }];
+
+test('four-decimal auto labor uses positive decimal half-up, including exponent and finite extremes', () => {
+  const row = { machine_model: '20A', sets: 2, target: 4000 };
+  const quote = price => [{ model: '20A', price }];
+  assert.equal(Pricing.calculate(row, quote(1490)), .1863);
+  assert.equal(Pricing.calculate(row, quote(1489.9999999999)), .1862);
+  assert.equal(Pricing.calculate(row, quote(1490.0000000001)), .1863);
+  assert.equal(Pricing.calculate(row, quote(0)), 0);
+  assert.equal(Pricing.calculate({ ...row, sets: 1, target: 1 }, quote(5e-5)), .0001);
+  assert.equal(Pricing.calculate({ ...row, sets: 1, target: 1 }, quote(4.999999e-5)), 0);
+  assert.equal(Pricing.calculate({ ...row, sets: 1, target: 1 }, quote(Number.MIN_VALUE)), 0);
+  assert.equal(Pricing.calculate({ ...row, sets: 1, target: 1 }, quote(Number.MAX_VALUE)), Number.MAX_VALUE);
+  assert.equal(Pricing.calculate({ ...row, sets: 1e-308, target: 1e308 }, quote(1e308)), 1e308);
+  assert.equal(Pricing.calculate({ ...row, sets: Number.MIN_VALUE, target: 1 }, quote(Number.MAX_VALUE)), null);
+  assert.equal(Pricing.calculate({ ...row, sets: Infinity }, quote(1490)), null);
+  const stored = { ...row, shot_price: .1862, shot_price_mode: 'manual' }, before = JSON.stringify(stored);
+  assert.equal(Pricing.laborPrice(stored), .1862); assert.equal(JSON.stringify(stored), before);
+});
 function sync(payload, molds) {
   const context = { window: { InjectionPricing: Pricing } };
   vm.runInNewContext(source.slice(source.indexOf('function engineeringMoldSyncKey('),
@@ -37,27 +55,31 @@ test('无效公式输入清除旧价，0费用有效，同模后续零件不重�
     Pricing.reprice(row, prices); assert.equal(row.shot_price, null);
   }
   assert.equal(Pricing.calculate({ machine_model: '20A', target: 1 }, [{ model: '20A', price: 0 }]), 0);
-  assert.equal(Pricing.calculate({ mold_part_index: 1, machine_model: '20A', target: 2800, sets: 1 },
+  assert.equal(Pricing.calculate({ mold_part_index: 1, injection_run_id: 'row:2', injection_run_part_index: 1,
+    source_sheet_name: '合成工程表', source_sheet_index: 0, mold_no: 'M', machine_model: '20A', target: 2800, sets: 1 },
     [{ model: '20A', price: 1920 }]), 0);
   assert.equal(Pricing.lookupMachinePrice('120A', prices), null);
 });
 
-test('工程拆分同模只在首件计价，同步核价基准也只重算首件', () => {
+test('未重新导入的旧工程零件保留逐行计费口径', () => {
   const { expandEngineeringMolds } = require('../backend/services/engineeringMolds');
   const { applyCostingBasisPayload } = require('../backend/services/costingBasis');
   const rows = expandEngineeringMolds([{ mold_no: 'INDEX-2', machine_model: '20A',
     target: 2800, sets: 1, parts: [{ name: '左大身' }, { name: '右大身' }] }]);
-  assert.deepEqual(rows.map(row => row.shot_price), [null, 0]);
+  assert.deepEqual(rows.map(row => row.shot_price), [null, null]);
   const result = applyCostingBasisPayload('molding', { injection: rows.map(row => ({ ...row, shot_price_mode: 'auto' })) }, {
     machines: [{ model: '20A', price: 1920 }] });
-  assert.deepEqual(result.payload.injection.map(row => row.shot_price), [0.6857, 0]);
+  assert.deepEqual(result.payload.injection.map(row => row.shot_price), [0.6857, 0.6857]);
 });
 
 test('编辑及同步移除自动后续重复价，保留手填来源和共模分摊', () => {
   const payload = { injection: [
-    { mold_part_index: 0, machine_model: '20A', target: 2800, sets: 1, shot_price: 0.6857 },
-    { mold_part_index: 1, machine_model: '20A', target: 2800, sets: 1, shot_price: .6857, shot_price_mode: 'auto' },
-    { mold_part_index: 1, machine_model: '20A', target: 3000, sets: 1, shot_price: .64, shot_price_mode: 'auto' },
+    { mold_no: 'M', source_sheet_name: '合成工程表', source_sheet_index: 0, injection_run_id: 'row:2', injection_run_part_index: 0,
+      mold_part_index: 0, machine_model: '20A', target: 2800, sets: 1, shot_price: 0.6857 },
+    { mold_no: 'M', source_sheet_name: '合成工程表', source_sheet_index: 0, injection_run_id: 'row:2', injection_run_part_index: 1,
+      mold_part_index: 1, machine_model: '20A', target: 2800, sets: 1, shot_price: .6857, shot_price_mode: 'auto' },
+    { mold_no: 'M', source_sheet_name: '合成工程表', source_sheet_index: 0, injection_run_id: 'row:2', injection_run_part_index: 2,
+      mold_part_index: 1, machine_model: '20A', target: 3000, sets: 1, shot_price: .64, shot_price_mode: 'auto' },
     { mold_part_index: 1, shot_price_mode: 'manual', machine_model: '20A', target: 3000, shot_price: 0 },
     { mold_part_index: 1, catalog_raw_weight: 1, machine_model: '20A', target: 3000, shot_price: 0.12 },
   ], machine_prices: [{ model: '20A', price: 1920 }] };
@@ -152,8 +174,8 @@ test('导出引用真实2020费用且四舍五入与缓存一致；历史手填�
     assert.match(ws.getCell(start + 1, 9).note, /固定值/);
     assert.equal(ws.getCell(start + 2, 9).formula, `ROUND(2020/J${start + 2}/L${start + 2},4)`);
     assert.equal(ws.getCell(start + 2, 9).result, 1.1477);
-    assert.equal(ws.getCell(start + 3, 9).value, 0);
-    assert.match(ws.getCell(start + 3, 9).note, /同模/);
+    assert.equal(ws.getCell(start + 3, 9).formula, `ROUND(2020/J${start + 3}/L${start + 3},4)`);
+    assert.equal(ws.getCell(start + 3, 9).result, 1.1477);
     assert.equal(ws.getCell(start + 4, 9).value, 0.5);
     assert.equal(ws.getCell(start + 5, 9).value, 1.1477);
     assert.match(ws.getCell(start + 5, 9).note, /固定值/);

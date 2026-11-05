@@ -72,15 +72,20 @@ test('真实隔离保存接口保留自动/手填/历史来源及供应商精确
     { ...historical, mold_no: 'SAME-MOLD', name: 'Synthetic right', mold_part_index: 1, sets: 2, shot_price: 0, shot_price_mode: 'auto' },
     { ...historical, mold_no: 'STAGED', mold_part_index: 1, catalog_raw_weight: 0, shot_price: .1234, shot_price_mode: 'auto' },
     { ...historical, mold_no: 'SAME-MOLD', name: 'Second run first', mold_part_index: 7,
+      source_sheet_name: '合成工程表', source_sheet_index: 0,
       injection_run_id: 'row:28', injection_run_part_index: 0, injection_run_name: '袖圈',
-      shot_price: .6312, target: 3200, shot_price_mode: 'auto' },
+      shot_price: .6313, target: 3200, shot_price_mode: 'auto' },
     { ...historical, mold_no: 'SAME-MOLD', name: 'Second run next', mold_part_index: 8,
+      source_sheet_name: '合成工程表', source_sheet_index: 0,
       injection_run_id: 'row:28', injection_run_part_index: 1, injection_run_name: '袖圈',
       shot_price: 0, target: 3200, shot_price_mode: 'auto' },
   ] };
+  for (const index of [6, 7]) Object.assign(molding.injection[index], {
+    source_sheet_name: '合成工程表', source_sheet_index: 0, injection_run_id: 'row:2', injection_run_part_index: index - 6,
+  });
   Pricing.reprice(auto, molding.machine_prices);
   openMolding(molding);
-  assert.deepEqual(molding.injection.map(row => row.shot_price), [1.01, 2.02, 0, 0, 0, null, .505, 0, .1234, .6312, 0]);
+  assert.deepEqual(molding.injection.map(row => row.shot_price), [1.01, 2.02, 0, 0, 0, null, .505, 0, .1234, .6313, 0]);
   const first = await api('/sections/' + section('molding').id, 'PUT', { payload: molding, base_filled_at: section('molding').filled_at });
   quote = await read();
   assert.deepEqual(JSON.parse(section('molding').payload_json), JSON.parse(JSON.stringify(molding)),
@@ -105,14 +110,90 @@ test('真实隔离保存接口保留自动/手填/历史来源及供应商精确
     sheet.eachRow(row => { if (row.getCell(1).value === '模号' && row.getCell(2).value === '模具名称') start = row.number + 1; });
     assert.ok(start);
     for (const index of [2, 3, 4]) { assert.equal(sheet.getCell(start + index, 9).value, 0); assert.equal(sheet.getCell(start + index, 9).formula, undefined); }
-    assert.equal(sheet.getCell(start + 5, 9).value, 0);
+    assert.equal(sheet.getCell(start + 5, 9).value, null);
     for (const index of [6]) { assert.equal(sheet.getCell(start + index, 9).formula, `ROUND(2020/J${start + index}/L${start + index},4)`); assert.equal(sheet.getCell(start + index, 9).result, .505); }
     assert.equal(sheet.getCell(start + 7, 9).value, 0);
     assert.equal(sheet.getCell(start + 8, 9).value, .1234);
     assert.equal(sheet.getCell(start + 9, 9).formula, `ROUND(2020/J${start + 9}/L${start + 9},4)`);
-    assert.equal(sheet.getCell(start + 9, 9).result, .6312);
+    assert.equal(sheet.getCell(start + 9, 9).result, .6313);
     assert.equal(sheet.getCell(start + 10, 9).value, 0);
   }
+  // Exercise the actual table buttons before the real save endpoint. The row
+  // being removed is the exact head of one explicit run, not a guessed mold.
+  const working = structuredClone(savedMolding);
+  const head = working.injection[6];
+  Object.assign(head, { shot_price: .3142, shot_price_mode: 'manual', target: 1234, sets: 3, cycle_sec: 31 });
+  const later = working.injection[7], laterName = later.name;
+  const otherRunBefore = JSON.stringify(working.injection.slice(9));
+  const legacyBefore = JSON.stringify(working.injection.slice(0, 6));
+  const buttons = require('./helpers/injection-structure-ui.cjs')(working.injection);
+  buttons.action('在下方插入副本（用于拆分）', 6);
+  assert.equal(working.injection.filter(row => row.injection_run_id === 'row:2')
+    .reduce((sum, row) => sum + Number(Pricing.laborPrice(row) || 0), 0), .3142);
+  buttons.action('删除', 6);
+  assert.equal(later.injection_run_part_index, 0);
+  assert.equal(later.name, laterName);
+  assert.equal(later.shot_price, .3142); assert.equal(later.shot_price_mode, 'manual');
+  assert.equal(later.target, 1234); assert.equal(later.sets, 3); assert.equal(later.cycle_sec, 31);
+  assert.equal(JSON.stringify(working.injection.slice(9)), otherRunBefore);
+  assert.equal(JSON.stringify(working.injection.slice(0, 6)), legacyBefore);
+  quote = await read();
+  await api('/sections/' + section('molding').id, 'PUT', { payload: working, base_filled_at: section('molding').filled_at });
+  quote = await read();
+  const reopened = JSON.parse(section('molding').payload_json);
+  assert.deepEqual(reopened, JSON.parse(JSON.stringify(working)), 'button-generated source and manual billing metadata survive real save/reopen');
+  const stored = new DatabaseSync(path.join(temporary, 'test.db'), { readOnly: true });
+  try {
+    assert.deepEqual(JSON.parse(stored.prepare('SELECT payload_json FROM quote_sections WHERE id=?')
+      .get(section('molding').id).payload_json), JSON.parse(JSON.stringify(working)));
+  } finally { stored.close(); }
+  const response = await fetch(`http://127.0.0.1:${port}/api/quotes/${created.id}/export-department/molding`, { headers: { Cookie: cookie } });
+  assert.equal(response.status, 200);
+  const exported = new (require('exceljs').Workbook)(); await exported.xlsx.load(Buffer.from(await response.arrayBuffer()));
+  const exportedSheet = exported.getWorksheet('啤机明细'); let exportedStart;
+  exportedSheet.eachRow(row => { if (row.getCell(1).value === '模号' && row.getCell(2).value === '模具名称') exportedStart = row.number + 1; });
+  assert.ok(exportedStart);
+  assert.equal(exportedSheet.getCell(exportedStart + 6, 9).value, 0, 'copied row never repeats the run labor');
+  assert.equal(exportedSheet.getCell(exportedStart + 7, 9).value, .3142, 'promoted head exports the exact manual fee');
+  assert.equal(exportedSheet.getCell(exportedStart + 7, 9).formula, undefined);
+  assert.equal(exportedSheet.getCell(exportedStart + 7, 10).value, 3);
+  assert.equal(exportedSheet.getCell(exportedStart + 7, 12).value, 1234);
+  assert.equal(exportedSheet.getCell(exportedStart + 9, 9).result, .6313, 'the distinct second run remains independent');
+  assert.equal(exportedSheet.getCell(exportedStart + 5, 9).value, null, 'legacy manual blank is not interpreted as a zero-price run member');
+
+  const rounding = JSON.parse(JSON.stringify(working));
+  rounding.machine_prices[0].price = 1490;
+  Object.assign(rounding.injection[9], { sets: 2, target: 4000, shot_price: .1862, shot_price_mode: 'auto' });
+  quote = await read();
+  await api('/sections/' + section('molding').id, 'PUT', { payload: rounding, base_filled_at: section('molding').filled_at });
+  quote = await read();
+  const oldPriceResponse = await fetch(`http://127.0.0.1:${port}/api/quotes/${created.id}/export-department/molding`, { headers: { Cookie: cookie } });
+  assert.equal(oldPriceResponse.status, 200);
+  const oldPriceBook = new (require('exceljs').Workbook)(); await oldPriceBook.xlsx.load(Buffer.from(await oldPriceResponse.arrayBuffer()));
+  const oldPriceCell = oldPriceBook.getWorksheet('啤机明细').getCell(exportedStart + 9, 9);
+  assert.equal(oldPriceCell.value, .1862); assert.equal(oldPriceCell.formula, undefined,
+    'a saved auto value from the earlier rounding rule stays fixed until explicit recalculation');
+  const beforeInput = JSON.stringify(rounding.injection);
+  const priceUi = require('./helpers/injection-structure-ui.cjs').pricing(rounding);
+  assert.equal(JSON.stringify(rounding.injection), beforeInput, 'opening never silently upgrades a saved price');
+  assert.equal(priceUi.input('target', 9).value, '4000');
+  priceUi.edit('target', '4000', 9); // Actual production input callback is an explicit recalculation.
+  assert.equal(rounding.injection[9].shot_price, .1863); assert.equal(priceUi.input('shot_price', 9).value, '0.1863');
+  assert.equal(rounding.injection[7].shot_price, .3142); assert.equal(rounding.injection[7].shot_price_mode, 'manual');
+  assert.equal(rounding.injection[4].shot_price_mode, 'manual');
+  await api('/sections/' + section('molding').id, 'PUT', { payload: rounding, base_filled_at: section('molding').filled_at });
+  quote = await read();
+  const roundedReopened = JSON.parse(section('molding').payload_json);
+  assert.deepEqual(roundedReopened, rounding);
+  const roundedStored = new DatabaseSync(path.join(temporary, 'test.db'), { readOnly: true });
+  try { assert.deepEqual(JSON.parse(roundedStored.prepare('SELECT payload_json FROM quote_sections WHERE id=?')
+    .get(section('molding').id).payload_json), rounding); } finally { roundedStored.close(); }
+  const roundedResponse = await fetch(`http://127.0.0.1:${port}/api/quotes/${created.id}/export-department/molding`, { headers: { Cookie: cookie } });
+  assert.equal(roundedResponse.status, 200);
+  const roundedBook = new (require('exceljs').Workbook)(); await roundedBook.xlsx.load(Buffer.from(await roundedResponse.arrayBuffer()));
+  const roundedCell = roundedBook.getWorksheet('啤机明细').getCell(exportedStart + 9, 9);
+  assert.equal(roundedCell.formula, `ROUND(1490/J${exportedStart + 9}/L${exportedStart + 9},4)`);
+  assert.equal(roundedCell.result, .1863);
   const row = { name: '隔离物料', supplier_id: 'A', supplier_name: '同名供应商', qty: 1 };
   const other = { name: '其他供应商物料', supplier_id: 'B', supplier_name: '同名供应商', qty: 5 };
   Supplier.setSupplier(row, '同名供应商', [row, other]);

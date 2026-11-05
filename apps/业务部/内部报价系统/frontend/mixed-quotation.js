@@ -103,7 +103,7 @@
       const payload = product.id === '__shared__' ? root.mixed_shared : root.mixed_products[product.id];
       for (const part of payload?.injection || []) {
         const shared = allocation.flatMap(m => m.parts.map(p => ({ ...p, mold_no: m.mold_no }))).find(p => p.product_id === product.id && p.mold_no === part.mold_no && p.name === part.name);
-        add(part.mold_no, { product, part, labor: Number(part.shot_price || 0) + (root.parts_catalog ? 0 : Number(shared?.product_labor || 0)), mode: shared ? '含共模分摊' : '明细啤价' });
+        add(part.mold_no, { product, part, labor: Number(window.InjectionPricing.laborPrice(part) || 0) + (root.parts_catalog ? 0 : Number(shared?.product_labor || 0)), mode: shared ? '含共模分摊' : '明细啤价' });
       }
     }
     for (const mold of root.parts_catalog ? [] : root.mixed_molds || []) for (const part of mold.parts || []) {

@@ -1,4 +1,5 @@
 'use strict';
+const InjectionPricing = require('../../frontend/injection-pricing');
 
 function expandEngineeringMolds(molds) {
   return (Array.isArray(molds) ? molds : []).flatMap(source => {
@@ -34,7 +35,7 @@ function expandEngineeringMolds(molds) {
         const runIndex = part.injection_run_id ? (runCounts.get(part.injection_run_id) || 0) : partIndex;
         if (part.injection_run_id) runCounts.set(part.injection_run_id, runIndex + 1);
         const partImages = [...new Set((Array.isArray(part.images) ? part.images : []).filter(Boolean))];
-        return {
+        const expanded = {
           ...common,
           ...(part.injection_run_id ? {
             injection_run_id: part.injection_run_id,
@@ -56,8 +57,10 @@ function expandEngineeringMolds(molds) {
           note: part.note || mold.note || '',
           mold_part_index: partIndex,
           mold_part_count: mold.parts.length,
-          shot_price: runIndex === 0 ? (part.shot_price ?? common.shot_price) : 0,
+          shot_price: part.shot_price ?? common.shot_price,
         };
+        if (InjectionPricing.isAdditionalPart(expanded)) expanded.shot_price = 0;
+        return expanded;
       });
     }
 
