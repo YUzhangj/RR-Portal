@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { latestPatrolGrades, lowerGrade } from '../src/utils/scoringPatrolGrade'
+import { latestPatrolGrades, preferredPatrolGrade } from '../src/utils/scoringPatrolGrade'
 
 describe('月度评分关联巡查评级', () => {
-  it('月度与巡查取较低等级，缺一来源时采用已有等级', () => {
-    expect(lowerGrade('B', 'C')).toBe('C')
-    expect(lowerGrade('C', 'A')).toBe('C')
-    expect(lowerGrade('B')).toBe('B')
-    expect(lowerGrade(undefined, 'C')).toBe('C')
-    expect(lowerGrade()).toBeUndefined()
+  it('优先采用巡查评级，无巡查时回退月度评分等级', () => {
+    expect(preferredPatrolGrade('B', 'C')).toBe('C')
+    expect(preferredPatrolGrade('C', 'A')).toBe('A')
+    expect(preferredPatrolGrade('B')).toBe('B')
+    expect(preferredPatrolGrade(undefined, 'C')).toBe('C')
+    expect(preferredPatrolGrade()).toBeUndefined()
   })
   it('仅采用所选范围内每家工厂最新有效巡查，不用未来或其他工厂评级', () => {
     const records = [

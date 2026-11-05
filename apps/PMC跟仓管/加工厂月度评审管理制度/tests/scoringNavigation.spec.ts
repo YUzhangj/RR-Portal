@@ -14,9 +14,9 @@ vi.mock('../src/views/ScoreSheetView.vue', () => ({ default: { template: '<div /
 vi.mock('../src/views/FactoryMonthlyDataView.vue', () => ({ default: { template: '<div />' } }))
 vi.mock('../src/views/FactoryListView.vue', () => ({ default: { template: '<div />' } }))
 vi.mock('../src/views/FactoryDetailView.vue', () => ({ default: { template: '<div />' } }))
-vi.mock('../src/pb', () => ({
+vi.mock('../src/pb', async () => ({
   pb: {
-    authStore: { record: null },
+    authStore: new (await import('pocketbase')).BaseAuthStore(),
     collection: vi.fn(() => { throw new Error('Navigation must not call the backend') }),
   },
 }))
@@ -26,12 +26,15 @@ describe('monthly scoring navigation', () => {
   const monthlyDataPath = '/factories/factory123/monthly-data/2026-07'
   let router: Router
   let auth: ReturnType<typeof import('../src/stores/auth')['useAuthStore']>
+  let pb: typeof import('../src/pb')['pb']
   let setPermissionOverrides: typeof import('../src/utils/permissions')['setPermissionOverrides']
 
   beforeEach(async () => {
     vi.resetModules()
     const { createPinia, setActivePinia } = await import('pinia')
     setActivePinia(createPinia())
+    ;({ pb } = await import('../src/pb'))
+    pb.authStore.clear()
     const { useAuthStore } = await import('../src/stores/auth')
     auth = useAuthStore()
     ;({ setPermissionOverrides } = await import('../src/utils/permissions'))
@@ -44,7 +47,9 @@ describe('monthly scoring navigation', () => {
   })
 
   function signIn(permissions: Record<string, boolean>) {
-    auth.$patch({ userId: 'charles-test', role: 'gm', displayName: 'Charles' })
+    const token = [btoa('{"alg":"HS256"}'), btoa(JSON.stringify({ type: 'auth', exp: Date.now() / 1000 + 3600 })), 'synthetic-signature'].join('.')
+    pb.authStore.save(token, { id: 'charles-test', role: 'gm', display_name: 'Charles' })
+    auth.sync()
     setPermissionOverrides(permissions)
   }
 
