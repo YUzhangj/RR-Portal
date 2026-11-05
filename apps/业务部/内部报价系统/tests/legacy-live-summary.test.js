@@ -17,7 +17,7 @@ function detailRow(ws) {
 
 function pageComponents(payloads) {
   const source = fs.readFileSync(path.join(__dirname,'../frontend/workbench.js'),'utf8');
-  const context = vm.createContext({num:v=>Number(v)||0,window:{__data:{sections:sectionsOf(payloads)}},globalCostingBasis:()=>DEFAULT_COSTING_BASIS,defaultAssemblyBaseRateForFactory:()=>310});
+  const context = vm.createContext({num:v=>Number(v)||0,window:{__data:{sections:sectionsOf(payloads)},InjectionPricing:require('../frontend/injection-pricing')},globalCostingBasis:()=>DEFAULT_COSTING_BASIS,defaultAssemblyBaseRateForFactory:()=>310});
   vm.runInContext(source.slice(source.indexOf('function legacyFormulaAmount('),source.indexOf('function renderLegacyItems(')),context);
   vm.runInContext(source.slice(source.indexOf('function legacyFormulaComponents('),source.indexOf('// ============== 汇总面板')),context);
   return context.legacyFormulaComponents(structuredClone(payloads));
@@ -62,4 +62,17 @@ test('source-only and native Excel historical calculations are never converted b
   assert.equal(calculateLegacyFormulaCosts(quote,{sales:{legacy_import:{summary_only:true}}}),null);
   assert.equal(calculateLegacyFormulaCosts(quote,{sales:{legacy_import:{formula_mode:'excel_native_v1',excel_model:{}}}}),null);
   assert.equal(calculateLegacyFormulaCosts(quote,{sales:{legacy_import:{formula_mode:'itemized_v1',excel_model:{}}}}),null);
+});
+
+test('历史itemized报价显式同步新啤次后前后台一致，未同步旧手填行和源偏移保持',()=>{
+  const first={mold_no:'M',source_sheet_name:'工程表',source_sheet_index:0,
+    product_group_id:'A',injection_run_id:'row:2',injection_run_part_index:0,shot_price:.4};
+  const payloads={sales:{legacy_import:{formula_mode:'itemized_v1',formula_markup_x:1,formula_offsets:{misc:.1}}},
+    molding:{injection:[first,{...first,injection_run_part_index:1,shot_price:.9},
+      {mold_no:'OLD',mold_part_index:2,shot_price:.2,shot_price_mode:'manual'}]}};
+  const before=JSON.stringify(payloads),page=pageComponents(payloads),cost=calculateLegacyFormulaCosts(quote,payloads);
+  near(page.injection_labor,.6);near(cost.components.injection_labor,.6);near(cost.quotedPrice,.7);
+  const summary=buildQuoteSummary(quote,sectionsOf(payloads));near(summary.components_before_tax.injection_labor,.6);
+  const row=buildVerificationRow(quote,{id:1,status:'drafting'},sectionsOf(payloads),[]);near(row.values.F,.7);
+  assert.equal(JSON.stringify(payloads),before,'new run calculation never rewrites historical fixed values or offsets');
 });

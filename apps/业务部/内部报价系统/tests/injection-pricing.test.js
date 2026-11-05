@@ -8,6 +8,24 @@ const { buildWorkbook } = require('../backend/services/exportInternal');
 const source = fs.readFileSync(require.resolve('../frontend/workbench.js'), 'utf8');
 const prices = [{ model: '20A', normal: '200T', price: 2020 },
   { model: '10A-12A', normal: '120T', price: 1210 }];
+
+test('four-decimal auto labor uses positive decimal half-up, including exponent and finite extremes', () => {
+  const row = { machine_model: '20A', sets: 2, target: 4000 };
+  const quote = price => [{ model: '20A', price }];
+  assert.equal(Pricing.calculate(row, quote(1490)), .1863);
+  assert.equal(Pricing.calculate(row, quote(1489.9999999999)), .1862);
+  assert.equal(Pricing.calculate(row, quote(1490.0000000001)), .1863);
+  assert.equal(Pricing.calculate(row, quote(0)), 0);
+  assert.equal(Pricing.calculate({ ...row, sets: 1, target: 1 }, quote(5e-5)), .0001);
+  assert.equal(Pricing.calculate({ ...row, sets: 1, target: 1 }, quote(4.999999e-5)), 0);
+  assert.equal(Pricing.calculate({ ...row, sets: 1, target: 1 }, quote(Number.MIN_VALUE)), 0);
+  assert.equal(Pricing.calculate({ ...row, sets: 1, target: 1 }, quote(Number.MAX_VALUE)), Number.MAX_VALUE);
+  assert.equal(Pricing.calculate({ ...row, sets: 1e-308, target: 1e308 }, quote(1e308)), 1e308);
+  assert.equal(Pricing.calculate({ ...row, sets: Number.MIN_VALUE, target: 1 }, quote(Number.MAX_VALUE)), null);
+  assert.equal(Pricing.calculate({ ...row, sets: Infinity }, quote(1490)), null);
+  const stored = { ...row, shot_price: .1862, shot_price_mode: 'manual' }, before = JSON.stringify(stored);
+  assert.equal(Pricing.laborPrice(stored), .1862); assert.equal(JSON.stringify(stored), before);
+});
 function sync(payload, molds) {
   const context = { window: { InjectionPricing: Pricing } };
   vm.runInNewContext(source.slice(source.indexOf('function engineeringMoldSyncKey('),
@@ -30,19 +48,20 @@ test('01M目标数、套数、机型、台班价变化均重新计算，不保�
   assert.equal(row.shot_price, 0.4);
 });
 
-test('无效公式输入清除旧价，0费用有效，后续零件也按公式计价', () => {
+test('无效公式输入清除旧价，0费用有效，同模后续零件不重复计价', () => {
   for (const patch of [{ target: 0 }, { target: null }, { sets: 0 }, { sets: -1 },
     { machine_model: '未知' }, { machine_model: '200A' }]) {
     const row = { machine_model: '20A', target: 2600, sets: 1, shot_price: 0.7769, ...patch };
     Pricing.reprice(row, prices); assert.equal(row.shot_price, null);
   }
   assert.equal(Pricing.calculate({ machine_model: '20A', target: 1 }, [{ model: '20A', price: 0 }]), 0);
-  assert.equal(Pricing.calculate({ mold_part_index: 1, machine_model: '20A', target: 2800, sets: 1 },
-    [{ model: '20A', price: 1920 }]), 0.6857);
+  assert.equal(Pricing.calculate({ mold_part_index: 1, injection_run_id: 'row:2', injection_run_part_index: 1,
+    source_sheet_name: '合成工程表', source_sheet_index: 0, mold_no: 'M', machine_model: '20A', target: 2800, sets: 1 },
+    [{ model: '20A', price: 1920 }]), 0);
   assert.equal(Pricing.lookupMachinePrice('120A', prices), null);
 });
 
-test('工程拆分后每条零件继承待算价，同步核价基准逐条重算', () => {
+test('未重新导入的旧工程零件保留逐行计费口径', () => {
   const { expandEngineeringMolds } = require('../backend/services/engineeringMolds');
   const { applyCostingBasisPayload } = require('../backend/services/costingBasis');
   const rows = expandEngineeringMolds([{ mold_no: 'INDEX-2', machine_model: '20A',
@@ -53,11 +72,14 @@ test('工程拆分后每条零件继承待算价，同步核价基准逐条重�
   assert.deepEqual(result.payload.injection.map(row => row.shot_price), [0.6857, 0.6857]);
 });
 
-test('编辑及同步时补算明确自动的后续零件零价，并计入总啤工', () => {
+test('编辑及同步移除自动后续重复价，保留手填来源和共模分摊', () => {
   const payload = { injection: [
-    { mold_part_index: 0, machine_model: '20A', target: 2800, sets: 1, shot_price: 0.6857 },
-    { mold_part_index: 1, machine_model: '20A', target: 2800, sets: 1, shot_price: 0, shot_price_mode: 'auto' },
-    { mold_part_index: 1, machine_model: '20A', target: 3000, sets: 1, shot_price: 0, shot_price_mode: 'auto' },
+    { mold_no: 'M', source_sheet_name: '合成工程表', source_sheet_index: 0, injection_run_id: 'row:2', injection_run_part_index: 0,
+      mold_part_index: 0, machine_model: '20A', target: 2800, sets: 1, shot_price: 0.6857 },
+    { mold_no: 'M', source_sheet_name: '合成工程表', source_sheet_index: 0, injection_run_id: 'row:2', injection_run_part_index: 1,
+      mold_part_index: 1, machine_model: '20A', target: 2800, sets: 1, shot_price: .6857, shot_price_mode: 'auto' },
+    { mold_no: 'M', source_sheet_name: '合成工程表', source_sheet_index: 0, injection_run_id: 'row:2', injection_run_part_index: 2,
+      mold_part_index: 1, machine_model: '20A', target: 3000, sets: 1, shot_price: .64, shot_price_mode: 'auto' },
     { mold_part_index: 1, shot_price_mode: 'manual', machine_model: '20A', target: 3000, shot_price: 0 },
     { mold_part_index: 1, catalog_raw_weight: 1, machine_model: '20A', target: 3000, shot_price: 0.12 },
   ], machine_prices: [{ model: '20A', price: 1920 }] };
@@ -68,8 +90,8 @@ test('编辑及同步时补算明确自动的后续零件零价，并计入总�
     source.indexOf('function renderMolding(')), context);
   const result = context.applyInjectionReferencePrices(payload, { material: false });
   assert.equal(result.changed, true);
-  assert.deepEqual(payload.injection.map(row => row.shot_price), [0.6857, 0.6857, 0.64, 0, 0.12]);
-  assert.equal(payload.injection.slice(0, 3).reduce((total, row) => total + row.shot_price, 0), 2.0114);
+  assert.deepEqual(payload.injection.map(row => row.shot_price), [0.6857, 0, 0, 0, 0.12]);
+  assert.equal(payload.injection.slice(0, 3).reduce((total, row) => total + row.shot_price, 0), .6857);
 });
 
 test('共模分阶段成本不被普通套数公式覆盖', () => {

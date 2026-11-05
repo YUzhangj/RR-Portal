@@ -1,4 +1,5 @@
 'use strict';
+const InjectionPricing = require('../../frontend/injection-pricing');
 
 function expandEngineeringMolds(molds) {
   return (Array.isArray(molds) ? molds : []).flatMap(source => {
@@ -28,11 +29,24 @@ function expandEngineeringMolds(molds) {
     };
 
     if (Array.isArray(mold.parts) && mold.parts.length) {
+      const runCounts = new Map();
       return mold.parts.map((sourcePart, partIndex) => {
         const part = sourcePart && typeof sourcePart === 'object' ? sourcePart : {};
+        const runIndex = part.injection_run_id ? (runCounts.get(part.injection_run_id) || 0) : partIndex;
+        if (part.injection_run_id) runCounts.set(part.injection_run_id, runIndex + 1);
         const partImages = [...new Set((Array.isArray(part.images) ? part.images : []).filter(Boolean))];
-        return {
+        const expanded = {
           ...common,
+          ...(part.injection_run_id ? {
+            injection_run_id: part.injection_run_id,
+            injection_run_name: part.injection_run_name || '',
+            injection_run_part_index: runIndex,
+            sets: part.sets ?? common.sets,
+            target: part.target ?? common.target,
+            machine: part.machine || common.machine,
+            machine_model: part.machine_model || common.machine_model,
+            cycle_sec: part.cycle_sec ?? common.cycle_sec,
+          } : {}),
           images: partImages.length ? partImages : moldImages,
           name: part.name || '',
           material: part.material || common.material,
@@ -45,6 +59,8 @@ function expandEngineeringMolds(molds) {
           mold_part_count: mold.parts.length,
           shot_price: part.shot_price ?? common.shot_price,
         };
+        if (InjectionPricing.isAdditionalPart(expanded)) expanded.shot_price = 0;
+        return expanded;
       });
     }
 

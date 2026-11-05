@@ -2,6 +2,7 @@
  * SPIN Vendor Quote Form Export Service
  * Loads VQ-template-spin.xlsx and fills data from DB for Spin Master format.
  */
+const InjectionPricing = require('../../frontend/injection-pricing');
 const ExcelJS = require('exceljs');
 const { buildSpinTransportRows } = require('./spinTransport');
 const { readTemplateParts } = require('./templateParts');
@@ -239,7 +240,8 @@ function sectionsToSpinData({ quote, sections }) {
     weight_g: num(item.weight_g),
     machine_type: item.machine || item.machine_model || '',
     cycle_time_sec: num(item.cycle_sec || item.cycle_time_sec),
-    molding_cost_usd: hkdUsd ? num(item.shot_price) / hkdUsd : 0,
+    molding_cost_usd: hkdUsd ? num(InjectionPricing.laborPrice(item)) / hkdUsd : 0,
+    shared_mold_labor: InjectionPricing.isAdditionalPart(item),
   }));
 
   const electronicExtra = electronic.electronics_extra || engineering.electronics_extra || {};
@@ -851,10 +853,10 @@ function fillCharacterSheet(ws, d) {
     const rate    = machRef ? (parseFloat(machRef.rate_rmb_24h) || 0) : 0;
 
     // Molding Cost = labour rate × cycle seconds ÷ 3600 ÷ sets per toy.
-    const moldCost = (rate && cycle) ? r2(rate * cycle / 3600 / sets) : (parseFloat(item.molding_cost_usd) || null);
+    const moldCost = item.shared_mold_labor ? 0 : (rate && cycle) ? r2(rate * cycle / 3600 / sets) : (parseFloat(item.molding_cost_usd) || null);
     const moldCostCell = ws.getCell(r, 14);
     delete moldCostCell._sharedFormula;
-    moldCostCell.value = {
+    moldCostCell.value = item.shared_mold_labor ? 0 : {
       formula: `IF(OR(G${r}="",O${r}="",Q${r}=""),"",Q${r}*O${r}/3600/G${r})`,
       result: moldCost,
     };

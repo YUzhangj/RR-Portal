@@ -9,6 +9,7 @@
  *
  * 覆盖范围：TOMY 与 SPIN；按客户分派到各自模板及填充逻辑。
  */
+const InjectionPricing = require('../../frontend/injection-pricing');
 const ExcelJS = require('exceljs');
 const { exportSpin } = require('./exportSpin');
 const { vqCustomerProfile } = require('./customerProfiles');
@@ -805,7 +806,7 @@ function sectionsToData({ quote, sections }) {
     machine_type: r.machine || r.machine_model || '',
     sets_per_toy: num(r.sets) || 1,
     // 系统注塑表的啤价已是 HK$/啤，BCD 直接使用，后续只乘码点。
-    molding_labor: num(r.shot_price),
+    molding_labor: num(InjectionPricing.laborPrice(r)),
   }));
 
   // 原料成本（BCD A 段）：注塑料 → plastic；车缝面料 → fabric

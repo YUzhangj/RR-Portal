@@ -1,4 +1,5 @@
 'use strict';
+const InjectionPricing = require('../../frontend/injection-pricing');
 
 const clone = value => JSON.parse(JSON.stringify(value));
 const number = (value, fallback = 0) => {
@@ -116,7 +117,7 @@ function sourceDynamicComponents(payloads) {
     const materialCost = number(row.weight_g) * loss * number(row.material_unit_price);
     const category = /^(PVC|TPR|TPE)\b/i.test(material) ? 'dom_mat' : 'imp_mat';
     components[category] += materialCost;
-    components.injection_labor += number(row.shot_price);
+    components.injection_labor += number(InjectionPricing.laborPrice(row));
     if (/^ABS\b/i.test(material)) components.abs_cost += materialCost;
   }
   for (const [dept, payload] of Object.entries(payloads)) {
@@ -185,7 +186,7 @@ function calculateLegacyFormulaCosts(quote, payloads) {
     const material = text(row.material);
     const materialCost = number(row.weight_g) * loss * number(row.material_unit_price);
     add(/^(PVC|TPR|TPE)\b/i.test(material) ? 'dom_mat' : 'imp_mat', materialCost);
-    add('injection_labor', number(row.shot_price));
+    add('injection_labor', number(InjectionPricing.laborPrice(row)));
     if (/^ABS\b/i.test(material)) add('abs_cost', materialCost);
   }
   const fx = number(sales.header?.fx_rmb_hkd) || 0.87;

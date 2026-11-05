@@ -274,6 +274,7 @@ function renderTable(container, columns, rows, opts = {}) {
     beforeRow = null,
     rowStyle = null,
     showRowNumber = true,
+    onStructureChange = () => true,
   } = opts;
   container.innerHTML = '';
 
@@ -300,6 +301,15 @@ function renderTable(container, columns, rows, opts = {}) {
   });
 
   const tbody = document.createElement('tbody');
+  function changeStructure(type, row, mutate) {
+    const previousRows = rows.slice();
+    const detail = mutate() || {};
+    if (onStructureChange({ type, row, rows, previousRows, ...detail }) === false) {
+      rows.splice(0, rows.length, ...previousRows);
+      return;
+    }
+    rebuild(); onChange();
+  }
   function rebuild() {
     tbody.innerHTML = '';
     rows.forEach((row, idx) => {
@@ -424,18 +434,20 @@ function renderTable(container, columns, rows, opts = {}) {
         };
         // 上移
         if (idx > 0) td.appendChild(mkBtn('↑', '上移', () => {
-          [rows[idx - 1], rows[idx]] = [rows[idx], rows[idx - 1]]; rebuild(); onChange();
+          changeStructure('move', row, () => { [rows[idx - 1], rows[idx]] = [rows[idx], rows[idx - 1]]; });
         }));
         // 下移
         if (idx < rows.length - 1) td.appendChild(mkBtn('↓', '下移', () => {
-          [rows[idx + 1], rows[idx]] = [rows[idx], rows[idx + 1]]; rebuild(); onChange();
+          changeStructure('move', row, () => { [rows[idx + 1], rows[idx]] = [rows[idx], rows[idx + 1]]; });
         }));
         // 复制此行（拆分用）→ 在下方插入一份副本
         td.appendChild(mkBtn('⎘', '在下方插入副本（用于拆分）', () => {
-          rows.splice(idx + 1, 0, JSON.parse(JSON.stringify(rows[idx]))); rebuild(); onChange();
+          changeStructure('copy', row, () => {
+            const copy = JSON.parse(JSON.stringify(row)); rows.splice(idx + 1, 0, copy); return { copy };
+          });
         }));
         // 删除
-        const delBtn = mkBtn('×', '删除', () => { rows.splice(idx, 1); rebuild(); onChange(); });
+        const delBtn = mkBtn('×', '删除', () => { changeStructure('delete', row, () => { rows.splice(idx, 1); }); });
         delBtn.className = 'mini danger';
         td.appendChild(delBtn);
         tr.appendChild(td);
@@ -1192,6 +1204,8 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
       }
     }
 
+    const runs = [...new Map((m.parts || []).filter(part => part.injection_run_id)
+      .map(part => [part.injection_run_id, part.injection_run_name || '未命名啤次'])).entries()];
     const tr = document.createElement('tr');
     // 序号
     const tdNo = document.createElement('td'); tdNo.className = 'ro'; tdNo.textContent = idx + 1; tr.appendChild(tdNo);
@@ -1222,6 +1236,15 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
           m.parts.forEach((part, partIndex) => {
             const nameRow = document.createElement('div');
             nameRow.style.cssText = 'min-height:66px;display:flex;gap:4px;align-items:center;padding:4px 0;border-bottom:1px solid #e2e8f0';
+            if (runs.length > 1) {
+              td.style.minWidth = '320px';
+              const runIndex = runs.findIndex(([id]) => id === part.injection_run_id);
+              const badge = document.createElement('span');
+              badge.className = 'mold-run-label';
+              badge.textContent = runIndex >= 0 ? `第${runIndex + 1}次啤 · ${runs[runIndex][1]}` : '啤次待确认';
+              badge.style.cssText = `flex:0 0 105px;padding:5px 7px;border-radius:6px;font-size:12px;line-height:1.5;white-space:normal;background:${runIndex % 2 ? '#fef3c7' : '#dbeafe'};color:#334155`;
+              nameRow.appendChild(badge);
+            }
             if (canEdit) {
               const input = document.createElement('textarea'); input.rows = 2; input.value = part.name || ''; input.style.flex = '1';
               input.oninput = () => { part.name = input.value; syncMoldFromParts(m); onChange(); };
@@ -1229,7 +1252,9 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
               del.onclick = () => { m.parts.splice(partIndex, 1); syncMoldFromParts(m); renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd); onChange(); };
               nameRow.append(input, del);
             } else {
-              nameRow.className = 'ro'; nameRow.style.whiteSpace = 'pre-wrap'; nameRow.textContent = part.name || '';
+              nameRow.className = 'ro';
+              const label = document.createElement('span'); label.style.whiteSpace = 'pre-wrap';
+              label.textContent = part.name || ''; nameRow.appendChild(label);
             }
             td.appendChild(nameRow);
           });
@@ -1304,7 +1329,15 @@ function renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd) {
         addPart.onclick = () => { addMoldPart(m); renderMolds(container, molds, onChange, canEdit, fxRmbHkd, fxHkdUsd); onChange(); };
         td.appendChild(addPart);
       }
-      if (f && f[0] === 'mold_no') td.classList.add('mold-number-cell');
+      if (f && f[0] === 'mold_no') {
+        td.classList.add('mold-number-cell');
+        if (runs.length > 1) {
+          const note = document.createElement('div'); note.className = 'mold-run-summary';
+          note.textContent = `共 ${runs.length} 次啤，分别计啤工；模费计一副`;
+          note.style.cssText = 'margin-top:8px;font-size:12px;line-height:1.5;color:#075985';
+          td.appendChild(note);
+        }
+      }
       tr.appendChild(td);
     });
 
@@ -2233,7 +2266,7 @@ function legacyFormulaComponents(payloads) {
     const material = String(row.material || '').trim();
     const materialCost = num(row.weight_g) * loss * num(row.material_unit_price);
     add(/^(PVC|TPR|TPE)\b/i.test(material) ? 'dom_mat' : 'imp_mat', materialCost);
-    add('injection_labor', num(row.shot_price));
+    add('injection_labor', num(window.InjectionPricing.laborPrice(row)));
     if (/^ABS\b/i.test(material)) add('abs_cost', materialCost);
   });
   Object.entries(payloads).forEach(([dept, payload]) => {
@@ -2362,7 +2395,7 @@ function renderSummaryPane(host, sections, quote, me) {
   const auxRaw = sum(eng.aux_materials || [], r => freeAmountHkd(r, fxRH, fxHU));  // 不计损耗
   const pkmatRaw = sum(eng.packaging_materials || [], r => freeAmountHkd(r, fxRH, fxHU));  // 不计损耗
   const _injLossM = 1 + num(mold.injection_loss_pct ?? 3) / 100;  // 注塑料损耗（默认3%）
-  const injTotal = weightedInjectionSum(mold, r => num(r.weight_g) * _injLossM * num(r.material_unit_price) + num(r.shot_price));
+  const injTotal = weightedInjectionSum(mold, r => num(r.weight_g) * _injLossM * num(r.material_unit_price) + num(window.InjectionPricing.laborPrice(r)));
   const injRaw = injTotal / _injLossM; // 留作兼容（部分老逻辑可能引用）
   const blowTotal = sum(mold.blow_items || [], r => {
     return blowRowTotal(r);
@@ -2643,7 +2676,7 @@ function renderSummaryPane(host, sections, quote, me) {
     misc: num(sales.pricing_summary?.indo_freight) + shippingCalc.customerSurtaxHkd,
     hardware: (hwRaw - _sumByMatch(eng.hardware, isMotor)),  // 五金 HKD（剔除马达项；五金表已 HKD）
     electronic: elecRaw,                                  // 电子 HKD（不识别/剔除马达）
-    injection_labor: weightedInjectionSum(mold, r => num(r.shot_price)),  // 啤工按各产品配比加权
+    injection_labor: weightedInjectionSum(mold, r => num(window.InjectionPricing.laborPrice(r))),  // 啤工按各产品配比加权
     painting_labor: ppTotal * 0.7,    // 喷油工 = 喷油总额 70%（喷油已 HKD，不除汇率）
     paint_material: ppTotal * 0.3,    // 油漆 = 喷油总额 30%（喷油已 HKD）
     assembly_labor: combinedAsmHkd,   // 装配工 = 旧组装+旧包装+新排拉(装配)+新排拉(包装)（已 HKD，不除汇率）
@@ -4599,6 +4632,9 @@ function syncInjectionMolds(payload, refMolds) {
       weight_g: m.weight_g ?? existing?.weight_g ?? null,
       mold_part_index: m.mold_part_index ?? 0,
       mold_part_count: m.mold_part_count ?? 1,
+      injection_run_id: m.injection_run_id,
+      injection_run_name: m.injection_run_name,
+      injection_run_part_index: m.injection_run_part_index,
       cycle_sec: m.cycle_sec ?? existing?.cycle_sec ?? null,
       sets: existing?.sets ?? (m.sets || 1),
       machine: m.machine || existing?.machine || '',
@@ -4657,6 +4693,12 @@ function isBlankInjectionPrice(value) {
   return value === null || value === undefined || value === '';
 }
 
+function changeInjectionStructure(change) {
+  const result = window.InjectionPricing.applyRunStructureChange(change);
+  if (!result.allowed) alert(result.message || '啤次资料不完整，请核对后重试。');
+  return result.allowed;
+}
+
 function engineeringMoldSyncKey(row) {
   return [
     row?.product_group_id || row?.product_group_name || '',
@@ -4673,7 +4715,7 @@ function engineeringImagesForInjection(row, refMolds) {
   ].filter(Boolean))];
 }
 
-// 仅补齐明确自动行的空价及后续零件零价；历史未标记/手填值保留，按钮套价可传 overwrite=true。
+// 仅补齐明确自动行的空价及同模重复价；历史未标记/手填值保留，按钮套价可传 overwrite=true。
 function applyInjectionReferencePrices(payload, { overwrite = false, material = true, machine = true } = {}) {
   let materialHits = 0;
   let machineHits = 0;
@@ -4700,9 +4742,11 @@ function applyInjectionReferencePrices(payload, { overwrite = false, material = 
       const matchedMachine = lookupMachinePrice(row.machine_model, payload.machine_prices);
       const nextPrice = window.InjectionPricing.calculate(row, payload.machine_prices);
       if (row.catalog_raw_weight != null) continue;
-      const autoPartZero = num(row.mold_part_index) > 0 && !isBlankInjectionPrice(row.shot_price) &&
-        num(row.shot_price) === 0 && row.shot_price_mode === 'auto';
-      const shouldPrice = overwrite || autoPartZero || (isBlankInjectionPrice(row.shot_price) && row.shot_price_mode === 'auto');
+      const autoPartDuplicate = window.InjectionPricing.isAdditionalPart(row) &&
+        !isBlankInjectionPrice(row.shot_price) && num(row.shot_price) !== 0 && row.shot_price_mode === 'auto';
+      const legacyAutoPartZero = !window.InjectionPricing.hasRunIdentity(row) && num(row.mold_part_index) > 0 &&
+        !isBlankInjectionPrice(row.shot_price) && num(row.shot_price) === 0 && row.shot_price_mode === 'auto';
+      const shouldPrice = overwrite || autoPartDuplicate || legacyAutoPartZero || (isBlankInjectionPrice(row.shot_price) && row.shot_price_mode === 'auto');
       if (shouldPrice && nextPrice !== null) {
         if (row.shot_price !== nextPrice) changed = true;
         row.shot_price = nextPrice;
@@ -4809,6 +4853,9 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
       weight_g: m.weight_g ?? null,
       mold_part_index: m.mold_part_index ?? 0,
       mold_part_count: m.mold_part_count ?? 1,
+      injection_run_id: m.injection_run_id,
+      injection_run_name: m.injection_run_name,
+      injection_run_part_index: m.injection_run_part_index,
       cycle_sec: m.cycle_sec ?? null,
       sets: m.sets || 1,
       machine: m.machine || '',
@@ -4836,7 +4883,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     ${canEdit ? `<small style="margin-left:8px"><button id="btn-auto-price" class="mini" type="button">🔄 自动按材质套料价</button></small>` : ''}
     ${canEdit ? `<small style="margin-left:6px"><button id="btn-auto-shot" class="mini" type="button">🔄 自动按机型套啤价</button></small>` : ''}
     </h3>
-    <p class="muted">每条零件均计算啤价＝本单机型台班费用 ÷ 目标数 ÷ 套数。修改本行机型、目标数、套数或点击“自动按机型套啤价”后使用自动计算；手填啤价及历史固定值保留，机型费用变化只更新自动计算行。修改后请保存本部门草稿。</p>
+    <p class="muted">按实际啤次计费：同一次啤只在首条零件计一次啤工；同一模具分两次啤则各计一次。未记录准确啤次的历史行保留原口径，重新导入源表并同步模具后才应用啤次计费。各条原料费分别计算。啤价＝本单机型台班费用 ÷ 目标数 ÷ 套数。修改本行机型、目标数、套数或点击“自动按机型套啤价”后使用自动计算；手填啤价及历史固定值保留，机型费用变化只更新自动计算行。修改后请保存本部门草稿。</p>
     <div id="wb-inj"></div>
     <div id="wb-inj-shared"></div>
     <div id="wb-inj-summary"></div>
@@ -5072,6 +5119,8 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     { key: 'product_group_name', label: '产品', readonly: true, width: '110px' },
     { key: 'name', label: '模具名称', type: 'textarea', width: '220px' },
     { key: 'mold_no', label: '模号', width: '70px' },
+    ...(payload.injection.some(row => row.injection_run_name)
+      ? [{ key: 'injection_run_name', label: '啤次分组', readonly: true, width: '150px' }] : []),
     { key: 'material', label: '材质', width: '110px', type: 'select', affectsOptions: true,
       options: () => {
         const names = (payload.material_prices || [])
@@ -5088,7 +5137,15 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     { key: 'machine', label: '机台', width: '90px', className: 'molding-machine-key',
       renderCell: pricingCell('machine', machineRefreshers) },
     { key: 'shot_price', label: payload.injection.some(r => r.catalog_raw_weight != null) ? '零件啤工(HK$/件)' : '啤价(HK$/啤)', type: 'number', width: '100px',
-      renderCell: pricingCell('shot_price', shotRefreshers, true) },
+      renderCell: (td, row, options) => {
+        if (window.InjectionPricing.isAdditionalPart(row)) {
+          td.classList.add('ro');
+          td.textContent = '0.0000';
+          td.title = '同模同次啤的啤工已计入首条零件，此行不重复计费';
+          return;
+        }
+        pricingCell('shot_price', shotRefreshers, true)(td, row, options);
+      } },
     { key: 'cavity', label: '出模数', width: '80px' },
     { key: 'side_action', label: '行位', width: '90px' },
     { key: 'sets', label: '套数', type: 'number', width: '70px', onValue: refreshShot },
@@ -5097,10 +5154,10 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     { key: 'mold_size', label: '模具尺寸', width: '130px' },
     { key: 'cycle_sec', label: '周期(秒)', type: 'number', width: '80px' },
     { key: 'finished_amt', label: '成品金额 HK$', readonly: true, width: '100px',
-      calc: r => num(r.weight_g) * (1 + num(payload.injection_loss_pct ?? 3)/100) * num(r.material_unit_price) + num(r.shot_price) },
+      calc: r => num(r.weight_g) * (1 + num(payload.injection_loss_pct ?? 3)/100) * num(r.material_unit_price) + num(window.InjectionPricing.laborPrice(r)) },
     { key: 'indo_amt', label: '印尼运费', readonly: true, width: '150px',
       headerInput: { get: () => payload.indo_pct, set: value => { payload.indo_pct = value; }, suffix: '%' },
-      calc: r => (num(r.weight_g) * (1 + num(payload.injection_loss_pct ?? 3)/100) * num(r.material_unit_price) + num(r.shot_price)) * num(payload.indo_pct) / 100 },
+      calc: r => (num(r.weight_g) * (1 + num(payload.injection_loss_pct ?? 3)/100) * num(r.material_unit_price) + num(window.InjectionPricing.laborPrice(r))) * num(payload.indo_pct) / 100 },
     { key: 'note', label: '备注' },
   ];
   const wrappedOnChange = (() => { const fns = []; const w = () => { fns.forEach(f => f()); onChange(); }; w._fns = fns; return w; })();
@@ -5121,6 +5178,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
   renderTable(host.querySelector('#wb-inj'), cols, payload.injection, {
     readonly: !canEdit,
     onChange: wrappedOnChange,
+    onStructureChange: changeInjectionStructure,
     showRowNumber: false,
     beforeRow: showInjectionGroups ? (row, index, allRows) => {
       const key = injectionGroupKey(row);
@@ -5178,7 +5236,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     const rawSum = weightedInjectionSum(payload, r => num(r.weight_g) * lossM * num(r.material_unit_price));
     const allocation = window.MixedQuotation?.renderMoldingAllocation(host.querySelector('#wb-inj-shared'), payload) || { amount: 0 };
     // Read-only allocation is included here but not saved as another injection row.
-    const directShotSum = weightedInjectionSum(payload, r => num(r.shot_price));
+    const directShotSum = weightedInjectionSum(payload, r => num(window.InjectionPricing.laborPrice(r)));
     const shotSum = directShotSum + allocation.amount;
     const finishedSum = rawSum + shotSum;
     const formatTotal = value => allocation.error ? '待完善' : formatNum(value);
@@ -5187,7 +5245,7 @@ function renderMolding(host, payload, canEdit, onChange, refMolds, fxRmbHkd, use
     const totalRatio = sum(groups.filter(g => !directProductGroup(payload, g.key)), group => productMixRatio(payload, group.key));
     const groupCards = groups.map(group => {
       const groupRaw = sum(group.rows, item => num(item.row.weight_g) * lossM * num(item.row.material_unit_price));
-      const groupShot = sum(group.rows, item => num(item.row.shot_price));
+      const groupShot = sum(group.rows, item => num(window.InjectionPricing.laborPrice(item.row)));
       const groupFinished = groupRaw + groupShot;
       return `<div class="ls-row" style="background:#f0f9ff;color:#075985">
         <span class="ls-label">${escapeHtml(group.name)} 小计（${group.rows.length} 行）</span>
@@ -7016,7 +7074,7 @@ function computeTotals(sections, p) {
   // 电子/五金/辅助/包装/二次加工(喷油) 均为 HKD，换算回 RMB（×汇率）以与其余 RMB 项相加
   const _salesFx = num((get('sales') || {}).header?.fx_rmb_hkd) || 0.85;
   const _salesFxUsd = num((get('sales') || {}).header?.fx_hkd_usd) || 7.8;
-  const injection = applyLoss(weightedInjectionSum(mold, r => num(r.shot_price) / Math.max(num(r.sets), 1)), mold.injection_loss_pct ?? 3);
+  const injection = applyLoss(weightedInjectionSum(mold, r => num(window.InjectionPricing.laborPrice(r)) / Math.max(num(r.sets), 1)), mold.injection_loss_pct ?? 3);
   // 注：模板里"成品金额"列其实是 啤价/套数 之类，这里先按 shot_price/sets 估算，导出时严格按模板填回。
   const second_proc = applyLoss(sum(pnt.second_proc || [], r => num(r.price) * num(r.qty)), pnt.second_proc_loss_pct ?? 1) * _salesFx;
   const electronics = (freeTableSubtotal(elecSrc, _salesFx)  // 电子部优先，与导出一致
