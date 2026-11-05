@@ -586,6 +586,9 @@ function parseDeliveryNote(text, options = {}) {
     }
   }
 
+  /* 无来源行对应的分栏仍交人工核对，仅给未携带定位方向的原文一次转正机会。 */
+  if (!fields.items.length && !grounding && lines.some(line => /^(Description|品名|名称|名稱|货名|貨名|ITEM)\s*$/i.test(line.trim()))) fields.columnScrambled = true;
+
   /* 分栏缺少逐行来源关联时不按数量/品名字数猜配对。保留完整原文供人工核对。 */
   if (!fields.items.length && (grounding || lines.some(line => /^(Description|品名|名称|名稱|货名|貨名|ITEM)\s*$/i.test(line.trim())))) {
     if (rawText.trim()) {
@@ -683,10 +686,12 @@ async function aiVisionExtract(dataUrl) {
     content = String(content);   /* rawText 保留完整提供器原文；解析函数自行处理空白。 */
     const truncated = choice && choice.finish_reason === 'length';
     const grounding = truncated ? null : _parseGrounding(content);
-    const needRotate = grounding && !grounding.invalid ? grounding.angle : 0;
+    let needRotate = grounding && !grounding.invalid ? grounding.angle : 0;
     const fields = needRotate
       ? { date: '', supplier: '', deliveryNo: '', orderNo: '', type: '来料', items: [] }
       : parseDeliveryNote(content, { truncated });
+    /* 分栏乱序特征（品名块/数量块对不上）：即使模型没给角度也让客户端转正试试 */
+    if (!needRotate && !grounding && fields.columnScrambled) needRotate = 90;
     return { content, fields, needRotate };
   };
   let { content, fields, needRotate } = decode(data);
@@ -836,9 +841,17 @@ function deleteRecords(db, ids, transaction = true) {
   return count;
 }
 
-function mergeRecordChanges(db, records, ids) {
-  db.exec('BEGIN');
+function mergeRecordChanges(db, records, ids, newIds = []) {
+  db.exec('BEGIN IMMEDIATE');
   try {
+    // Recheck creation intent under the write transaction. A second writer
+    // cannot turn a new ID into an edit between authorization and insertion.
+    const created = new Set(newIds);
+    const current = db.prepare('SELECT id FROM records WHERE id=?');
+    const tomb = db.prepare('SELECT id FROM record_tombstones WHERE id=?');
+    for (const row of records) if (created.has(Number(row.id)) && (current.get(row.id) || tomb.get(row.id))) {
+      Auth.fail(409, '新记录编号已被占用或删除，整批修改未保存；请保留草稿并核对');
+    }
     const deleted = deleteRecords(db, ids, false);
     const result = upsertRecords(db, records, false);
     db.exec('COMMIT');
@@ -1081,9 +1094,19 @@ function validIds(ids) {
     return id;
   });
 }
-function authorizeRecordBatch(db, input, ids, user, replace = false) {
+function authorizeRecordBatch(db, input, ids, user, replace = false, newIds = []) {
   if (!Array.isArray(input)) Auth.fail(400, 'records须为数组');
   const deleted = validIds(ids), seen = new Set();
+  if (!Array.isArray(newIds) || newIds.some(id => typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) || new Set(newIds).size !== newIds.length) {
+    Auth.fail(400, '新记录编号须为不重复的安全整数');
+  }
+  const created = new Set(newIds);
+  const submitted = new Set(input.map(raw => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) Auth.fail(400, '记录格式不正确');
+    return validIds([raw.id])[0];
+  }));
+  if (newIds.some(id => !submitted.has(id) || deleted.includes(id))) Auth.fail(400, '新记录编号须对应本次资料且不能同时删除');
+  if (!replace && newIds.length) Auth.requirePermission(user, 'records', 'e');
   if (replace) Auth.requirePermission(user, 'import', 'm');
   if (deleted.length) Auth.requirePermission(user, 'records', 'm');
   const get = db.prepare('SELECT * FROM records WHERE id=?');
@@ -1101,6 +1124,18 @@ function authorizeRecordBatch(db, input, ids, user, replace = false) {
     if (seen.has(id)) Auth.fail(400, '记录编号重复');
     seen.add(id);
     const currentRow = get.get(id), current = currentRow && rowToRecord(currentRow);
+    if (!replace && created.has(id)) {
+      if (tomb.get(id)) Auth.fail(409, '新记录编号已被删除，整批修改未保存；请保留草稿并核对');
+      if (current) {
+        const retry = { ...raw, id, status: raw.status || 'pending' };
+        if (retry.status === 'pending') for (const col of REVIEW_FIELDS.slice(1)) if (retry[col] == null) retry[col] = '';
+        const before = canonicalValues(current), after = canonicalValues(retry);
+        if (!before.every((value, index) => value === after[index])) {
+          Auth.fail(409, '新记录编号已被占用，整批修改未保存；请保留草稿并核对');
+        }
+        return null; // An identical retry is a no-op, never an update.
+      }
+    }
     // These rows cannot be written by upsertRecords. Preserve the stale and
     // tombstone rules without requiring edit rights on somebody else's row.
     if (!replace && (deleted.includes(id) || tomb.get(id) || current?.updatedAt &&
@@ -1142,7 +1177,7 @@ function authorizeRecordBatch(db, input, ids, user, replace = false) {
     }
     return record;
   });
-  return { records: output.filter(Boolean), deletedIds: deleted };
+  return { records: output.filter(Boolean), deletedIds: deleted, newIds };
 }
 function validatedUsers(db, input) {
   if (!Array.isArray(input)) Auth.fail(400, 'users须为数组');
@@ -1456,8 +1491,8 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/records' && req.method === 'POST') {
       const body = await readBody(req);
-      const allowed = authorizeRecordBatch(db, body.records, body.deletedIds || [], user);
-      const r = mergeRecordChanges(db, allowed.records, allowed.deletedIds);
+      const allowed = authorizeRecordBatch(db, body.records, body.deletedIds || [], user, false, body.newIds === undefined ? [] : body.newIds);
+      const r = mergeRecordChanges(db, allowed.records, allowed.deletedIds, allowed.newIds);
       return sendJson(res, 200, { ok: true, count: db.prepare('SELECT COUNT(*) c FROM records').get().c,
         ...r });
     }

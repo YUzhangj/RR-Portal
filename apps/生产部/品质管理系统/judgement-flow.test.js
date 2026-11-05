@@ -122,14 +122,14 @@ for (const [manual, label] of [['COND', 'AOD'], ['HOLD', '待定'], ['PASS', '�
 
 test('conditional record survives review, SQLite round trip and CSV export with its failing details', () => {
   const b = browser(); b.elements.get('f_result').value = 'COND'; b.ctx._loadDefectRows([defect(100), defect(75)]);
-  b.ctx._loadMeasRows([measurement()]); b.ctx.saveRecord(); b.ctx.approveRecord(501);
+  b.ctx._loadMeasRows([measurement()]); b.ctx.saveRecord(); const savedId = b.json('state.records[0].id'); b.ctx.approveRecord(savedId);
   const record = b.json('state.records[0]'); assert.equal(record.result, 'COND'); assert.equal(record.reviewBy, 'Test Inspector');
   assert.equal(record.status, 'approved'); assert.ok(record.reviewAt); assert.ok(record.updatedAt);
   const core = vm.runInNewContext(server.slice(server.indexOf('const RECORD_COLS'), server.indexOf('function replaceUsers')) +
     ';({SCHEMA_SQL,upsertRecords,rowToRecord})');
   const db = new DatabaseSync(':memory:');
   try { db.exec(core.SCHEMA_SQL); core.upsertRecords(db, [record]);
-    const stored = core.rowToRecord(db.prepare('SELECT * FROM records WHERE id=501').get());
+    const stored = core.rowToRecord(db.prepare('SELECT * FROM records WHERE id=?').get(savedId));
     assert.equal(stored.result, 'COND'); assert.equal(stored.fail, 175); assert.equal(stored.defects.length, 2);
     assert.equal(stored.measurements[0].result, 'FAIL');
     const csv = vm.runInNewContext(server.slice(server.indexOf('function formatModifiedDate'), server.indexOf('function buildFactoryExcelHtml')) + ';buildRecordsCsv', {})([stored]);
@@ -269,7 +269,7 @@ test('direction handler, save, SQLite round trip and reopen preserve direction a
     const db=new DatabaseSync(':memory:');
     try {
       db.exec(core.SCHEMA_SQL);core.upsertRecords(db,[saved]);
-      const stored=core.rowToRecord(db.prepare('SELECT * FROM records WHERE id=501').get());
+      const stored=core.rowToRecord(db.prepare('SELECT * FROM records WHERE id=?').get(saved.id));
       b.ctx._loadMeasRows(stored.measurements);
       assert.equal(b.json('_measRows[0].tolDir'),dir);assert.equal(b.json('_measRows[0].standard'),type==='single'?0:type==='LW'?'0×0':'0×0×0');
       assert.equal(b.json('_measRows[0].values[0]'),0);

@@ -234,9 +234,15 @@
     });
   }
 
+  function hasQuantity(fields) {
+    return usableItems(fields) && fields.items.some(function (item) {
+      return String(item.qty == null ? '' : item.qty).trim();
+    });
+  }
+
   function aiStartOcr(op) {
     var baseAngle = op.snapshot.angle;
-    var attempted = [baseAngle], candidates = null;
+    var attempted = [baseAngle], candidates = null, pendingFallback = null;
     function attempt(angle) {
       requireCurrent(op);
       return renderImage(op.snapshot.original, angle, op).then(function (small) {
@@ -249,7 +255,13 @@
           return response.json().catch(function () { return {}; }).then(function (body) {
             requireCurrent(op);
             if (!response.ok || !body || !body.ok) throw new Error((body && body.error) || ('HTTP ' + response.status));
-            if (!usableItems(body.fields)) {
+            var rotatedPending = usableItems(body.fields) && !hasQuantity(body.fields) &&
+              [90, 180, 270].indexOf(body.needRotate) !== -1;
+            if (!usableItems(body.fields) || rotatedPending) {
+              /* 有内容但解析不出明细（待核对原文）：留底，转正尝试全部失败后回退到它，不丢原文 */
+              if (!pendingFallback && usableItems(body.fields)) {
+                pendingFallback = { fields: body.fields, rawText: body.rawText, image: small, angle: angle };
+              }
               if ([90, 180, 270].indexOf(body.needRotate) !== -1 && !candidates) {
                 var correction = body.needRotate === 180 ? 180 : (body.needRotate === 270 ? 90 : 270);
                 candidates = [(baseAngle + correction) % 360];
@@ -261,7 +273,13 @@
                 setT('ocrStatus', '检测到图片旋转，自动转正重试（第 ' + (attempted.length - 1) + ' 次）...');
                 return attempt(next);
               }
-              throw new Error('未识别到货品明细，请核对图片方向或手动录入；原有更正已保留');
+              if (pendingFallback) {
+                body = { ok: true, fields: pendingFallback.fields, rawText: pendingFallback.rawText, needsManualReview: true };
+                small = pendingFallback.image;
+                angle = pendingFallback.angle;
+              } else {
+                throw new Error('未识别到货品明细，请核对图片方向或手动录入；原有更正已保留');
+              }
             }
             var committed = imageApi().commit(op.snapshot, small, angle);
             if (!committed) throw obsolete();

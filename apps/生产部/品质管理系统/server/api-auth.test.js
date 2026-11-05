@@ -457,3 +457,100 @@ test('entry append validation is atomic for invalid or duplicate new description
     assert.deepEqual(defectRows(A), before);
   }
 });
+
+
+// Exercise the real backup normalization output through the real isolated HTTP
+// endpoint and SQLite. No browser identity or imported audit field grants rights.
+function normalizedBackup(records, mode='append') {
+  const app=fs.readFileSync(path.join(__dirname,'../app.js'),'utf8');
+  const from=app.indexOf('function _backupJsonBytes(value, limit = Infinity) {');
+  const to=app.indexOf('\n/* 格式校验',from);
+  let captured;
+  const context={state:{records:[],nextId:31},window:{},incoming:records,mode,
+    nowIso:()=> '2026-11-05T01:00:00.000Z',persist(){captured=JSON.parse(JSON.stringify(context.state.records));},
+    showToast(){},_backupLog(){},_backupRefreshAll(){},_newRecordId(){throw new Error('Explicit synthetic IDs required');}};
+  vm.runInNewContext(app.slice(from,to)+';if(!_backupDoImport(incoming,mode))throw new Error("Backup fixture rejected");',context);
+  assert.ok(captured);return captured;
+}
+
+test('full backup rows cannot smuggle approval or audit rights through append or replacement',async()=>{
+  sql(A,db=>db.prepare('UPDATE users SET perms=? WHERE username=?').run(JSON.stringify({...allZero,
+    records:{v:0,e:1,a:0,m:0},import:{v:0,e:0,a:0,m:1}}),'restricted'));
+  const session=await login('restricted');
+  const original={...fresh(810),date:'2026-11-05',supplier:'Synthetic original supplier',productName:'Full backup source',
+    status:'approved',reviewBy:'forged backup approver',reviewAt:'1900-01-01T00:00:00Z',confirmBy:'Original confirmer',
+    defects:[{desc:'Original defect',qty:0,level:'MAJ 0.65',category:'appearance',remark:'Full source remark'}],
+    measurements:[{item:'Zero standard',measureType:'single',standard:0,tolerance:0,tolDir:'-',values:[0],avg:0,result:'PASS'}],
+    username:'jc',role:'admin',perms:{review:{a:1}},csrfToken:'forged'};
+  const approved=normalizedBackup([original]);
+  assert.deepEqual(approved[0].defects,original.defects);assert.deepEqual(approved[0].measurements,original.measurements);
+  assert.equal(approved[0].reviewBy,original.reviewBy);assert.equal(approved[0].confirmBy,original.confirmBy);
+  for(const k of['username','role','perms','csrfToken'])assert.equal(k in approved[0],false);
+  for(const route of['/api/records','/api/records/replace']) {
+    const before=snapshot();const result=await request(route,{method:'POST',session,body:{records:approved}});
+    assert.equal(result.status,403,result.text);assert.equal(snapshot(),before);
+  }
+  const forgedPending=normalizedBackup([{...original,status:'pending'}]);
+  const before=snapshot();assert.equal((await request('/api/records',{method:'POST',session,body:{records:forgedPending}})).status,403);assert.equal(snapshot(),before);
+  const allowed=normalizedBackup([{...original,status:'pending',reviewBy:'',reviewAt:'',rejectReason:'',rejectBy:'',rejectAt:''}]);
+  const result=await request('/api/records',{method:'POST',session,body:{records:allowed}});assert.equal(result.status,200,result.text);
+  const saved=sql(A,db=>db.prepare('SELECT * FROM records WHERE id=810').get());
+  assert.equal(saved.status,'pending');assert.equal(saved.reviewBy,'');assert.deepEqual(JSON.parse(saved.measurements),original.measurements);
+});
+
+test('authorized backup replacement retains full supported business details while server attributes approval',async()=>{
+  const admin=await login('jc');const original={...fresh(811),date:'2026-11-05',supplier:'Synthetic original supplier',
+    status:'approved',reviewBy:'Untrusted backup actor',reviewAt:'1900-01-01T00:00:00Z',orderQty:0,sampleQty:0,result2:'HOLD',
+    defects:[{desc:'Whole original defect',qty:0,level:'MAJ 0.65',category:'appearance',remark:'All original comments'}],
+    measurements:[{item:'Full original measurement',measureType:'single',standard:0,tolerance:0,tolDir:'-',values:[0],avg:0,result:'PASS'}]};
+  const rows=normalizedBackup([original],'replace');const result=await request('/api/records/replace',{method:'POST',session:admin,body:{records:rows}});
+  assert.equal(result.status,200,result.text);const saved=sql(A,db=>db.prepare('SELECT * FROM records WHERE id=811').get());
+  assert.equal(saved.id,811);assert.equal(saved.orderQty,0);assert.equal(saved.sampleQty,0);assert.equal(saved.result2,'HOLD');
+  assert.deepEqual(JSON.parse(saved.defects),original.defects);assert.deepEqual(JSON.parse(saved.measurements),original.measurements);
+  assert.equal(saved.status,'approved');assert.equal(saved.reviewBy,'jc display');assert.notEqual(saved.reviewAt,original.reviewAt);
+  assert.equal(sql(A,db=>db.prepare('SELECT COUNT(*) AS n FROM records').get().n),1);
+});
+
+
+test('two real HTTP creators forcing the same ID cannot overwrite each other',async()=>{
+  const admin=await login('jc');const left=fresh(901,{status:'pending',productName:'LEFT ORIGINAL'}),right=fresh(901,{status:'pending',productName:'RIGHT ORIGINAL'});
+  const results=await Promise.all([left,right].map(record=>request('/api/records',{method:'POST',session:admin,body:{records:[record],newIds:[901]}})));
+  assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);
+  const winner=results[0].status===200?left:right,saved=sql(A,db=>db.prepare('SELECT * FROM records WHERE id=901').get());
+  assert.equal(saved.productName,winner.productName);assert.equal(saved.status,'pending');assert.equal(sql(A,db=>db.prepare('SELECT count(*) AS n FROM records').get().n),4);
+});
+
+test('a completely identical new pending retry is a no-op and does not rewrite its row or audit',async()=>{
+  const admin=await login('jc'),record=fresh(902,{status:'pending',productName:'EXACT SAME SOURCE'}),body={records:[record],newIds:[902]};
+  let r=await request('/api/records',{method:'POST',session:admin,body});assert.equal(r.status,200,r.text);assert.equal(r.json.accepted,1);
+  const before=snapshot();r=await request('/api/records',{method:'POST',session:admin,body});assert.equal(r.status,200,r.text);assert.equal(r.json.accepted,0);assert.equal(snapshot(),before);
+});
+
+test('creation collisions reject an entire mixed create-delete batch before any SQLite change',async()=>{
+  const admin=await login('jc'),before=snapshot();
+  const r=await request('/api/records',{method:'POST',session:admin,body:{records:[fresh(903,{status:'pending'}),fresh(2,{status:'pending',updatedAt:'2099-01-01T00:00:00Z',productName:'MUST NOT OVERWRITE'})],newIds:[903,2],deletedIds:[3]}});
+  assert.equal(r.status,409,r.text);assert.equal(snapshot(),before);
+});
+
+test('creation intent cannot reuse a tombstoned random ID even after the client reloads',async()=>{
+  const admin=await login('jc');assert.equal((await request('/api/records/delete',{method:'POST',session:admin,body:{ids:[3]}})).status,200);
+  const before=snapshot();const r=await request('/api/records',{method:'POST',session:admin,body:{records:[fresh(3,{status:'pending',updatedAt:'2099-01-01T00:00:00Z'})],newIds:[3]}});
+  assert.equal(r.status,409,r.text);assert.equal(snapshot(),before);assert.equal(sql(A,db=>db.prepare('SELECT count(*) AS n FROM record_tombstones WHERE id=3').get().n),1);
+});
+
+test('malformed, duplicate, non-payload or simultaneously deleted creation IDs fail atomically',async()=>{
+  const admin=await login('jc');
+  for(const [newIds,deletedIds]of[[[904,904],[]],[['904'],[]],[[1.5],[]],[[0],[]],[[Number.MAX_SAFE_INTEGER+1],[]],[[905],[]],[{},[]],[[904],[904]]]) {
+    const before=snapshot();const r=await request('/api/records',{method:'POST',session:admin,body:{records:[fresh(904,{status:'pending'})],newIds,deletedIds}});
+    assert.equal(r.status,400,r.text);assert.equal(snapshot(),before);
+  }
+});
+
+
+test('creation intent requires entry permission before revealing whether an ID is occupied',async()=>{
+  const session=await login('restricted'),before=snapshot();
+  for(const id of[2,906]) {
+    const r=await request('/api/records',{method:'POST',session,body:{records:[fresh(id,{status:'pending'})],newIds:[id]}});
+    assert.equal(r.status,403,r.text);assert.equal(snapshot(),before);
+  }
+});

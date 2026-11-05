@@ -56,7 +56,36 @@ const STORAGE_KEYS = {
   partners:     STORAGE_PREFIX + 'partners',       /* 供应商&客户名单 */
 };
 const LS_KEY = STORAGE_KEYS.records;   /* 主数据 key */
+/* # 列短码：内部 ID 是随机安全整数（降低多机同时录入撞号的概率）。
+   界面显示 6 位「数字+英文」短码（36 进制，36^6≈21亿组合），悬停可见完整号。 */
+function _shortId(id) {
+  const n = Number(id);
+  if (!Number.isFinite(n)) return String(id);
+  if (n < 1e9) return String(id);                          /* 旧的顺序短号原样显示 */
+  return (n % 2176782336).toString(36).toUpperCase().padStart(6, '0');   /* 36^6 取模 → 6 位 */
+}
 let state        = { records: [], nextId: 31 };
+/* 新记录 ID：52 位随机正整数，给旧客户端的 nextId 留出安全余量。
+   旧逻辑用本地 nextId 顺序号，多台电脑/多个浏览器同时录入会撞号，
+   后同步的会把先同步的同号记录覆盖掉（记录「不见了」的根因）。
+   列表排序按日期/更新时间，不依赖 id 顺序，随机 id 无副作用。 */
+function _newRecordId(reservedIds) {
+  const used = reservedIds || new Set(state.records.map(r => Number(r.id)));
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const words = new Uint32Array(2);
+    if (window.crypto && typeof window.crypto.getRandomValues === 'function') window.crypto.getRandomValues(words);
+    else {
+      words[0] = Math.floor(Math.random() * 0x100000000);
+      words[1] = Math.floor(Math.random() * 0x100000000);
+    }
+    const id = (words[0] & 0xfffff) * 0x100000000 + words[1];
+    if (Number.isSafeInteger(id) && id > 0 && !used.has(id)) {
+      used.add(id);
+      return id;
+    }
+  }
+  throw new Error('记录编号分配失败，请重试；现有记录未改动');
+}
 let editingId    = null;
 let chartInst    = {};          // { chartId: echartsInstance }
 let currentPage  = 'dashboard';
@@ -2261,7 +2290,7 @@ function filterRecords() {
             <input type="checkbox" class="row-check" ${checked}
                    onchange="_onRowCheck(this, ${r.id})" />
           </td>
-          <td style="text-align:right;color:#3a4858">${r.id}</td>
+          <td style="text-align:right;color:#3a4858;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="完整编号 ${r.id}">${_shortId(r.id)}</td>
           <td style="font-family:var(--font-mono);font-size:11px;white-space:nowrap">${r.date}</td>
           <td style="font-family:var(--font-mono);font-size:11px;white-space:nowrap">${formatModifiedDate(r.updatedAt) || '-'}</td>
           <td style="font-weight:500;color:#e8edf5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${r.supplier}">${r.supplier}</td>
@@ -3443,10 +3472,12 @@ function parseBatchPreview() {
 function confirmBatchImport() {
   if (!_batchRows.length) { showToast('请先解析预览', 'error'); return; }
 
-  _batchRows.forEach(r => {
-    r.id = state.nextId++;
-    state.records.push(r);
-  });
+  let additions;
+  try {
+    const used = new Set(state.records.map(r => Number(r.id)));
+    additions = _batchRows.map(r => ({ ...r, id: _newRecordId(used) }));
+  } catch (error) { showToast(error.message, 'error'); return; }
+  state.records.push(...additions);
   persist();
 
   const n = _batchRows.length;
@@ -5089,7 +5120,8 @@ function saveRecord(options = {}) {
       state.records[idx] = { ...prev, ...rec };
     }
   } else {
-    rec.id = state.nextId++;
+    try { rec.id = _newRecordId(); }
+    catch (error) { showToast(error.message, 'error'); return false; }
     rec.status = 'pending';   /* 新记录先进入待审核，审核通过后才进验货明细 */
     state.records.push(rec);
   }
@@ -5222,7 +5254,7 @@ function renderReviewPage() {
     const checked = _reviewSelected.has(r.id) ? 'checked' : '';
     return `<tr>
       <td style="text-align:center"><input type="checkbox" ${checked} onchange="toggleReviewSelect(${r.id})"></td>
-      <td style="text-align:right;color:#3a4858">${r.id}</td>
+      <td style="text-align:right;color:#3a4858;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="完整编号 ${r.id}">${_shortId(r.id)}</td>
       <td style="font-family:var(--font-mono);font-size:11px;white-space:nowrap">${_esc(r.date)}</td>
       <td style="font-weight:500;white-space:nowrap">${_esc(r.supplier)}</td>
       <td style="white-space:nowrap">${_esc(r.client||'-')}</td>
@@ -5949,7 +5981,7 @@ function backupImportJSON(event) {
           <div class="backup-mode-radios">
             <label class="backup-mode-label">
               <input type="radio" name="bkMode" value="append" checked />
-              <div><b>追加到现有数据</b><div style="font-size:11px;color:var(--text-dim)">当前 ${recs().length} 条 + 备份 ${incoming.length} 条（推荐）</div></div>
+              <div><b>追加到现有数据</b><div style="font-size:11px;color:var(--text-dim)">保留原编号；相同记录跳过，编号内容冲突时暂停整批导入</div></div>
             </label>
             <label class="backup-mode-label">
               <input type="radio" name="bkMode" value="replace" />
@@ -5973,49 +6005,136 @@ function backupImportJSON(event) {
 }
 
 /* 执行实际写入 */
+function _backupJsonBytes(value, limit = Infinity) {
+  const text = JSON.stringify(value);
+  if (typeof text !== 'string') throw new Error('备份格式无效');
+  let size = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 0x80) size++;
+    else if (code < 0x800) size += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length &&
+        text.charCodeAt(i + 1) >= 0xdc00 && text.charCodeAt(i + 1) <= 0xdfff) { size += 4; i++; }
+    else size += 3;
+    if (size > limit) return size;
+  }
+  return size;
+}
+
 function _backupDoImport(incoming, mode) {
   try {
-    /* 标准化每条记录 */
-    const normalized = incoming.map(r => ({
-      id:          state.nextId++,
-      date:        r.date        || '',
-      inspDate:    r.inspDate    || r.date || '',
-      supplier:    r.supplier    || r.厂名 || '',
-      client:      r.client      || r.客名 || '',
-      processType: r.processType || '',
-      productNo:   r.productNo   || r.款号 || '',
-      productName: r.productName || r.款式 || '',
-      deliveryNo:  r.deliveryNo  || r.单号 || '',
-      orderNo:     r.orderNo     || r.PO || r.PO号 || r.订单号 || '',
-      type:        r.type        || '成品',
-      qty:         r.qty         || 0,
-      sampleQty:   r.sampleQty != null ? r.sampleQty : null,
-      pass:        r.pass        || 0,
-      fail:        r.fail        || 0,
-      defectRate:  r.defectRate  || '',
-      result:      r.result      || 'PASS',
-      defect:      r.defect      || '',
-      qc:          r.qc          || '',
-      remark:      r.remark      || '',
-      updatedAt:   r.updatedAt   || nowIso(),
-    }));
-
-    if (mode === 'replace') {
-      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;
-      state.records = normalized;
-      state.nextId  = Math.max(state.nextId || 1, normalized.length + 1);
-    } else {
-      state.records.push(...normalized);
+    if (!Array.isArray(incoming) || !['append', 'replace'].includes(mode)) throw new Error('备份格式或导入方式无效');
+    const maxBody = 50 * 1024 * 1024;   /* 与原 /api/records 载荷上限一致 */
+    if (_backupJsonBytes(incoming, maxBody) > maxBody) throw new Error('备份超过服务器允许的大小');
+    const fields = ['date','inspDate','supplier','client','processType','productNo','productName',
+      'deliveryNo','orderNo','type','qty','sampleQty','pass','fail','defectRate','result','result2','defect',
+      'defects','measurements','qc','confirmBy','remark','orderQty','updatedAt',
+      'status','reviewBy','reviewAt','rejectReason','rejectBy','rejectAt','aqlLevel'];
+    const numeric = new Set(['qty','sampleQty','pass','fail','orderQty']);
+    const aliases = {supplier:['厂名'],client:['客名'],productNo:['款号'],productName:['款式'],
+      deliveryNo:['单号'],orderNo:['PO','PO号','订单号']};
+    const defectFields = ['desc','qty','level','category','remark'];
+    const measurementFields = ['item','standard','measureType','tolDir','standardL','standardW','standardH',
+      'tolerance','toleranceL','toleranceW','toleranceH','values','lValues','wValues','hValues','avg','result'];
+    const samples = new Set(['values','lValues','wValues','hValues']);
+    const owns = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+    const scalar = value => value === null || ['string','number','boolean'].includes(typeof value) &&
+      (typeof value !== 'number' || Number.isFinite(value));
+    const safeId = value => (typeof value === 'number' || typeof value === 'string' && /^\d+$/.test(value)) &&
+      Number.isSafeInteger(Number(value)) && Number(value) > 0;
+    const stamp = nowIso();
+    const used = new Set(state.records.map(r => Number(r.id)));
+    for (const r of incoming) if (r && safeId(r.id)) used.add(Number(r.id));
+    function details(value, keys, measurement) {
+      if (!Array.isArray(value)) throw new Error('备份的不良或测量明细格式无效');
+      return value.map(row => {
+        if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('备份明细行格式无效');
+        const copy = {};
+        for (const key of keys) if (owns(row, key)) {
+          if (measurement && samples.has(key)) {
+            if (!Array.isArray(row[key]) || !row[key].every(scalar)) throw new Error('备份测量样本格式无效');
+            copy[key] = row[key].slice();
+          } else {
+            if (!scalar(row[key])) throw new Error('备份明细包含无效字段');
+            copy[key] = row[key];
+          }
+        }
+        return copy;
+      });
     }
-    persist();
+    function normalize(r, id) {
+      if (!r || typeof r !== 'object' || Array.isArray(r)) throw new Error('备份记录格式无效');
+      const row = {id};
+      for (const key of fields) {
+        let value = owns(r,key) ? r[key] : undefined;
+        if (value === undefined && aliases[key]) {
+          for (const alias of aliases[key]) if (owns(r,alias)) { value = r[alias]; break; }
+        }
+        if (value === undefined) {
+          if (key === 'inspDate') value = owns(r,'date') ? r.date : '';
+          else if (key === 'updatedAt') value = stamp;
+          else if (key === 'defects' || key === 'measurements') value = [];
+          else if (key === 'type') value = '成品';
+          else if (key === 'qty' || key === 'pass' || key === 'fail') value = 0;
+          else if (key === 'sampleQty' || key === 'orderQty' || key === 'status') value = null;
+          else if (key === 'result') value = 'PASS';
+          else value = '';
+        }
+        if (key === 'defects' || key === 'measurements') {
+          row[key] = details(value, key === 'defects' ? defectFields : measurementFields, key === 'measurements');
+        } else if (numeric.has(key)) {
+          if (value === null || value === '') row[key] = null;
+          else {
+            if (!scalar(value) || typeof value === 'boolean' || !Number.isFinite(Number(value))) throw new Error('备份包含无效数值');
+            row[key] = Number(value);
+          }
+        } else {
+          if (!scalar(value)) throw new Error('备份包含无效字段');
+          row[key] = value;
+        }
+      }
+      if (row.status && !['pending','approved','rejected'].includes(row.status)) throw new Error('备份审核状态无效');
+      return row;
+    }
+    const existing = new Map();
+    for (const row of state.records) {
+      if (existing.has(Number(row.id))) throw new Error('现有资料含重复编号，请先联系管理员核对');
+      existing.set(Number(row.id), row);
+    }
+    const added = [], seen = new Map();
+    let skipped = 0;
+    for (const raw of incoming) {
+      const id = raw && safeId(raw.id) ? Number(raw.id) : _newRecordId(used);
+      const row = normalize(raw, id), signature = JSON.stringify(row);
+      if (seen.has(id)) {
+        if (seen.get(id) !== signature) throw new Error('备份内编号 ' + id + ' 的内容冲突，整批导入已暂停');
+        skipped++; continue;
+      }
+      seen.set(id, signature);
+      if (mode === 'append' && existing.has(id)) {
+        if (JSON.stringify(normalize(existing.get(id), id)) !== signature) {
+          throw new Error('编号 ' + id + ' 与现有内容不同，整批导入已暂停，请先核对备份');
+        }
+        skipped++; continue;
+      }
+      added.push(row);
+    }
+    const next = mode === 'replace' ? added : state.records.concat(added);
+    if (_backupJsonBytes({records:next}, maxBody) > maxBody) throw new Error('合并后资料超过服务器允许的大小，原资料未改动');
+    if (mode === 'replace') window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;
+    state.records = next;
+    state.nextId = Math.max(state.nextId || 1, 1);
+    if (mode === 'replace' || added.length) persist();
 
     const modeLabel = mode === 'replace' ? '覆盖' : '追加';
-    showToast(`${normalized.length} 条备份记录已在本地暂存，等待服务器同步`, 'info');
-    _backupLog(`${modeLabel}导入备份 ${normalized.length} 条记录`, 'ok');
+    showToast(`${added.length} 条备份记录已在本地暂存，跳过 ${skipped} 条重复项；仍须服务器权限核验`, 'info');
+    _backupLog(`${modeLabel}导入备份 ${added.length} 条，跳过 ${skipped} 条重复项`, 'ok');
     _backupRefreshAll();
+    return true;
   } catch(e) {
     showToast('导入写入失败：' + e.message, 'error');
     _backupLog('导入写入失败：' + e.message, 'error');
+    return false;
   }
 }
 
@@ -6749,7 +6868,8 @@ function _buildImportPlan(mode) {
   const remCol   = getCol('remark');
 
   const newRecs = [];
-  let nextId = mode === 'replace' ? 1 : state.nextId;
+  const nextId = state.nextId;
+  const reservedIds = new Set(state.records.map(r => Number(r.id)));
   let skipped = 0;
   let dateWarn = 0;
   const dateWarnRows = [];   /* 日期异常的行号，方便用户定位 */
@@ -6789,7 +6909,7 @@ function _buildImportPlan(mode) {
     if (/^\d+\.0$/.test(productNo)) productNo = productNo.replace(/\.0$/, '');
 
     newRecs.push({
-      id:          nextId++,
+      id:          _newRecordId(reservedIds),
       date,
       inspDate,
       supplier:    rawSup,
@@ -6942,6 +7062,13 @@ function executeImportConfirm() {
   if (btn) { btn.disabled = true; btn.textContent = '导入中…'; }
 
   try {
+    const used = new Set(state.records.map(r => Number(r.id)));
+    for (const row of plan.records) {
+      if (!Number.isSafeInteger(row.id) || row.id <= 0 || used.has(row.id)) {
+        throw new Error('预览中的记录编号已被占用或重复，请重新分析后导入；现有资料未改动');
+      }
+      used.add(row.id);
+    }
     if (plan.mode === 'replace') {
       window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 替换模式导入走 /api/records/replace */
       state.records = plan.records;
