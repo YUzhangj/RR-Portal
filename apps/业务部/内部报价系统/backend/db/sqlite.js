@@ -122,8 +122,7 @@ if (!_verificationVersionCols.includes('category')) {
   db.exec('ALTER TABLE quote_verification_versions ADD COLUMN category TEXT');
   console.log('[migrate] 核价版本类别字段已添加');
 }
-db.prepare("DELETE FROM audit_log WHERE quote_id IN (SELECT id FROM quotes WHERE deleted_at IS NOT NULL AND deleted_at < datetime('now', '-30 days'))").run();
-db.prepare("DELETE FROM quotes WHERE deleted_at IS NOT NULL AND deleted_at < datetime('now', '-30 days')").run();
+// 启动只初始化结构和种子；不永久清理回收站报价及其关联资料。
 db.exec('CREATE INDEX IF NOT EXISTS idx_users_factory ON users(factory_code)');
 db.prepare(`INSERT OR IGNORE INTO factory_material_price_managers (factory_code, user_id)
   SELECT factory_code, manager_user_id FROM factory_material_price_control

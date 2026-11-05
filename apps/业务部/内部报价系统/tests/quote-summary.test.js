@@ -35,8 +35,9 @@ test('报价删除进入回收站并可恢复', () => {
   assert.match(summaryRoute, /deleted_at IS NULL/);
   const sqliteDb = fs.readFileSync(path.join(__dirname, '../backend/db/sqlite.js'), 'utf8');
   const postgresDb = fs.readFileSync(path.join(__dirname, '../backend/db/postgres.js'), 'utf8');
-  assert.match(sqliteDb, /-30 days/);
-  assert.match(postgresDb, /INTERVAL '30 days'/);
+  assert.doesNotMatch(sqliteDb, /DELETE FROM (?:quotes|audit_log)\b/i);
+  assert.doesNotMatch(postgresDb, /DELETE FROM (?:quotes|audit_log)\b/i);
+  assert.match(listSource, /30 \* 24 \* 60 \* 60 \* 1000/);
 });
 
 test('报价汇总读取报价基本资料和客价', () => {
