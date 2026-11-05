@@ -340,6 +340,7 @@ export default function ShipmentSheetTable<T extends object>({ fields, onEdits, 
     }}
     onMouseDownCapture={event => { if (selectionGesture.current || (event.shiftKey && anchor && point(event.target))) event.preventDefault() }}
     onPasteCapture={event => {
+      if ((event.target as HTMLElement).closest('.shipment-sheet-top-scroll')) return
       if (batchPending.current) { event.preventDefault(); event.stopPropagation(); return }
       const multiple = !!anchor && !!end && (anchor.row !== end.row || anchor.col !== end.col)
       const start = multiple ? anchor : point(event.target) || anchor
@@ -356,6 +357,7 @@ export default function ShipmentSheetTable<T extends object>({ fields, onEdits, 
       catch (error) { message.error((error as Error).message) }
     }}
     onCopyCapture={event => {
+      if ((event.target as HTMLElement).closest('.shipment-sheet-top-scroll')) return
       if (!anchor || !end) return
       const editor = (event.target as HTMLElement).closest<HTMLInputElement | HTMLTextAreaElement>('input,textarea')
       if (anchor.row === end.row && anchor.col === end.col && editor && editor.selectionStart !== editor.selectionEnd) return
@@ -374,6 +376,7 @@ export default function ShipmentSheetTable<T extends object>({ fields, onEdits, 
       event.clipboardData.setData('text/plain', values.join('\n'))
     }}
     onKeyDownCapture={event => {
+      if ((event.target as HTMLElement).closest('.shipment-sheet-top-scroll')) return
       if (batchPending.current) { event.preventDefault(); event.stopPropagation(); return }
       // Never intercept the first key of an IME session or recreate its input.
       if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {

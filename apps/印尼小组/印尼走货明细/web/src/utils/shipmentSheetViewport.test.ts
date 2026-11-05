@@ -124,7 +124,7 @@ it('在仍挂载输入框的多行选区粘贴一个值，整区写入而非原�
   const context = createContext({ point: () => ({ row: 0, col: 0 }), anchor: { row: 0, col: 0 }, end: { row: 2, col: 0 },
     fields: ['contract_no'], count: 3, batchPending: { current: false }, runBatch: (build: () => unknown) => onEdits(build()),
     parseSheetClipboard, sheetPasteSelectionEdits, message: { error: vi.fn() },
-    event: { target: { closest: () => ({}) }, preventDefault, stopPropagation: vi.fn(), clipboardData: { getData: () => 'NEW' } } })
+    event: { target: { closest: (selector: string) => selector === 'input:not([readonly]):not([disabled]),textarea:not([readonly]):not([disabled])' ? {} : null }, preventDefault, stopPropagation: vi.fn(), clipboardData: { getData: () => 'NEW' } } })
   runInContext(transpile(`const paste = ${paste}; paste(event)`), context)
   expect(preventDefault).toHaveBeenCalledOnce()
   expect(onEdits).toHaveBeenCalledExactlyOnceWith([0, 1, 2].map(row => ({ row, field: 'contract_no', value: 'NEW' })))
