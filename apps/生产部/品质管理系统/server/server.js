@@ -372,8 +372,9 @@ function parseDeliveryNote(text, options = {}) {
       for (const row of tbl.slice(hi + 1)) {
         const cells = splitRow(row);
         if (cells.every(c => !c)) continue;   /* 空白可能是分页间隔，不能截断后续真实明细 */
+        // Only a complete repeated header is non-business text; keep partial and ambiguous rows.
+        if (cells.length === head.length && cells.every((value, index) => value.replace(/\s+/g, '') === headKeys[index])) continue;
         if (deliveryColumnsLayout) {
-          if (cells.every((value, index) => value.replace(/\s+/g, '') === headKeys[index])) continue;
           if (/^(合计|合計|总计|總計|TOTAL)(?:[：:]|$)/i.test(cells[0] || '')) continue;
           const quantity = cells[cQty] || '', unit = cells[4] || '';
           if (cells.length !== head.length || !/^\d+$/.test(cells[0]) || (!cells[2] && !cells[3]) ||
@@ -613,7 +614,7 @@ function parseDeliveryNote(text, options = {}) {
     const seenLoose = new Set();
     fields.items = fields.items.filter(it => {
       if (!it.productName || !it.qty) return true;   /* 信息不全的行不参与合并 */
-      const k = [it._seq || '', it.orderNo || '', normName(it.productName), it.qty, it.unit].join('|');
+      const k = [it._seq || '', it.orderNo || '', it.productNo || '', normName(it.productName), it.qty, it.unit].join('|');
       if (seenLoose.has(k)) return false;
       seenLoose.add(k); return true;
     });
@@ -629,6 +630,31 @@ function parseDeliveryNote(text, options = {}) {
   }
   fields.items.forEach(it => { delete it._seq; });
   return fields;
+}
+
+/* Secondary OCR is not a second goods parser. Read only explicit header lines
+   before the table; conflicting labels remain empty for the user to confirm. */
+function _explicitOcrHeaders(content) {
+  const values = { date: new Set(), supplier: new Set(), deliveryNo: new Set() };
+  for (const raw of content.split('\n').slice(0, 16)) {
+    const line = raw.trim().replace(/^#+\s*/, '').replace(/\*\*/g, '');
+    if (/^[|{\[]|<table\b|\\begin\{/i.test(line) ||
+        /^(?:品名|货名|貨名|名称|名稱|货品名称|貨品名稱|Description|ITEM|Qty|Quantity|数量|數量)\s*[.:：]?$/i.test(line) ||
+        /品名|货名|貨名|名称|名稱|Description|ITEM/i.test(line) && /数量|數量|QTY/i.test(line)) break;
+    let match = /^(?:日期|送[货貨]日期|DATE)\s*[:：]\s*(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$/i.exec(line);
+    if (match) {
+      const y = Number(match[1]), m = Number(match[2]), d = Number(match[3]), dt = new Date(Date.UTC(y, m - 1, d));
+      if (dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d)
+        values.date.add(match[1] + '-' + match[2].padStart(2, '0') + '-' + match[3].padStart(2, '0'));
+    }
+    match = /^(?:送[货貨][单單](?:[号號]|[编編][号號])|[发發][货貨][单單][号號]|[单單][号號])\s*[:：]\s*((?=[A-Za-z0-9.\-/]*\d)[A-Za-z0-9][A-Za-z0-9.\-/]{3,})$/.exec(line);
+    if (match) values.deliveryNo.add(match[1]);
+    match = /^(?:供应商|供應商|Supplier)\s*[:：]\s*([^|<>{}]{2,40})$/i.exec(line);
+    if (match) values.supplier.add(match[1].trim());
+    else if (!/[:：|<>{}]|客户|客戶|收货|收貨|地址|电话|電話/.test(line) &&
+        /^[\p{L}0-9（）()· .-]{6,40}(?:公司|工厂|工廠|制品厂|製品廠|纸品厂|紙品廠)$/u.test(line)) values.supplier.add(line);
+  }
+  return Object.fromEntries(Object.entries(values).map(([key, set]) => [key, set.size === 1 ? [...set][0] : '']));
 }
 
 /* 调用视觉模型（OpenAI 兼容）做全文 OCR，再确定性解析字段 */
@@ -649,12 +675,13 @@ async function aiVisionExtract(dataUrl) {
       ] },
     ],
   };
-  async function callModel(model) {
+  async function callModel(model, signal) {
     payload.model = model;
     const resp = await fetch(AI.baseURL.replace(/\/$/, '') + '/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + AI.apiKey },
       body: JSON.stringify(payload),
+      ...(signal ? { signal } : {}),
     });
     return { status: resp.status, raw: await resp.text() };
   }
@@ -714,6 +741,26 @@ async function aiVisionExtract(dataUrl) {
     } catch (error) { console.warn('[AI] 重试响应异常：', error.name); }
   }
   const needsManualReview = fields.manualReviewRequired === true || fields.items.some(item => item.quantityNeedsReview === true);
+  /* Optional header recovery must never discard successful rows or replace their PO.
+     One bounded request; only explicit, complete document-header evidence is used. */
+  if (fields.items.length && !needRotate && !needsManualReview && (!fields.supplier || !fields.deliveryNo || !fields.date)) {
+    try {
+      payload.messages[0].content[0].text = OCR_READ_PROMPT;
+      const rh = await callModel(payload.model, AbortSignal.timeout(8000));
+      if (rh.status < 400) {
+        const hd = JSON.parse(rh.raw), choice = hd && hd.choices && hd.choices[0];
+        let hc = choice && choice.message && choice.message.content || '';
+        if (Array.isArray(hc)) hc = hc.map(c => (typeof c === 'string' ? c : (c && c.text) || '')).join('');
+        if (choice && choice.finish_reason === 'stop' && typeof hc === 'string' && !_parseGrounding(hc)) {
+          const hf = _explicitOcrHeaders(hc);
+          for (const key of ['date', 'supplier', 'deliveryNo']) if (!fields[key] && hf[key]) fields[key] = hf[key];
+        }
+      }
+    } catch (error) {
+      // Provider messages can contain request details. Do not log their text.
+      console.warn('[AI] Optional header recovery unavailable');
+    }
+  }
   return { fields, usage: data.usage || null, rawText: content, needRotate, needsManualReview };
 }
 

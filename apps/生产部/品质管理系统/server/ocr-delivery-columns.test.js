@@ -14,7 +14,7 @@ const plain=value=>JSON.parse(JSON.stringify(value));
 function runtime(responses=[]) {
   let calls=0;
   const context=vm.createContext({AI:{ready:true,baseURL:'https://synthetic.invalid/v1',apiKey:'synthetic',ocrModel:'synthetic'},
-    console:{warn(){}},setTimeout:fn=>fn(),fetch:async()=>{
+    console:{warn(){}},setTimeout:fn=>fn(),AbortSignal,fetch:async()=>{
       assert.ok(responses.length,'Unexpected additional provider call');calls++;
       return{status:200,text:async()=>JSON.stringify({choices:[{message:{content:responses.shift()}}]})};
     }});

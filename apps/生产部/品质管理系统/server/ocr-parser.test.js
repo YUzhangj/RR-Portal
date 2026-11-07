@@ -14,12 +14,12 @@ function runtime(responses = []) {
   const calls = [];
   const context = vm.createContext({
     AI: { ready: true, ocrModel: 'fixture-model', baseURL: 'https://fixture.invalid/v1', apiKey: 'fixture' },
-    console: { warn() {} }, setTimeout: callback => callback(),
+    console: { warn() {} }, setTimeout: callback => callback(), AbortSignal,
     fetch: async (_url, request) => {
       calls.push(JSON.parse(request.body));
       const response = responses.shift();
       assert.ok(response, 'Unexpected provider attempt');
-      return { status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: response } }] }) };
+      return { status: 200, text: async () => JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: response } }] }) };
     },
   });
   vm.runInContext(block + ';globalThis.actual = { parseDeliveryNote, aiVisionExtract };', context);
@@ -54,9 +54,9 @@ test('a header or metadata row without goods cannot become a headerless item', (
   ]) assert.deepEqual(parse(text).items, [], text);
 });
 test('a header-only provider response triggers another prompt instead of reporting a fake item', async () => {
-  const r = runtime(['| 订单号 | 货号 | 品名 | 数量 | 单位 |', table([goodRow])]);
+  const r = runtime(['| 订单号 | 货号 | 品名 | 数量 | 单位 |', table([goodRow]), '没有可确认的表头']);
   const result = await r.extract();
-  assert.equal(r.calls.length, 2);
+  assert.equal(r.calls.length, 3); // one table retry, then one optional header-only attempt
   assert.deepEqual(plain(result.fields.items), [item(...goodRow)]);
 });
 test('the third prompt can recover goods and retain first-pass document metadata', async () => {
@@ -143,7 +143,7 @@ test('truncated HTML rowspan does not create another goods row from its pending 
   assert.deepEqual(parse(text).items, [item('P001', '完整零件', '1000')]);
 });
 test('the production OCR prompt retains its empty-row instruction without skipping nonempty goods', async () => {
-  const r = runtime([htmlTable]);
+  const r = runtime([htmlTable, '没有可确认的表头']);
   const result = await r.extract();
   assert.match(r.calls[0].messages[0].content[0].text, /Skip fully empty table rows\./);
   assert.deepEqual(plain(result.fields.items), [item(...goodRow)]);
