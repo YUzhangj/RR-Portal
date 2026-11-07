@@ -5,7 +5,7 @@ import dayjs from 'dayjs'
 import { expect, it, vi } from 'vitest'
 import { shipmentDeclarationSaveError } from './shipmentDeclarationSaveValidation'
 import { shipmentPackingAverageQty, shipmentWeightQuantity, shipmentKgWeight } from './shipmentWeight'
-import { applyMergedShipmentEdits } from './shipmentMergedEditor'
+import { applyMergedShipmentEdits, mergedFieldEditable } from './shipmentMergedEditor'
 import { consolidateShipmentItems } from './shipmentConsolidation'
 import { shipmentSheetFields, sheetFillDownEdits } from './shipmentSheet'
 
@@ -26,7 +26,7 @@ const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve()
 function fixture() {
   const state: any = {
     Map, Set, structuredClone, dayjs, num: (value: any) => Number(value) || 0,
-    shipmentDeclarationSaveError, shipmentPackingAverageQty, shipmentWeightQuantity, shipmentKgWeight, applyMergedShipmentEdits,
+    shipmentDeclarationSaveError, shipmentPackingAverageQty, shipmentWeightQuantity, shipmentKgWeight, applyMergedShipmentEdits, mergedFieldEditable,
     editorSession: { current: 1 }, editorLoadState: { current: 'ready' }, savePending: { current: null },
     unacknowledgedSave: { current: false }, writtenMaterials: { current: new Map() },
     sheetWritePending: { current: false }, sheetEditing: false, saving: false,

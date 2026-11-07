@@ -22,7 +22,7 @@ import { formatShipmentDeclaration, isShipmentCountUnit, roundedShipmentDeclarat
 import { shipmentDeclarationSaveError } from '../utils/shipmentDeclarationSaveValidation'
 import { shipmentDateOnly, shipmentPurchaseDates } from '../utils/shipmentDates'
 import { formatShipmentPallet, shipmentOptionalNumber } from '../utils/shipmentDisplay'
-import { applyMergedShipmentEdits, mergedReadOnlyFields, type MergedEditorRow } from '../utils/shipmentMergedEditor'
+import { applyMergedShipmentEdits, mergedFieldEditable, mergedSnapshotEditable, sharedPackingReadOnlyHint, supplementSourceReadOnlyHint, type MergedEditorRow } from '../utils/shipmentMergedEditor'
 import { shipmentSheetFields, type SheetEdit } from '../utils/shipmentSheet'
 import { remainingOutboundQuantity } from '../utils/shipmentOutboundLink'
 import { linkShipmentOutboundBatches } from '../utils/shipmentOutboundBatchLink'
@@ -513,11 +513,18 @@ export default function ShipmentsPage() {
   }
   // 计算列辅助
   const num = (v: any) => Number(v) || 0
-  function calc(it: ShipmentItem) {
+  function calc(it: ShipmentItem & { sources?: ShipmentItem[] }): {
+    m: any; grossTotal: number; netTotal: number; cbmEach: number; cbmTotal: number; invoiceAmount: number; purchaseAmount: number
+  } {
     const m = it.material_id != null ? matMap.get(it.material_id) : null
     const weightQty = shipmentWeightQuantity(m?.name_zh, it.qty)
-    const grossTotal = shipmentGrossPerPc(m?.weight_per_carton, effectiveWeighingQty(it, m)) * weightQty
-    const netTotal = num(m?.net_per_pc) * weightQty
+    const sourceTotals = it.sources?.map(source => calc(source))
+    const grossTotal = sourceTotals
+      ? sourceTotals.reduce((total, source) => total + source.grossTotal, 0)
+      : shipmentGrossPerPc(m?.weight_per_carton, effectiveWeighingQty(it, m)) * weightQty
+    const netTotal = sourceTotals
+      ? sourceTotals.reduce((total, source) => total + source.netTotal, 0)
+      : num(m?.net_per_pc) * weightQty
     const cbmEach = shipmentCbmPerCarton(m?.length, m?.width, m?.height)
     const cbmTotal = cbmEach * num(it.cartons)
     const invoiceAmount = num(it.invoice_price) * num(it.kg)
@@ -1140,6 +1147,8 @@ export default function ShipmentsPage() {
     const material = item?.material_id != null ? matMap.get(item.material_id) : undefined
     if (field === 'currency') return item?.currency || '¥'
     if (field === 'material:unit_kg') return material?.unit_kg || 'KGM'
+    if (field === 'material:net_per_pc' && item?.packing_source)
+      return [...new Set(item.sources.map(source => matMap.get(source.material_id!)?.net_per_pc ?? ''))].join(' / ')
     if (field === 'kg') return shipmentOptionalNumber(item?.kg) == null ? undefined : formatShipmentDeclaration(item?.kg, material?.unit_kg)
     if (field === 'qty') return shipmentOptionalNumber(item?.qty)
     if (field === 'pallet') return formatShipmentPallet(item?.pallet)
@@ -1241,6 +1250,11 @@ export default function ShipmentsPage() {
   // 改物料主数据（单位/尺寸/毛净重）→ 更新 matMap、标脏、并按单位重算相关行的送货KG重量
   function patchMatDim(materialId: number | undefined, field: string, value: any) {
     if (materialId == null) return
+    const group = consolidatedItems.find(item => item.material_id === materialId)
+    if (group && !mergedFieldEditable(group, `material:${field}`)) {
+      message.error(['unit_kg', 'net_per_pc'].includes(field) ? supplementSourceReadOnlyHint : sharedPackingReadOnlyHint)
+      return
+    }
     if (field === 'unit_kg') {
       const row = consolidatedItems.findIndex(item => item.material_id === materialId)
       if (row >= 0) return writeMergedCells([{ row, field: 'material:unit_kg', value: String(value || 'KGM') }], false)
@@ -1302,6 +1316,8 @@ export default function ShipmentsPage() {
 
   function fillableMaterial(i: number, field: string, control: React.ReactNode) {
     const fillField = `material:${field}`
+    if (!mergedFieldEditable(consolidatedItems[i], fillField))
+      return <span title={['unit_kg', 'net_per_pc'].includes(field) ? supplementSourceReadOnlyHint : sharedPackingReadOnlyHint}>{mergedCellValue(i, fillField)}</span>
     return (
       <FillableShipmentCell
         rowIndex={i}
@@ -1315,9 +1331,9 @@ export default function ShipmentsPage() {
     )
   }
 
-  function importedHsCell(row: ShipmentItem, index: number, field: 'hs_cn' | 'hs_id') {
+  function importedHsCell(row: MergedEditorRow<ShipmentItem>, index: number, field: 'hs_cn' | 'hs_id') {
     const code = matMap.get(row.material_id!)?.[field] ?? ''
-    if (!row.material_snapshot || !(row.material_id! < 0)) return code
+    if (!mergedSnapshotEditable(row)) return <span title="含货号库物料的合并行，海关编码按原来源保留">{code}</span>
     const sheetField = `snapshot:${field}`
     return <FillableShipmentCell rowIndex={index} rowCount={consolidatedItems.length} field={sheetField} onFill={fillMaterialDown}
       onFillToEnd={(sourceIndex, sourceField) => fillMaterialDown(sourceIndex, consolidatedItems.length - 1, sourceField)}>
@@ -1558,11 +1574,14 @@ export default function ShipmentsPage() {
           {showConsolidated && <Typography.Paragraph type="secondary">
             同柜相同物料已合并，可直接在本表编辑、粘贴或向下填充。合并行的数量和重量只显示汇总，采购单号和日期保留各自来源。修改后请保存。
           </Typography.Paragraph>}
+          {consolidatedItems.some(item => item.packing_source) && <Typography.Paragraph type="secondary">
+            装箱明细与补量合并后，包装信息仅修改原装箱明细，补量保留原数量、重量和箱数。申报单位及单个净重按各来源保留，不能在汇总行统一修改。
+          </Typography.Paragraph>}
           {items.some(item => !shipmentUsesDeclarationPrice(item) && (item.purchase_charge_ratio ?? 1) < 1) && <Typography.Paragraph type="secondary">
             备品不收费：数量和重量保留实际走货（含备品），采购金额按对应采购明细的正常入库／总入库比例折算；分批及合并走货不重复计费。
           </Typography.Paragraph>}
           {items.some(item => item.material_snapshot) && <Typography.Paragraph type="secondary">
-            Excel 导入行的中国／印尼海关编码可直接编辑、粘贴或向下填充；保存后仅影响本票走货及导出，不写回货号库。
+            全部来源均为 Excel 导入行时，中国／印尼海关编码可直接编辑、粘贴或向下填充；含货号库物料的合并行保留原编码。修改仅影响本票走货及导出，不写回货号库。
           </Typography.Paragraph>}
           <Typography.Paragraph type="secondary">
             申报数量按申报单位：PCE 为实际件数，SET 为套数，KGM 为净重公斤，TNE 为净重吨数。送货数量及其数量单位单独保留；毛重、净重始终以 kg 显示。
@@ -1572,9 +1591,8 @@ export default function ShipmentsPage() {
             editableAt={(row, field) => {
               const item = consolidatedItems[row]
               const material = item?.material_id != null ? matMap.get(item.material_id) : undefined
-              return !(item?.sources.length > 1 && mergedReadOnlyFields.has(field))
+              return mergedFieldEditable(item, field)
                 && (field !== 'kg' || !isShipmentCountUnit(material?.unit_kg))
-                && (!field.startsWith('snapshot:') || (!!item?.material_snapshot && item.material_id != null && item.material_id < 0))
             }}
             onEdits={editSheetCells}
             onUndo={undoSheetEdit}
@@ -1631,7 +1649,9 @@ export default function ShipmentsPage() {
                     setEditorDirty(true)
                   }} />
               } },
-              { title: '申报单位', width: 130, render: (_v, r, i) => fillableMaterial(i, 'unit_kg', <Select size="small" value={matMap.get(r.material_id!)?.unit_kg || 'KGM'} options={UNIT_LIST.map(u => ({ value: u, label: u }))} onChange={(v) => patchMatDim(r.material_id, 'unit_kg', v)} style={{ width: '100%' }} />) },
+              { title: '申报单位', width: 130, render: (_v, r, i) => !mergedFieldEditable(r, 'material:unit_kg')
+                ? <span title={supplementSourceReadOnlyHint}>{matMap.get(r.material_id!)?.unit_kg || 'KGM'}</span>
+                : fillableMaterial(i, 'unit_kg', <Select size="small" value={matMap.get(r.material_id!)?.unit_kg || 'KGM'} options={UNIT_LIST.map(u => ({ value: u, label: u }))} onChange={(v) => patchMatDim(r.material_id, 'unit_kg', v)} style={{ width: '100%' }} />) },
               { title: '申报数量', width: 120, onCell: r => ({ style: r.sources.length > 1 || isShipmentCountUnit(matMap.get(r.material_id!)?.unit_kg) ? GRAY : undefined }), render: (_v, r, i) => r.sources.length > 1 || isShipmentCountUnit(matMap.get(r.material_id!)?.unit_kg)
                 ? <span title="按申报单位自动对应；PCE/SET 请修改送货数量">{mergedCellValue(i, 'kg')}</span>
                 : fillable(i, 'kg', <ShipmentNumberCell value={shipmentOptionalNumber(r.kg)} precision={shipmentDeclarationPrecision(matMap.get(r.material_id!)?.unit_kg)} onCommit={v => patchItem(i, 'kg', v)} />) },
@@ -1672,7 +1692,9 @@ export default function ShipmentsPage() {
               { title: '每箱重量', width: 100, render: (_v, r, i) => fillableMaterial(i, 'weight_per_carton', <InputNumber size="small" controls={false} min={0} step={0.0001} value={matMap.get(r.material_id!)?.weight_per_carton || null} onChange={(v) => patchMatDim(r.material_id, 'weight_per_carton', v ?? 0)} style={{ width: '100%' }} />) },
               { title: '称重数量', width: 100, render: (_v, r, i) => { const m = matMap.get(r.material_id!); return fillable(i, 'weighing_qty', <InputNumber size="small" controls={false} min={0} step={1} value={shipmentOptionalNumber(effectiveWeighingQty(r, m)) ?? null} onChange={(v) => patchItem(i, 'weighing_qty', v ?? 0)} style={{ width: '100%' }} />) } },
               { title: '单个毛重', width: 100, onCell: () => ({ style: GRAY }), render: (_v, r) => { const m = matMap.get(r.material_id!); return <span title="单个毛重 = 每箱重量 ÷ 称重数量">{shipmentGrossPerPc(m?.weight_per_carton, effectiveWeighingQty(r, m)).toFixed(6)}</span> } },
-              { title: '单个净重', width: 100, render: (_v, r, i) => fillableMaterial(i, 'net_per_pc', <InputNumber size="small" controls={false} min={0} step={0.000001} value={matMap.get(r.material_id!)?.net_per_pc} onChange={(v) => patchMatDim(r.material_id, 'net_per_pc', v ?? 0)} style={{ width: '100%' }} />) },
+              { title: '单个净重', width: 100, render: (_v, r, i) => !mergedFieldEditable(r, 'material:net_per_pc')
+                ? <span title={supplementSourceReadOnlyHint}>{mergedCellValue(i, 'material:net_per_pc')}</span>
+                : fillableMaterial(i, 'net_per_pc', <InputNumber size="small" controls={false} min={0} step={0.000001} value={matMap.get(r.material_id!)?.net_per_pc} onChange={(v) => patchMatDim(r.material_id, 'net_per_pc', v ?? 0)} style={{ width: '100%' }} />) },
               {
                 title: '', width: 44, fixed: 'right',
                 render: (_v, _r, i) => (
