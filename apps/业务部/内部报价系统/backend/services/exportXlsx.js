@@ -458,7 +458,7 @@ async function buildWorkbook({ quote, sections }) {
   const sewingWeightedSum = sum(sewing.sewing_groups || [], group =>
     (sum(group.items || [], item => num(item.usage) * num(item.mat_price) * (num(item.markup) || 1)) + sewLaborToAdd(group)) * sewGroupQty(group));
   const sewingTotalRmb = sewingWeightedSum / sewTotalQty(sewing);
-  // 多纸箱 + 多平卡：Σ(箱价i / qty_i + Σ平卡i_j) × 汇率
+  // 多纸箱 + 多平卡：Σ((箱价i + Σ平卡i_j) / qty_i) × 汇率
   const ccx = eng.carton_calc || {};
   const cartonListX = (ccx.cartons && ccx.cartons.length) ? ccx.cartons : (ccx.cl ? [{
     cl: ccx.cl, cw: ccx.cw, ch: ccx.ch, qty: ccx.qty,
@@ -469,7 +469,7 @@ async function buildWorkbook({ quote, sections }) {
     const boxPrice = (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * cartonRateX / 1000;
     const flatSum = (b.flat_cards || []).reduce((a, f) => a + ((num(f.l) || num(b.cl)) + 1) * ((num(f.w) || num(b.cw)) + 1) * 2 / 1000 * (f.qty == null || f.qty === '' ? 1 : num(f.qty)), 0);
     const q = Math.max(num(b.qty), 1);
-    return s + boxPrice / q + flatSum;
+    return s + (boxPrice + flatSum) / q;
   }, 0) * fxRH;
   // cost 包含 吹气/搪胶/车缝/纸箱
   const blowRmb = sum(mold.blow_items || [], r => {
@@ -2504,11 +2504,11 @@ function renderCartonAndFreight(ws, row, eng, sales, refs) {
     row += 1;
   }
 
-  // 构造九、合计纸箱成本公式：Σ(box_i / qty_i + Σflat_i_j)
+  // 构造九、合计纸箱成本公式：Σ((box_i + Σflat_i_j) / qty_i)
   if (refs && cartonRefs.length) {
     const parts = cartonRefs.map(cr => {
       const flatSum = cr.flatCells.length ? `+${cr.flatCells.join('+')}` : '';
-      return `${cr.boxCell}/MAX(${cr.qtyCell},1)${flatSum}`;
+      return `(${cr.boxCell}${flatSum})/MAX(${cr.qtyCell},1)`;
     });
     refs.cartonHkdPerPcs = parts.join('+');  // HK$/PCS （还没 × 汇率）
   }
