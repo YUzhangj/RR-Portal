@@ -372,8 +372,9 @@ function parseDeliveryNote(text, options = {}) {
       for (const row of tbl.slice(hi + 1)) {
         const cells = splitRow(row);
         if (cells.every(c => !c)) continue;   /* 空白可能是分页间隔，不能截断后续真实明细 */
+        // Only a complete repeated header is non-business text; keep partial and ambiguous rows.
+        if (cells.length === head.length && cells.every((value, index) => value.replace(/\s+/g, '') === headKeys[index])) continue;
         if (deliveryColumnsLayout) {
-          if (cells.every((value, index) => value.replace(/\s+/g, '') === headKeys[index])) continue;
           if (/^(合计|合計|总计|總計|TOTAL)(?:[：:]|$)/i.test(cells[0] || '')) continue;
           const quantity = cells[cQty] || '', unit = cells[4] || '';
           if (cells.length !== head.length || !/^\d+$/.test(cells[0]) || (!cells[2] && !cells[3]) ||
@@ -517,44 +518,10 @@ function parseDeliveryNote(text, options = {}) {
       /* 艾美斯类：序号 订单编号 货号 货品名称 单位 订单数量 交货数量 … —— 数量取「交货数量」列 */
       const orderNameUnit = /^(?:序号|序號|序|NO\.?)\s+(?:订单编号|订单号|訂單編號|訂單號)\s+(?:货号|貨號)\s+(?:货品名称|貨品名稱|品名|名称|名稱)\s+(?:单位|單位)(?:\s|$)/i.test(plainHeader);
       if (orderNameUnit) {
-        /* 逐行解析艾美斯类版式：序号 订单编号 [换行折断位] 货品名称… 单位 数量…
-           每一行都必须结构完整（有名称、有单位、有数量列）才采用；
-           任一行对不上就整张单退回人工核对（保留审查要求的兜底语义）。 */
-        const headToks2 = plainHeader.split(/\s+/);
-        const unitHeadAt = headToks2.findIndex(t => /^(单位|單位)$/.test(t));
-        const qtyHeads = unitHeadAt === -1 ? [] : headToks2.slice(unitHeadAt + 1).filter(t => /数量|數量/.test(t));
-        const deliverAt = qtyHeads.findIndex(t => /交货|交貨|送货|送貨/.test(t));
-        const pick = deliverAt !== -1 ? deliverAt : 0;
-        const numTok = /^(?:\d{1,3}(?:,\d{3})+|\d+)$/;
-        const unitTok = /^(个|個|PCS|件|套|卷|张|張|桶|KG|米|箱|包|条|條|颗|顆)$/i;
-        const rows2 = [];
-        let badRow = false;
-        for (const ln of lines.slice(hiP + 1)) {
-          const toks = ln.trim().split(/\s+/);
-          if (!ln.trim()) continue;
-          if (/^(合计|合計|总计|總計|备注|備注)/.test(ln.trim())) break;
-          if (toks.length === 1 && /^\d+$/.test(toks[0])) continue;   /* 空序号行 */
-          if (!/^\d+$/.test(toks[0])) continue;
-          let ci = 1;
-          let rowOrder = toks[ci++] || '';
-          /* 订单号换行折断（BBC2025285-0 下行剩 1）：拼回后必须符合 字母+数字-两位数字 才接受 */
-          if (/^[A-Za-z]{2,}\d{4,}-\d$/.test(rowOrder) && /^\d{1,2}$/.test(toks[ci] || '') &&
-              /^[A-Za-z]{2,}\d{4,}-\d{2}$/.test(rowOrder + toks[ci])) rowOrder += toks[ci++];
-          const unitAt2 = toks.findIndex((t, k) => k >= ci && unitTok.test(t));
-          const name2 = unitAt2 > ci ? toks.slice(ci, unitAt2).join(' ') : '';
-          const nums2 = unitAt2 === -1 ? [] : toks.slice(unitAt2 + 1).filter(t => numTok.test(t));
-          const qty2 = nums2[pick] || '';
-          if (!name2 || unitAt2 === -1 || !qty2) { badRow = true; break; }
-          rows2.push({ productNo: '', productName: name2, qty: quantityText(qty2, toks[unitAt2]), unit: toks[unitAt2], orderNo: rowOrder, _seq: toks[0] });
-        }
-        if (!badRow && rows2.length) {
-          fields.items = rows2;
-          if (rows2[0].orderNo) fields.orderNo = rows2[0].orderNo;
-        } else {
-          fields.items = [_pendingOcrItem(String(text || ''))];
-          fields.orderNo = '';
-          fields.manualReviewRequired = true;
-        }
+        /* 空白分词丢失了空货号/换行单元格的边界，不能拼接 PO 或过滤数字凑列。 */
+        fields.items = [_pendingOcrItem(String(text || ''))];
+        fields.orderNo = '';
+        fields.manualReviewRequired = true;
         return fields;
       }
       const hasOtherNumericColumns = /尺寸|重量|单价|單價|金额|金額|SIZE|WEIGHT|PRICE|AMOUNT/i.test(plainHeader);
@@ -624,94 +591,11 @@ function parseDeliveryNote(text, options = {}) {
   if (!fields.items.length && !grounding && lines.some(line => /^(Description|品名|名称|名稱|货名|貨名|ITEM)\s*$/i.test(line.trim()))) fields.columnScrambled = true;
 
   /* 分栏缺少逐行来源关联时不按数量/品名字数猜配对。保留完整原文供人工核对。 */
-  /* 分栏输出配对（显达硅胶类：Description 品名块 + Qty 数量块，横拍照片常触发）：
-     仅当品名行数与数量行数完全一致才按顺序配对；数量对不上就交回人工核对兜底。 */
-  if (!fields.items.length) {
-    const UNIT_RE = '(?:PCS|pcs|个|件|套|卷|张|張|桶|KG|kg|米|箱|包|条|條|颗|顆)';
-    const isQtyLine = l => {
-      const t = l.trim();
-      return new RegExp('^\\d{1,3}(?:[,\\.]\\d{3})+\\s*' + UNIT_RE + '?$').test(t)
-          || new RegExp('^\\d{2,}\\s+' + UNIT_RE + '$').test(t);
-    };
-    const hiD = lines.findIndex(l => /^\s*(Description|DESCRIPTION|品名|名称|名稱|货名|貨名|ITEM)\s*$/i.test(l));
-    let hiQ = hiD === -1 ? -1 : lines.findIndex((l, idx) => idx > hiD && /^\s*(Qty|QTY|Quantity|数量|數量)\s*[.:：]?\s*$/i.test(l));
-    let qtyFrom = -1;
-    if (hiQ !== -1) {
-      qtyFrom = hiQ + 1;
-    } else if (hiD !== -1) {
-      /* 横拍/旋转图：模型常把 Qty 表头丢掉，数量块裸奔在品名块后面——找第一段连续数量行 */
-      for (let i = hiD + 1; i < lines.length; i++) {
-        if (isQtyLine(lines[i])) { qtyFrom = i; break; }
-      }
-    }
-    if (hiD !== -1 && qtyFrom !== -1) {
-      const qtys = [];
-      for (const ln of lines.slice(qtyFrom)) {
-        if (isQtyLine(ln)) qtys.push(ln.trim());
-        else if (qtys.length || ln.trim()) break;   /* 数量块必须连续 */
-      }
-      /* 品名块：跳过 PO 行（顺便抓订单号）和 #编号/纯编码行 */
-      const block = lines.slice(hiD + 1, qtyFrom);
-      for (const ln of block) {
-        const po = ln.match(/P\s*\/?\s*O\s*(?:NO|No|no)\.?\s*[:#]?\s*([A-Za-z]{1,4}[A-Za-z0-9\-]{4,})/);
-        if (po && !fields.orderNo) fields.orderNo = po[1];
-      }
-      const cjkCount = s => (s.match(/[一-鿿]/g) || []).length;
-      let names = block.map(l => l.trim())
-        .filter(t => t && !/P\s*\/?\s*O/i.test(t) && !/^[#＃]?[A-Za-z0-9][A-Za-z0-9\-]*$/.test(t) && cjkCount(t) >= 2);
-      if (names.length !== qtys.length) {
-        const stricter = names.filter(t => cjkCount(t) >= 3);   /* 合并单元格碎片（如「鸭子」）再过滤一轮 */
-        if (stricter.length === qtys.length) names = stricter;
-      }
-      if (qtys.length && names.length === qtys.length) {
-        names.forEach((name, i) => {
-          const qm = qtys[i].match(/^(\d{1,3}(?:[,\.]\d{3})+|\d+)\s*(.*)$/);
-          fields.items.push({ productNo: '', productName: name, qty: quantityText(qm ? qm[1] : '', (qm && qm[2]) || ''), unit: (qm && qm[2]) || '' });
-        });
-      }
-    }
-  }
-
   if (!fields.items.length && (grounding || lines.some(line => /^(Description|品名|名称|名稱|货名|貨名|ITEM)\s*$/i.test(line.trim())))) {
     if (rawText.trim()) {
       fields.items.push(_pendingOcrItem(rawText));
       fields.orderNo = '';   /* 未建立逐行关联，不能让首个 PO 成为整块原文的采购来源。 */
     }
-  }
-
-  /* 破行/列错位垃圾行清理（宏福单实测：HTML 破行会产生 货号=PCS、订单号=数量 的假行）：
-     1. 货号位置是单位词（PCS/个/件…）——必是列错位
-     2. 订单号是纯数字且等于本行数量——抓错了列，清空避免脏 PO 进表单
-     3. 无数量且品名是公司名/标题/表尾词——页眉页脚误识别 */
-  const UNIT_WORD = /^(PCS|pcs|个|個|件|套|卷|张|張|桶|KG|kg|米|箱|包|条|條|颗|顆)$/;
-  fields.items = fields.items.filter(it => !UNIT_WORD.test(String(it.productNo || '').trim()));
-  fields.items.forEach(it => {
-    if (it.orderNo && /^\d+$/.test(it.orderNo) && String(it.orderNo) === String(it.qty || '').replace(/,/g, '')) it.orderNo = '';
-  });
-  fields.items = fields.items.filter(it => {
-    if (it.qty) return true;
-    if (String(it.productName || '').startsWith('待核对')) return true;   /* 人工核对行保留 */
-    const n = String(it.productName || '');
-    if (!/[一-鿿]/.test(n)) return false;
-    if (/公司|有限|DELIVERY|送货单|送貨單|NOTE/i.test(n)) return false;
-    return true;
-  });
-
-  /* 同名同量重复行（模型复读/破行重组）：保留订单号有效的那条，有序号的真实重复行不动 */
-  {
-    const normN = n => String(n || '').replace(/\s+/g, '');
-    const validOrder = o => /[A-Za-z]/.test(o || '') && /\d/.test(o || '');
-    const byKey = new Map();
-    for (const it of fields.items) {
-      if (it._seq || !it.productName || !it.qty) continue;
-      const k = [normN(it.productName), String(it.qty), String(it.unit || '')].join('|');
-      if (!byKey.has(k)) { byKey.set(k, it); continue; }
-      const kept = byKey.get(k);
-      if (!validOrder(kept.orderNo) && validOrder(it.orderNo)) { kept.__dupDrop = true; byKey.set(k, it); }
-      else it.__dupDrop = true;
-    }
-    fields.items = fields.items.filter(it => !it.__dupDrop);
-    fields.items.forEach(it => { delete it.__dupDrop; });
   }
 
   /* 模型偶发「复读」：把同一行明细输出多次，甚至整份单据重复 N 遍。
@@ -730,7 +614,7 @@ function parseDeliveryNote(text, options = {}) {
     const seenLoose = new Set();
     fields.items = fields.items.filter(it => {
       if (!it.productName || !it.qty) return true;   /* 信息不全的行不参与合并 */
-      const k = [it._seq || '', it.orderNo || '', normName(it.productName), it.qty, it.unit].join('|');
+      const k = [it._seq || '', it.orderNo || '', it.productNo || '', normName(it.productName), it.qty, it.unit].join('|');
       if (seenLoose.has(k)) return false;
       seenLoose.add(k); return true;
     });
@@ -746,6 +630,31 @@ function parseDeliveryNote(text, options = {}) {
   }
   fields.items.forEach(it => { delete it._seq; });
   return fields;
+}
+
+/* Secondary OCR is not a second goods parser. Read only explicit header lines
+   before the table; conflicting labels remain empty for the user to confirm. */
+function _explicitOcrHeaders(content) {
+  const values = { date: new Set(), supplier: new Set(), deliveryNo: new Set() };
+  for (const raw of content.split('\n').slice(0, 16)) {
+    const line = raw.trim().replace(/^#+\s*/, '').replace(/\*\*/g, '');
+    if (/^[|{\[]|<table\b|\\begin\{/i.test(line) ||
+        /^(?:品名|货名|貨名|名称|名稱|货品名称|貨品名稱|Description|ITEM|Qty|Quantity|数量|數量)\s*[.:：]?$/i.test(line) ||
+        /品名|货名|貨名|名称|名稱|Description|ITEM/i.test(line) && /数量|數量|QTY/i.test(line)) break;
+    let match = /^(?:日期|送[货貨]日期|DATE)\s*[:：]\s*(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$/i.exec(line);
+    if (match) {
+      const y = Number(match[1]), m = Number(match[2]), d = Number(match[3]), dt = new Date(Date.UTC(y, m - 1, d));
+      if (dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d)
+        values.date.add(match[1] + '-' + match[2].padStart(2, '0') + '-' + match[3].padStart(2, '0'));
+    }
+    match = /^(?:送[货貨][单單](?:[号號]|[编編][号號])|[发發][货貨][单單][号號]|[单單][号號])\s*[:：]\s*((?=[A-Za-z0-9.\-/]*\d)[A-Za-z0-9][A-Za-z0-9.\-/]{3,})$/.exec(line);
+    if (match) values.deliveryNo.add(match[1]);
+    match = /^(?:供应商|供應商|Supplier)\s*[:：]\s*([^|<>{}]{2,40})$/i.exec(line);
+    if (match) values.supplier.add(match[1].trim());
+    else if (!/[:：|<>{}]|客户|客戶|收货|收貨|地址|电话|電話/.test(line) &&
+        /^[\p{L}0-9（）()· .-]{6,40}(?:公司|工厂|工廠|制品厂|製品廠|纸品厂|紙品廠)$/u.test(line)) values.supplier.add(line);
+  }
+  return Object.fromEntries(Object.entries(values).map(([key, set]) => [key, set.size === 1 ? [...set][0] : '']));
 }
 
 /* 调用视觉模型（OpenAI 兼容）做全文 OCR，再确定性解析字段 */
@@ -766,12 +675,13 @@ async function aiVisionExtract(dataUrl) {
       ] },
     ],
   };
-  async function callModel(model) {
+  async function callModel(model, signal) {
     payload.model = model;
     const resp = await fetch(AI.baseURL.replace(/\/$/, '') + '/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + AI.apiKey },
       body: JSON.stringify(payload),
+      ...(signal ? { signal } : {}),
     });
     return { status: resp.status, raw: await resp.text() };
   }
@@ -831,23 +741,24 @@ async function aiVisionExtract(dataUrl) {
     } catch (error) { console.warn('[AI] 重试响应异常：', error.name); }
   }
   const needsManualReview = fields.manualReviewRequired === true || fields.items.some(item => item.quantityNeedsReview === true);
-  /* 表格直达输出常把表头（公司名/日期/单号）丢掉：明细已有时补一次全文识别，只取缺的表头字段 */
+  /* Optional header recovery must never discard successful rows or replace their PO.
+     One bounded request; only explicit, complete document-header evidence is used. */
   if (fields.items.length && !needRotate && !needsManualReview && (!fields.supplier || !fields.deliveryNo || !fields.date)) {
-    console.warn('[AI] 明细已解析但表头缺字段，补一次全文识别取表头');
-    payload.messages[0].content[0].text = OCR_READ_PROMPT;
-    let rh = await callModel(payload.model);
-    for (let i = 0; i < 3 && isDenied(rh); i++) { await sleep(1500); rh = await callModel(payload.model); }
-    if (rh.status < 400) {
-      try {
-        const hd = JSON.parse(rh.raw);
-        let hc = hd && hd.choices && hd.choices[0] && hd.choices[0].message && hd.choices[0].message.content || '';
+    try {
+      payload.messages[0].content[0].text = OCR_READ_PROMPT;
+      const rh = await callModel(payload.model, AbortSignal.timeout(8000));
+      if (rh.status < 400) {
+        const hd = JSON.parse(rh.raw), choice = hd && hd.choices && hd.choices[0];
+        let hc = choice && choice.message && choice.message.content || '';
         if (Array.isArray(hc)) hc = hc.map(c => (typeof c === 'string' ? c : (c && c.text) || '')).join('');
-        const hf = parseDeliveryNote(String(hc));
-        if (!fields.date && hf.date) fields.date = hf.date;
-        if (!fields.supplier && hf.supplier) fields.supplier = hf.supplier;
-        if (!fields.deliveryNo && hf.deliveryNo) fields.deliveryNo = hf.deliveryNo;
-        if (!fields.orderNo && hf.orderNo) fields.orderNo = hf.orderNo;
-      } catch (e) { console.warn('[AI] 表头补识别异常：', e.message); }
+        if (choice && choice.finish_reason === 'stop' && typeof hc === 'string' && !_parseGrounding(hc)) {
+          const hf = _explicitOcrHeaders(hc);
+          for (const key of ['date', 'supplier', 'deliveryNo']) if (!fields[key] && hf[key]) fields[key] = hf[key];
+        }
+      }
+    } catch (error) {
+      // Provider messages can contain request details. Do not log their text.
+      console.warn('[AI] Optional header recovery unavailable');
     }
   }
   return { fields, usage: data.usage || null, rawText: content, needRotate, needsManualReview };

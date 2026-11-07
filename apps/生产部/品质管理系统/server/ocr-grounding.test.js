@@ -14,12 +14,12 @@ function runtime(responses = []) {
   const calls = [];
   const ctx = vm.createContext({
     AI: { ready: true, baseURL: 'https://fixture.invalid/v1', apiKey: 'fixture', ocrModel: 'fixture-model' },
-    console: { warn() {} }, setTimeout: fn => fn(),
+    console: { warn() {} }, setTimeout: fn => fn(), AbortSignal,
     fetch: async (_url, request) => {
       calls.push(JSON.parse(request.body));
       assert(responses.length, 'Unexpected extra provider call');
       const response = responses.shift();
-      const data = typeof response === 'string' ? { choices: [{ message: { content: response } }] } : response;
+      const data = typeof response === 'string' ? { choices: [{ finish_reason: 'stop', message: { content: response } }] } : response;
       return { status: 200, text: async () => JSON.stringify(data) };
     },
   });
@@ -125,8 +125,8 @@ test('complete upright grounding without explicit goods rows is preserved for ma
 });
 
 test('only truly empty results retry; a successful table preserves metadata and stops at the bounded attempt', async () => {
-  const r=runtime(['供应商：合成公司\n日期：2026-11-03\n没有货品行', '没有明细', goods]);
-  const result=await r.extract();assert.equal(r.calls.length,3);assert.equal(result.fields.items[0].qty,'100');
+  const r=runtime(['供应商：合成公司\n日期：2026-11-03\n没有货品行', '没有明细', goods, '没有可确认的表头']);
+  const result=await r.extract();assert.equal(r.calls.length,4);assert.equal(result.fields.items[0].qty,'100');
   assert.equal(result.fields.date,'2026-11-03');assert.equal(result.needsManualReview,false);assert.equal(result.rawText,goods);
 });
 
