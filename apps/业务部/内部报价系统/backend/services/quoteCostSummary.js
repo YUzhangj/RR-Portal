@@ -155,7 +155,7 @@ function calculateSingleQuoteCosts(quote, sections, options = {}) {
   const cartonHkd = cartons.reduce((total, box) => {
     const boxPrice = (num(box.cl) + num(box.cw) + 2) * (num(box.cw) + num(box.ch) + 1) * 2 * paperRate / 1000;
     const flatCards = sum(box.flat_cards, card => ((num(card.l) || num(box.cl)) + 1) * ((num(card.w) || num(box.cw)) + 1) * 2 / 1000 * (hasValue(card, 'qty') ? num(card.qty) : 1));
-    return total + boxPrice / Math.max(num(box.qty), 1) + flatCards;
+    return total + (boxPrice + flatCards) / Math.max(num(box.qty), 1);
   }, 0);
 
   const indoFreight = (hardwareTotal + auxiliaryTotal + packagingTotal) * num(eng.indo_pct) / 100

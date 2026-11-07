@@ -240,7 +240,7 @@ test('carton product dimensions are labeled in inches', async () => {
   assert.ok(summaryHeaderRow > 0);
   assert.equal(
     worksheet.getCell(summaryHeaderRow + 1, 10).value.formula,
-    `(F${titleRow + 3}/MAX(G${titleRow + 3},1)+F${titleRow + 4})`,
+    `((F${titleRow + 3}+F${titleRow + 4})/MAX(G${titleRow + 3},1))`,
   );
   const workbenchSource = fs.readFileSync(path.join(__dirname, '../frontend/workbench.js'), 'utf8');
   assert.match(workbenchSource, /data-formula-flat-qty/);

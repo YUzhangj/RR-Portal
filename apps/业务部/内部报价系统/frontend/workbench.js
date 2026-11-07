@@ -2469,7 +2469,7 @@ function renderSummaryPane(host, sections, quote, me) {
   // 车发使用同一总用量分母，保证车衣 = 配套合计 − 车发。
   const sewingHairRmb = sum((sewing.sewing_groups || []).filter(g => g.category === '车发'), group => sewingGroupAmount(group) * sewGroupQty(group)) / sewTotalQty;
   const sewingClothRmb = sewingTotalRmb - sewingHairRmb;
-  // 多纸箱 + 多平卡：Σ(箱价i / qty_i + Σ平卡价i_j) × 汇率
+  // 多纸箱 + 多平卡：Σ((箱价i + Σ平卡价i_j) / qty_i) × 汇率
   const ccc = eng.carton_calc || {};
   const cartonList = (ccc.cartons && ccc.cartons.length) ? ccc.cartons : (ccc.cl ? [{
     cl: ccc.cl, cw: ccc.cw, ch: ccc.ch, qty: ccc.qty,
@@ -2482,7 +2482,7 @@ function renderSummaryPane(host, sections, quote, me) {
     const boxPrice = (num(b.cl) + num(b.cw) + 2) * (num(b.cw) + num(b.ch) + 1) * 2 * cartonRate / 1000;
     const flatSum = (b.flat_cards || []).reduce((a, f) => a + ((num(f.l) || num(b.cl)) + 1) * ((num(f.w) || num(b.cw)) + 1) * 2 / 1000 * (f.qty == null || f.qty === '' ? 1 : num(f.qty)), 0);
     const q = Math.max(num(b.qty), 1);
-    return s + boxPrice / q + flatSum;
+    return s + (boxPrice + flatSum) / q;
   }, 0) * fxRH;
 
   // 附加税：历史版本为手填并存到 sales.pricing_summary.surtax；现与导出统一为 0.4% 模型
@@ -3354,7 +3354,7 @@ function engineeringCartonDetails(c) {
       ka_label:box.ka_label || c.ka_label,unit:cartonBoxPrice(box,rate),amount:cartonBoxPrice(box,rate)/Math.max(num(box.qty),1)},
     ...(box.flat_cards || []).map((card,i) => ({type:'平卡',name:card.name || `平卡 ${i + 1}`,parent:box.name || `纸箱 ${index + 1}`,
       l:num(card.l)||num(box.cl),w:num(card.w)||num(box.cw),h:'',qty:card.qty ?? 1,rate:'',ka_label:'',
-      unit:cartonFlatPrice({...card,qty:1},box),amount:cartonFlatPrice(card,box)}))
+      unit:cartonFlatPrice({...card,qty:1},box),amount:cartonFlatPrice(card,box)/Math.max(num(box.qty),1)}))
   ]);
 }
 function renderCartonCalc(host, c, canEdit, onChange) {
