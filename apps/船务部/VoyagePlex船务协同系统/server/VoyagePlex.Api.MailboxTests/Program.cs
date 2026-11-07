@@ -585,6 +585,50 @@ await Test("retry cancellation propagates without writes and releases shared syn
     cancel = false; await f.Retry(2, ids);
 });
 
+await Test("retry rejects missing inactive or non-admin actors before parser access", async () =>
+{
+    var retryCalls = 0;
+    await using var f = await Fixture.Create((p, _) =>
+    {
+        if (p.ContainsKey("selected_uids")) retryCalls++;
+        return Task.FromResult(Reply(p, Item(11, failed: true)));
+    });
+    await f.Sync(2); var ids = await f.ItemIds(); var before = await f.Snapshot();
+    foreach (var actor in new long[] { 0, 999, 2 })
+    {
+        try { await f.Service.RetryFailedAsync(ids, actor, CancellationToken.None, "Huadeng", 2); throw new Exception("Unauthorized retry accepted"); }
+        catch (MailboxRetryRejectedException error) { Require(error.StatusCode == 403, "Incorrect authorization status"); }
+    }
+    await f.Read(db => db.Database.ExecuteSqlRawAsync("UPDATE Users SET IsActive=0 WHERE Id=1"));
+    try { await f.Retry(2, ids); throw new Exception("Inactive retry accepted"); }
+    catch (MailboxRetryRejectedException error) { Require(error.StatusCode == 403, "Incorrect inactive status"); }
+    Require(retryCalls == 0 && await f.Snapshot() == before, "Denied actor contacted parser or changed mailbox data");
+});
+
+await Test("queued retry rechecks actor after acquiring shared synchronization lock", async () =>
+{
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var retryCalls = 0;
+    await using var f = await Fixture.Create(async (p, _) =>
+    {
+        if (!p.ContainsKey("selected_uids")) return Reply(p, Item(11, failed: true));
+        retryCalls++; entered.SetResult(); await release.Task;
+        return Reply(p, Item(11));
+    });
+    await f.Sync(2); await f.Sync(3);
+    await f.Read(async db => { db.Users.Add(new() { Id = 4, Username = "queued-admin", Role = "admin", IsActive = true }); await db.SaveChangesAsync(); });
+    var first = f.Retry(2, await f.ItemIds(2)); await entered.Task;
+    var queued = f.Service.RetryFailedAsync(await f.ItemIds(3), 4, CancellationToken.None, "Huadeng", 3);
+    Require(!queued.IsCompleted, "Second retry did not wait on shared lock");
+    await f.Read(db => db.Database.ExecuteSqlRawAsync("UPDATE Users SET Role='shipping' WHERE Id=4"));
+    release.SetResult(); await first;
+    try { await queued; throw new Exception("Revoked queued retry accepted"); }
+    catch (MailboxRetryRejectedException error) { Require(error.StatusCode == 403, "Incorrect queued authorization status"); }
+    Require(retryCalls == 1, "Revoked queued actor contacted parser");
+    await f.Read(async db => Require((await db.ImportEmailItems.IgnoreQueryFilters().SingleAsync(x => x.MailOwnerId == 3)).Status == "failed", "Queued mailbox was modified"));
+});
+
 Console.WriteLine($"Mailbox service regression tests passed: {passed}");
 
 sealed class StubHandler(Func<JsonObject, CancellationToken, Task<HttpResponseMessage>> handler) : HttpMessageHandler
@@ -623,6 +667,7 @@ sealed class Fixture : IAsyncDisposable
         {
             await db.Database.EnsureCreatedAsync();
             db.MailSystemSettings.Add(new() { Id = 1, SyncEnabled = false, StartDate = "2026-10-08" });
+            db.Users.Add(new() { Id = 1, Username = "retry-admin", Role = "admin", IsActive = true });
             foreach (var id in new[] { 2, 3, 5, 6 })
             {
                 db.Users.Add(new() { Id = id, Username = $"owner{id}", MailboxAddress = $"owner{id}@example.com", CompanyAccess = "Huadeng", Role = "shipping" });
@@ -633,7 +678,7 @@ sealed class Fixture : IAsyncDisposable
         return fixture;
     }
     public Task<object> Sync(long owner, CancellationToken cancellation = default) => Service.SyncAsync(cancellation, "Huadeng", owner);
-    public Task<object> Retry(long owner, long[] ids, CancellationToken cancellation = default) => Service.RetryFailedAsync(ids, cancellation, "Huadeng", owner);
+    public Task<object> Retry(long owner, long[] ids, CancellationToken cancellation = default) => Service.RetryFailedAsync(ids, 1, cancellation, "Huadeng", owner);
     public async Task<long[]> ItemIds(long? owner = null)
     {
         long[] result = [];
