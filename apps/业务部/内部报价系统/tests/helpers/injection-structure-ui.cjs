@@ -42,6 +42,7 @@ module.exports.pricing = function pricingUi(payload) {
     num: value => Number(value) || 0, onChange() {}, refMolds: [], engineeringImagesForInjection: () => [] });
   vm.runInContext(source.slice(source.indexOf('function renderTable('), source.indexOf('// 辅助/包装材料 类别')), context);
   vm.runInContext(source.slice(source.indexOf('function formatNum('), source.indexOf('function legacyFormulaAmount(')), context);
+  vm.runInContext(source.slice(source.indexOf('function engineeringTargetForInjection('), source.indexOf('// 仅补齐明确自动行')), context);
   const start = source.indexOf('function renderMolding('), pricing = source.indexOf('  const shotRefreshers =', start);
   const columns = source.indexOf('  const cols = [', start);
   vm.runInContext(source.slice(pricing, source.indexOf("  renderTable(host.querySelector('#wb-material-prices')", pricing)) +
