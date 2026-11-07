@@ -513,11 +513,18 @@ export default function ShipmentsPage() {
   }
   // 计算列辅助
   const num = (v: any) => Number(v) || 0
-  function calc(it: ShipmentItem) {
+  function calc(it: ShipmentItem & { sources?: ShipmentItem[] }): {
+    m: any; grossTotal: number; netTotal: number; cbmEach: number; cbmTotal: number; invoiceAmount: number; purchaseAmount: number
+  } {
     const m = it.material_id != null ? matMap.get(it.material_id) : null
     const weightQty = shipmentWeightQuantity(m?.name_zh, it.qty)
-    const grossTotal = shipmentGrossPerPc(m?.weight_per_carton, effectiveWeighingQty(it, m)) * weightQty
-    const netTotal = num(m?.net_per_pc) * weightQty
+    const sourceTotals = it.sources?.map(source => calc(source))
+    const grossTotal = sourceTotals
+      ? sourceTotals.reduce((total, source) => total + source.grossTotal, 0)
+      : shipmentGrossPerPc(m?.weight_per_carton, effectiveWeighingQty(it, m)) * weightQty
+    const netTotal = sourceTotals
+      ? sourceTotals.reduce((total, source) => total + source.netTotal, 0)
+      : num(m?.net_per_pc) * weightQty
     const cbmEach = shipmentCbmPerCarton(m?.length, m?.width, m?.height)
     const cbmTotal = cbmEach * num(it.cartons)
     const invoiceAmount = num(it.invoice_price) * num(it.kg)
