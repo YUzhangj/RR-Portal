@@ -12,8 +12,8 @@ type BatchItem = CustomsItem & { outbound_id?: number; carton_no?: string; mater
 // Call once for a single shipment/container, not across a list of shipments.
 export function consolidateShipmentItems<T extends BatchItem>(
   items: readonly T[], materials: ReadonlyMap<number, Material>, fallback?: string,
-): Array<T & { sources: T[]; outbound_ids: number[]; purchase_charge_ratio?: number }> {
-  const groups = new Map<string, T & { sources: T[]; outbound_ids: number[]; purchase_charge_ratio?: number }>()
+): Array<T & { sources: T[]; outbound_ids: number[]; purchase_charge_ratio?: number; packing_source?: T }> {
+  const groups = new Map<string, T & { sources: T[]; outbound_ids: number[]; purchase_charge_ratio?: number; packing_source?: T }>()
   const text = (value: unknown) => String(value ?? '').trim()
   const sum = (...values: unknown[]) => {
     const numbers = values.map(value => Number(value) || 0)
@@ -27,9 +27,56 @@ export function consolidateShipmentItems<T extends BatchItem>(
     }
     return Number(numbers.reduce((a, b) => a + b, 0).toPrecision(15))
   }
+  // Supplementary allocations from the same outbound can have no packing
+  // data. Attach them only to one unambiguous packed row of that material.
+  const ordered = sortShipmentItems(items, materials, fallback)
+  const supplementKey = (item: T) => {
+    const material = materials.get(item.material_id!)
+    const snapshot = item.material_snapshot as Material | undefined
+    const identity = snapshot?.id ?? item.material_id
+    if (!material || !(Number(identity) > 0) || !(Number(item.outbound_id) > 0)
+      || !(Number(item.qty) > 0) || !(Number(item.kg) > 0)
+      || !Number.isFinite(Number(item.qty)) || !Number.isFinite(Number(item.kg))
+      || snapshot && (snapshot.id !== material.id || !text(snapshot.name_zh) || text(snapshot.name_zh) !== text(material.name_zh)))
+      return null
+    return JSON.stringify([identity, item.outbound_id,
+      text(item.supplier || material.supplier), effectiveCustomsCompany(item, material, fallback), invoiceCustomsCompany(item, material),
+      ...['name_zh', 'product_code', 'related_product_code', 'spec', 'category', 'hs_cn', 'hs_id', 'tool_kind'].map(field => material[field as keyof Material] ?? ''),
+      ...(['hs_cn', 'hs_id'] as const).map(field => snapshot
+        ? material.shipment_hs_product_fallback === true && material[field] == null : !material[field]),
+      text(material.unit_kg || 'KGM'), text(item.purchase_unit || (isPaperRope(material.name_zh) ? '米' : '个')),
+      text(item.currency || '¥'), text(item.contract_no), text(item.contract_date),
+      text(item.invoice_no), text(item.invoice_date), text(item.formula_name || material.name_zh),
+    ])
+  }
+  const packedByKey = new Map<string, T[]>()
+  for (const item of ordered) {
+    const key = supplementKey(item)
+    const packing = parseShipmentPacking(item.qty_per_carton)
+    if (!key || !(Number(item.cartons) > 0) || item.carton_group
+      || (item.material_snapshot as Material | undefined)?.shipment_outbound_link_group
+      || !['uniform', 'ranges'].includes(packing.mode)) continue
+    packedByKey.set(key, [...(packedByKey.get(key) || []), item])
+  }
+  const supplementOwners = new Map<T, T>()
+  for (const item of ordered) {
+    const material = materials.get(item.material_id!)
+    if (Number(item.cartons) || item.carton_group || text(item.pallet) || text(item.carton_no)
+      || (item.material_snapshot as Material | undefined)?.shipment_outbound_link_group
+      || parseShipmentPacking(item.qty_per_carton).mode !== 'empty'
+      || ['length', 'width', 'height', 'weight_per_carton'].some(field => Number(material?.[field as keyof Material])))
+      continue
+    const key = supplementKey(item)
+    const candidates = key ? (packedByKey.get(key) || []).filter(packed =>
+      ['bl_head', 'product_use'].every(field => !text(item[field as keyof T])
+        || text(item[field as keyof T]) === text(packed[field as keyof T]))) : []
+    if (candidates.length !== 1) continue
+    supplementOwners.set(item, candidates[0])
+    supplementOwners.set(candidates[0], candidates[0])
+  }
   // Sort before choosing the surviving position: shared-carton ordering also
   // determines which contract owns a company's final-line surcharge.
-  sortShipmentItems(items, materials, fallback).forEach((item, index) => {
+  ordered.forEach((item, index) => {
     const material = materials.get(item.material_id!)
     const snapshot = item.material_snapshot as Material | undefined
     const identity = snapshot ? snapshot.id : item.material_id
@@ -44,12 +91,13 @@ export function consolidateShipmentItems<T extends BatchItem>(
       && Number.isFinite(Number(item.kg)) && (Number(item.kg) > 0 || (linkedPacking && Number(item.kg) === 0))
       && Number.isFinite(Number(item.qty)) && Number(item.qty) > 0
       && (!snapshot || confirmedSnapshot) && (['uniform', 'empty'].includes(packing.mode) || (linkedPacking && packing.mode === 'ranges'))
-    const key = eligible ? JSON.stringify([
+    const owner = supplementOwners.get(item)
+    const key = owner ? JSON.stringify(['supplement', ordered.indexOf(owner)]) : eligible ? JSON.stringify([
       identity, text(item.supplier || material?.supplier),
       linkedPacking ? [snapshot.shipment_outbound_link_group, text(item.qty_per_carton)] : null,
-      // Confirmed local snapshots may use different negative editor keys. Merge
-      // only when their actual declaration/packing attributes are identical.
-      ...['name_zh', 'name_en', 'product_code', 'related_product_code', 'spec', 'category', 'hs_cn', 'hs_id',
+      // Confirmed local snapshots may use different translations for the same
+      // material ID. Declaration and packing attributes still define boundaries.
+      ...['name_zh', 'product_code', 'related_product_code', 'spec', 'category', 'hs_cn', 'hs_id',
         'tool_kind', 'length', 'width', 'height', 'weight_per_carton', 'gross_per_pc', 'net_per_pc'].map(field => material?.[field as keyof Material] ?? ''),
       // Blank imported HS is an explicit declaration, while ordinary rows can
       // inherit product HS. Those different semantics must never collapse.
@@ -67,7 +115,12 @@ export function consolidateShipmentItems<T extends BatchItem>(
     ]) : JSON.stringify(['single', index])
     const group = groups.get(key)
     if (!group) {
-      groups.set(key, { ...item, sources: [item], outbound_ids: item.outbound_id ? [item.outbound_id] : [] })
+      groups.set(key, { ...(owner || item), qty: item.qty, kg: item.kg, cartons: item.cartons,
+        price: item.price, purchase_charge_ratio: item.purchase_charge_ratio,
+        sources: [item], outbound_ids: item.outbound_id ? [item.outbound_id] : [],
+        // Display-only owner: editing packing must not give an unboxed
+        // supplementary allocation new cartons or modify its material master.
+        ...(owner ? { packing_source: owner } : {}) })
       return
     }
     group.sources.push(item)

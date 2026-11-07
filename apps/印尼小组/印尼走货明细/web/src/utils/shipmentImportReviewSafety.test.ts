@@ -6,6 +6,8 @@ import { DOMParser } from '@xmldom/xmldom'
 import { applyShipmentImport } from './shipmentImportApply'
 import { consolidateShipmentItems } from './shipmentConsolidation'
 import { buildCustomsWorkbook } from './customsExport'
+import { shipmentPurchaseAmount } from './shipmentPurchase'
+import { applyMergedShipmentEdits } from './shipmentMergedEditor'
 import { applyShipmentSheetEdits } from './shipmentSheet'
 import type { Material } from '../api/client'
 import { importShipmentFile, matchShipmentMaterial, parseShipmentWorkbook, planShipmentImport } from './shipmentImport'
@@ -194,3 +196,85 @@ it.each([
   expect(next.weighing_qty).toBe(expectedWeighing)
   expect(next.material_snapshot!.weight_per_carton).toBe(expectedWeight)
 })
+
+
+it('confirmed imported and ordinary allocations of OUT-132 merge despite different English translations', async () => {
+  const master = { ...material, id: 989, product_code: '97282/1099227/6077460',
+    name_zh: '10寸阿奇CDU', name_en: '10-inch Archie tray', unit_kg: 'KGM',
+    hs_cn: '4819100000', hs_id: '48192000', net_per_pc: .1493 }
+  const snapshot = { ...master, name_en: '10-inch Archie CDU', image: 'imported-picture' }
+  const rows = [
+    { ...old, _rowKey: 11, material_id: -11, outbound_id: 132, qty: 1000, kg: 149.3,
+      material_snapshot: snapshot, cartons: 10, pallet: '' },
+    { ...old, _rowKey: 19, material_id: 989, outbound_id: 132, qty: 10, kg: 1.51, cartons: 1, pallet: '' },
+  ]
+  const before = structuredClone(rows)
+  const map = new Map([[989, master], [-11, snapshot]])
+  const merged = consolidateShipmentItems(rows, map)
+  expect(merged).toHaveLength(1)
+  expect(merged[0]).toMatchObject({ qty: 1010, kg: 150.81, cartons: 11, outbound_ids: [132] })
+  expect(shipmentPurchaseAmount(merged[0])).toBe(rows.reduce((sum, row) => sum + shipmentPurchaseAmount(row), 0))
+  expect(merged[0].sources).toEqual(before)
+  const edited = applyMergedShipmentEdits(rows, map, merged, [{ row: 0, field: 'pallet', value: '1-2/1卡' }])
+  expect(edited.items.map(row => [row.outbound_id, row.qty, row.kg, row.pallet]))
+    .toEqual([[132, 1000, 149.3, '1-2/1卡'], [132, 10, 1.51, '1-2/1卡']])
+  expect(rows).toEqual(before)
+  const reloaded = JSON.parse(JSON.stringify(edited.items))
+  expect(consolidateShipmentItems(reloaded, edited.materials)).toHaveLength(1)
+  const differentHs = new Map(map).set(-11, { ...snapshot, hs_id: '00123456' })
+  expect(consolidateShipmentItems(rows, differentHs)).toHaveLength(2)
+  const templateBuffer = Uint8Array.from(readFileSync(new URL('../../public/template-customs-rrm.xlsx', import.meta.url))).buffer
+  const blob = await buildCustomsWorkbook({ templateBuffer, items: edited.items, materials: edited.materials,
+    productHs: new Map(), images: new Map(), form: { customer: 'RRM', containerNo: 'OUT132-MERGE', rate: 1 } })
+  const sheet = XLSX.read(await blob.arrayBuffer(), { type: 'array' }).Sheets['OUT132-MERGE']
+  expect(sheet.F4.v).toBe('10寸阿奇CDU')
+  expect(sheet.K4.v).toBe(150.81)
+  expect(sheet.L4.v).toBe(1010)
+  expect(sheet.F5?.v).not.toBe('10寸阿奇CDU')
+}, 60000)
+
+it.each([false, true])('OUT-132 的补量合并保留分段装箱和逐批毛净重，来源顺序倒置=%s', async reverse => {
+  const master: Material = { id: 989, name_zh: '10寸阿奇CDU', name_en: '10-inch Archie tray',
+    product_code: '97282/1099227/6077460', spec: '50.149x 63.931CM', category: '彩盒/彩咭',
+    unit_kg: 'KGM', hs_cn: '4819100000', hs_id: '48192000', net_per_pc: .10053 }
+  const snapshot: Material = { ...master, name_en: '10-inch Archie CDU',
+    length: 100, width: 50, height: 20, weight_per_carton: 10.370000000000001, net_per_pc: .09953 }
+  const base = { outbound_id: 132, price: .3411, purchase_charge_ratio: 1500 / 1515,
+    currency: 'US$', purchase_unit: '个', supplier: '彩乐智能包装（香港）有限公司',
+    customs_company: '彩乐智能包装（香港）有限公司', po_no: 'IRRIHS0459', po_date: '2026-10-28',
+    formula_name: '10寸阿奇CDU', contract_no: '' }
+  const packed = { ...base, _rowKey: 11, material_id: -11, material_snapshot: snapshot,
+    qty: 1500, kg: 149.3, cartons: 15, qty_per_carton: '1-15/100', weighing_qty: 100,
+    pallet: '1-15/5卡', product_use: '产品配件', bl_head: '華登製品實業有限公司' }
+  const supplement = { ...base, _rowKey: 19, material_id: 989, qty: 15, kg: 1.51, cartons: 0 }
+  const rows = reverse ? [supplement, packed] : [packed, supplement]
+  const before = structuredClone(rows)
+  const map = new Map([[989, master], [-11, snapshot]])
+  const merged = consolidateShipmentItems(rows, map)
+  expect(merged).toHaveLength(1)
+  expect(merged[0]).toMatchObject({ material_id: -11, qty: 1515, kg: 150.81, cartons: 15,
+    qty_per_carton: '1-15/100', pallet: '1-15/5卡', product_use: '产品配件', bl_head: '華登製品實業有限公司' })
+  expect(merged[0].sources).toEqual(before)
+  expect(rows).toEqual(before)
+  expect(shipmentPurchaseAmount(merged[0])).toBeCloseTo(511.65, 8)
+  const edited = applyMergedShipmentEdits(rows, map, merged, [{ row: 0, field: 'contract_no', value: 'MERGED-132' }])
+  expect(edited.items.map(row => [row.qty, row.kg])).toEqual(rows.map(row => [row.qty, row.kg]))
+  expect(edited.items.every(row => row.contract_no === 'MERGED-132')).toBe(true)
+  const templateBuffer = Uint8Array.from(readFileSync(new URL('../../public/template-customs-rri.xlsx', import.meta.url))).buffer
+  const blob = await buildCustomsWorkbook({ templateBuffer, items: edited.items, materials: edited.materials,
+    productHs: new Map(), images: new Map(), form: { customer: 'RRI', containerNo: 'ACTUAL-OUT132', rate: .93 } })
+  const sheet = XLSX.read(await blob.arrayBuffer(), { type: 'array' }).Sheets['ACTUAL-OUT132']
+  expect(sheet.F5?.v).not.toBe('10寸阿奇CDU')
+  expect([sheet.K4.v, sheet.L4.v, sheet.AT4.v]).toEqual([150.81, 1515, 15])
+  expect(sheet.AP4.v).toBeCloseTo(511.65, 8)
+  expect([sheet.P4.v, sheet.Q4.v]).toEqual([155.55, 150.80])
+  expect(Number(sheet.BA4.v) * Number(sheet.L4.v)).toBeCloseTo(155.55, 8)
+  expect(Number(sheet.BB4.v) * Number(sheet.L4.v)).toBeCloseTo(150.80295, 8)
+  expect(sheet.BC4.v).toBe('1-15/5卡')
+
+  for (const change of [{ outbound_id: 133 }, { contract_no: 'OTHER' }, { invoice_no: 'OTHER' },
+    { bl_head: '另一抬头' }, { product_use: 'OTHER' }, { cartons: 1 }])
+    expect(consolidateShipmentItems([packed, { ...supplement, ...change }], map)).toHaveLength(2)
+  // Two potential physical packs require an explicit decision.
+  expect(consolidateShipmentItems([packed, { ...packed, _rowKey: 20 }, supplement], map)).toHaveLength(3)
+}, 60000)

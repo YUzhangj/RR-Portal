@@ -1319,16 +1319,30 @@ export async function buildCustomsWorkbook(input: CustomsExportInput): Promise<B
     setCell(ws, ri, 50, qpc, (typeof qpc === 'string' && /[^\d.]/.test(qpc)) ? 's' : 'n')
     setCell(ws, ri, 51, m?.weight_per_carton || 0, 'n')
     const weighingQty = it.weighing_qty ?? shipmentWeightQuantity(m?.name_zh, shipmentPackingAverageQty(qpc))
-    const grossPerPc = shipmentGrossPerPc(m?.weight_per_carton, weighingQty)
+    const weightQty = shipmentWeightQuantity(m?.name_zh, it.qty)
+    const sourceWeights = it.sources.map(source => {
+      const sourceMaterial = matOf(source)
+      const quantity = shipmentWeightQuantity(sourceMaterial?.name_zh, source.qty)
+      const weighing = source.weighing_qty ?? shipmentWeightQuantity(sourceMaterial?.name_zh, shipmentPackingAverageQty(source.qty_per_carton))
+      return {
+        gross: shipmentGrossPerPc(sourceMaterial?.weight_per_carton, weighing) * quantity,
+        net: (Number(sourceMaterial?.net_per_pc) || 0) * quantity,
+      }
+    })
+    const grossTotal = sourceWeights.reduce((total, source) => total + source.gross, 0)
+    const netTotal = sourceWeights.reduce((total, source) => total + source.net, 0)
+    const originalGrossPerPc = shipmentGrossPerPc(m?.weight_per_carton, weighingQty)
+    const mixedWeights = Math.abs(originalGrossPerPc * weightQty - grossTotal) > 1e-8
+      || Math.abs((Number(m?.net_per_pc) || 0) * weightQty - netTotal) > 1e-8
+    const grossPerPc = mixedWeights && weightQty > 0 ? grossTotal / weightQty : originalGrossPerPc
     setCell(ws, ri, 52, grossPerPc, 'n')
-    ws[XLSX.utils.encode_cell({ r: ri, c: 52 })].f = `IFERROR(IF(AZ${ri + 1}>0,AZ${ri + 1}/${Number(weighingQty) || 0},0),0)`
-    setCell(ws, ri, 53, m?.net_per_pc || 0, 'n')
+    if (!mixedWeights) ws[XLSX.utils.encode_cell({ r: ri, c: 52 })].f = `IFERROR(IF(AZ${ri + 1}>0,AZ${ri + 1}/${Number(weighingQty) || 0},0),0)`
+    setCell(ws, ri, 53, mixedWeights && weightQty > 0 ? netTotal / weightQty : m?.net_per_pc || 0, 'n')
     setCell(ws, ri, 54, formatShipmentPallet(it.pallet), 's')
     // File readers and import previews use cached values before Excel/WPS
     // recalculates. Keep the actual weights alongside their live formulas.
-    const weightQty = shipmentWeightQuantity(m?.name_zh, it.qty)
-    ws[XLSX.utils.encode_cell({ r: ri, c: 15 })].v = Number((grossPerPc * weightQty).toFixed(2))
-    ws[XLSX.utils.encode_cell({ r: ri, c: 16 })].v = Number(((Number(m?.net_per_pc) || 0) * weightQty).toFixed(2))
+    ws[XLSX.utils.encode_cell({ r: ri, c: 15 })].v = Number(grossTotal.toFixed(2))
+    ws[XLSX.utils.encode_cell({ r: ri, c: 16 })].v = Number(netTotal.toFixed(2))
     const cbmEach = shipmentCbmPerCarton(m?.length, m?.width, m?.height)
     ws[XLSX.utils.encode_cell({ r: ri, c: 17 })].v = cbmEach
     ws[XLSX.utils.encode_cell({ r: ri, c: 18 })].v = cbmEach * (Number(it.cartons) || 0)
