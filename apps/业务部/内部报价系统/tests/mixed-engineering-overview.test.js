@@ -10,6 +10,26 @@ function calculations(){
  return context;
 }
 const calculators=calculations(),totals=calculators.engineeringSummaryTotals;
+test('纸箱和平卡按各自装箱量分摊，兼容旧单箱与零、空数量且不改原数据',()=>{
+ const {calculateQuoteCosts}=require('../backend/services/quoteCostSummary');
+ const box={cl:10,cw:8,ch:6,qty:12,flat_cards:[{qty:2}]};
+ const cases=[
+  [{paper_rate:2.75,cartons:[box]},.1705],
+  [{paper_rate:2.75,cartons:[box,{cl:4,cw:3,ch:2,qty:3,flat_cards:[{l:5,w:4,qty:.5},{qty:0}]}]},.2795],
+  [{paper_rate:2.75,cartons:[{...box,qty:0}]},2.046],
+  [{paper_rate:2.75,cartons:[{...box,qty:''}]},2.046],
+  [{paper_rate:2.75,cl:10,cw:8,ch:6,qty:12,flat_card:1},.154],
+  [{paper_rate:2.75,cartons:[{...box,flat_cards:[]}]},.1375],
+ ];
+ for(const [carton,expected] of cases){
+  const before=JSON.stringify(carton);
+  const front=totals({carton_calc:carton},.85,7.8).carton;
+  const back=calculateQuoteCosts({qty:100},[{dept:'engineering',payload_json:JSON.stringify({carton_calc:carton})}]).components.carton;
+  assert.ok(Math.abs(front-expected)<1e-12,`frontend ${before}`);
+  assert.ok(Math.abs(back-expected)<1e-12,`backend ${before}`);
+  assert.equal(JSON.stringify(carton),before);
+ }
+});
 test('旧报价未存纸价时按服务端固定回退计算，不套用今日工厂默认值',()=>{
  const oldDefault=calculators.defaultCartonRate;
  calculators.defaultCartonRate=()=>9.5;
@@ -28,7 +48,7 @@ test('工程概览金额沿用明细币种换算、纸箱和平卡公式，不�
  payload.carton_calc={paper_rate:2.75,cartons:[{cl:10,cw:8,ch:6,qty:12,flat_cards:[{l:0,w:0,qty:2}]},{cl:0,cw:0,ch:0,qty:1,flat_cards:[]}]};
  const before=JSON.stringify(root),cost=totals(payload,.85,7.8);
  assert.equal(cost.hardware,2);assert.equal(cost.auxiliary,.3);assert.equal(cost.packaging,1.56);assert.equal(cost.mold_rmb,100);
- const box=(10+8+2)*(8+6+1)*2*2.75/1000/12+(10+1)*(8+1)*2/1000*2;
+ const box=((10+8+2)*(8+6+1)*2*2.75/1000+(10+1)*(8+1)*2/1000*2)/12;
  assert.ok(Math.abs(cost.carton-box)<1e-12);
  const sections=Object.entries({sales:{mixed_quote:cfg,header:{fx_rmb_hkd:.85,fx_hkd_usd:7.8}},engineering:root}).map(([dept,p])=>({dept,payload_json:JSON.stringify(p)}));
  const result=calculateMixedQuote({qty:100},sections,{strict:true});
@@ -100,6 +120,8 @@ test('纸箱平卡逐行合计与总计相同；模费分摊沿用单款公式',
  const carton={paper_rate:2.75,cartons:[{name:'主箱',cl:10,cw:8,ch:6,qty:12,flat_cards:[{name:'衬卡',qty:2}]}]};
  const rows=calculators.engineeringCartonDetails(carton);
  assert.equal(rows.length,2);assert.equal(rows[1].l,10);assert.equal(rows[1].qty,2);
+ assert.equal(rows[1].unit,.198);
+ assert.equal(rows[1].amount,.396/12);
  assert.equal(rows.reduce((sum,row)=>sum+row.amount,0),totals({carton_calc:carton},.85,7.8).carton);
  const c=calculators.engineeringMoldCostTotals({items:[{price_rmb:850}],fx_rmb_usd:8,customer_subsidy_usd:25,amortization_qty:100,prototype_fee_usd:10,prototype_amortization_qty:200,testing_fee_usd:20,testing_amortization_qty:400});
  assert.equal(c.sumUsd,125);assert.equal(c.perPcsUsd,1);assert.equal(c.perPcsRmb,8.5);assert.equal(c.prototypePerPcsUsd,.05);assert.equal(c.testingPerPcsUsd,.05);

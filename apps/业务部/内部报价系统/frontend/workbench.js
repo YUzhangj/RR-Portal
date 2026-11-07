@@ -3354,7 +3354,7 @@ function engineeringCartonDetails(c) {
       ka_label:box.ka_label || c.ka_label,unit:cartonBoxPrice(box,rate),amount:cartonBoxPrice(box,rate)/Math.max(num(box.qty),1)},
     ...(box.flat_cards || []).map((card,i) => ({type:'平卡',name:card.name || `平卡 ${i + 1}`,parent:box.name || `纸箱 ${index + 1}`,
       l:num(card.l)||num(box.cl),w:num(card.w)||num(box.cw),h:'',qty:card.qty ?? 1,rate:'',ka_label:'',
-      unit:cartonFlatPrice({...card,qty:1},box),amount:cartonFlatPrice(card,box)}))
+      unit:cartonFlatPrice({...card,qty:1},box),amount:cartonFlatPrice(card,box)/Math.max(num(box.qty),1)}))
   ]);
 }
 function renderCartonCalc(host, c, canEdit, onChange) {
