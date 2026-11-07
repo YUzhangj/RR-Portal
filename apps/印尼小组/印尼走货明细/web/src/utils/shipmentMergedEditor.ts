@@ -9,10 +9,30 @@ interface EditorItem {
   carton_group?: string; supplier?: string; customs_company?: string
   qty_per_carton?: string
 }
-export type MergedEditorRow<T extends EditorItem> = T & { sources: T[]; outbound_ids: number[] }
+export type MergedEditorRow<T extends EditorItem> = T & { sources: T[]; outbound_ids: number[]; packing_source?: T }
 export interface OutboundBalance { outbound_id: number; allocatable_qty?: number }
 export const mergedReadOnlyFields = new Set(['po_no', 'po_date', 'qty', 'kg'])
 const directTextFields = new Set(['formula_name', 'product_use', 'contract_no', 'invoice_no', 'supplier', 'po_no', 'pallet', 'carton_no'])
+const packingOwnerFields = new Set(['pallet', 'carton_no', 'cartons', 'qty_per_carton', 'weighing_qty',
+  'material:length', 'material:width', 'material:height', 'material:weight_per_carton'])
+const packingMaterialFields = new Set(['material:length', 'material:width', 'material:height', 'material:weight_per_carton'])
+const supplementSourceFields = new Set(['material:unit_kg', 'material:net_per_pc'])
+export const supplementSourceReadOnlyHint = '此行含装箱明细和补量，申报单位及单个净重按各来源保留，不能在汇总行统一修改'
+export const sharedPackingReadOnlyHint = '装箱明细与补量共用物料资料，不能在汇总行统一修改包装尺寸和每箱重量'
+function sharesPackingMaterial<T extends EditorItem>(row: MergedEditorRow<T>): boolean {
+  const owner = row.packing_source
+  return !!owner && row.sources.some(source => source !== owner && source.material_id === owner.material_id)
+}
+export function mergedSnapshotEditable<T extends EditorItem>(row: MergedEditorRow<T> | undefined): boolean {
+  return !!row?.sources.length && row.sources.every(source => !!source.material_snapshot
+    && typeof source.material_snapshot === 'object' && source.material_id != null && source.material_id < 0)
+}
+export function mergedFieldEditable<T extends EditorItem>(row: MergedEditorRow<T> | undefined, field: string): boolean {
+  return !!row && !(row.sources.length > 1 && mergedReadOnlyFields.has(field))
+    && !(row.packing_source && supplementSourceFields.has(field))
+    && !(packingMaterialFields.has(field) && sharesPackingMaterial(row))
+    && (!field.startsWith('snapshot:') || mergedSnapshotEditable(row))
+}
 
 // Distribute an entered integer carton total without losing rounding remainders.
 export function allocateShipmentCartons(total: number, weights: number[]): number[] {
@@ -49,25 +69,33 @@ export function applyMergedShipmentEdits<T extends EditorItem>(
       return index
     })
     if (new Set(indices).size !== indices.length) throw new Error('出库来源重复，请刷新后重试')
+    const ownerIndex = group.packing_source ? sourceIndex.get(group.packing_source._rowKey) : undefined
+    if (group.packing_source && (group.packing_source._rowKey == null || ownerIndex == null || !indices.includes(ownerIndex)))
+      throw new Error('装箱来源已变化，请刷新后重试')
+    if (group.packing_source && supplementSourceFields.has(edit.field)) throw new Error(supplementSourceReadOnlyHint)
+    if (packingMaterialFields.has(edit.field) && sharesPackingMaterial(group)) throw new Error(sharedPackingReadOnlyHint)
+    if (edit.field.startsWith('snapshot:') && !mergedSnapshotEditable(group))
+      throw new Error('此行包含货号库物料，海关编码按原来源保留，不能在汇总行统一修改')
     if (indices.length > 1 && mergedReadOnlyFields.has(edit.field))
       throw new Error(['qty', 'kg'].includes(edit.field)
         ? `第 ${edit.row + 1} 行的数量和重量只显示汇总，不能直接修改`
         : `第 ${edit.row + 1} 行包含多批采购来源，采购单号和日期按原记录保留`)
     const value = parseShipmentSheetValue(edit.field, edit.value)
-    if (indices.length > 1 && edit.field === 'qty_per_carton' && !['empty', 'uniform'].includes(parseShipmentPacking(String(value)).mode))
+    if (indices.length > 1 && ownerIndex == null && edit.field === 'qty_per_carton' && !['empty', 'uniform'].includes(parseShipmentPacking(String(value)).mode))
       throw new Error('合并行的每箱数量请填写统一数量，例如 3000')
-    return { ...edit, value, rawValue: edit.value, group, indices }
+    const targets = ownerIndex != null && packingOwnerFields.has(edit.field) ? [ownerIndex] : indices
+    return { ...edit, value, rawValue: edit.value, group, indices, targets }
   })
   // First propagate common cells; material edits still use the shared conflict
   // checks and recalculation in the existing spreadsheet editor.
   for (const edit of parsed) {
-    if (edit.indices.length === 1 || edit.field !== 'cartons')
-      edit.indices.forEach(index => put(index, edit.field, edit.value))
+    if (edit.targets.length === 1 || edit.field !== 'cartons')
+      edit.targets.forEach(index => put(index, edit.field, edit.value))
     if (edit.indices.length > 1 && edit.field === 'qty_per_carton'
       && !parsed.some(other => other.group.material_id === edit.group.material_id && ['material:net_per_pc', 'material:unit_kg'].includes(other.field)))
-      edit.indices.forEach(index => put(index, 'kg', items[index].kg))
+      edit.targets.forEach(index => put(index, 'kg', items[index].kg))
   }
-  for (const edit of parsed.filter(edit => edit.indices.length > 1 && edit.field === 'cartons')) {
+  for (const edit of parsed.filter(edit => edit.targets.length > 1 && edit.field === 'cartons')) {
     const sources = edit.indices.map(index => items[index])
     const quantities = sources.map(source => Number(source.qty) || 0)
     const weights = sources.map(source => Number(source.cartons) || 0)
@@ -80,7 +108,7 @@ export function applyMergedShipmentEdits<T extends EditorItem>(
   // and newlines after validation so the next character does not join words.
   // Pasted and filled cells retain the shared editor's normalization.
   if (options.preserveTextWhitespace) for (const edit of parsed) {
-    if (directTextFields.has(edit.field)) edit.indices.forEach(index => {
+    if (directTextFields.has(edit.field)) edit.targets.forEach(index => {
       Object.assign(result.items[index], { [edit.field]: edit.rawValue })
     })
   }

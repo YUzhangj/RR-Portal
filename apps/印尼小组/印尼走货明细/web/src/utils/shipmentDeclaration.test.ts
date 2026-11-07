@@ -10,7 +10,7 @@ import { shipmentPackingAverageQty, shipmentWeightQuantity } from './shipmentWei
 import { withShipmentInvoicePrices } from './shipmentInvoice'
 import { shipmentPurchaseAmount } from './shipmentPurchase'
 import { applyShipmentSheetEdits, parseSheetClipboard, sheetPasteEdits } from './shipmentSheet'
-import { applyMergedShipmentEdits } from './shipmentMergedEditor'
+import { applyMergedShipmentEdits, mergedFieldEditable } from './shipmentMergedEditor'
 import { consolidateShipmentItems } from './shipmentConsolidation'
 import { parseShipmentWorkbook } from './shipmentImport'
 import { buildCustomsWorkbook } from './customsExport'
@@ -223,7 +223,7 @@ it('真实单位下拉接入同一粘贴业务链，空草稿选单位后填量�
   const map = new Map([[-1, { ...original.material_snapshot }]])
   const state = {
     items, matMap: map, consolidatedItems: consolidateShipmentItems(items, map),
-    applyMergedShipmentEdits, outRows: [], editing: { id: 9 }, customsOptions: [],
+    applyMergedShipmentEdits, mergedFieldEditable, outRows: [], editing: { id: 9 }, customsOptions: [],
     sheetRevision: { current: { rawItems: items, matMap: map, session: 1 } }, sheetWritePending: { current: false },
     dirtyMatIds: new Set<number>(), setItems: vi.fn(), setMatMap: vi.fn(), setDirtyMatIds: vi.fn(),
     setEditorDirty: vi.fn(), setSheetEditing: vi.fn(), setOutRows: vi.fn(),
