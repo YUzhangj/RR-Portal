@@ -255,7 +255,7 @@ public sealed class MailboxSyncService(IServiceScopeFactory scopeFactory, ILogge
         finally { SyncLock.Release(); }
     }
 
-    public async Task<object> RetryFailedAsync(IReadOnlyList<long> itemIds, CancellationToken cancellationToken,
+    public async Task<object> RetryFailedAsync(IReadOnlyList<long> itemIds, long actorId, CancellationToken cancellationToken,
         string company, long? ownerId)
     {
         if (company is not ("Xingxin" or "Huadeng") ||
@@ -269,6 +269,7 @@ public sealed class MailboxSyncService(IServiceScopeFactory scopeFactory, ILogge
             using var scope = scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             db.Company = company; db.MailOwnerId = ownerId;
+            await RequireMailboxAdmin(db, actorId, "重试失败邮件", cancellationToken);
             if (await db.ImportEmailItems.CountAsync(item => itemIds.Contains(item.Id), cancellationToken) != itemIds.Count)
                 throw new MailboxRetryRejectedException("部分邮件不存在或不属于所选邮箱", 404);
             ServerMailboxCredentials? credentials = null;
@@ -327,6 +328,7 @@ public sealed class MailboxSyncService(IServiceScopeFactory scopeFactory, ILogge
             // transaction so a user-confirmed or changed item can never be overwritten.
             db.ChangeTracker.Clear();
             await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            await RequireMailboxAdmin(db, actorId, "重试失败邮件", cancellationToken);
             if (credentials is not null)
             {
                 var currentOwner = await db.Users.AsNoTracking().FirstOrDefaultAsync(value => value.Id == ownerId && value.IsActive &&
@@ -417,7 +419,7 @@ public sealed class MailboxSyncService(IServiceScopeFactory scopeFactory, ILogge
             using var scope = scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             db.Company = company; db.MailOwnerId = ownerId; db.CurrentUserId = actorId;
-            await RequireBackfillAdmin(db, actorId, cancellationToken);
+            await RequireMailboxAdmin(db, actorId, "补录明确缺失的邮件", cancellationToken);
             var credentials = await BackfillCredentials(db, ownerId, cancellationToken);
             var state = await db.MailSyncStates.AsNoTracking().SingleOrDefaultAsync(cancellationToken)
                 ?? throw new MailboxRetryRejectedException("所选邮箱尚无可核对的同步身份");
@@ -462,7 +464,7 @@ public sealed class MailboxSyncService(IServiceScopeFactory scopeFactory, ILogge
 
             db.ChangeTracker.Clear();
             await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-            await RequireBackfillAdmin(db, actorId, cancellationToken);
+            await RequireMailboxAdmin(db, actorId, "补录明确缺失的邮件", cancellationToken);
             var currentCredentials = await BackfillCredentials(db, ownerId, cancellationToken);
             if (currentCredentials != credentials)
                 throw new MailboxRetryRejectedException("邮箱绑定在补录期间已变化，未补录邮件");
@@ -545,10 +547,10 @@ public sealed class MailboxSyncService(IServiceScopeFactory scopeFactory, ILogge
         finally { SyncLock.Release(); }
     }
 
-    private static async Task RequireBackfillAdmin(AppDbContext db, long actorId, CancellationToken cancellationToken)
+    private static async Task RequireMailboxAdmin(AppDbContext db, long actorId, string action, CancellationToken cancellationToken)
     {
         if (actorId <= 0 || !await db.Users.AsNoTracking().AnyAsync(value => value.Id == actorId && value.IsActive && value.Role == "admin", cancellationToken))
-            throw new MailboxRetryRejectedException("只有管理员可以补录明确缺失的邮件", 403);
+            throw new MailboxRetryRejectedException($"只有管理员可以{action}", 403);
     }
 
     private static async Task<ServerMailboxCredentials?> BackfillCredentials(AppDbContext db, long? ownerId, CancellationToken cancellationToken)

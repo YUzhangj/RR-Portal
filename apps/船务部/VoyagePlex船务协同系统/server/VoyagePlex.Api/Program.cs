@@ -1100,7 +1100,7 @@ app.MapPost("/api/imports/email/mailbox/sync", async (HttpContext context, Mailb
 app.MapPost("/api/imports/email/mailbox/retry-failed", async (JsonObject payload, HttpContext context,
     AppDbContext db, MailboxSyncService sync, CancellationToken cancellationToken) =>
 {
-    if (context.Items["CurrentUser"] is not AppUser { Role: "admin" })
+    if (context.Items["CurrentUser"] is not AppUser { Role: "admin" } actor)
         return Results.Json(new { error = "只有管理员可以重试失败邮件" }, statusCode: 403);
     if ((db.Company == "Huadeng" && db.MailOwnerId is null or <= 0) ||
         (db.Company == "Xingxin" && db.MailOwnerId is not null) || db.Company is not ("Xingxin" or "Huadeng"))
@@ -1111,7 +1111,7 @@ app.MapPost("/api/imports/email/mailbox/retry-failed", async (JsonObject payload
     var itemIds = ids.Select(value => value!.GetValue<long>()).ToArray();
     if (itemIds.Distinct().Count() != itemIds.Length)
         return Results.BadRequest(new { error = "请选择1至5封不同的失败邮件" });
-    try { return Results.Ok(await sync.RetryFailedAsync(itemIds, cancellationToken, db.Company, db.MailOwnerId)); }
+    try { return Results.Ok(await sync.RetryFailedAsync(itemIds, actor.Id, cancellationToken, db.Company, db.MailOwnerId)); }
     catch (MailboxRetryRejectedException error)
     { return Results.Json(new { error = error.Message }, statusCode: error.StatusCode); }
     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
