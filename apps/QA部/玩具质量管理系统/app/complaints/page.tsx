@@ -548,7 +548,7 @@ export default function Complaints() {
           tone="good"
         />
       </div>
-      <div className="sticky top-14 z-20 -mx-1 bg-[#f5f5f3] px-1 pt-1">
+      <div className="min-w-0">
         <Filters
           singleRow
           searchValue={search}
@@ -736,10 +736,6 @@ export default function Complaints() {
           </div>
         </div>
       </div>
-      <div
-        aria-hidden="true"
-        className="pointer-events-none sticky top-[12.25rem] z-20 -mb-2 h-2 bg-[#f5f5f3]"
-      />
       <DataTable
         page={tablePage}
         onPageChange={setTablePage}
@@ -748,7 +744,6 @@ export default function Complaints() {
         extendedPagination
         headerTone="accent"
         stickyHeader
-        stickyHeaderTop="12.75rem"
         columns={[
           <input
             key="all"
