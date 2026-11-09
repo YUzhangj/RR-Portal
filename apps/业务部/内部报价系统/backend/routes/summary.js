@@ -148,19 +148,40 @@ router.post('/:id/revoke-confirmation', quoteWriteRoute(db, req => Number(req.pa
   }
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
   if (!reason || reason.length > 300) return res.status(400).json({error:'请填写撤销原因（1–300字）'});
-  if (await db.prepare('SELECT 1 FROM quote_verification_versions WHERE quote_id=? LIMIT 1').get(id)) {
-    return res.status(409).json({error:'已有核价版本，不能直接撤销确认，以免影响核价资料；请先核对后续核价记录'});
-  }
   const verification = await db.prepare('SELECT * FROM quote_verifications WHERE quote_id=?').get(id);
   if (verification && (verification.status !== 'not_started' || Object.keys(parseJson(verification.verified_values_json, {unknown:true})).length
       || Object.keys(parseJson(verification.verified_sections_json, {unknown:true})).length || verification.note)) {
     return res.status(409).json({error:'已有核价填写记录，不能直接撤销确认'});
   }
+  const versions = await db.prepare('SELECT * FROM quote_verification_versions WHERE quote_id=? ORDER BY version_no,id').all(id);
+  const versionIds = versions.map(version => Number(version.id));
+  const sections = versionIds.length ? await db.prepare(`SELECT * FROM quote_verification_sections
+    WHERE version_id IN (${versionIds.map(() => '?').join(',')}) ORDER BY version_id,id`).all(...versionIds) : [];
+  const first = versions[0];
+  // Opening the costing page automatically initializes one drafting V1. That
+  // generated shell is not a user costing record and may be removed together
+  // with an explicit confirmation revocation. Any later metadata edit, save,
+  // review or additional version makes the costing data user-owned and blocks
+  // the destructive lifecycle change.
+  const unexpectedVersion = versions.length > 1 || (first && (
+    Number(first.version_no) !== 1 || first.label !== 'V1' || first.source_type !== 'quote'
+    || first.status !== 'drafting' || first.parent_version_id != null || first.category
+    || first.note || first.completed_by || first.completed_at
+  ));
+  const touchedSection = sections.some(section => section.status !== 'empty'
+    || section.filled_by || section.filled_at || section.reviewed_by || section.reviewed_at || section.review_comment);
+  const laterVerificationAction = await db.prepare(`SELECT action FROM audit_log WHERE quote_id=?
+    AND (action LIKE 'verification_%' OR action='sync_verification_costing_basis')
+    AND action NOT IN ('verification_create','verification_version_create') LIMIT 1`).get(id);
+  if (unexpectedVersion || touchedSection || laterVerificationAction) {
+    return res.status(409).json({error:'已有核价填写、审核或版本记录，不能直接撤销确认'});
+  }
   // Save the complete automatic snapshot before removing only the unused case.
-  // No version, department payload, original quote or attachment is removed.
+  // Original quote data and attachments are never removed.
   await db.prepare(`INSERT INTO audit_log(quote_id,dept,actor,action,detail)
     VALUES (?,'sales',?,'customer_confirmation_revoke',?)`).run(id,req.user.name,
-      JSON.stringify({reason,previous_confirmation:existing,unused_verification:verification || null}));
+      JSON.stringify({reason,previous_confirmation:existing,unused_verification:verification || null,
+        unused_versions:versions,unused_sections:sections}));
   await db.prepare('DELETE FROM quote_verifications WHERE quote_id=?').run(id);
   await db.prepare(`UPDATE quote_customer_confirmations SET status='pending',confirmed_by=NULL,confirmed_at=NULL,
     updated_at=CURRENT_TIMESTAMP WHERE quote_id=?`).run(id);

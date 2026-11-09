@@ -69,9 +69,20 @@ test('customer confirmation atomically freezes matching price, header and sectio
   const reconfirm=await api(`/quote-summary/${uid}/confirmation`,'PUT',{status:'confirmed'});assert.equal(reconfirm.status,200,JSON.stringify(reconfirm.body));
   assert.equal(JSON.parse((await readDb.prepare('SELECT baseline_json FROM quote_verifications WHERE quote_id=?').get(uid)).baseline_json).quote.product_name,'corrected');
   assert.equal((await api(`/quote-summary/${uid}/revoke-confirmation`,'POST',undoBody)).status,409);
-  // Viewing the costing task may initialize its first version; any
-  // resulting version must survive an attempted undo, even if it is still empty.
-  assert.equal((await api(`/verifications/${uid}`)).status,200);
+  // Merely viewing the costing task creates an automatic empty V1. That shell
+  // must not prevent a deliberate correction of the customer confirmation.
+  const emptyView=await api(`/verifications/${uid}`);assert.equal(emptyView.status,200);
+  assert.equal((await api(`/quote-summary/${uid}/revoke-confirmation`,'POST',{...undoBody,base_confirmation_revision:await revision(uid)})).status,200);
+  assert.equal(await readDb.prepare('SELECT id FROM quote_verification_versions WHERE quote_id=?').get(uid),undefined);
+  assert.equal((await undoRow()).status,'pending');
+  // Once any department saves, even without submitting, revocation must keep
+  // protecting that real costing record.
+  assert.equal((await api(`/quote-summary/${uid}/confirmation`,'PUT',{status:'confirmed'})).status,200);
+  const touchedView=await api(`/verifications/${uid}`);assert.equal(touchedView.status,200);
+  const sales=touchedView.body.sections.find(item=>item.dept==='sales');
+  assert.equal((await api(`/verifications/versions/${touchedView.body.selected_version.id}/sections/${sales.id}`,'PUT',{
+    payload:JSON.parse(sales.payload_json),base_revision:sales.revision,submit:false,
+  })).status,200);
   assert.equal((await api(`/quote-summary/${uid}/revoke-confirmation`,'POST',{...undoBody,base_confirmation_revision:await revision(uid)})).status,409);
   assert.ok(await readDb.prepare('SELECT id FROM quote_verification_versions WHERE quote_id=?').get(uid));
   assert.equal((await undoRow()).status,'confirmed');
