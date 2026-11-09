@@ -318,6 +318,7 @@ router.post('/:quoteId/versions', async (req, res) => {
   if (!await ensureCaseAndFirstVersion(loaded.quote, req.user)) return res.status(409).json({error:'客价确认已撤销，请刷新列表'});
   const latest = await db.prepare(`SELECT * FROM quote_verification_versions
     WHERE quote_id=? ORDER BY version_no DESC LIMIT 1`).get(quoteId);
+  if (!latest) return res.status(409).json({ error: '客价确认已撤销，请刷新列表' });
   if (latest && latest.status !== 'completed') {
     return res.status(409).json({ error: `请先完成 ${latest.label}，再创建下一版本` });
   }
@@ -371,21 +372,28 @@ router.post('/:quoteId/versions', async (req, res) => {
 router.patch('/versions/:versionId', async (req, res) => {
   if (!canManageVersions(req.user)) return res.status(403).json({ error: '只有业务、工程或管理员可以编辑版本类别' });
   const versionId = Number(req.params.versionId);
-  const version = await db.prepare('SELECT id, quote_id, label, category FROM quote_verification_versions WHERE id=?').get(versionId);
-  if (!version) return res.status(404).json({ error: '核价版本不存在' });
-  const access = await quoteAccess(req.user, version.quote_id);
-  if (access.status !== 200) return res.status(access.status).json({ error: '无权编辑该核价版本' });
   const category = String(req.body?.category || '').trim().slice(0, 40) || null;
-  await db.prepare("UPDATE quote_verification_versions SET category=?, updated_at=datetime('now') WHERE id=?")
-    .run(category, versionId);
-  await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
-    VALUES (?, ?, ?, 'verification_version_category', ?)`).run(
-    version.quote_id,
-    req.user.dept,
-    actorName(req.user),
-    `${version.label} 版本类别：${category || '未设置'}`,
-  );
-  res.json({ ok: true, category });
+  try {
+    // Even clearing an already-empty category is a user action. Commit its
+    // audit with the edit while holding the same lock used by revocation.
+    await withVerificationVersion(db, versionId, async version => {
+      const access = await quoteAccess(req.user, version.quote_id);
+      if (access.status !== 200) throw Object.assign(new Error('无权编辑该核价版本'), { status: access.status });
+      await db.prepare("UPDATE quote_verification_versions SET category=?, updated_at=datetime('now') WHERE id=?")
+        .run(category, versionId);
+      await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
+        VALUES (?, ?, ?, 'verification_version_category', ?)`).run(
+        version.quote_id,
+        req.user.dept,
+        actorName(req.user),
+        `${version.label} 版本类别：${category || '未设置'}`,
+      );
+    });
+    res.json({ ok: true, category });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    throw error;
+  }
 });
 
 router.get('/:quoteId', async (req, res) => {
@@ -398,6 +406,7 @@ router.get('/:quoteId', async (req, res) => {
     (SELECT COUNT(*) FROM quote_verification_sections s WHERE s.version_id=v.id) AS total_count,
     (SELECT COUNT(*) FROM quote_verification_sections s WHERE s.version_id=v.id AND s.status='approved') AS approved_count
     FROM quote_verification_versions v WHERE v.quote_id=? ORDER BY v.version_no`).all(quoteId);
+  if (!versions.length) return res.status(409).json({ error: '客价确认已撤销，请刷新列表' });
   const requestedVersionId = Number(req.query.version_id || versions[versions.length - 1]?.id);
   const selectedVersion = versions.find(version => Number(version.id) === requestedVersionId);
   if (!selectedVersion) return res.status(404).json({ error: '核价版本不存在' });
