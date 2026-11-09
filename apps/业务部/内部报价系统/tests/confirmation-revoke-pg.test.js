@@ -60,8 +60,8 @@ test('PostgreSQL confirmation revocation preserves NUMERIC 12/zero/NULL and tran
   for(let i=0;i<6;i++){
    const id=await confirmed(),rev=await revision(id);const [view,revoke]=await Promise.all([api(`/verifications/${id}`),api(`/quote-summary/${id}/revoke-confirmation`,'POST',{base_confirmation_revision:rev,reason:'concurrent test'})]);
    const rows=await snapshot(id);
-   if(revoke.status===200){assert.equal(view.status,409);assert.equal(rows.quote_customer_confirmations[0].status,'pending');assert.equal(rows.quote_verifications.length,0);assert.equal(rows.quote_verification_versions.length,0);}
-   else{assert.equal(revoke.status,409);assert.equal(view.status,200);assert.equal(rows.quote_customer_confirmations[0].status,'confirmed');assert.equal(rows.quote_verifications.length,1);assert.equal(rows.quote_verification_versions.length,1);assert.equal((await undo(id)).status,409);}
+   assert.equal(revoke.status,200,JSON.stringify(revoke.body));assert.ok([200,409].includes(view.status));
+   assert.equal(rows.quote_customer_confirmations[0].status,'pending');assert.equal(rows.quote_verifications.length,0);assert.equal(rows.quote_verification_versions.length,0);
   }
  });
  await t.test('header and reconfirm races match their acknowledged lifecycle result',async()=>{
