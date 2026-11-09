@@ -86,20 +86,19 @@ public sealed class P113CloudRawWorkflowDbTests(DbFixture fx)
     }
 
     [Fact]
-    public async Task Dedicated_role_binding_never_grants_matrix_permission_and_management_audits_explicit_account()
+    public async Task Non_admin_management_permission_cannot_assign_or_remove_raw_workflow_roles()
     {
         using var c=fx.Open();using var s=new CloudRawFixture(c,fx.ConnectionString!);
         var controller=new RawMaterialWorkflowController(s.Factory,new PermissionService(s.Factory),new AuditLogger())
         {ControllerContext=new(){HttpContext=new DefaultHttpContext{User=new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier,s.Clerk)],"test"))}}};
         Assert.IsType<ForbidResult>(await controller.SaveRole(s.Clerk,new("06-manager")));
         c.Execute("INSERT INTO [userbqrpower]([用户],[菜单],[打开],[保存]) VALUES(@Clerk,N'账号管理',1,1)",s);
-        Assert.IsType<NoContentResult>(await controller.SaveRole(s.Clerk,new("06-manager")));
-        Assert.Equal("06-manager",(await RawMaterialActorAccess.ResolveAsync(c,null,s.Clerk)).PositionCode);
-        c.Execute("UPDATE [userbqrpower] SET [审核]=0 WHERE [用户]=@Clerk AND [菜单]=N'原料出库表'",s);
-        Assert.False(await new PermissionService(s.Factory).HasAsync(s.Clerk,"原料出库表",PermissionAction.审核));
-        Assert.Equal(1,c.ExecuteScalar<int>("SELECT COUNT(*) FROM [c操作记录] WHERE [表名]=N'原料流程岗位绑定' AND [操作员]=@Clerk",s));
-        Assert.IsType<NoContentResult>(await controller.SaveRole(s.Clerk,new(null)));
-        Assert.Null((await RawMaterialActorAccess.ResolveAsync(c,null,s.Clerk)).PositionCode);
+        Assert.IsType<ForbidResult>(await controller.SaveRole(s.Clerk,new("06-manager")));
+        Assert.IsType<ForbidResult>(await controller.SaveRole(s.Keeper,new("06-manager")));
+        Assert.IsType<ForbidResult>(await controller.SaveRole(s.Clerk,new(null)));
+        Assert.Equal("06-clerk",(await RawMaterialActorAccess.ResolveAsync(c,null,s.Clerk)).PositionCode);
+        Assert.Equal("05-warehouse",(await RawMaterialActorAccess.ResolveAsync(c,null,s.Keeper)).PositionCode);
+        Assert.Equal(0,c.ExecuteScalar<int>("SELECT COUNT(*) FROM [c操作记录] WHERE [表名]=N'原料流程岗位绑定' AND [操作员]=@Clerk",s));
     }
 
     [Fact]

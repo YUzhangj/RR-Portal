@@ -330,6 +330,7 @@ export default function PlasticRawMaterialReceiptPage() {
         原料编号: l.原料编号,
         原料名称: l.原料名称,
         单位: l.单位,
+        每包重量: l.采购政策版本 === 1 && l.单位?.trim() === "包" ? l.每库存单位KG : l.每包重量,
         单价类型: l.单价类型,
         数量: Number(l.订货数量 ?? 0),
         单价: l.单价 ?? undefined,

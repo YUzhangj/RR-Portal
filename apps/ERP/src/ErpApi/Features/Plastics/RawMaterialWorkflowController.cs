@@ -20,7 +20,8 @@ public sealed class RawMaterialWorkflowController(ISqlConnectionFactory factory,
     public async Task<IActionResult> Role(string user)
     {
         using var c = factory.Create();
-        if (!await permissions.HasAsync(c, null, UserName, "账号管理", PermissionAction.打开)) return Forbid();
+        var current = await RawMaterialActorAccess.ResolveAsync(c, null, UserName);
+        if ((!current.IsValid && !current.IsAdmin) || !current.EffectivePermissions.TryGetValue("账号管理", out var management) || !management.打开) return Forbid();
         var accounts = (await c.QueryAsync<Account>("SELECT [ID],[用户] AS [User],[锁定到期] AS LockedUntil FROM [sysfileuser] WHERE [用户]=@user", new { user })).ToArray();
         if (accounts.Length != 1) return NotFound(new { 消息 = "账号不存在或不唯一。" });
         var actor = await RawMaterialActorAccess.ResolveAsync(c, null, accounts[0].User);
@@ -35,11 +36,18 @@ public sealed class RawMaterialWorkflowController(ISqlConnectionFactory factory,
         using var c = factory.Create();
         await c.OpenAsync();
         using var tx = c.BeginTransaction();
-        if (!await permissions.HasAsync(c, tx, UserName, "账号管理", PermissionAction.打开)
-            || !await permissions.HasAsync(c, tx, UserName, "账号管理", PermissionAction.保存)) return Forbid();
+        // 岗位是审批职责，不等同旧账号管理菜单权。最终写入事务核对真实、唯一且有效的 admin。
+        var actors = (await c.QueryAsync<Account>("SELECT [ID],[用户] AS [User],[锁定到期] AS LockedUntil FROM [sysfileuser] WITH(HOLDLOCK) WHERE [用户]=@user", new { user = UserName }, tx)).ToArray();
+        if (actors.Length != 1 || actors[0].LockedUntil > DateTime.Now
+            || !actors[0].User.Equals("admin", StringComparison.OrdinalIgnoreCase)) return Forbid();
+        // 直接读取现有菜单矩阵，避免错误的历史岗位绑定阻止 admin 解除自己的绑定。
+        var actorPermissions = await RawMaterialTransactionPermissions.ReadAsync(c, tx, actors[0].User);
+        if (!actorPermissions.TryGetValue("账号管理", out var management) || !management.打开 || !management.保存) return Forbid();
         var accounts = (await c.QueryAsync<Account>("SELECT [ID],[用户] AS [User],[锁定到期] AS LockedUntil FROM [sysfileuser] WITH(HOLDLOCK) WHERE [用户]=@user", new { user }, tx)).ToArray();
         if (accounts.Length != 1) return NotFound(new { 消息 = "目标账号不存在或不唯一。" });
         var account = accounts[0];
+        if (account.User.Equals("admin", StringComparison.OrdinalIgnoreCase) && dto.PositionCode is not null)
+            return Conflict(new { 消息 = "admin 固定为管理员，不能绑定普通原料流程岗位。" });
         if (dto.PositionCode is null)
             await c.ExecuteAsync("DELETE FROM [原料流程岗位绑定] WHERE [用户ID]=@id", new { id = account.ID }, tx);
         else

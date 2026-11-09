@@ -12,6 +12,7 @@ beforeEach(() => localStorage.setItem("web2.user", "cloud-p113"));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear(); });
 
 it("原料岗位保持未绑定，手动保存只发送岗位，不改菜单权限；失败保留选择可重试", async () => {
+  localStorage.setItem("web2.user", "admin");
   const writes: { path: string; body: unknown }[] = []; let fails = true;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = decodeURIComponent(new URL(String(input), "http://test").pathname);
@@ -35,6 +36,7 @@ it("原料岗位保持未绑定，手动保存只发送岗位，不改菜单权�
 });
 
 it("账号管理没有保存位不能修改原料岗位", async () => {
+  localStorage.setItem("web2.user", "admin");
   const writes = vi.fn();
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.method === "PUT") writes();
@@ -71,4 +73,31 @@ it("云端 /erp basename 下铃铛跳真实原料单且仅编码一次", async (
   render(<QueryClientProvider client={qc}><MemoryRouter basename="/erp" initialEntries={["/erp/"]}><MessageBell /><RouteProbe /></MemoryRouter></QueryClientProvider>);
   fireEvent.click(screen.getByTitle("消息")); fireEvent.click(await screen.findByRole("button", { name: /云端原料出库/ }));
   await waitFor(() => expect(screen.getByTestId("route")).toHaveTextContent("/plastic-raw-material-stock-issue?open=YCK%20%E7%94%B2%2F1"));
+});
+
+it("非 admin 即使有账号管理保存位也只能查看岗位，不能提交", async () => {
+  const writes = vi.fn();
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === "PUT") writes();
+    return String(input).includes("permissions") ? json(permRowsToMap([{ 菜单: "账号管理", 打开: true, 保存: true }])) : json({ accountName: "clerk-one", positionCode: "06-clerk" });
+  }));
+  renderWithProviders(<RawWorkflowRoleDialog account="clerk-one" onClose={() => {}} />);
+  expect(await screen.findByRole("combobox", { name: "原料流程岗位" })).toBeDisabled();
+  expect(screen.getByText(/当前仅可查看原料岗位/)).toBeInTheDocument();
+  const save=screen.getByRole("button", { name: "保存岗位" });expect(save).toBeDisabled();fireEvent.click(save);expect(writes).not.toHaveBeenCalled();
+});
+
+it.each([null, "06-manager"])("admin 目标禁选普通岗位，只能清除已有历史绑定 %s", async positionCode => {
+  localStorage.setItem("web2.user", "admin");
+  const writes: unknown[] = [];const close=vi.fn();
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === "PUT") { writes.push(JSON.parse(String(init.body)));return new Response(null,{status:204}); }
+    return String(input).includes("permissions") ? json(permRowsToMap([{ 菜单: "账号管理", 打开: true, 保存: true }])) : json({ accountName: "ADMIN", positionCode });
+  }));
+  renderWithProviders(<RawWorkflowRoleDialog account="ADMIN" onClose={close} />);
+  expect(await screen.findByRole("combobox", { name: "原料流程岗位" })).toBeDisabled();
+  expect(screen.getByText(/admin 固定为管理员，不能绑定普通岗位/)).toBeInTheDocument();
+  const clear=screen.getByRole("button",{name:"清除历史岗位"});
+  if (positionCode) { expect(clear).toBeEnabled();fireEvent.click(clear);await waitFor(()=>expect(close).toHaveBeenCalledOnce());expect(writes).toEqual([{positionCode:null}]); }
+  else { expect(clear).toBeDisabled();fireEvent.click(clear);expect(writes).toEqual([]); }
 });

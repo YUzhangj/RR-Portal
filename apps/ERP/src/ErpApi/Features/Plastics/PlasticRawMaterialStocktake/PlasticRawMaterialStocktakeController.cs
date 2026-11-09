@@ -37,6 +37,8 @@ public sealed class PlasticRawMaterialStocktakeController(
         string 单号;
         try { 单号 = await svc.CreateAsync(dto, CurrentUser); }
         catch (ArgumentException ex) { return BadRequest(new { 消息 = ex.Message }); }
+        catch (UnauthorizedAccessException) { return Forbid(); }
+        catch (InvalidOperationException ex) { return Conflict(new { 消息 = ex.Message }); }
         return CreatedAtAction(nameof(Get), new { 单号 }, new { 单号 });
     }
 
@@ -44,7 +46,8 @@ public sealed class PlasticRawMaterialStocktakeController(
     public async Task<IActionResult> Delete(string 单号)
     {
         if (!await AllowAsync(PermissionAction.删除)) return Forbid();
-        try { if (!await svc.DeleteAsync(单号)) return NotFound(); }
+        try { if (!await svc.DeleteAsync(单号, CurrentUser)) return NotFound(); }
+        catch (UnauthorizedAccessException) { return Forbid(); }
         catch (InvalidOperationException ex) { return Conflict(new { 消息 = ex.Message }); }
         return NoContent();
     }
@@ -53,7 +56,9 @@ public sealed class PlasticRawMaterialStocktakeController(
     public async Task<IActionResult> Approve(string 单号)
     {
         if (!await AllowAsync(PermissionAction.审核)) return Forbid();
-        if (!await svc.ApproveAsync(单号, CurrentUser)) return Conflict(new { 消息 = "审核失败：单不存在或已审核。" });
+        try { if (!await svc.ApproveAsync(单号, CurrentUser)) return Conflict(new { 消息 = "审核失败：单不存在或已审核。" }); }
+        catch (UnauthorizedAccessException) { return Forbid(); }
+        catch (InvalidOperationException ex) { return Conflict(new { 消息 = ex.Message }); }
         return NoContent();
     }
 
@@ -61,7 +66,9 @@ public sealed class PlasticRawMaterialStocktakeController(
     public async Task<IActionResult> Unapprove(string 单号)
     {
         if (!await AllowAsync(PermissionAction.反审核)) return Forbid();
-        if (!await svc.UnapproveAsync(单号, CurrentUser)) return Conflict(new { 消息 = "反审核失败：单不存在或未审核。" });
+        try { if (!await svc.UnapproveAsync(单号, CurrentUser)) return Conflict(new { 消息 = "反审核失败：单不存在或未审核。" }); }
+        catch (UnauthorizedAccessException) { return Forbid(); }
+        catch (InvalidOperationException ex) { return Conflict(new { 消息 = ex.Message }); }
         return NoContent();
     }
 }

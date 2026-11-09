@@ -10,7 +10,7 @@ namespace ErpApi.Features.Plastics;
 public static class RawMaterialReceiptPolicy
 {
     private sealed record Header(string? Number,string? Audit,int? Version);
-    private sealed record Line(string? 原料编号,string? 单位,decimal? 每包重量,decimal 数量,string? 备品);
+    private sealed record Line(long ID,string? 原料编号,string? 单位,decimal? 每包重量,decimal 数量,string? 备品);
     private sealed record Ordered(string? Code,string? Unit,decimal? Factor,int? Version,decimal Quantity);
     private static string Unit(string? value)=>value?.Trim().ToUpperInvariant() is "公斤"?"KG":value?.Trim().ToUpperInvariant()??"";
 
@@ -23,7 +23,14 @@ public static class RawMaterialReceiptPolicy
         var source=await SourceAsync(c,tx,dto.订单单号);
         if(source?.Version!=1)throw new InvalidOperationException("原料采购来源正在修改或已删除，请重新选择。");
         await RawMaterialTransactionPermissions.RequireAsync(c,tx,user,"原料入仓单",PermissionAction.保存);
-        await ValidateLinesAsync(c,tx,dto.订单单号,dto.明细.Select(x=>new Line(x.原料编号,x.单位,x.每包重量,x.数量,x.备品)),null,false);
+        var defaults=await ValidateLinesAsync(c,tx,dto.订单单号,dto.明细.Select(x=>new Line(0,x.原料编号,x.单位,x.每包重量,x.数量,x.备品)),null,false);
+        // 只从本单明确且一致的冻结采购来源补缺省，不使用当前主档或固定包重。
+        foreach(var line in dto.明细)
+        {
+            var frozen=defaults[line.原料编号!];
+            if(string.IsNullOrWhiteSpace(line.单位))line.单位=frozen.Unit;
+            if(frozen.Unit=="包"&&line.每包重量 is null)line.每包重量=frozen.Factor;
+        }
         return true;
     }
 
@@ -52,15 +59,24 @@ public static class RawMaterialReceiptPolicy
         if(receipt.Number!=order)throw new InvalidOperationException("原料入仓来源正在修改，请重新打开后审核。");
         if(!approved)return;
         if(source.Audit!="1")throw new InvalidOperationException("原料采购订单尚未完成审核，不能入仓。");
-        var lines=await c.QueryAsync<Line>("SELECT [原料编号],[单位],[每包重量],ISNULL([数量],0) AS 数量,[备品] FROM [原料入仓明细单] WHERE [单号]=@number",new{number},tx);
-        await ValidateLinesAsync(c,tx,order,lines,number,true);
+        var lines=(await c.QueryAsync<Line>("SELECT [ID],[原料编号],[单位],[每包重量],ISNULL([数量],0) AS 数量,[备品] FROM [原料入仓明细单] WHERE [单号]=@number",new{number},tx)).ToArray();
+        var defaults=await ValidateLinesAsync(c,tx,order,lines,number,true);
+        // 兼容旧页面已保存的新政策入仓；填补与过账、期初和审计在同一事务内。
+        foreach(var line in lines)
+        {
+            var frozen=defaults[line.原料编号!];
+            if(!string.IsNullOrWhiteSpace(line.单位)&&(frozen.Unit!="包"||line.每包重量 is not null))continue;
+            await c.ExecuteAsync("UPDATE [原料入仓明细单] SET [单位]=@unit,[每包重量]=@weight WHERE [ID]=@id AND [单号]=@number",
+                new{unit=string.IsNullOrWhiteSpace(line.单位)?frozen.Unit:line.单位,weight=frozen.Unit=="包"&&line.每包重量 is null?frozen.Factor:line.每包重量,id=line.ID,number},tx);
+        }
     }
 
     private static Task<Header?> SourceAsync(SqlConnection c,SqlTransaction tx,string number)=>c.QuerySingleOrDefaultAsync<Header>(
         "SELECT [单号] AS Number,[审核] AS Audit,[采购政策版本] AS Version FROM [原料采购订单] WITH(UPDLOCK,HOLDLOCK) WHERE [单号]=@number",new{number},tx);
 
-    private static async Task ValidateLinesAsync(SqlConnection c,SqlTransaction tx,string order,IEnumerable<Line> lines,string? receipt,bool activate)
+    private static async Task<Dictionary<string,(string Unit,decimal Factor)>> ValidateLinesAsync(SqlConnection c,SqlTransaction tx,string order,IEnumerable<Line> lines,string? receipt,bool activate)
     {
+        var defaults=new Dictionary<string,(string Unit,decimal Factor)>(StringComparer.OrdinalIgnoreCase);
         var orders=(await c.QueryAsync<Ordered>("SELECT [原料编号] AS Code,[单位] AS Unit,[每库存单位KG] AS Factor,[采购政策版本] AS Version,ISNULL([订货数量],0) AS Quantity FROM [原料采购订单明细] WHERE [单号]=@order",new{order},tx)).ToArray();
         foreach(var group in lines.GroupBy(x=>x.原料编号,StringComparer.OrdinalIgnoreCase))
         {
@@ -69,7 +85,7 @@ public static class RawMaterialReceiptPolicy
             var unit=Unit(source[0].Unit);var factor=source[0].Factor;
             if(unit is not ("KG" or "包")||factor is not >0||unit=="KG"&&factor!=1||source.Any(x=>x.Version!=1||Unit(x.Unit)!=unit||x.Factor!=factor))
                 throw new InvalidOperationException("原料采购冻结换算不完整，请核对原单。");
-            if(group.Any(x=>x.数量<=0||decimal.Round(x.数量,4)!=x.数量||Unit(x.单位)!=unit||(unit=="包"&&x.每包重量!=factor)))
+            if(group.Any(x=>x.数量<=0||decimal.Round(x.数量,4)!=x.数量||x.每包重量 is <=0||(!string.IsNullOrWhiteSpace(x.单位)&&Unit(x.单位)!=unit)||(unit=="包"&&x.每包重量.HasValue&&x.每包重量!=factor)))
                 throw new InvalidOperationException("入仓数量须为正且最多4位小数，单位及包重须与采购冻结换算一致。");
             var requested=group.Where(x=>x.备品!="1").Sum(x=>x.数量);
             var received=await c.ExecuteScalarAsync<decimal>("""
@@ -80,6 +96,8 @@ WHERE h.[订单单号]=@order AND h.[审核]=N'1' AND ISNULL(d.[备品],N'0')<>N
             // Before the first posted movement the existing master balance is the opening balance.
             // Existing ledger materials freeze zero opening, so old receipts are never counted twice.
             if(activate)await RawMaterialInventorySql.ActivateAsync(c,tx,group.Key!,unit,factor!.Value);
+            defaults[group.Key!]=(unit,factor!.Value);
         }
+        return defaults;
     }
 }

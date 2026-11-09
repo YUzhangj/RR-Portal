@@ -59,7 +59,7 @@ const PO_LIST = [
 
 type Call = { url: string; method: string; body?: string };
 
-function installFetch(perms: unknown[] = PERMS) {
+function installFetch(perms: unknown[] = PERMS, importedLine: Record<string, unknown> = {}) {
   const calls: Call[] = [];
   vi.stubGlobal(
     "fetch",
@@ -85,7 +85,7 @@ function installFetch(perms: unknown[] = PERMS) {
         return json({
           单头: PO_LIST[0],
           明细: [
-            { id: 21, 原料编号: "RM-1", 原料名称: "ABS 757", 单位: "KG", 单价类型: "含税", 订货数量: 100, 单价: 12.5, 备注: "PO行" },
+            { id: 21, 原料编号: "RM-1", 原料名称: "ABS 757", 单位: "KG", 单价类型: "含税", 订货数量: 100, 单价: 12.5, 备注: "PO行", ...importedLine },
           ],
         });
       if (p === "/api/plastic-raw-material-receipt-query/summary")
@@ -147,6 +147,26 @@ describe("PlasticRawMaterialReceiptPage(原料入仓单)", () => {
       expect(body.明细).toEqual([
         expect.objectContaining({ 原料编号: "RM-1", 数量: 100, 单价: 12.5, 备注: "PO行" }),
       ]);
+    });
+  });
+
+  it.each([
+    [{ 单位: "包", 采购政策版本: 1, 每库存单位KG: 17.5, 每包重量: 99 }, 17.5],
+    [{ 单位: "KG", 采购政策版本: 1, 每库存单位KG: 1, 每包重量: 20 }, 20],
+    [{ 单位: "包", 采购政策版本: null, 每包重量: 12 }, 12],
+  ])("订单调入保存保留明确冻结包重，KG物理包重及旧政策保持原值 %j", async (line, expectedWeight) => {
+    const calls=installFetch(PERMS,line);
+    renderWithProviders(<PlasticRawMaterialReceiptPage />, "/plastic-raw-material-receipt");
+    await screen.findByText("原料入仓单(新建)");
+    fireEvent.click(screen.getByRole("button", {name:"选择"}));
+    fireEvent.click((await screen.findByText("台化")).closest("tr")!);
+    fireEvent.click(screen.getByRole("button",{name:"调入"}));
+    fireEvent.click((await screen.findByText("RPO-1")).closest("tr")!);
+    await screen.findByText("已调入采购订单 RPO-1 的 1 行明细");
+    fireEvent.click(screen.getByRole("button",{name:"保存"}));
+    await waitFor(()=>{
+      const post=calls.find(c=>c.url.endsWith("/plastic-raw-material-receipt")&&c.method==="POST");
+      expect(post).toBeTruthy();expect(JSON.parse(post!.body!).明细[0]).toEqual(expect.objectContaining({单位:line.单位,每包重量:expectedWeight,数量:100}));
     });
   });
 

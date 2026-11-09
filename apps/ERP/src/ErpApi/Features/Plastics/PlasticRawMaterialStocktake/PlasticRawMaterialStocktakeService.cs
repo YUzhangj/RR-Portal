@@ -1,4 +1,5 @@
 using Dapper;
+using Microsoft.Data.SqlClient;
 using ErpApi.Engines.Authorization;
 using ErpApi.Engines.DocumentNumber;
 using ErpApi.Features.MasterData;
@@ -24,6 +25,9 @@ public sealed class PlasticRawMaterialStocktakeService(ISqlConnectionFactory fac
         await c.OpenAsync();
         using var tx = c.BeginTransaction();
         await RawMaterialInventorySql.LockCodesAsync(c,tx,dto.明细.Select(l=>l.原料编号).OfType<string>());
+        if (await c.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM [原料自动扣料期初] WHERE [原料编号] IN @codes",
+            new { codes = dto.明细.Select(l => l.原料编号).OfType<string>().ToArray() }, tx) > 0)
+            await RawMaterialTransactionPermissions.RequireAsync(c, tx, user, DocType, PermissionAction.保存);
         var 单号 = await docNo.NextAsync(DocType, Prefix, now, c, tx);
 
         await c.ExecuteAsync(@"
@@ -45,6 +49,7 @@ VALUES(@单号,@原料编号,@原料名称,@产地,@每包重量,@单位,@系统
                       盈亏数量 = l.盘点数量 - 系统数量, l.备注, ledgerCount }, tx);
         }
 
+        await RejectDuplicateLedgerCountsAsync(c, tx, 单号);
         tx.Commit();
         return 单号;
     }
@@ -87,9 +92,11 @@ FROM [原料盘点明细单] WHERE [单号]=@单号 ORDER BY [ID];", new { 单�
         await c.OpenAsync();
         using var tx = c.BeginTransaction();
         await RawMaterialInventorySql.LockDocumentAsync(c,tx,DocType,单号);
+        await RequireLedgerPermissionAsync(c, tx, 单号, user, PermissionAction.审核);
         var 审核 = await c.ExecuteScalarAsync<string?>(
             "SELECT ISNULL([审核],'0') FROM [原料盘点单] WITH (UPDLOCK, HOLDLOCK) WHERE [单号]=@单号", new { 单号 }, tx);
         if (审核 is null || 审核 == "1") return false;
+        await RejectDuplicateLedgerCountsAsync(c, tx, 单号);
         var counts=await c.QueryAsync<(string 原料编号,decimal 系统数量,bool 原料台账盘点)>(
             "SELECT [原料编号],ISNULL([系统数量],0),ISNULL([原料台账盘点],0) FROM [原料盘点明细单] WHERE [单号]=@单号",new { 单号 },tx);
         foreach (var count in counts)
@@ -121,6 +128,7 @@ WHERE d.[单号] = @单号 AND d.[原料编号] IS NOT NULL AND ISNULL(d.[原料
         await c.OpenAsync();
         using var tx = c.BeginTransaction();
         await RawMaterialInventorySql.LockDocumentAsync(c,tx,DocType,单号);
+        await RequireLedgerPermissionAsync(c, tx, 单号, user, PermissionAction.反审核);
         var 审核 = await c.ExecuteScalarAsync<string?>(
             "SELECT ISNULL([审核],'0') FROM [原料盘点单] WITH (UPDLOCK, HOLDLOCK) WHERE [单号]=@单号", new { 单号 }, tx);
         if (审核 is null || 审核 != "1") return false;
@@ -137,11 +145,13 @@ WHERE d.[单号] = @单号 AND d.[原料编号] IS NOT NULL AND ISNULL(d.[原料
         return true;
     }
 
-    public async Task<bool> DeleteAsync(string 单号)
+    public async Task<bool> DeleteAsync(string 单号, string? user = null)
     {
         using var c = factory.Create();
         await c.OpenAsync();
         using var tx = c.BeginTransaction();
+        await RawMaterialInventorySql.LockDocumentAsync(c, tx, DocType, 单号);
+        await RequireLedgerPermissionAsync(c, tx, 单号, user ?? "", PermissionAction.删除);
         var 审核 = await c.ExecuteScalarAsync<string?>(
             "SELECT ISNULL([审核],'0') FROM [原料盘点单] WITH (UPDLOCK, HOLDLOCK) WHERE [单号]=@单号", new { 单号 }, tx);
         if (审核 is null) return false;
@@ -150,6 +160,31 @@ WHERE d.[单号] = @单号 AND d.[原料编号] IS NOT NULL AND ISNULL(d.[原料
         await c.ExecuteAsync("DELETE FROM [原料盘点单] WHERE [单号]=@单号", new { 单号 }, tx);
         tx.Commit();
         return true;
+    }
+
+    private static async Task RequireLedgerPermissionAsync(SqlConnection c, SqlTransaction tx, string number,
+        string user, PermissionAction action)
+    {
+        var ledger = await c.ExecuteScalarAsync<int>(@"
+SELECT COUNT(*) FROM [原料盘点明细单] d
+WHERE d.[单号]=@number AND (d.[原料台账盘点]=1 OR EXISTS
+    (SELECT 1 FROM [原料自动扣料期初] o WHERE o.[原料编号]=d.[原料编号]));", new { number }, tx);
+        if (ledger > 0)
+            await RawMaterialTransactionPermissions.RequireAsync(c, tx, user, DocType, action);
+    }
+
+    // 按数据库原料编号的相等语义检查，包括大小写及尾空格；旧台账明细仍沿用历史路径。
+    private static async Task RejectDuplicateLedgerCountsAsync(SqlConnection c, SqlTransaction tx, string number)
+    {
+        var duplicate = await c.ExecuteScalarAsync<string?>(@"
+SELECT TOP (1) [原料编号]
+FROM [原料盘点明细单] WITH (UPDLOCK, HOLDLOCK)
+WHERE [单号]=@number AND [原料编号] IS NOT NULL
+GROUP BY [原料编号]
+HAVING COUNT_BIG(*) > 1 AND MAX(CASE WHEN [原料台账盘点]=1 THEN 1 ELSE 0 END)=1;",
+            new { number }, tx);
+        if (duplicate is not null)
+            throw new InvalidOperationException($"原料 {duplicate} 已启用原料库存台账，同一盘点单只能保留一行该原料，请合并后重新保存。");
     }
 
     private static string ApprovalFilter(string? 审核情况) => 审核情况 switch
