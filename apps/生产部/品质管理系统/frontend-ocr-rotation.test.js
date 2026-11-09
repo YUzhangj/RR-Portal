@@ -23,7 +23,7 @@ function fixture(options = {}) {
   b.json = expression => JSON.parse(b.run('JSON.stringify(' + expression + ')'));
   const config = { width: 100, height: 200, ...options };
   let serial = 0;
-  for (const id of ['ocrPreview','ocrStatus','ocrRawText','btnStartOcr','btnRotateOcr','btnApplyOcrToForm']) {
+  for (const id of ['ocrPreview','ocrStatus','ocrRawText','ocrItemsPreview','btnStartOcr','btnRotateOcr','btnApplyOcrToForm','btnParseOcrText']) {
     const node = { src: '', value: '', style: {}, textContent: '', disabled: false,
       addEventListener(event, fn) { handlers[id + ':' + event] = fn; } };
     b.elements.set(id, node);
@@ -503,4 +503,54 @@ test('a text response from an older image or login cannot replace fields', async
     finish({ok:true,json:async()=>({ok:true,fields:{items:[{productNo:'OLD',productName:'old',qty:'80'}]}})});
     assert.equal(await pending,false);assert.notEqual(x.value('ocrProductNo'),'OLD');
   }
+});
+
+
+test('editing the original text cancels a pending local worker without losing the correction', async () => {
+  const x = fixture({local:true}); x.upload(); await tick(); let finish;
+  x.b.ctx.Tesseract = {recognize: () => new Promise(resolve => {finish = resolve;})};
+  const pending = x.b.ctx.startOcr(); await tick(); await tick();
+  assert.equal(typeof finish, 'function');
+  x.b.elements.get('ocrRawText').value = 'MANUAL NEW TEXT';
+  x.b.elements.get('ocrProductNo').value = 'MANUAL-SKU';
+  x.b.ctx.invalidateOcrText();
+  finish({data:{text:'货号：STALE-SKU\n数量：12'}}); await pending;
+  assert.equal(x.value('ocrRawText'), 'MANUAL NEW TEXT');
+  assert.equal(x.value('ocrProductNo'), 'MANUAL-SKU');
+  assert.equal(x.b.ctx.__qcOcrTextNeedsParsing, true);
+  assert.match(x.status(), /原文已修改/);
+  assert.equal(x.b.run('_ocrWorkerBusy'), false);
+  assert.equal(x.b.ctx.applyOcrToForm(), false);
+});
+
+test('maintenance cancellation invalidates local OCR and permits a fresh result only after recovery', async () => {
+  const x = fixture({local:true}); x.upload(); await tick(); let finish;
+  x.b.ctx.Tesseract = {recognize: () => new Promise(resolve => {finish = resolve;})};
+  const pending = x.b.ctx.startOcr(); await tick(); await tick();
+  x.b.elements.get('ocrRawText').value = 'KEEP ORIGINAL';
+  x.b.elements.get('ocrProductNo').value = 'KEEP-SKU';
+  const originalImage = x.preview();
+  const listeners = {};
+  x.b.ctx.window.addEventListener = () => {};
+  x.b.ctx.document.addEventListener = (event, fn) => { listeners[event] = fn; };
+  x.b.ctx.setInterval = () => 1;
+  x.b.ctx.fetch = async () => ({ok:true,json:async()=>({enabled:true})});
+  vm.runInContext(source('maintenance.js'), x.b.ctx); await tick();
+  assert.equal(x.b.ctx.__QC_MAINTENANCE.blocked, true);
+  finish({data:{text:'货号：STALE-SKU\n数量：12'}}); await pending;
+  assert.equal(x.value('ocrRawText'), 'KEEP ORIGINAL');
+  assert.equal(x.value('ocrProductNo'), 'KEEP-SKU');
+  assert.equal(x.preview(), originalImage);
+  assert.equal(x.b.run('_ocrWorkerBusy'), false);
+  // Simulate the already-tested deliberate maintenance recovery/reload boundary.
+  x.b.ctx.__QC_MAINTENANCE.blocked = false;
+  x.b.ctx.invalidateOcrText();
+  const preview = x.b.elements.get('ocrItemsPreview');
+  preview.hidden = false; preview.innerHTML = 'OLD TABLE';
+  x.b.ctx.Tesseract = {recognize:async()=>({data:{text:'货号：FRESH-SKU\n数量：12'}})};
+  await x.b.ctx.startOcr();
+  assert.equal(x.value('ocrProductNo'), 'FRESH-SKU');
+  assert.equal(x.b.ctx.__qcOcrTextNeedsParsing, false);
+  assert.equal(preview.hidden, true); assert.equal(preview.innerHTML, '');
+  assert.match(x.status(), /本地识别完成/);
 });

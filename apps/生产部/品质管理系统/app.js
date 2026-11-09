@@ -2832,6 +2832,8 @@ function _clearOcrPreviewFields() {
 window.__QC_OCR_IMAGE = {
   snapshot: _ocrImageSnapshot,
   current: _sameOcrImage,
+  // Low-level invalidation avoids calling __QC_OCR_CANCEL recursively.
+  invalidatePending() { _ocrImageRevision++; },
   cancel: _cancelOcrWork,
   commit(snapshot, dataUrl, angle) {
     if (!_sameOcrImage(snapshot)) return null;
@@ -3039,7 +3041,11 @@ async function startOcr() {
         showToast('表格文字识别不完整，未自动填入字段；请核对原文，不要按乱码提交', 'error');
       } else {
         window.__qcAiResult = null;
+        window.__qcOcrTextActor = null;
+        window.__qcOcrTextNeedsParsing = false;
         window.__qcOcrResultContext = snapshot;
+        const previewTable = document.getElementById('ocrItemsPreview');
+        if (previewTable) { previewTable.hidden = true; previewTable.innerHTML = ''; }
         setText('ocrStatus', '本地识别完成，请核对字段');
         showToast('本地识别完成，请逐项核对货号、名称和数量', 'info');
       }

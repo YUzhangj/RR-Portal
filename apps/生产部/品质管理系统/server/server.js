@@ -539,8 +539,9 @@ function parseDeliveryNote(text, options = {}) {
         const rowPattern = new RegExp('^(?<order>\\S+)\\s+(?<sku>\\S+)\\s+' +
           (hasModel ? '(?<model>\\S+)\\s+' : '') + '(?<name>.+?)\\s+(?<color>\\S+)\\s+(?<qty>' + num + ')\\s*(?<unit>PCS|个|個|件|套|条|條)\\s+(?<delivered>' + num + ')(?:\\s*[/／]\\s*(?<owed>' + num + '))?\\s+(?<cartons>\\d+)(?:\\s+(?<remark>.*))?$', 'i');
         for (const line of lines.slice(hiP + 1)) {
-          if (/^(?:胶箱|膠箱|胶袋|膠袋|钙箱|鈣箱|纸箱|紙箱|平卡|卡板|吸塑|QC|Q[.]C[.]?|收货人|收貨人|送货人|送貨人|合计|合計|总计|總計)[：:\s]/i.test(line)) break;
-          if (line === plainHeader) continue;
+          // A footer ends a page, not the delivery note: keep scanning later pages.
+          if (/^(?:胶箱|膠箱|胶袋|膠袋|钙箱|鈣箱|纸箱|紙箱|平卡|卡板|吸塑|QC|Q[.]C[.]?|收货人|收貨人|送货人|送貨人|合计|合計|总计|總計)[：:\s]/i.test(line)) continue;
+          if (componentHeader.test(line.replace(/\s+/g, ''))) continue;
           if (/^[\d\s+*xX×.,，/()\-]+$/.test(line)) continue; // 备注换行数字不构成新的货品。
           const match = rowPattern.exec(line), row = match && match.groups;
           const code = value => value.replace(/[‐‑‒–—−﹘﹣－]/g, '-');

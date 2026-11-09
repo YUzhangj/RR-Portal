@@ -27,6 +27,8 @@
   }
   function cancelOperation() {
     textRevision++;
+    // Local Tesseract work cannot be aborted, but its snapshot must become stale too.
+    if (imageApi() && typeof imageApi().invalidatePending === 'function') imageApi().invalidatePending();
     var previous = activeOperation;
     activeOperation = null;
     if (previous && previous.controller) previous.controller.abort();
