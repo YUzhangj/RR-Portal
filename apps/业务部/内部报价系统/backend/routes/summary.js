@@ -148,15 +148,19 @@ router.post('/:id/revoke-confirmation', quoteWriteRoute(db, req => Number(req.pa
   }
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
   if (!reason || reason.length > 300) return res.status(400).json({error:'请填写撤销原因（1–300字）'});
+  // Writers lock the version before its sections and case. Keep that order:
+  // an acknowledged save or metadata edit must be visible before eligibility
+  // is checked, and no writer may slip between the check and cascading delete.
+  const versions = await db.prepare(`SELECT * FROM quote_verification_versions
+    WHERE quote_id=? ORDER BY id${db.pool ? ' FOR UPDATE' : ''}`).all(id);
+  const versionIds = versions.map(version => Number(version.id));
+  const sections = versionIds.length ? await db.prepare(`SELECT * FROM quote_verification_sections
+    WHERE version_id IN (${versionIds.map(() => '?').join(',')}) ORDER BY version_id,id${db.pool ? ' FOR UPDATE' : ''}`).all(...versionIds) : [];
   const verification = await db.prepare('SELECT * FROM quote_verifications WHERE quote_id=?').get(id);
   if (verification && (verification.status !== 'not_started' || Object.keys(parseJson(verification.verified_values_json, {unknown:true})).length
       || Object.keys(parseJson(verification.verified_sections_json, {unknown:true})).length || verification.note)) {
     return res.status(409).json({error:'已有核价填写记录，不能直接撤销确认'});
   }
-  const versions = await db.prepare('SELECT * FROM quote_verification_versions WHERE quote_id=? ORDER BY version_no,id').all(id);
-  const versionIds = versions.map(version => Number(version.id));
-  const sections = versionIds.length ? await db.prepare(`SELECT * FROM quote_verification_sections
-    WHERE version_id IN (${versionIds.map(() => '?').join(',')}) ORDER BY version_id,id`).all(...versionIds) : [];
   const first = versions[0];
   // Opening the costing page automatically initializes one drafting V1. That
   // generated shell is not a user costing record and may be removed together
