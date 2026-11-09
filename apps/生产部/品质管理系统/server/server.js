@@ -250,7 +250,8 @@ function parseDeliveryNote(text, options = {}) {
       if (cells.length > 1) latexCells.set(t, cells.filter(Boolean));
     }
   }
-  const componentHeader = /^[订訂][单單][号號][货貨][号號](?:型[号號])?配件名[称稱][颜顏]色[数數]量[单單]位本[单單]送[货貨][数數][/／]本[单單]欠[数數]箱[数數](?:备[注註]|備[注註])?$/;
+  // 配件单用「模号」标注模具编号，也有「型号」写法；两者占相同的独立列。
+  const componentHeader = /^[订訂][单單][号號][货貨][号號](?:[型模][号號])?配件名[称稱][颜顏]色[数數]量[单單]位本[单單]送[货貨][数數][/／]本[单單]欠[数數]箱[数數](?:备[注註]|備[注註])?$/;
   for (let i = 0; i < lines.length; i++) {
     if (!/^[订訂][单單][号號]\s+[货貨][号號]/.test(lines[i])) continue;
     for (let end = i; end < Math.min(lines.length, i + 4); end++) {
@@ -534,7 +535,7 @@ function parseDeliveryNote(text, options = {}) {
       const componentLayout = componentHeader.test(plainHeader.replace(/\s+/g, ''));
       if (componentLayout) {
         const num = '(?:\\d{1,3}(?:[,，]\\d{3})+|\\d+)(?:\\.\\d+)?';
-        const hasModel = /型[号號]/.test(plainHeader);
+        const hasModel = /[型模][号號]/.test(plainHeader);
         const rowPattern = new RegExp('^(?<order>\\S+)\\s+(?<sku>\\S+)\\s+' +
           (hasModel ? '(?<model>\\S+)\\s+' : '') + '(?<name>.+?)\\s+(?<color>\\S+)\\s+(?<qty>' + num + ')\\s*(?<unit>PCS|个|個|件|套|条|條)\\s+(?<delivered>' + num + ')(?:\\s*[/／]\\s*(?<owed>' + num + '))?\\s+(?<cartons>\\d+)(?:\\s+(?<remark>.*))?$', 'i');
         for (const line of lines.slice(hiP + 1)) {

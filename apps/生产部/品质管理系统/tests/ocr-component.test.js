@@ -94,3 +94,14 @@ test('wrapped header and typographic code dashes preserve seven goods rows, not 
     assert.ok(parsed.items.every(row=>!row.quantityNeedsReview));
   }
 });
+
+test('mold-number headers map all seven rows and exclude wrapped headers and packing footers', () => {
+  for (const modelHeader of ['模号', '模號', '型号', '型號']) {
+    const names=['配件上壳','配件下壳','蛋形下壳','杯下壳','圆圈上壳','左耳朵','右耳朵'];
+    const rows=names.map((name,i)=>`CB2026123-BU001 9298 MODEL-02M-01 ${name} 87275-粉红色 ${i<5?9000:21000} PCS ${i<5?21000:9000} ${i<5?6:21} ${i<5?'1500*6':'21*1000'}`);
+    const result=parse(documentText(`订单号 货号 ${modelHeader} 配件名称 颜色 数量 单位 本单送货数/\n本单欠数 箱数 备注\n${rows.join('\n')}\n胶箱: 65 钙箱: 纸箱:\n平卡: 胶袋: 卡板: 吸塑:\n收货人: QC: 送货人: 合成姓名`));
+    assert.equal(result.items.length,7,modelHeader);
+    assert.deepEqual(result.items.map(item=>[item.orderNo,item.productNo,item.model,item.productName,item.color,item.qty,item.unit,item.deliveryBalance,item.cartons,item.remark]),names.map((name,i)=>['CB2026123-BU001','9298','MODEL-02M-01',name,'87275-粉红色',i<5?'9000':'21000','PCS',i<5?'21000':'9000',i<5?'6':'21',i<5?'1500*6':'21*1000']),modelHeader);
+    assert.ok(result.items.every(item=>!item.quantityNeedsReview),modelHeader);
+  }
+});
