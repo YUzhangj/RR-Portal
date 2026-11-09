@@ -5945,10 +5945,48 @@ function backupExportJSON() {
 /* ════════════════
    ② 导入 JSON 备份
 ════════════════ */
+function _backupReadPackage(parsed) {
+  if (Array.isArray(parsed)) return { records: parsed, isDraft: false };
+  if (!parsed || typeof parsed !== 'object') throw new Error('文件不是有效的 JSON 数组或备份包');
+  const hasState = Object.prototype.hasOwnProperty.call(parsed, 'state');
+  const isDraft = hasState || parsed.backupType === 'pending-records';
+  if (hasState && (!parsed.state || typeof parsed.state !== 'object' || Array.isArray(parsed.state) ||
+      !Array.isArray(parsed.state.records) || Object.prototype.hasOwnProperty.call(parsed, 'records'))) {
+    throw new Error('未同步草稿格式无效，需包含 state.records');
+  }
+  if (isDraft && (typeof parsed.owner !== 'string' || !parsed.owner.trim() ||
+      typeof parsed.company !== 'string' || !parsed.company)) {
+    throw new Error('未同步草稿格式无效，需包含公司和原账号');
+  }
+  if (parsed.company !== undefined && parsed.company !== getCompany()) {
+    throw new Error('文件所属公司与当前公司不一致，请切换到文件所属公司后导入');
+  }
+  const records = hasState ? parsed.state.records : parsed.records;
+  if (!Array.isArray(records)) throw new Error('文件不是有效的 JSON 数组或备份包');
+  // 草稿的删除队列、整库替换标记和 nextId 不属于人工追加恢复的内容。
+  return { records, isDraft, company: parsed.company, owner: isDraft ? parsed.owner : null };
+}
+
+function _backupRequireImport() {
+  if (window.__QC_DRAFT_RECOVERY_BLOCKED) {
+    throw new Error('当前账号的草稿冲突尚未处理，请先下载并核对原草稿，处理冲突后再导入');
+  }
+  if (!can('importData')) throw new Error('当前账号无权限导入数据，请使用有数据导入权限的账号');
+}
+
 function backupImportJSON(event) {
   const file = event.target.files[0];
   event.target.value = '';   /* 允许重复选同一文件 */
+  _backupImportFile(file);
+}
+
+function _backupImportFile(file) {
   if (!file) return;
+  try {
+    _backupRequireImport();
+    // 兼容草稿备份还包含完整原文；实际记录载荷仍在写入前按 50 MB 校验。
+    if (file.size > 200 * 1024 * 1024) throw new Error('备份文件超过允许读取的大小（200 MB）');
+  } catch (e) { showToast(e.message, 'error'); return; }
 
   const reader = new FileReader();
   reader.onerror = () => { showToast('文件读取失败，请重试', 'error'); };
@@ -5966,18 +6004,15 @@ function backupImportJSON(event) {
         return;
       }
 
-      const incoming = parsed.records || parsed;   /* 兼容旧格式（直接数组） */
+      const source = _backupReadPackage(parsed);
+      const incoming = source.records;
       const exportedAt = parsed.exportedAt
-        ? new Date(parsed.exportedAt).toLocaleString('zh-CN')
+        ? _esc(new Date(parsed.exportedAt).toLocaleString('zh-CN'))
         : '未知时间';
-
-      /* 弹出确认，让用户选择导入模式 */
-      _backupConfirm({
-        icon:         '⬆',
-        title:        '导入 JSON 备份',
-        body:         `
-          <div>备份文件包含 <strong>${incoming.length}</strong> 条验货记录</div>
-          <div style="font-size:11px;color:var(--text-dim);margin-top:4px">导出时间：${exportedAt}</div>
+      const description = source.isDraft
+        ? `<div style="font-size:12px;margin-top:8px">未同步草稿 · 原账号：${_esc(source.owner)} · 公司：${_esc(source.company)}</div>
+           <div style="font-size:12px;color:var(--text-dim);margin-top:8px">仅追加恢复，保留现有记录及原编号；相同记录跳过，同编号内容不同则暂停整批导入。草稿中的删除和覆盖操作不会执行。</div>`
+        : `<div style="font-size:11px;color:var(--text-dim);margin-top:4px">导出时间：${exportedAt}</div>
           <div class="backup-mode-radios">
             <label class="backup-mode-label">
               <input type="radio" name="bkMode" value="append" checked />
@@ -5985,14 +6020,22 @@ function backupImportJSON(event) {
             </label>
             <label class="backup-mode-label">
               <input type="radio" name="bkMode" value="replace" />
-              <div><b>覆盖当前数据</b><div style="font-size:11px;color:var(--red)">⚠ 当前 ${recs().length} 条记录将被清空</div></div>
+              <div><b>覆盖当前数据</b><div style="font-size:11px;color:var(--red)">⚠ 当前 ${state.records.length} 条记录将被清空</div></div>
             </label>
-          </div>`,
-        confirmLabel:  '确认导入',
+          </div>`;
+
+      /* 弹出确认，让用户选择导入模式 */
+      _backupConfirm({
+        icon:         '⬆',
+        title:        source.isDraft ? '恢复未同步验货草稿' : '导入 JSON 备份',
+        body:         `
+          <div>文件包含 <strong>${incoming.length}</strong> 条验货记录</div>
+          ${description}`,
+        confirmLabel:  source.isDraft ? '确认追加恢复' : '确认导入',
         confirmClass:  'btn-primary',
         onConfirm:    () => {
-          const mode = document.querySelector('input[name="bkMode"]:checked')?.value || 'append';
-          _backupDoImport(incoming, mode);
+          const mode = source.isDraft ? 'append' : document.querySelector('input[name="bkMode"]:checked')?.value || 'append';
+          _backupDoImport(parsed, mode);
         },
       });
 
@@ -6021,9 +6064,15 @@ function _backupJsonBytes(value, limit = Infinity) {
   return size;
 }
 
-function _backupDoImport(incoming, mode) {
+function _backupDoImport(payload, mode) {
   try {
-    if (!Array.isArray(incoming) || !['append', 'replace'].includes(mode)) throw new Error('备份格式或导入方式无效');
+    _backupRequireImport();
+    const source = _backupReadPackage(payload), incoming = source.records;
+    const validationError = _backupValidate(payload);
+    if (validationError) throw new Error(validationError);
+    if (!['append', 'replace'].includes(mode)) throw new Error('备份格式或导入方式无效');
+    if (source.isDraft && mode !== 'append') throw new Error('未同步草稿仅支持追加恢复，不能覆盖当前数据');
+    if (source.isDraft && window.__QC_FORCE_REPLACE) throw new Error('当前有尚未同步的覆盖操作，请先处理原操作，再恢复草稿');
     const maxBody = 50 * 1024 * 1024;   /* 与原 /api/records 载荷上限一致 */
     if (_backupJsonBytes(incoming, maxBody) > maxBody) throw new Error('备份超过服务器允许的大小');
     const fields = ['date','inspDate','supplier','client','processType','productNo','productName',
@@ -6104,6 +6153,7 @@ function _backupDoImport(incoming, mode) {
     const added = [], seen = new Map();
     let skipped = 0;
     for (const raw of incoming) {
+      if (source.isDraft && (!raw || !safeId(raw.id))) throw new Error('草稿记录缺少有效原编号，整批恢复已暂停，请先核对原草稿');
       const id = raw && safeId(raw.id) ? Number(raw.id) : _newRecordId(used);
       const row = normalize(raw, id), signature = JSON.stringify(row);
       if (seen.has(id)) {
@@ -6121,10 +6171,22 @@ function _backupDoImport(incoming, mode) {
     }
     const next = mode === 'replace' ? added : state.records.concat(added);
     if (_backupJsonBytes({records:next}, maxBody) > maxBody) throw new Error('合并后资料超过服务器允许的大小，原资料未改动');
-    if (mode === 'replace') window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;
-    state.records = next;
-    state.nextId = Math.max(state.nextId || 1, 1);
-    if (mode === 'replace' || added.length) persist();
+    if (mode === 'replace' || added.length) {
+      const previousRecords = state.records, previousNextId = state.nextId;
+      const hadReplacement = Object.prototype.hasOwnProperty.call(window, '__QC_FORCE_REPLACE');
+      const previousReplacement = window.__QC_FORCE_REPLACE;
+      try {
+        if (mode === 'replace') window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;
+        state.records = next;
+        state.nextId = Math.max(state.nextId || 1, 1);
+        if (persist() === false) throw new Error('本地保存失败，原资料未改动，请检查登录状态或浏览器存储空间');
+      } catch (e) {
+        state.records = previousRecords; state.nextId = previousNextId;
+        if (hadReplacement) window.__QC_FORCE_REPLACE = previousReplacement;
+        else delete window.__QC_FORCE_REPLACE;
+        throw e;
+      }
+    }
 
     const modeLabel = mode === 'replace' ? '覆盖' : '追加';
     showToast(`${added.length} 条备份记录已在本地暂存，跳过 ${skipped} 条重复项；仍须服务器权限核验`, 'info');
@@ -6140,15 +6202,15 @@ function _backupDoImport(incoming, mode) {
 
 /* 格式校验：返回错误描述字符串，或 null 表示通过 */
 function _backupValidate(parsed) {
-  /* 支持两种格式：
+  /* 支持三种格式：
      1. { version, records: [...] }  — 本系统导出格式
      2. [...]                        — 直接数组（简单兼容）
+     3. { owner, company, state: { records: [...] } } — 未同步草稿
+        或 { backupType: 'pending-records', owner, company, records: [...] }
   */
-  const arr = Array.isArray(parsed)
-    ? parsed
-    : (parsed && Array.isArray(parsed.records) ? parsed.records : null);
-
-  if (!arr) return '文件不是有效的 JSON 数组或备份包';
+  let arr;
+  try { arr = _backupReadPackage(parsed).records; }
+  catch (e) { return e.message; }
   if (arr.length === 0) return '备份文件中没有记录（空数组）';
 
   /* 检查必要字段：至少80%的记录要有 date 和 supplier */
@@ -6405,8 +6467,9 @@ function _setProgress(pct, label) {
 ═══════════════════════════════ */
 function _startImport(file) {
   const name = file.name.toLowerCase();
+  if (name.endsWith('.json')) { _backupImportFile(file); return; }
   if (!name.endsWith('.xlsx') && !name.endsWith('.xls') && !name.endsWith('.csv')) {
-    _showFatalError('不支持的文件格式：' + file.name + '，请使用 .xlsx / .xls / .csv');
+    _showFatalError('不支持的文件格式：' + file.name + '，请使用 .xlsx / .xls / .csv / .json');
     return;
   }
   if (typeof XLSX === 'undefined') {

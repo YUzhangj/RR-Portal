@@ -463,10 +463,10 @@ test('entry append validation is atomic for invalid or duplicate new description
 // endpoint and SQLite. No browser identity or imported audit field grants rights.
 function normalizedBackup(records, mode='append') {
   const app=fs.readFileSync(path.join(__dirname,'../app.js'),'utf8');
-  const from=app.indexOf('function _backupJsonBytes(value, limit = Infinity) {');
-  const to=app.indexOf('\n/* 格式校验',from);
+  const from=app.indexOf('function _backupReadPackage(parsed) {');
+  const to=app.indexOf('function backupClearAll()',from);
   let captured;
-  const context={state:{records:[],nextId:31},window:{},incoming:records,mode,
+  const context={state:{records:[],nextId:31},window:{},incoming:records,mode,can:()=>true,getCompany:()=>A,
     nowIso:()=> '2026-11-05T01:00:00.000Z',persist(){captured=JSON.parse(JSON.stringify(context.state.records));},
     showToast(){},_backupLog(){},_backupRefreshAll(){},_newRecordId(){throw new Error('Explicit synthetic IDs required');}};
   vm.runInNewContext(app.slice(from,to)+';if(!_backupDoImport(incoming,mode))throw new Error("Backup fixture rejected");',context);

@@ -123,10 +123,12 @@ test('clear acknowledgement followed by new entry uses a fresh id above tombston
 });
 test('backup replace uses the replacement channel and does not reset its allocated ids', () => {
   const state = { records: [record(500)], nextId: 501 };
-  const context = { state, window: {}, nowIso: () => '2026-10-19T05:00:00Z', persist() {}, showToast() {}, _backupLog() {}, _backupRefreshAll() {} };
+  const context = { state, window: {}, can: () => true, getCompany: () => 'dg-xingxin',
+    nowIso: () => '2026-10-19T05:00:00Z', persist() {}, showToast() {}, _backupLog() {}, _backupRefreshAll() {} };
+  for (const name of ['_backupRequireImport','_backupReadPackage','_backupValidate']) context[name] = appFunction(name, context);
   context._newRecordId = appFunction('_newRecordId', context);
   context._backupJsonBytes = appFunction('_backupJsonBytes', context);
-  appFunction('_backupDoImport', context)([{ productNo: 'imported' }], 'replace');
+  appFunction('_backupDoImport', context)([{ date: '2026-10-19', supplier: 'Test Supplier', productNo: 'imported' }], 'replace');
   assert.ok(Number.isSafeInteger(state.records[0].id)); assert.ok(state.records[0].id > 0); assert.notEqual(state.records[0].id, 500);
   assert.equal(state.nextId, 501);
   assert.ok(context.window.__QC_FORCE_REPLACE);
