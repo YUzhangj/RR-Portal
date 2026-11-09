@@ -150,7 +150,8 @@ test('normal recognized rows still replace missing metadata and persist all queu
     {productNo:'0013',productName:'Synthetic B',qty:'30',orderNo:'PO-B'},
   ]}});
   x.b.ctx.openAddModal(); await x.b.ctx.startOcr();
-  for (const id of ['ocrDate','ocrOrderNo','ocrDeliveryNo']) assert.equal(x.value(id),'');
+  for (const id of ['ocrDate','ocrDeliveryNo']) assert.equal(x.value(id),'');
+  assert.equal(x.value('ocrOrderNo'),'PO-A');
   x.b.ctx.applyOcrToForm();
   assert.equal(x.b.ctx.saveRecord(),true); assert.equal(x.b.ctx.saveRecord(),true);
   assert.deepEqual(x.b.json('state.records.map(r=>[r.productNo,r.productName,r.qty,r.orderNo,r.date])'),
@@ -476,4 +477,30 @@ test('garbled local table text is retained for review without committing partial
   assert.equal(x.value('ocrQty'),'');
   assert.match(x.status(),/未读出完整货品明细/);
   assert.ok(!x.b.messages.some(message=>message.type==='success'));
+});
+
+test('reparsing existing text maps each column locally without any image/model request', async()=>{
+  const x=fixture(); x.upload();
+  const original='订单号 货号 型号 配件名称 颜色 数量 单位 本单送货数/\n本单欠数 箱数 备注\nPO-A 9298 MODEL–01 配件上壳 蓝 80 PCS 120 6';
+  x.b.elements.get('ocrRawText').value=original;
+  x.b.ctx.__QC_REQUEST=async(route,options)=>{
+    assert.equal(route,'/api/ai/ocr-parse');assert.deepEqual(JSON.parse(options.body),{text:original});
+    return{ok:true,json:async()=>({ok:true,fields:{deliveryNo:'3000123',items:[{orderNo:'PO-A',productNo:'9298',model:'MODEL-01',productName:'配件上壳',color:'蓝',qty:'80',unit:'PCS'}]}})};
+  };
+  assert.equal(await x.b.ctx.reparseOcrText(),true);
+  assert.equal(x.requests.length,0);assert.equal(x.canvasCalls.length,0);
+  assert.equal(x.value('ocrProductNo'),'9298');assert.equal(x.value('ocrProductName'),'配件上壳');
+  assert.equal(x.value('ocrOrderNo'),'PO-A');assert.equal(x.value('ocrQty'),'80');
+  assert.match(x.value('ocrRemark'),/MODEL-01.*蓝/);assert.equal(x.value('ocrRawText'),original);
+  x.b.ctx.invalidateOcrText();assert.equal(x.b.ctx.applyOcrToForm(),false);
+});
+test('a text response from an older image or login cannot replace fields', async()=>{
+  for(const invalidate of [x=>x.upload('another'),x=>{x.b.ctx.__QC_AUTH=null;}]) {
+    const x=fixture();x.upload();let finish;
+    x.b.elements.get('ocrRawText').value='合成原文';
+    x.b.ctx.__QC_REQUEST=()=>new Promise(resolve=>{finish=resolve;});
+    const pending=x.b.ctx.reparseOcrText();invalidate(x);
+    finish({ok:true,json:async()=>({ok:true,fields:{items:[{productNo:'OLD',productName:'old',qty:'80'}]}})});
+    assert.equal(await pending,false);assert.notEqual(x.value('ocrProductNo'),'OLD');
+  }
 });

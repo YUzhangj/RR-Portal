@@ -891,9 +891,11 @@
           <label class="form-label">识别原文（可手动修改后重新提取）</label>
           <textarea id="ocrRawText" class="batch-textarea" style="height:120px"
             placeholder="识别结果将显示在这里，可手动编辑后点击下方字段重新匹配"
-            oninput="extractFieldsFromOcrText(this.value)"></textarea>
+            oninput="invalidateOcrText()"></textarea>
         </div>
 
+        <div style="margin-top:8px"><button type="button" class="btn-secondary" id="btnParseOcrText" onclick="reparseOcrText()">按原文重新提取</button></div>
+        <div id="ocrItemsPreview" hidden style="margin-top:12px;max-height:260px;overflow:auto"></div>
         <!-- 4. 字段提取预览（两列）-->
         <div style="margin-top:10px;font-size:11px;color:var(--text-dim)">
           ⚠ 识别结果仅供参考，请人工确认后再应用到单条录入。
@@ -936,9 +938,9 @@
 
 <script src="sso.js"></script><!-- 门户SSO免登：必须在 qc-backend.js / app.js 之前 -->
 <script src="report_export.js"></script>
-<script src="qc-backend.js?v=20261109-ocr-maintenance-r2"></script><!-- 后端同步层：必须在 app.js 之前 -->
-<script src="app.js?v=20261109-ocr-maintenance-r2"></script>
-<script src="ai-ocr.js?v=20261109-ocr-maintenance-r2"></script><!-- AI(百炼)识别，劫持 startOcr -->
+<script src="qc-backend.js?v=20261109-ocr-mapping-r4"></script><!-- 后端同步层：必须在 app.js 之前 -->
+<script src="app.js?v=20261109-ocr-mapping-r4"></script>
+<script src="ai-ocr.js?v=20261109-ocr-mapping-r4"></script><!-- AI(百炼)识别，劫持 startOcr -->
 <script src="mobile.js"></script><!-- 移动端侧栏抽屉交互 -->
 <script>
 /* 切换系统下拉：点击页面其它位置时收起 */

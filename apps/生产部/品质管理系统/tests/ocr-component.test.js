@@ -20,8 +20,8 @@ test('component sheet splits PO, alphanumeric/CJK SKU, component name and exact 
   assert.equal(result.deliveryNo, '3000123');
   assert.equal(result.orderNo, 'BP2026123-PN001');
   assert.deepEqual(result.items, [
-    {orderNo:'BP2026123-PN001',productNo:'666玩具公仔',productName:'大身前后',qty:'1981',unit:'PCS'},
-    {orderNo:'BP2026123-PN001',productNo:'666玩具公仔',productName:'右脚',qty:'630',unit:'PCS'},
+    {orderNo:'BP2026123-PN001',productNo:'666玩具公仔',productName:'大身前后',qty:'1981',unit:'PCS',color:'兰',deliveryBalance:'1981/2019',cartons:'8',remark:''},
+    {orderNo:'BP2026123-PN001',productNo:'666玩具公仔',productName:'右脚',qty:'630',unit:'PCS',color:'兰',deliveryBalance:'630/3370',cartons:'1',remark:''},
   ]);
 });
 test('a positioned table of the same layout keeps the quantity column apart from owed quantity and cartons', () => {
@@ -77,7 +77,20 @@ test('model-column layout uses the actual quantity, preserving model separately 
   const text=documentText(head+'\nCB2026123-BU001 9298 MODEL-A01 配件上壳 87275-粉红色 80 PCS 120 6 15*6\nCB2026123-BU001 9298 MODEL-A01 配件下壳 87275-粉红色 80 PCS 120 4 20*4\nCB2026123-BU001 9298 MODEL-B02 左耳朵 珠光白 120 PCS 80 12 12*10\n胶箱：22');
   const result=parse(text);
   assert.equal(result.items.length,3);
+  assert.equal(result.items[0].deliveryBalance,'120');assert.equal(result.items[0].cartons,'6');assert.equal(result.items[0].remark,'15*6');
   assert.deepEqual(result.items.map(item=>[item.productNo,item.model,item.productName,item.qty]),[
     ['9298','MODEL-A01','配件上壳','80'],['9298','MODEL-A01','配件下壳','80'],['9298','MODEL-B02','左耳朵','120'],
   ]);
+});
+
+test('wrapped header and typographic code dashes preserve seven goods rows, not footer or remark fragments', () => {
+  const names=['配件上壳','配件下壳','蛋形下壳','杯下壳','圆圈上壳','左耳朵','右耳朵'];
+  for(const dash of ['-','–','－']) {
+    const body=names.map((name,i)=>`CB2026123${dash}BU001 9298 MODEL${dash}02M${dash}01 ${name} 87275${dash}粉红色 ${i<5?9000:21000} PCS ${i<5?21000:9000} 6 1500*6`).join('\n');
+    const raw=documentText('订单号 货号 型号 配件名称 颜色 数量 单位 本单送货数/\n本单欠数 箱数 备注\n'+body+'\n0\n胶箱：65 钙箱：纸箱：\n平卡：胶袋：\n收货人：QC：送货人：合成姓名');
+    const parsed=parse(raw);
+    assert.equal(parsed.items.length,7);
+    assert.deepEqual(parsed.items.map(row=>[row.orderNo,row.productNo,row.model,row.productName,row.qty]),names.map((name,i)=>['CB2026123-BU001','9298','MODEL-02M-01',name,String(i<5?9000:21000)]));
+    assert.ok(parsed.items.every(row=>!row.quantityNeedsReview));
+  }
 });

@@ -2818,6 +2818,10 @@ function _sameOcrImage(snapshot) {
 function _clearOcrPreviewFields() {
   window.__qcAiResult = null;
   window.__qcOcrResultContext = null;
+  window.__qcOcrTextActor = null;
+  window.__qcOcrTextNeedsParsing = false;
+  const previewTable = document.getElementById('ocrItemsPreview');
+  if (previewTable) { previewTable.hidden = true; previewTable.innerHTML = ''; }
   const applyButton = document.getElementById('btnApplyOcrToForm');
   if (applyButton) applyButton.textContent = '应用到单条录入';
   setVal('ocrRawText', '');

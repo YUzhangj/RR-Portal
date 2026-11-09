@@ -124,6 +124,18 @@ test.after(async () => {
 });
 test.beforeEach(() => { seed(A); seed(B); });
 
+test('local OCR text parsing maps wrapped component columns without a model call or database write', async () => {
+  const session=await login('viewer'),before=snapshot();
+  const text='订单号 货号 型号 配件名称 颜色 数量 单位 本单送货数/\n本单欠数 箱数 备注\nCB2026123–BU001 9298 MODEL–01 合成配件 蓝 80 PCS 120 6 15*6\n胶箱：6';
+  const result=await request('/api/ai/ocr-parse',{method:'POST',session,body:{text}});
+  assert.equal(result.status,200,result.text);
+  assert.deepEqual(result.json.fields.items.map(item=>[item.orderNo,item.productNo,item.model,item.productName,item.color,item.qty]),[['CB2026123-BU001','9298','MODEL-01','合成配件','蓝','80']]);
+  assert.equal(snapshot(),before);assert.equal(fs.existsSync(marker),false);
+  assert.equal((await request('/api/ai/ocr-parse',{method:'POST',body:{text}})).status,401);
+  assert.equal((await request('/api/ai/ocr-parse',{method:'POST',session:await login('restricted'),body:{text}})).status,403);
+  assert.equal((await request('/api/ai/ocr-parse',{method:'POST',session,body:{text:''}})).status,400);
+});
+
 test('maintenance blocks all business APIs without modifying records, accounts or sessions and can be toggled live', async () => {
   const session = await login('jc'), before = snapshot();
   const flag = path.join(dataPath, 'maintenance.lock');
