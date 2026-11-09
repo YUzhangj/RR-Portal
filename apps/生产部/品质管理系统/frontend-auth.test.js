@@ -650,5 +650,5 @@ test('a low unused random draft restores alongside another creator without autom
 
 test('normal HTML selects all matching modern creation-intent and OCR scripts without changing their load order',()=>{
   const html=source('index.html');const scripts=[...html.matchAll(/<script src="(qc-backend|app|ai-ocr)\.js\?v=([^"]+)"/g)].map(m=>[m[1],m[2]]);
-  assert.deepEqual(scripts,[['qc-backend','20261105-safe-ids-ocr-r1'],['app','20261105-safe-ids-ocr-r1'],['ai-ocr','20261105-safe-ids-ocr-r1']]);
+  assert.deepEqual(scripts,[['qc-backend','20261109-ocr-mapping-r4'],['app','20261109-ocr-mapping-r4'],['ai-ocr','20261109-ocr-mapping-r4']]);
 });

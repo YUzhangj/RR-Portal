@@ -12,18 +12,23 @@
   var statusPromise = null;
   var patchTimer = null;
   var activeOperation = null;
+  var textRevision = 0;
+  window.__qcOcrTextNeedsParsing = false;
 
   function imageApi() { return window.__QC_OCR_IMAGE; }
   function stillCurrent(op) {
     return activeOperation === op && imageApi() && imageApi().current(op.snapshot);
   }
   function controlsBusy(busy) {
-    ['btnStartOcr', 'btnRotateOcr', 'btnApplyOcrToForm'].forEach(function (id) {
+    ['btnStartOcr', 'btnRotateOcr', 'btnApplyOcrToForm', 'btnParseOcrText'].forEach(function (id) {
       var button = document.getElementById(id);
       if (button) button.disabled = busy;
     });
   }
   function cancelOperation() {
+    textRevision++;
+    // Local Tesseract work cannot be aborted, but its snapshot must become stale too.
+    if (imageApi() && typeof imageApi().invalidatePending === 'function') imageApi().invalidatePending();
     var previous = activeOperation;
     activeOperation = null;
     if (previous && previous.controller) previous.controller.abort();
@@ -102,6 +107,7 @@
       })
       .then(function (s) {
         if (!sameActor(actor) || (op && !stillCurrent(op))) return false;
+        if (!s || typeof s.ready !== 'boolean') throw new Error('识别服务状态返回无效');
         aiStatus = s || {};
         aiReady = !!(s && s.ready);
         updateHint();
@@ -124,7 +130,7 @@
     if (!text || text === '未上传图片' || text.indexOf('AI OCR') === 0 || text.indexOf('本地 OCR') === 0) {
       el.textContent = aiReady
         ? 'AI OCR 已就绪(' + ((aiStatus && aiStatus.ocrModel) || '百炼') + ')'
-        : 'AI OCR 未就绪，将回退本地 OCR';
+        : aiStatus && aiStatus.error ? 'AI OCR 连接失败，请稍后重试' : 'AI OCR 未配置，将使用本地 OCR，请核对明细';
     }
   }
 
@@ -173,6 +179,8 @@
 
   function applyFields(fields) {
     fields = fields || {};
+    window.__qcOcrTextNeedsParsing = false;
+    window.__qcOcrTextActor = null;
     if (fields.supplier) {
       var matched = canonName('supplier', fields.supplier);
       if (matched !== fields.supplier) {
@@ -187,10 +195,11 @@
     setV('ocrDate', fields.date || '');
     setV('ocrSupplier', fields.supplier || '');
     setV('ocrDeliveryNo', fields.deliveryNo || '');
-    setV('ocrOrderNo', fields.orderNo || '');
+    setV('ocrOrderNo', first.orderNo || fields.orderNo || '');
     setV('ocrType', fields.type || '来料');
     setV('ocrProductNo', first.productNo || '');
-    setV('ocrProductName', first.productName || '');
+    setV('ocrProductName', /^待核对原(?:文|行)[：:]/.test(first.productName || '') ? '' : first.productName || '');
+    setV('ocrRemark', [['型号',first.model],['颜色',first.color],['原单送货/欠数',first.deliveryBalance],['箱数',first.cartons],['原单备注',first.remark]].filter(function (pair) { return pair[1]; }).map(function (pair) { return pair[0]+'：'+pair[1]; }).join('；'));
     setV('ocrQty', String(first.qty == null ? '' : first.qty).replace(/[^\d.]/g, ''));
 
     var lines = [];
@@ -216,6 +225,14 @@
       },
       items: items,
     };
+    var preview = document.getElementById('ocrItemsPreview');
+    if (preview) {
+      var escape = function (v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
+      preview.hidden = !items.length;
+      preview.innerHTML = '<table class="batch-preview-table"><thead><tr>' + ['订单号（PO）','货号','型号','配件名称','颜色','数量','单位','本单送货数/本单欠数','箱数','备注'].map(function (v) { return '<th>'+v+'</th>'; }).join('') + '</tr></thead><tbody>' + items.map(function (it) {
+        return '<tr>'+[it.orderNo || fields.orderNo,it.productNo,it.model,/^待核对原(?:文|行)[：:]/.test(it.productName || '') ? '待核对原文' : it.productName,it.color,it.qty,it.unit,it.deliveryBalance,it.cartons,it.remark].map(function (v) { return '<td>'+escape(v || '—')+'</td>'; }).join('')+'</tr>';
+      }).join('')+'</tbody></table>';
+    }
 
     var applyBtn = document.getElementById('btnApplyOcrToForm');
     if (applyBtn) {
@@ -303,6 +320,9 @@
   function operationFailure(op, error, prefix) {
     if (!stillCurrent(op) || error && error.name === 'AbortError') return;
     var msg = error && error.message ? error.message : '未知错误';
+    if (/Failed to fetch|NetworkError|Load failed|fetch failed/i.test(msg)) {
+      msg = '无法连接识别服务，请检查网络后重试；图片与已填内容已保留';
+    }
     setT('ocrStatus', prefix + '：' + msg);
     toast(prefix + '：' + msg, 'error');
   }
@@ -337,7 +357,8 @@
     setV('f_orderNo', it.orderNo || c.orderNo || '');   /* 多 PO 单：用本条自己的 PO 号 */
     if (c.type) setV('f_type', c.type);
     setV('f_productNo', it.productNo || '');
-    setV('f_productName', it.productName || '');
+    setV('f_productName', /^待核对原(?:文|行)[：:]/.test(it.productName || '') ? '' : it.productName || '');
+    setV('f_remark', [['型号',it.model],['颜色',it.color],['原单送货/欠数',it.deliveryBalance],['箱数',it.cartons],['原单备注',it.remark]].filter(function (pair) { return pair[1]; }).map(function (pair) { return pair[0]+'：'+pair[1]; }).join('；'));
     setV('f_qty', String(it.qty == null ? '' : it.qty).replace(/[^\d.]/g, ''));
     if (typeof window._markOcrQuantity === 'function') window._markOcrQuantity(it.quantityNeedsReview ? '待核对' : it.qty);
     if (typeof window.onQtyChange === 'function') window.onQtyChange();
@@ -356,6 +377,31 @@
     toast('本地 OCR 入口未就绪，请刷新页面后重试', 'error');
   }
 
+  window.invalidateOcrText = function () {
+    cancelOperation(); window.__qcOcrTextNeedsParsing = true;
+    var preview = document.getElementById('ocrItemsPreview'); if (preview) preview.hidden = true;
+    setT('ocrStatus', '原文已修改，请点击“按原文重新提取”后再应用');
+  };
+  window.reparseOcrText = function () {
+    var input = document.getElementById('ocrRawText'), raw = input && input.value;
+    if (!raw || !raw.trim()) { toast('请先填写识别原文', 'error'); return Promise.resolve(false); }
+    if (!window.__QC_AUTH || typeof window.__QC_REQUEST !== 'function') { toast('请先登录当前公司', 'error'); return Promise.resolve(false); }
+    cancelOperation(); var revision = textRevision, actor = actorContext();
+    controlsBusy(true); window.__qcOcrTextNeedsParsing = true;
+    setT('ocrStatus', '正在按表头重新提取原文…');
+    return window.__QC_REQUEST('/api/ai/ocr-parse', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:raw})})
+      .then(function (res) { return res.json().then(function (body) { if (!res.ok || !body.ok) throw new Error(body.error || '原文解析失败'); return body; }); })
+      .then(function (body) {
+        if (revision !== textRevision || !sameActor(actor) || input.value !== raw) return false;
+        if (!usableItems(body.fields)) throw new Error('原文没有可核对的货品明细，请检查表头和行内容');
+        applyFields(body.fields); setV('ocrRawText', raw); window.__qcOcrTextActor = actor;
+        window.__qcOcrResultContext = imageApi() && imageApi().snapshot();
+        setT('ocrStatus', body.needsManualReview ? '部分明细需核对，请查看下方对应表' : '原文提取完成，请核对下方列对应后应用');
+        return true;
+      }).catch(function (err) { if (revision === textRevision && sameActor(actor)) { setT('ocrStatus', '原文提取失败：'+err.message); toast(err.message,'error'); } return false; })
+      .finally(function () { if (revision === textRevision) controlsBusy(false); });
+  };
+
   function aiDispatch() {
     var op = beginOperation();
     if (!op) return Promise.resolve();
@@ -363,6 +409,7 @@
     return checkAiStatus(true, op).then(function (ready) {
       requireCurrent(op);
       if (ready) return aiStartOcr(op);
+      if (!aiStatus || aiStatus.error) throw new Error('无法检查 AI 识别服务状态，请稍后重试；已填内容已保留');
       setT('ocrStatus', 'AI OCR 未就绪，正在改用本地 OCR...');
       return runOriginalOcr();
     }).catch(function (error) { operationFailure(op, error, 'AI 识别失败'); })
@@ -398,6 +445,8 @@
     if (typeof window.applyOcrToForm === 'function' && !window.applyOcrToForm.__qcWrapped) {
       var origApply = window.applyOcrToForm;
       window.applyOcrToForm = function () {
+        if (window.__qcOcrTextNeedsParsing) { toast('请先按原文重新提取，再应用到表单', 'error'); return false; }
+        if (window.__qcOcrTextActor && !canSaveOcr(window.__qcOcrTextActor)) return false;
         if (activeOperation && stillCurrent(activeOperation)) { toast('请等待图片处理完成后再应用', 'info'); return false; }
         var context = window.__qcOcrResultContext;
         var current = imageApi() && imageApi().snapshot();

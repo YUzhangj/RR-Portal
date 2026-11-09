@@ -210,6 +210,7 @@ function _clearSession() {
 
 /* ── 权限判断（基于权限矩阵；jc 主账号保底全权）── */
 function can(action) {
+  if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) return false;
   if (window.__QC_DRAFT_RECOVERY_BLOCKED && ['createRecord','editRecord','deleteRecord','batchDelete','importData','reviewRecord'].includes(action)) return false;
   const u = _liveUser();
   if (!u) return false;
@@ -2817,6 +2818,10 @@ function _sameOcrImage(snapshot) {
 function _clearOcrPreviewFields() {
   window.__qcAiResult = null;
   window.__qcOcrResultContext = null;
+  window.__qcOcrTextActor = null;
+  window.__qcOcrTextNeedsParsing = false;
+  const previewTable = document.getElementById('ocrItemsPreview');
+  if (previewTable) { previewTable.hidden = true; previewTable.innerHTML = ''; }
   const applyButton = document.getElementById('btnApplyOcrToForm');
   if (applyButton) applyButton.textContent = '应用到单条录入';
   setVal('ocrRawText', '');
@@ -2827,6 +2832,8 @@ function _clearOcrPreviewFields() {
 window.__QC_OCR_IMAGE = {
   snapshot: _ocrImageSnapshot,
   current: _sameOcrImage,
+  // Low-level invalidation avoids calling __QC_OCR_CANCEL recursively.
+  invalidatePending() { _ocrImageRevision++; },
   cancel: _cancelOcrWork,
   commit(snapshot, dataUrl, angle) {
     if (!_sameOcrImage(snapshot)) return null;
@@ -3021,12 +3028,27 @@ async function startOcr() {
       setText('ocrStatus', '识别失败，请重新上传清晰图片');
       showToast('未识别到文字，请上传更清晰的图片', 'error');
     } else {
-      window.__qcAiResult = null;
-      window.__qcOcrResultContext = snapshot;
+      const ids = ['ocrDate','ocrSupplier','ocrProductNo','ocrProductName','ocrDeliveryNo','ocrOrderNo','ocrQty','ocrType','ocrRemark'];
+      const previous = ids.map(id => document.getElementById(id)?.value || '');
+      ids.forEach(id => setVal(id, ''));
       setVal('ocrRawText', text);
       extractFieldsFromOcrText(text);
-      setText('ocrStatus', '识别完成');
-      showToast('✓ 识别完成，请核对字段', 'success');
+      const quantity = document.getElementById('ocrQty')?.value || '';
+      const identity = (document.getElementById('ocrProductNo')?.value || '').trim() || (document.getElementById('ocrProductName')?.value || '').trim();
+      if (!quantity || !identity) {
+        ids.forEach((id, i) => setVal(id, previous[i]));
+        setText('ocrStatus', '本地 OCR 未读出完整货品明细，原文已保留，请人工核对或重试');
+        showToast('表格文字识别不完整，未自动填入字段；请核对原文，不要按乱码提交', 'error');
+      } else {
+        window.__qcAiResult = null;
+        window.__qcOcrTextActor = null;
+        window.__qcOcrTextNeedsParsing = false;
+        window.__qcOcrResultContext = snapshot;
+        const previewTable = document.getElementById('ocrItemsPreview');
+        if (previewTable) { previewTable.hidden = true; previewTable.innerHTML = ''; }
+        setText('ocrStatus', '本地识别完成，请核对字段');
+        showToast('本地识别完成，请逐项核对货号、名称和数量', 'info');
+      }
     }
   } catch (err) {
     if (!_sameOcrImage(snapshot)) return;
