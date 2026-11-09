@@ -292,7 +292,7 @@ test('a pending local worker is never duplicated after a new upload and cannot c
   await x.b.ctx.startOcr(); assert.equal(calls,1); assert.match(x.status(),/尚未结束/);
   finish({data:{text:'OLD TEXT'}}); await old;
   assert.equal(x.value('ocrRawText'),'');
-  x.b.ctx.Tesseract={recognize:async()=>({data:{text:'数量：12'}})};
+  x.b.ctx.Tesseract={recognize:async()=>({data:{text:'货号：SYNTHETIC-01\n数量：12'}})};
   await x.b.ctx.startOcr(); assert.match(x.status(),/识别完成/);
 });
 
@@ -446,4 +446,34 @@ test('valid and manual rows remain together after a successful rotation instead 
   ]}});
   await x.b.ctx.startOcr();assert.equal(x.requests.length,2);assert.equal(x.b.ctx.__qcAiResult.items.length,2);
   assert.equal(x.b.ctx.__qcAiResult.items[1].quantityNeedsReview,true);assert.match(x.status(),/人工核对/);
+});
+
+test('an unavailable or malformed AI status never silently invokes the local OCR engine', async () => {
+  for (const failure of ['network','auth','maintenance','invalid']) {
+    const x=fixture();x.upload();await tick();let localCalls=0;
+    x.b.elements.get('ocrProductNo').value='KEEP-CORRECTION';
+    x.b.ctx.Tesseract={recognize:async()=>{localCalls++;return{data:{text:'数量：999'}};}};
+    x.b.ctx.__QC_REQUEST=async()=>{
+      if(failure==='network')throw new TypeError('Failed to fetch');
+      if(failure==='invalid')return{ok:true,status:200,json:async()=>({})};
+      return{ok:false,status:failure==='auth'?401:503};
+    };
+    await x.b.ctx.startOcr();
+    assert.equal(localCalls,0);assert.equal(x.requests.length,0);
+    assert.equal(x.value('ocrProductNo'),'KEEP-CORRECTION');
+    assert.match(x.status(),/无法检查 AI/);
+    assert.ok(!x.b.messages.some(message=>message.type==='success'));
+  }
+});
+test('garbled local table text is retained for review without committing partial fields or a success toast', async () => {
+  const x=fixture({local:true});x.upload();
+  x.b.elements.get('ocrProductNo').value='MANUAL-CORRECTION';
+  const text='T es Co Fr\n合成塑胶有限公司\n送货单\nN0:3000123\nTIEOETOEOSEESEYEEE\nEECTOIEYRECES 人世 工\n胶箱：65';
+  x.b.ctx.Tesseract={recognize:async()=>({data:{text}})};
+  await x.b.ctx.startOcr();
+  assert.equal(x.value('ocrRawText'),text);
+  assert.equal(x.value('ocrProductNo'),'MANUAL-CORRECTION');
+  assert.equal(x.value('ocrQty'),'');
+  assert.match(x.status(),/未读出完整货品明细/);
+  assert.ok(!x.b.messages.some(message=>message.type==='success'));
 });

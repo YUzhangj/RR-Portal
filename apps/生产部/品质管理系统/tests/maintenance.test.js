@@ -23,7 +23,7 @@ test('a request body cannot pass its write boundary after maintenance is enabled
 });
 
 function browser() {
-  const nodes = Object.fromEntries(['qcMaintenance','qcMaintenanceTitle','qcMaintenanceMessage','qcMaintenanceRefresh','appWrapper','loginScreen']
+  const nodes = Object.fromEntries(['qcMaintenance','qcMaintenanceState','qcMaintenanceCheck','qcMaintenanceTitle','qcMaintenanceMessage','qcMaintenanceRefresh','appWrapper','loginScreen']
     .map(id => [id, { id, hidden: false, textContent: '', inert: false }]));
   nodes.qcMaintenance.contains = target => target === nodes.qcMaintenance;
   const events = {}, calls = [], storage = { pendingDraft: 'original draft' };

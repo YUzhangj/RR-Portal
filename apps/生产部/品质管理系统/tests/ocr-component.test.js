@@ -71,3 +71,13 @@ test('network failure reports a connection problem and leaves edited fields unto
   assert.equal(values.ocrProductName,'corrected');
   assert.equal(messages.length,1);
 });
+
+test('model-column layout uses the actual quantity, preserving model separately from SKU and component name', () => {
+  const head=header.replace('货号 配件名称','货号 型号 配件名称');
+  const text=documentText(head+'\nCB2026123-BU001 9298 MODEL-A01 配件上壳 87275-粉红色 80 PCS 120 6 15*6\nCB2026123-BU001 9298 MODEL-A01 配件下壳 87275-粉红色 80 PCS 120 4 20*4\nCB2026123-BU001 9298 MODEL-B02 左耳朵 珠光白 120 PCS 80 12 12*10\n胶箱：22');
+  const result=parse(text);
+  assert.equal(result.items.length,3);
+  assert.deepEqual(result.items.map(item=>[item.productNo,item.model,item.productName,item.qty]),[
+    ['9298','MODEL-A01','配件上壳','80'],['9298','MODEL-A01','配件下壳','80'],['9298','MODEL-B02','左耳朵','120'],
+  ]);
+});

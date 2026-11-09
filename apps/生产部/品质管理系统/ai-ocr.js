@@ -102,6 +102,7 @@
       })
       .then(function (s) {
         if (!sameActor(actor) || (op && !stillCurrent(op))) return false;
+        if (!s || typeof s.ready !== 'boolean') throw new Error('识别服务状态返回无效');
         aiStatus = s || {};
         aiReady = !!(s && s.ready);
         updateHint();
@@ -124,7 +125,7 @@
     if (!text || text === '未上传图片' || text.indexOf('AI OCR') === 0 || text.indexOf('本地 OCR') === 0) {
       el.textContent = aiReady
         ? 'AI OCR 已就绪(' + ((aiStatus && aiStatus.ocrModel) || '百炼') + ')'
-        : 'AI OCR 未就绪，将回退本地 OCR';
+        : aiStatus && aiStatus.error ? 'AI OCR 连接失败，请稍后重试' : 'AI OCR 未配置，将使用本地 OCR，请核对明细';
     }
   }
 
@@ -191,6 +192,7 @@
     setV('ocrType', fields.type || '来料');
     setV('ocrProductNo', first.productNo || '');
     setV('ocrProductName', /^待核对原(?:文|行)[：:]/.test(first.productName || '') ? '' : first.productName || '');
+    setV('ocrRemark', first.model ? '型号：' + first.model : '');
     setV('ocrQty', String(first.qty == null ? '' : first.qty).replace(/[^\d.]/g, ''));
 
     var lines = [];
@@ -341,6 +343,7 @@
     if (c.type) setV('f_type', c.type);
     setV('f_productNo', it.productNo || '');
     setV('f_productName', /^待核对原(?:文|行)[：:]/.test(it.productName || '') ? '' : it.productName || '');
+    if (it.model) setV('f_remark', '型号：' + it.model);
     setV('f_qty', String(it.qty == null ? '' : it.qty).replace(/[^\d.]/g, ''));
     if (typeof window._markOcrQuantity === 'function') window._markOcrQuantity(it.quantityNeedsReview ? '待核对' : it.qty);
     if (typeof window.onQtyChange === 'function') window.onQtyChange();
@@ -366,6 +369,7 @@
     return checkAiStatus(true, op).then(function (ready) {
       requireCurrent(op);
       if (ready) return aiStartOcr(op);
+      if (!aiStatus || aiStatus.error) throw new Error('无法检查 AI 识别服务状态，请稍后重试；已填内容已保留');
       setT('ocrStatus', 'AI OCR 未就绪，正在改用本地 OCR...');
       return runOriginalOcr();
     }).catch(function (error) { operationFailure(op, error, 'AI 识别失败'); })
