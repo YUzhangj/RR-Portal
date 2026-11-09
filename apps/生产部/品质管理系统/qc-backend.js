@@ -202,14 +202,40 @@
     window.__QC_DRAFT_RECOVERY_BLOCKED = true;
     notice(recoveryMessage(), true);
   }
+  function draftDownloadPackage(raw) {
+    var draft = JSON.parse(raw.replace(/^\uFEFF/, ''));
+    if (!draft || !draft.state || !Array.isArray(draft.state.records) ||
+        !blockedRecovery || draft.owner !== blockedRecovery.owner || draft.company !== COMPANY) {
+      throw new Error('原草稿的公司、账号或记录格式无效');
+    }
+    // 顶层 records 与普通 JSON 备份一致，旧版“导入 JSON”也能识别。
+    // 完整原文另存，断点和删除队列只供核对，不在人工导入时执行。
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      source: '兴信 QMS 未同步验货草稿',
+      backupType: 'pending-records',
+      company: COMPANY,
+      owner: draft.owner,
+      count: draft.state.records.length,
+      records: draft.state.records,
+      draftRecovery: { originalRaw: raw }
+    };
+  }
   function downloadBlockedDraft() {
     if (!recoveryIsCurrent()) return false;
     try {
-      var blob = new Blob([blockedRecovery.raw], { type: 'application/json;charset=utf-8' });
+      var content = blockedRecovery.raw, converted = false;
+      try {
+        content = JSON.stringify(draftDownloadPackage(content), null, 2);
+        converted = true;
+      } catch (_) { /* 损坏草稿仍须允许下载原文，不影响已有备份保护。 */ }
+      var blob = new Blob([content], { type: 'application/json;charset=utf-8' });
       var url = URL.createObjectURL(blob), link = document.createElement('a');
       link.href = url; link.download = '品质未同步草稿-' + COMPANY + '-' + blockedRecovery.owner + '.json';
       document.body.appendChild(link); link.click(); link.remove();
       setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      if (!converted) notice(recoveryMessage() + ' 已下载原始草稿；内容不完整，暂不能作为备份导入。', true);
       return true;
     } catch (_) { notice(recoveryMessage() + ' 下载失败，请保留此页面并联系管理员。', true); return false; }
   }

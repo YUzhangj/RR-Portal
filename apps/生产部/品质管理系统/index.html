@@ -499,15 +499,15 @@
       <div class="import-info-bar">
         <div class="import-info-item">
           <span class="import-info-icon">📄</span>
-          <div><div class="import-info-title">支持格式</div><div class="import-info-desc">.xlsx · .xls · .csv</div></div>
+          <div><div class="import-info-title">支持格式</div><div class="import-info-desc">.xlsx · .xls · .csv · .json</div></div>
         </div>
         <div class="import-info-item">
           <span class="import-info-icon">🔗</span>
-          <div><div class="import-info-title">自动识别</div><div class="import-info-desc">兴信验货表 · 明细/汇总表头</div></div>
+          <div><div class="import-info-title">自动识别</div><div class="import-info-desc">兴信验货表 · JSON 备份/未同步草稿</div></div>
         </div>
         <div class="import-info-item">
           <span class="import-info-icon">🛡</span>
-          <div><div class="import-info-title">安全导入</div><div class="import-info-desc">本地解析，不上传服务器</div></div>
+          <div><div class="import-info-title">安全导入</div><div class="import-info-desc">本地解析，确认后同步服务器</div></div>
         </div>
         <div class="import-info-item">
           <span class="import-info-icon">⚡</span>
@@ -522,11 +522,11 @@
            ondrop="handleDrop(event)">
         <div class="import-zone-inner">
           <div class="import-icon" id="importZoneIcon">⬆</div>
-          <div class="import-title">将 Excel / CSV 文件拖到此处</div>
-          <div class="import-sub">或点击下方按钮选择文件 · 支持兴信验货明细表格式</div>
+          <div class="import-title">将 Excel / CSV / JSON 文件拖到此处</div>
+          <div class="import-sub">或点击下方按钮选择文件 · 支持验货表、JSON 备份及未同步草稿</div>
           <label class="btn-import-pick mt16">
             <span>📂 选择文件</span>
-            <input type="file" id="importFileInput" accept=".csv,.xls,.xlsx"
+            <input type="file" id="importFileInput" accept=".csv,.xls,.xlsx,.json"
                    style="display:none" onchange="handleFileImport(event)" />
           </label>
         </div>
@@ -606,7 +606,7 @@
             <div class="backup-card-icon">⬆</div>
             <div class="backup-card-body">
               <div class="backup-card-title">导入数据备份</div>
-              <div class="backup-card-desc">从之前导出的 JSON 备份文件恢复数据，支持覆盖或追加</div>
+              <div class="backup-card-desc">支持 JSON 备份和未同步验货草稿；草稿仅追加恢复，保留现有数据</div>
             </div>
             <label class="backup-btn blue" style="cursor:pointer">
               导入 JSON
@@ -938,8 +938,8 @@
 
 <script src="sso.js"></script><!-- 门户SSO免登：必须在 qc-backend.js / app.js 之前 -->
 <script src="report_export.js"></script>
-<script src="qc-backend.js?v=20261109-ocr-mapping-r4"></script><!-- 后端同步层：必须在 app.js 之前 -->
-<script src="app.js?v=20261109-ocr-mapping-r4"></script>
+<script src="qc-backend.js?v=20261109-draft-backup-r3"></script><!-- 后端同步层：必须在 app.js 之前 -->
+<script src="app.js?v=20261109-draft-backup-r3"></script>
 <script src="ai-ocr.js?v=20261109-ocr-mapping-r4"></script><!-- AI(百炼)识别，劫持 startOcr -->
 <script src="mobile.js"></script><!-- 移动端侧栏抽屉交互 -->
 <script>
