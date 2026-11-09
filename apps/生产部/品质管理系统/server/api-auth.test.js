@@ -124,6 +124,30 @@ test.after(async () => {
 });
 test.beforeEach(() => { seed(A); seed(B); });
 
+test('maintenance blocks all business APIs without modifying records, accounts or sessions and can be toggled live', async () => {
+  const session = await login('jc'), before = snapshot();
+  const flag = path.join(dataPath, 'maintenance.lock');
+  const sessionsBefore = fs.readFileSync(path.join(dataPath, 'sessions.json'), 'utf8');
+  fs.writeFileSync(flag, 'maintenance');
+  try {
+    assert.equal((await request('/api/health')).status, 200);
+    assert.equal((await request('/api/maintenance')).json.enabled, true);
+    for (const route of ['/api/bootstrap','/api/session','/api/ai/status','/api/export/records.csv']) {
+      const result = await request(route, {session});
+      assert.equal(result.status, 503); assert.equal(result.response.headers.get('x-qc-maintenance'), '1');
+    }
+    for (const route of ['/api/records','/api/records/delete','/api/records/replace','/api/users','/api/partners','/api/defects','/api/ai/ocr-extract','/api/login']) {
+      const result = await request(route, {method:'POST',session,body:{records:[fresh()],ids:[1],users:[],partners:[],defectLib:[],image:'not-sent'}});
+      assert.equal(result.status, 503); assert.equal(result.json.maintenance, true);
+    }
+    assert.equal(snapshot(), before);
+    assert.equal(fs.readFileSync(path.join(dataPath, 'sessions.json'), 'utf8'), sessionsBefore);
+    assert.equal(fs.existsSync(marker), false);
+  } finally { fs.unlinkSync(flag); }
+  assert.equal((await request('/api/maintenance')).json.enabled, false);
+  assert.equal((await request('/api/session', {session})).status, 200);
+});
+
 test('every protected GET, HEAD and POST rejects anonymous callers without DB or model effects', async () => {
   const before = snapshot(), files = fs.readdirSync(dataPath).sort();
   for (const route of ['/api/bootstrap', '/api/session', '/api/export/records.csv', '/api/export/factory-excel.xls', '/api/ai/status', '/api/integration/inspections']) {

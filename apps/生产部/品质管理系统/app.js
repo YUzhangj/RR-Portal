@@ -210,6 +210,7 @@ function _clearSession() {
 
 /* ── 权限判断（基于权限矩阵；jc 主账号保底全权）── */
 function can(action) {
+  if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) return false;
   if (window.__QC_DRAFT_RECOVERY_BLOCKED && ['createRecord','editRecord','deleteRecord','batchDelete','importData','reviewRecord'].includes(action)) return false;
   const u = _liveUser();
   if (!u) return false;

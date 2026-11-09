@@ -1,0 +1,73 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const test = require('node:test');
+const root = path.join(__dirname, '..');
+const server = fs.readFileSync(path.join(root, 'server/server.js'), 'utf8');
+const ai = fs.readFileSync(path.join(root, 'ai-ocr.js'), 'utf8');
+const ctx = vm.createContext({});
+vm.runInContext(server.slice(server.indexOf('const OCR_READ_PROMPT ='), server.indexOf('/* ── 记录表列顺序')), ctx);
+const parse = text => JSON.parse(JSON.stringify(ctx.parseDeliveryNote(text)));
+const header = '订单号 货号 配件名称 颜色 数量 单位 本单送货数/本单欠数 箱数 备注';
+const rows = ['BP2026123-PN001 666玩具公仔 大身前后 兰 1981 PCS 1981/2019 8',
+  'BP2026123-PN001 666玩具公仔 右脚 兰 630 PCS 630/3370 1'];
+const documentText = content => '合成供应商有限公司\n送货单\nNO: 3000123\n2026年11月9日\n' + content;
+
+test('component sheet splits PO, alphanumeric/CJK SKU, component name and exact current quantity', () => {
+  const result = parse(documentText([header, ...rows, '钙箱: 9', '收货人: 测试'].join('\n')));
+  assert.equal(result.deliveryNo, '3000123');
+  assert.equal(result.orderNo, 'BP2026123-PN001');
+  assert.deepEqual(result.items, [
+    {orderNo:'BP2026123-PN001',productNo:'666玩具公仔',productName:'大身前后',qty:'1981',unit:'PCS'},
+    {orderNo:'BP2026123-PN001',productNo:'666玩具公仔',productName:'右脚',qty:'630',unit:'PCS'},
+  ]);
+});
+test('a positioned table of the same layout keeps the quantity column apart from owed quantity and cartons', () => {
+  const result = parse(documentText('|订单号|货号|配件名称|颜色|数量|单位|本单送货数/本单欠数|箱数|备注|\n|BP2026123-PN001|666玩具公仔|右脚|兰|630|PCS|630/3370|1||'));
+  assert.equal(result.items.length,1);
+  assert.equal(result.items[0].productNo,'666玩具公仔');
+  assert.equal(result.items[0].productName,'右脚');
+  assert.equal(result.items[0].qty,'630');
+});
+test('conflicting quantity or missing columns keeps complete source instead of guessing from owed/carton numbers', () => {
+  for (const row of [rows[0].replace('1981/2019', '1982/2019'), rows[0].replace('1981 PCS', 'unreadable PCS'), rows[0].replace('666玩具公仔 ', '')]) {
+    const result = parse(documentText(header + '\n' + row));
+    assert.equal(result.items.length,1);
+    assert.equal(result.items[0].quantityNeedsReview,true);
+    assert.equal(result.items[0].qty,'');
+    assert.equal(result.items[0].productName,'待核对原文：'+row);
+  }
+});
+test('different row orders do not leak the first order into the whole sheet', () => {
+  const result = parse(documentText(header+'\n'+rows[0]+'\n'+rows[1].replace('BP2026123-PN001','BP2026123-PN002')));
+  assert.equal(result.orderNo,'');
+  assert.deepEqual(result.items.map(row=>row.orderNo),['BP2026123-PN001','BP2026123-PN002']);
+});
+function fn(name) {
+  const start=ai.indexOf('  function '+name+'(');
+  const end=ai.indexOf('\n  function ', start+1);
+  return ai.slice(start,end);
+}
+test('manual source text stays in the review result and never becomes the product name in preview or queued form', () => {
+  const values={}, item={productName:'待核对原行：complete synthetic row',qty:'',quantityNeedsReview:true};
+  const s={window:{},setV:(k,v)=>{values[k]=v;},canonName:(_t,v)=>v,toast(){},setT(){},canSaveOcr:()=>true,
+    document:{getElementById:()=>null}};
+  vm.createContext(s);vm.runInContext(fn('applyFields')+'\n'+fn('loadQueueItem'),s);
+  s.applyFields({supplier:'synthetic',items:[item]});
+  assert.equal(values.ocrProductName,'');
+  assert.match(s.window.__qcAiResult.items[0].productName,/待核对原行/);
+  s.loadQueueItem({idx:0,items:[item],common:{}});
+  assert.equal(values.f_productName,'');
+  assert.equal(values.f_qty,'');
+});
+test('network failure reports a connection problem and leaves edited fields untouched', () => {
+  const values={ocrProductName:'corrected'}, messages=[];
+  const s={stillCurrent:()=>true,setT:(k,v)=>{values[k]=v;},toast:v=>messages.push(v)};
+  vm.createContext(s);vm.runInContext(fn('operationFailure'),s);
+  s.operationFailure({},new TypeError('Failed to fetch'),'AI 识别失败');
+  assert.match(values.ocrStatus,/无法连接识别服务/);
+  assert.equal(values.ocrProductName,'corrected');
+  assert.equal(messages.length,1);
+});

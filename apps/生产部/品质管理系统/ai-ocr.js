@@ -190,7 +190,7 @@
     setV('ocrOrderNo', fields.orderNo || '');
     setV('ocrType', fields.type || '来料');
     setV('ocrProductNo', first.productNo || '');
-    setV('ocrProductName', first.productName || '');
+    setV('ocrProductName', /^待核对原(?:文|行)[：:]/.test(first.productName || '') ? '' : first.productName || '');
     setV('ocrQty', String(first.qty == null ? '' : first.qty).replace(/[^\d.]/g, ''));
 
     var lines = [];
@@ -303,6 +303,9 @@
   function operationFailure(op, error, prefix) {
     if (!stillCurrent(op) || error && error.name === 'AbortError') return;
     var msg = error && error.message ? error.message : '未知错误';
+    if (/Failed to fetch|NetworkError|Load failed|fetch failed/i.test(msg)) {
+      msg = '无法连接识别服务，请检查网络后重试；图片与已填内容已保留';
+    }
     setT('ocrStatus', prefix + '：' + msg);
     toast(prefix + '：' + msg, 'error');
   }
@@ -337,7 +340,7 @@
     setV('f_orderNo', it.orderNo || c.orderNo || '');   /* 多 PO 单：用本条自己的 PO 号 */
     if (c.type) setV('f_type', c.type);
     setV('f_productNo', it.productNo || '');
-    setV('f_productName', it.productName || '');
+    setV('f_productName', /^待核对原(?:文|行)[：:]/.test(it.productName || '') ? '' : it.productName || '');
     setV('f_qty', String(it.qty == null ? '' : it.qty).replace(/[^\d.]/g, ''));
     if (typeof window._markOcrQuantity === 'function') window._markOcrQuantity(it.quantityNeedsReview ? '待核对' : it.qty);
     if (typeof window.onQtyChange === 'function') window.onQtyChange();

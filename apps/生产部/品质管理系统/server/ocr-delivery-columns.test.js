@@ -119,7 +119,8 @@ test('the new source cannot auto-save a guessed count; correction is explicit an
   x.b.elements.get('f_qty').value='34';assert.equal(x.b.ctx.saveRecord(),true);
   const saved=plain(x.b.json('state.records[0]'));
   assert.equal(saved.qty,34);assert.equal(saved.productNo,'');assert.equal(saved.orderNo,'');
-  assert.equal(saved.productName,'待核对原文：'+raw);assert.equal('quantityNeedsReview'in saved,false);
+  assert.equal(saved.productName,'');assert.equal(x.b.elements.get('ocrRawText').value,raw);
+  assert.equal('quantityNeedsReview'in saved,false);
 });
 
 test('a manual delivery-layout retry never acquires a previous response PO or other metadata',async()=>{

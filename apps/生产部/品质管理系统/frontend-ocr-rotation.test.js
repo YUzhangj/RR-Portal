@@ -134,9 +134,12 @@ test('successful auto-rotation commits the same image sent to AI and preserves m
   assert.equal(x.value('ocrRawText'), 'FULL SYNTHETIC RAW'); assert.match(x.status(), /人工核对/);
   x.b.ctx.applyOcrToForm();
   assert.equal(x.b.ctx.saveRecord(), false); assert.deepEqual(x.b.json('state.records'), []);
+  assert.equal(x.value('ocrProductName'), '');
+  assert.equal(x.value('f_productName'), '');
+  x.b.elements.get('f_productName').value = '人工核对配件';
   x.b.elements.get('f_qty').value = '12';
   assert.equal(x.b.ctx.saveRecord(), true);
-  assert.deepEqual(x.b.json('state.records.map(r=>[r.productName,r.qty,r.status])'), [['待核对原行：Synthetic',12,'pending']]);
+  assert.deepEqual(x.b.json('state.records.map(r=>[r.productName,r.qty,r.status])'), [['人工核对配件',12,'pending']]);
 });
 
 test('normal recognized rows still replace missing metadata and persist all queue items once', async () => {
@@ -422,6 +425,7 @@ test('manual fallback keeps the exact original response image and angle after ev
   assert.equal(x.b.ctx.__QC_OCR_IMAGE.snapshot().angle,0);assert.equal(x.value('ocrRawText'),pending.rawText);
   assert.match(x.status(),/人工核对/);assert.equal(x.b.ctx.__qcAiResult.items[0].productName,pending.fields.items[0].productName);
   x.b.ctx.openAddModal();x.b.ctx.applyOcrToForm();assert.equal(x.b.ctx.saveRecord(),false);
+  x.b.elements.get('f_productName').value='人工核对配件';
   x.b.elements.get('f_qty').value='12';assert.equal(x.b.ctx.saveRecord(),true);
   assert.equal(x.b.json('state.records[0].qty'),12);assert.deepEqual(x.controls(),[false,false,false]);
 });

@@ -27,6 +27,13 @@ const LEGACY_DB = path.join(__dirname, 'qc.db');        // 本地开发的旧版
 const SEED_PATH = path.join(__dirname, 'seed.json');
 const AI_CONFIG_PATH = path.join(__dirname, 'ai-config.json');
 const PORT      = process.env.PORT === undefined ? 8765 : Number(process.env.PORT);
+/* 运维在修改前创建此标记，验证后移除；逐请求读取，无需重启即可锁定。 */
+function maintenanceState() {
+  let enabled = /^(1|true)$/i.test(process.env.QC_MAINTENANCE || '');
+  try { fs.statSync(path.join(DATA_DIR, 'maintenance.lock')); enabled = true; }
+  catch (error) { if (error.code !== 'ENOENT') enabled = true; }
+  return { enabled, message: '系统修复中，暂时无法操作，请稍后再试' };
+}
 const sessions  = Auth.createSessions({ storeFile: path.join(DATA_DIR, 'sessions.json') });   // 会话落盘，重启不掉线
 
 /* ════════ 厂区 → 子公司清单（数据隔离边界；每家子公司一个独立库 server/data/<id>/qc.db）════════
@@ -514,6 +521,27 @@ function parseDeliveryNote(text, options = {}) {
       /* 无单位行只有明确完整列序才可定位数量，不能拿尺寸/单价前的整数猜。
          品名可含空格；数量、尺寸、重量从明确尾列定位，PO与货号取明确前列。 */
       const plainHeader = lines[hiP];
+      /* 俊达类配件单：数量、送货/欠数、箱数并存。只在完整表头和完整行
+         均对应时拆列，不能把订单号/货号/数量整行当成配件名称。 */
+      const componentLayout = /^[订訂][单單][号號][货貨][号號]配件名[称稱][颜顏]色[数數]量[单單]位本[单單]送[货貨][数數][/／]本[单單]欠[数數]箱[数數](?:备[注註]|備[注註])?$/.test(plainHeader.replace(/\s+/g, ''));
+      if (componentLayout) {
+        const num = '(?:\\d{1,3}(?:[,，]\\d{3})+|\\d+)(?:\\.\\d+)?';
+        const rowPattern = new RegExp('^([A-Za-z0-9][A-Za-z0-9._/\\-]*)\\s+(\\S+)\\s+(.+?)\\s+(\\S+)\\s+(' + num + ')\\s*(PCS|个|個|件|套|条|條)\\s+(' + num + ')\\s*[/／]\\s*(' + num + ')\\s+(\\d+)(?:\\s+.*)?$', 'i');
+        for (const line of lines.slice(hiP + 1)) {
+          if (/^(?:胶箱|膠箱|胶袋|膠袋|钙箱|鈣箱|纸箱|紙箱|平卡|卡板|吸塑|QC|Q[.]C[.]?|收货人|收貨人|送货人|送貨人|合计|合計|总计|總計)[：:\s]/i.test(line)) break;
+          if (line === plainHeader) continue;
+          const row = rowPattern.exec(line);
+          if (!row || Number(row[5].replace(/[,，]/g, '')) !== Number(row[7].replace(/[,，]/g, ''))) {
+            fields.items.push(_pendingOcrItem(line));
+            continue;
+          }
+          fields.items.push({ orderNo: row[1], productNo: row[2], productName: row[3],
+            qty: quantityText(row[5], row[6]), unit: row[6] });
+        }
+        const orders = fields.items.map(item => item.orderNo || '');
+        fields.orderNo = orders.length && orders.every(order => order && order === orders[0]) ? orders[0] : '';
+        return fields;
+      }
       const fixedColumns = /^(?:序号|序號|序|NO\.?)\s+(?:订单号|訂單號|PO(?:\s*NO\.?)?|P\/I(?:\s*NO\.?)?)\s+(?:货号|貨號|ITEM(?:\s*NO\.?)?)\s+(?:品名|名称|名稱|货名|貨名|Description)\s+(?:数量|數量|QTY)\s+(?:尺寸|SIZE)(?:[（(](?:MM|CM|M)[）)])?\s+(?:重量|WEIGHT)(?:[（(](?:KG|G)[）)])?$/i.test(plainHeader);
       /* 艾美斯类：序号 订单编号 货号 货品名称 单位 订单数量 交货数量 … —— 数量取「交货数量」列 */
       const orderNameUnit = /^(?:序号|序號|序|NO\.?)\s+(?:订单编号|订单号|訂單編號|訂單號)\s+(?:货号|貨號)\s+(?:货品名称|貨品名稱|品名|名称|名稱)\s+(?:单位|單位)(?:\s|$)/i.test(plainHeader);
@@ -1291,7 +1319,10 @@ function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
     req.on('data', (c) => { data += c; if (data.length > 50 * 1024 * 1024) req.destroy(); });
-    req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
+    req.on('end', () => { try {
+      if (maintenanceState().enabled) Auth.fail(503, maintenanceState().message);
+      resolve(data ? JSON.parse(data) : {});
+    } catch (e) { reject(e); } });
     req.on('error', reject);
   });
 }
@@ -1458,8 +1489,13 @@ const server = http.createServer(async (req, res) => {
   if (!p.startsWith('/api/')) return serveStatic(req, res, p);
 
   try {
+    if (p === '/api/maintenance' && req.method === 'GET') return sendJson(res, 200, maintenanceState());
     if (p === '/api/health' && req.method === 'GET') {
       return sendJson(res, 200, { ok: true, time: new Date().toISOString() });
+    }
+    if (maintenanceState().enabled) {
+      res.setHeader('Retry-After', '60'); res.setHeader('X-QC-Maintenance', '1');
+      return sendJson(res, 503, { ok: false, maintenance: true, error: maintenanceState().message });
     }
     /* ── 厂区清单（登录页用，无需鉴权）── */
     if (p === '/api/companies' && req.method === 'GET') {
@@ -1612,6 +1648,7 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 404, { ok: false, error: 'unknown api route' });
   } catch (e) {
     const code = e instanceof Auth.AuthError ? e.status : e instanceof SyntaxError ? 400 : 500;
+    if (code === 503 && maintenanceState().enabled) res.setHeader('X-QC-Maintenance', '1');
     if (code === 500) console.error('[api error]', p, e && e.name);
     return sendJson(res, code, { ok: false, error: e instanceof Auth.AuthError ? e.message : code === 400 ? 'JSON格式不正确' : '请求失败，请稍后重试' });
   }

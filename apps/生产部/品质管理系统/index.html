@@ -36,6 +36,19 @@
   </style>
 </head>
 <body>
+<style>
+#qcMaintenance { position:fixed;inset:0;z-index:2147483647;background:#0c121c;color:#e7edf7;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px; }
+#qcMaintenance[hidden] { display:none; }
+#qcMaintenance h1 { font:700 30px sans-serif;margin:0 0 18px; }
+#qcMaintenance p { font:15px/1.8 sans-serif;color:#a8b8cd;max-width:480px; }
+#qcMaintenance button { margin-top:16px;padding:12px 24px;border:0;border-radius:8px;background:#00b7d8;color:#fff;cursor:pointer; }
+</style>
+<div id="qcMaintenance" role="alertdialog" aria-modal="true" aria-labelledby="qcMaintenanceTitle">
+  <div><h1 id="qcMaintenanceTitle">正在检查系统状态</h1>
+    <p id="qcMaintenanceMessage">请稍候，暂时无法操作。</p>
+    <button id="qcMaintenanceRefresh" hidden>刷新后继续</button></div>
+</div>
+<script src="maintenance.js?v=20261109-ocr-maintenance-r1"></script>
 <div id="loginScreen" style="display:flex;align-items:center;justify-content:center;
   min-height:100vh;background:var(--bg-body);padding:20px;box-sizing:border-box">
   <div style="width:460px;max-width:100%">
@@ -922,9 +935,9 @@
 
 <script src="sso.js"></script><!-- 门户SSO免登：必须在 qc-backend.js / app.js 之前 -->
 <script src="report_export.js"></script>
-<script src="qc-backend.js?v=20261105-safe-ids-ocr-r1"></script><!-- 后端同步层：必须在 app.js 之前 -->
-<script src="app.js?v=20261105-safe-ids-ocr-r1"></script>
-<script src="ai-ocr.js?v=20261105-safe-ids-ocr-r1"></script><!-- AI(百炼)识别，劫持 startOcr -->
+<script src="qc-backend.js?v=20261109-ocr-maintenance-r1"></script><!-- 后端同步层：必须在 app.js 之前 -->
+<script src="app.js?v=20261109-ocr-maintenance-r1"></script>
+<script src="ai-ocr.js?v=20261109-ocr-maintenance-r1"></script><!-- AI(百炼)识别，劫持 startOcr -->
 <script src="mobile.js"></script><!-- 移动端侧栏抽屉交互 -->
 <script>
 /* 切换系统下拉：点击页面其它位置时收起 */
