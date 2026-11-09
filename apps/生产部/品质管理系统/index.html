@@ -37,39 +37,19 @@
 </head>
 <body>
 <style>
-#qcMaintenance { position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;overflow:auto;padding:28px;background:radial-gradient(ellipse at 50% 15%,#123444 0,transparent 55%),#0b111b;color:#e7edf7;box-sizing:border-box; }
+#qcMaintenance { position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;padding:24px;background:#0b111b;color:#e7edf7;box-sizing:border-box;text-align:center;font-family:system-ui,sans-serif; }
 #qcMaintenance[hidden] { display:none; }
-.qc-maint-card { width:min(100%,540px);padding:36px;box-sizing:border-box;background:#121e2c;border:1px solid #2b4055;border-radius:20px;box-shadow:0 24px 80px #0005;font:14px/1.7 system-ui,sans-serif; }
-.qc-maint-brand { display:flex;align-items:center;gap:12px;color:#9eafc3;font-size:12px;letter-spacing:.5px; }
-.qc-maint-logo { display:grid;place-items:center;width:40px;height:40px;background:#143a46;color:#42d8e8;border:1px solid #24525e;border-radius:12px;font-size:15px;font-weight:800; }
-.qc-maint-brand strong { display:block;font-size:15px;color:#e7edf7;letter-spacing:0; }
-.qc-maint-state { display:inline-flex;align-items:center;gap:8px;color:#f5ca80;background:#382e20;border:1px solid #66502d;border-radius:30px;padding:4px 12px;margin:28px 0 16px;font-size:12px; }
-.qc-maint-state::before { content:'';width:7px;height:7px;background:#f5c166;border-radius:50%;box-shadow:0 0 0 4px #f5c16618; }
-#qcMaintenance h1 { font-size:29px;line-height:1.4;margin:0 0 10px;letter-spacing:1px; }
-#qcMaintenanceMessage { color:#adbdcf;margin:0; }
-.qc-maint-note { padding:16px;margin:24px 0;background:#0d1723;border-radius:12px;border:1px solid #26374a;color:#acbdce; }
-.qc-maint-note strong { display:block;color:#d6e5f4;font-size:13px;margin-bottom:4px; }
-.qc-maint-actions { display:flex;gap:10px;flex-wrap:wrap; }
-#qcMaintenance button { font:600 14px system-ui,sans-serif;padding:11px 18px;border:1px solid #3c5269;border-radius:9px;background:#1c3043;color:#e7edf7;cursor:pointer; }
-#qcMaintenance button:hover { border-color:#61d4e0; }
-#qcMaintenance button:focus-visible { outline:2px solid #61d4e0;outline-offset:3px; }
-#qcMaintenance button:disabled { opacity:.6;cursor:wait; }
-#qcMaintenanceRefresh { background:#00a3be!important;border-color:#00a3be!important;color:#fff!important; }
-.qc-maint-footer { font-size:12px;color:#8295ad;margin:18px 0 0; }
-@media(max-width:540px) { #qcMaintenance { padding:18px; } .qc-maint-card { padding:26px 22px; } #qcMaintenance h1 { font-size:25px; } .qc-maint-actions button { flex:1; } }
+#qcMaintenance h1 { margin:0 0 12px;font-size:26px;line-height:1.4; }
+#qcMaintenanceMessage { margin:0;color:#9cacc0;font-size:14px;line-height:1.7; }
+#qcMaintenanceRefresh { margin-top:22px;padding:10px 20px;border:1px solid #3a526a;border-radius:8px;background:#1c3043;color:#e7edf7;font:14px system-ui,sans-serif;cursor:pointer; }
+#qcMaintenanceRefresh:focus-visible { outline:2px solid #61d4e0;outline-offset:3px; }
 </style>
 <div id="qcMaintenance" role="alertdialog" aria-modal="true" aria-labelledby="qcMaintenanceTitle" aria-describedby="qcMaintenanceMessage">
-  <div class="qc-maint-card">
-    <div class="qc-maint-brand"><span class="qc-maint-logo" aria-hidden="true">QC</span><div><strong>兴信 QMS</strong>品质管理系统</div></div>
-    <div class="qc-maint-state" id="qcMaintenanceState">正在确认系统状态</div>
-    <h1 id="qcMaintenanceTitle">正在检查系统状态</h1>
-    <p id="qcMaintenanceMessage" aria-live="polite">请稍候，暂时无法操作。</p>
-    <div class="qc-maint-note"><strong>未保存内容请保留在本页</strong>修复期间暂不提交变更，请勿重复提交或关闭未保存的页面。</div>
-    <div class="qc-maint-actions"><button id="qcMaintenanceCheck" type="button">检查修复状态</button><button id="qcMaintenanceRefresh" type="button" hidden>刷新后继续</button></div>
-    <p class="qc-maint-footer">页面会自动检查状态，修复完成后提示刷新。</p>
-  </div>
+  <div><h1 id="qcMaintenanceTitle">正在检查系统状态</h1>
+    <p id="qcMaintenanceMessage" aria-live="polite">请稍候。</p>
+    <button id="qcMaintenanceRefresh" type="button" hidden>刷新继续</button></div>
 </div>
-<script src="maintenance.js?v=20261109-ocr-maintenance-r2"></script>
+<script src="maintenance.js?v=20261109-ocr-maintenance-r3"></script>
 <div id="loginScreen" style="display:flex;align-items:center;justify-content:center;
   min-height:100vh;background:var(--bg-body);padding:20px;box-sizing:border-box">
   <div style="width:460px;max-width:100%">
