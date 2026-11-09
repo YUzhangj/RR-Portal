@@ -115,6 +115,7 @@
   window.__QC_CLEAR_AUTH = clearAuth;
   window.__QC_API_URL = apiUrl;
   window.__QC_REQUEST = function (path, options) {
+    if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) return Promise.reject(new Error('系统修复中，暂时无法操作'));
     options = Object.assign({}, options || {});
     options.credentials = 'same-origin';
     options.cache = 'no-store';
@@ -126,6 +127,7 @@
     }
     var requestAuth = window.__QC_AUTH;
     return fetch(apiUrl(path), options).then(function (res) {
+      if (res.headers && res.headers.get('X-QC-Maintenance') === '1' && window.__QC_MAINTENANCE) window.__QC_MAINTENANCE.activate();
       if (window.__QC_AUTH === requestAuth && res.status === 401) clearAuth('登录已失效，请重新登录');
       return res;
     });
@@ -395,6 +397,10 @@
       var xhr = new XMLHttpRequest();
       xhr.open('GET', apiUrl('/api/bootstrap'), false);
       xhr.send(null);
+      if (xhr.status === 503 && xhr.getResponseHeader && xhr.getResponseHeader('X-QC-Maintenance') === '1') {
+        if (window.__QC_MAINTENANCE) window.__QC_MAINTENANCE.activate();
+        return false;   /* 不清会话、不覆盖本地草稿。 */
+      }
       if (xhr.status !== 200) throw new Error(xhr.status === 401 ? '请使用当前公司的品质账号登录' : '数据加载失败，请重新登录');
       var data = JSON.parse(xhr.responseText);
       acceptAuth(data);
@@ -416,6 +422,7 @@
 
   /* ── 写穿透：把本地写入推回后端 ── */
   function post(url, body) {
+    if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) return Promise.resolve(false);
     function completed(ok, status, error) {
       window.__QC_LAST_SYNC = { url: url, ok: ok, status: status, error: error, time: new Date().toISOString() };
       if (ok) {
@@ -435,6 +442,7 @@
       return fetch(url, { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json', 'X-QC-CSRF': window.__QC_AUTH.csrfToken }, body: JSON.stringify(body)
       }).then(function (r) {
+        if (r.headers && r.headers.get('X-QC-Maintenance') === '1' && window.__QC_MAINTENANCE) window.__QC_MAINTENANCE.activate();
         if (window.__QC_AUTH !== requestAuth) return false;
         if (r.status === 401) clearAuth('登录已失效，请重新登录；未同步修改仍保留在本地');
         return completed(r.ok, r.status);
@@ -450,6 +458,7 @@
   };
 
   function pushRecords() {
+    if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) return Promise.resolve(false);
     var owner = window.__QC_AUTH && window.__QC_AUTH.user.username;
     if (!owner) return Promise.resolve(false);
     if (recoveryIsCurrent()) { notice(recoveryMessage(), true); return Promise.resolve(false); }
@@ -463,6 +472,7 @@
     return recordPushQueue;
   }
   function sendRecords(owner, epoch) {
+    if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) return Promise.resolve(false);
     if (!window.__QC_AUTH || window.__QC_AUTH.user.username !== owner || draftOwner !== owner || epoch !== recordQueueEpoch) return Promise.resolve(false);
     try {
       var st = JSON.parse(localStorage.getItem(KEY.records) || '{}');
@@ -530,6 +540,7 @@
     if (typeof window.persist === 'function' && !window.persist.__qcPatched) {
       var origPersist = window.persist;
       window.persist = function () {
+        if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) { notice('系统修复中，记录未提交，请保留当前页面。', true); return false; }
         if (!window.__QC_AUTH) { notice('请先登录当前公司，记录尚未保存。', true); return false; }
         if (recoveryIsCurrent()) { notice(recoveryMessage(), true); return false; }
         var ret = origPersist.apply(this, arguments);
@@ -542,6 +553,7 @@
     if (typeof window._savePartners === 'function' && !window._savePartners.__qcPatched) {
       var origP = window._savePartners;
       window._savePartners = function (list) {
+        if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) return false;
         var ret = origP.apply(this, arguments);
         pushPartners(list);
         return ret;
@@ -552,6 +564,7 @@
     if (typeof window._saveDefectLib === 'function' && !window._saveDefectLib.__qcPatched) {
       var origDef = window._saveDefectLib;
       window._saveDefectLib = function (lib) {
+        if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) return false;
         var ret = origDef.apply(this, arguments);
         pushDefects(lib);
         return ret;

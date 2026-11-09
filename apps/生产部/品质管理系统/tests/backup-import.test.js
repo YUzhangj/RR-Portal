@@ -312,3 +312,101 @@ test('optional user-provided draft imports all records and skips a repeat', {
   assert.equal(h.records.length, payload.state.records.length);
   assert.equal(h.saved, 1);
 });
+
+function withoutUpdatedAt(row) {
+  const copy = clone(row);
+  delete copy.updatedAt;
+  return copy;
+}
+function sqliteRoundTrip(rows) {
+  const { DatabaseSync } = require('node:sqlite');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server/server.js'), 'utf8');
+  const begin = source.indexOf('const RECORD_COLS =');
+  const finish = source.indexOf('function nextRecordId(', begin);
+  assert.ok(begin >= 0 && finish > begin);
+  const dbRuntime = vm.createContext({});
+  vm.runInContext(source.slice(begin, finish) + ';globalThis.storage={RECORD_COLS,SCHEMA_SQL,recordValues,rowToRecord};', dbRuntime);
+  const { RECORD_COLS, SCHEMA_SQL, recordValues, rowToRecord } = dbRuntime.storage;
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec(SCHEMA_SQL);
+    const insert = db.prepare('INSERT INTO records(' + RECORD_COLS.join(',') + ') VALUES(' + RECORD_COLS.map(() => '?').join(',') + ')');
+    for (const row of rows) insert.run(...recordValues(row));
+    return clone(db.prepare('SELECT * FROM records ORDER BY id').all().map(rowToRecord));
+  } finally { db.close(); }
+}
+
+test('a draft missing updatedAt skips an unchanged repeat across clocks and an actual SQLite reload', () => {
+  const payload = draft([withoutUpdatedAt(record(701, {
+    defects: [{ desc: '合成缺陷', qty: 1, level: 'MIN' }],
+    measurements: [{ item: '合成尺寸', standard: '10', values: [10, 10.1] }],
+  }))]);
+  const first = harness();
+  first.load(payload); first.confirm();
+  assert.equal(first.saved, 1);
+  assert.equal(first.records[0].updatedAt, stamp);
+  const fromServer = sqliteRoundTrip(first.records);
+  assert.deepEqual(fromServer, first.records);
+  const repeated = harness({ records: fromServer });
+  repeated.sandbox.nowIso = () => '2026-11-09T08:00:01.000Z';
+  repeated.load(payload); repeated.confirm();
+  assert.equal(repeated.saved, 0);
+  assert.deepEqual(repeated.records, fromServer);
+  assert.ok(repeated.notices.some(entry => /跳过 1/.test(entry.message)));
+  assert.equal(repeated.notices.some(entry => entry.type === 'error'), false);
+});
+
+test('a mixed draft skips the missing-timestamp existing row and stamps only the new row', () => {
+  const existingDraft = withoutUpdatedAt(record(702));
+  const first = harness(); first.load(draft([existingDraft])); first.confirm();
+  const fromServer = sqliteRoundTrip(first.records);
+  const next = harness({ records: fromServer });
+  next.sandbox.nowIso = () => '2026-11-09T08:00:02.000Z';
+  next.load(draft([existingDraft, withoutUpdatedAt(record(703, { qty: 31 }))])); next.confirm();
+  assert.equal(next.saved, 1);
+  assert.deepEqual(next.records[0], fromServer[0]);
+  assert.equal(next.records[1].id, 703);
+  assert.equal(next.records[1].qty, 31);
+  assert.equal(next.records[1].updatedAt, '2026-11-09T08:00:02.000Z');
+});
+
+test('missing updatedAt never hides business, nested-detail or approval differences and rejects the whole mixed batch', () => {
+  const original = withoutUpdatedAt(record(704));
+  const first = harness(); first.load(draft([original])); first.confirm();
+  const fromServer = sqliteRoundTrip(first.records);
+  for (const change of [{ qty: 21 }, { supplier: '不同合成供应商' },
+    { defects: [{ desc: '新增合成缺陷', qty: 1 }] }, { measurements: [{ item: '新增尺寸', values: [12] }] },
+    { status: 'approved', reviewBy: 'different-reviewer' }]) {
+    const next = harness({ records: fromServer });
+    next.sandbox.nowIso = () => '2026-11-09T08:00:03.000Z';
+    next.load(draft([withoutUpdatedAt(record(705)), { ...original, ...change }])); next.confirm();
+    assert.equal(next.saved, 0);
+    assert.deepEqual(next.records, fromServer);
+    assert.equal(next.sandbox.state.nextId, 31);
+    assert.equal(next.window.__QC_FORCE_REPLACE, undefined);
+    assert.ok(next.notices.some(entry => /编号 704.*内容不同/.test(entry.message)));
+  }
+});
+
+test('explicit different, null or empty timestamps are not treated as missing and still conflict', () => {
+  const original = withoutUpdatedAt(record(706));
+  const first = harness(); first.load(draft([original])); first.confirm();
+  const fromServer = sqliteRoundTrip(first.records);
+  for (const updatedAt of ['2026-11-09T08:00:04.000Z', null, '']) {
+    const next = harness({ records: fromServer });
+    next.sandbox.nowIso = () => '2026-11-09T08:00:05.000Z';
+    next.load(draft([{ ...original, updatedAt }])); next.confirm();
+    assert.equal(next.saved, 0);
+    assert.deepEqual(next.records, fromServer);
+    assert.ok(next.notices.some(entry => /编号 706.*内容不同/.test(entry.message)));
+  }
+});
+
+test('duplicate new IDs with omitted and explicitly different timestamps fail atomically', () => {
+  const firstRow = withoutUpdatedAt(record(707));
+  const h = harness();
+  h.load(draft([firstRow, { ...firstRow, updatedAt: '2026-11-09T07:59:59.000Z' }])); h.confirm();
+  assert.equal(h.saved, 0);
+  assert.deepEqual(h.records, []);
+  assert.ok(h.notices.some(entry => /备份内编号 707.*冲突/.test(entry.message)));
+});

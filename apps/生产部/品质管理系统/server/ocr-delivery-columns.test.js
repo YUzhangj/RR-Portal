@@ -119,7 +119,8 @@ test('the new source cannot auto-save a guessed count; correction is explicit an
   x.b.elements.get('f_qty').value='34';assert.equal(x.b.ctx.saveRecord(),true);
   const saved=plain(x.b.json('state.records[0]'));
   assert.equal(saved.qty,34);assert.equal(saved.productNo,'');assert.equal(saved.orderNo,'');
-  assert.equal(saved.productName,'待核对原文：'+raw);assert.equal('quantityNeedsReview'in saved,false);
+  assert.equal(saved.productName,'');assert.equal(x.b.elements.get('ocrRawText').value,raw);
+  assert.equal('quantityNeedsReview'in saved,false);
 });
 
 test('a manual delivery-layout retry never acquires a previous response PO or other metadata',async()=>{
@@ -140,4 +141,37 @@ test('decimal and multi-dot delivery-column values reach the existing real save 
     x.b.elements.get('f_qty').value='8760';assert.equal(x.b.ctx.saveRecord(),true);
     const saved=plain(x.b.json('state.records[0]'));assert.equal(saved.qty,8760);assert.equal(saved.productNo,'0012');assert.equal(saved.orderNo,'PO-KG');
   }
+});
+
+for (const modelHeader of ['', '模号']) {
+  test('component sheets keep every page after packing/signature footers and repeated complete headers' + (modelHeader ? ' with mold column' : ''), () => {
+    const heading = ['订单号', '货号', modelHeader, '配件名称', '颜色', '数量', '单位', '本单送货数/本单欠数', '箱数', '备注'].filter(Boolean).join(' ');
+    const line = (order, name, qty) => [order, 'SKU1093', modelHeader ? 'MODEL-02M-01' : '', name, '兰', qty, 'PCS', qty + '/200', '1'].filter(Boolean).join(' ');
+    const raw = [heading, line('PO-PAGE001', '第一页合成配件', '100'), '胶箱：1', '收货人：第一页合成姓名',
+      heading, line('PO-PAGE002', '第二页合成配件', '120'), '胶箱：1', '收货人：第二页合成姓名'].join('\n');
+    const fields = runtime().parse(raw);
+    assert.equal(fields.orderNo, '');
+    assert.deepEqual(fields.items.map(item => [item.orderNo, item.productNo, item.productName, item.qty, item.model || '']), [
+      ['PO-PAGE001', 'SKU1093', '第一页合成配件', '100', modelHeader ? 'MODEL-02M-01' : ''],
+      ['PO-PAGE002', 'SKU1093', '第二页合成配件', '120', modelHeader ? 'MODEL-02M-01' : ''],
+    ]);
+  });
+}
+
+test('unrecognized text between component pages is retained for review instead of discarded with the footer', () => {
+  const heading = '订单号 货号 模号 配件名称 颜色 数量 单位 本单送货数/本单欠数 箱数 备注';
+  const unknown = 'PR1093页间未识别内容：数量不清楚，必须保留';
+  const raw = [heading, 'PO-PAGE001 SKU1093 MODEL-A 第一页合成配件 兰 100 PCS 100/200 1',
+    '胶箱：1', '收货人：合成姓名', unknown, heading,
+    'PO-PAGE002 SKU1093 MODEL-B 第二页合成配件 兰 120 PCS 120/180 1', '胶箱：1'].join('\n');
+  const fields = runtime().parse(raw);
+  assert.equal(fields.items.length, 3);
+  assert.deepEqual(fields.items.filter(item => !item.quantityNeedsReview).map(item => [item.orderNo, item.productName, item.qty]), [
+    ['PO-PAGE001', '第一页合成配件', '100'], ['PO-PAGE002', '第二页合成配件', '120'],
+  ]);
+  const unresolved = fields.items[1];
+  assert.equal(unresolved.productName, '待核对原文：' + unknown);
+  assert.equal(unresolved.qty, '');
+  assert.equal(unresolved.quantityNeedsReview, true);
+  assert.equal(fields.orderNo, '');
 });

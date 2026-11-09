@@ -23,7 +23,7 @@ function fixture(options = {}) {
   b.json = expression => JSON.parse(b.run('JSON.stringify(' + expression + ')'));
   const config = { width: 100, height: 200, ...options };
   let serial = 0;
-  for (const id of ['ocrPreview','ocrStatus','ocrRawText','btnStartOcr','btnRotateOcr','btnApplyOcrToForm']) {
+  for (const id of ['ocrPreview','ocrStatus','ocrRawText','ocrItemsPreview','btnStartOcr','btnRotateOcr','btnApplyOcrToForm','btnParseOcrText']) {
     const node = { src: '', value: '', style: {}, textContent: '', disabled: false,
       addEventListener(event, fn) { handlers[id + ':' + event] = fn; } };
     b.elements.set(id, node);
@@ -134,9 +134,12 @@ test('successful auto-rotation commits the same image sent to AI and preserves m
   assert.equal(x.value('ocrRawText'), 'FULL SYNTHETIC RAW'); assert.match(x.status(), /人工核对/);
   x.b.ctx.applyOcrToForm();
   assert.equal(x.b.ctx.saveRecord(), false); assert.deepEqual(x.b.json('state.records'), []);
+  assert.equal(x.value('ocrProductName'), '');
+  assert.equal(x.value('f_productName'), '');
+  x.b.elements.get('f_productName').value = '人工核对配件';
   x.b.elements.get('f_qty').value = '12';
   assert.equal(x.b.ctx.saveRecord(), true);
-  assert.deepEqual(x.b.json('state.records.map(r=>[r.productName,r.qty,r.status])'), [['待核对原行：Synthetic',12,'pending']]);
+  assert.deepEqual(x.b.json('state.records.map(r=>[r.productName,r.qty,r.status])'), [['人工核对配件',12,'pending']]);
 });
 
 test('normal recognized rows still replace missing metadata and persist all queue items once', async () => {
@@ -147,7 +150,8 @@ test('normal recognized rows still replace missing metadata and persist all queu
     {productNo:'0013',productName:'Synthetic B',qty:'30',orderNo:'PO-B'},
   ]}});
   x.b.ctx.openAddModal(); await x.b.ctx.startOcr();
-  for (const id of ['ocrDate','ocrOrderNo','ocrDeliveryNo']) assert.equal(x.value(id),'');
+  for (const id of ['ocrDate','ocrDeliveryNo']) assert.equal(x.value(id),'');
+  assert.equal(x.value('ocrOrderNo'),'PO-A');
   x.b.ctx.applyOcrToForm();
   assert.equal(x.b.ctx.saveRecord(),true); assert.equal(x.b.ctx.saveRecord(),true);
   assert.deepEqual(x.b.json('state.records.map(r=>[r.productNo,r.productName,r.qty,r.orderNo,r.date])'),
@@ -289,7 +293,7 @@ test('a pending local worker is never duplicated after a new upload and cannot c
   await x.b.ctx.startOcr(); assert.equal(calls,1); assert.match(x.status(),/尚未结束/);
   finish({data:{text:'OLD TEXT'}}); await old;
   assert.equal(x.value('ocrRawText'),'');
-  x.b.ctx.Tesseract={recognize:async()=>({data:{text:'数量：12'}})};
+  x.b.ctx.Tesseract={recognize:async()=>({data:{text:'货号：SYNTHETIC-01\n数量：12'}})};
   await x.b.ctx.startOcr(); assert.match(x.status(),/识别完成/);
 });
 
@@ -422,6 +426,7 @@ test('manual fallback keeps the exact original response image and angle after ev
   assert.equal(x.b.ctx.__QC_OCR_IMAGE.snapshot().angle,0);assert.equal(x.value('ocrRawText'),pending.rawText);
   assert.match(x.status(),/人工核对/);assert.equal(x.b.ctx.__qcAiResult.items[0].productName,pending.fields.items[0].productName);
   x.b.ctx.openAddModal();x.b.ctx.applyOcrToForm();assert.equal(x.b.ctx.saveRecord(),false);
+  x.b.elements.get('f_productName').value='人工核对配件';
   x.b.elements.get('f_qty').value='12';assert.equal(x.b.ctx.saveRecord(),true);
   assert.equal(x.b.json('state.records[0].qty'),12);assert.deepEqual(x.controls(),[false,false,false]);
 });
@@ -442,4 +447,110 @@ test('valid and manual rows remain together after a successful rotation instead 
   ]}});
   await x.b.ctx.startOcr();assert.equal(x.requests.length,2);assert.equal(x.b.ctx.__qcAiResult.items.length,2);
   assert.equal(x.b.ctx.__qcAiResult.items[1].quantityNeedsReview,true);assert.match(x.status(),/人工核对/);
+});
+
+test('an unavailable or malformed AI status never silently invokes the local OCR engine', async () => {
+  for (const failure of ['network','auth','maintenance','invalid']) {
+    const x=fixture();x.upload();await tick();let localCalls=0;
+    x.b.elements.get('ocrProductNo').value='KEEP-CORRECTION';
+    x.b.ctx.Tesseract={recognize:async()=>{localCalls++;return{data:{text:'数量：999'}};}};
+    x.b.ctx.__QC_REQUEST=async()=>{
+      if(failure==='network')throw new TypeError('Failed to fetch');
+      if(failure==='invalid')return{ok:true,status:200,json:async()=>({})};
+      return{ok:false,status:failure==='auth'?401:503};
+    };
+    await x.b.ctx.startOcr();
+    assert.equal(localCalls,0);assert.equal(x.requests.length,0);
+    assert.equal(x.value('ocrProductNo'),'KEEP-CORRECTION');
+    assert.match(x.status(),/无法检查 AI/);
+    assert.ok(!x.b.messages.some(message=>message.type==='success'));
+  }
+});
+test('garbled local table text is retained for review without committing partial fields or a success toast', async () => {
+  const x=fixture({local:true});x.upload();
+  x.b.elements.get('ocrProductNo').value='MANUAL-CORRECTION';
+  const text='T es Co Fr\n合成塑胶有限公司\n送货单\nN0:3000123\nTIEOETOEOSEESEYEEE\nEECTOIEYRECES 人世 工\n胶箱：65';
+  x.b.ctx.Tesseract={recognize:async()=>({data:{text}})};
+  await x.b.ctx.startOcr();
+  assert.equal(x.value('ocrRawText'),text);
+  assert.equal(x.value('ocrProductNo'),'MANUAL-CORRECTION');
+  assert.equal(x.value('ocrQty'),'');
+  assert.match(x.status(),/未读出完整货品明细/);
+  assert.ok(!x.b.messages.some(message=>message.type==='success'));
+});
+
+test('reparsing existing text maps each column locally without any image/model request', async()=>{
+  const x=fixture(); x.upload();
+  const original='订单号 货号 型号 配件名称 颜色 数量 单位 本单送货数/\n本单欠数 箱数 备注\nPO-A 9298 MODEL–01 配件上壳 蓝 80 PCS 120 6';
+  x.b.elements.get('ocrRawText').value=original;
+  x.b.ctx.__QC_REQUEST=async(route,options)=>{
+    assert.equal(route,'/api/ai/ocr-parse');assert.deepEqual(JSON.parse(options.body),{text:original});
+    return{ok:true,json:async()=>({ok:true,fields:{deliveryNo:'3000123',items:[{orderNo:'PO-A',productNo:'9298',model:'MODEL-01',productName:'配件上壳',color:'蓝',qty:'80',unit:'PCS'}]}})};
+  };
+  assert.equal(await x.b.ctx.reparseOcrText(),true);
+  assert.equal(x.requests.length,0);assert.equal(x.canvasCalls.length,0);
+  assert.equal(x.value('ocrProductNo'),'9298');assert.equal(x.value('ocrProductName'),'配件上壳');
+  assert.equal(x.value('ocrOrderNo'),'PO-A');assert.equal(x.value('ocrQty'),'80');
+  assert.match(x.value('ocrRemark'),/MODEL-01.*蓝/);assert.equal(x.value('ocrRawText'),original);
+  x.b.ctx.invalidateOcrText();assert.equal(x.b.ctx.applyOcrToForm(),false);
+});
+test('a text response from an older image or login cannot replace fields', async()=>{
+  for(const invalidate of [x=>x.upload('another'),x=>{x.b.ctx.__QC_AUTH=null;}]) {
+    const x=fixture();x.upload();let finish;
+    x.b.elements.get('ocrRawText').value='合成原文';
+    x.b.ctx.__QC_REQUEST=()=>new Promise(resolve=>{finish=resolve;});
+    const pending=x.b.ctx.reparseOcrText();invalidate(x);
+    finish({ok:true,json:async()=>({ok:true,fields:{items:[{productNo:'OLD',productName:'old',qty:'80'}]}})});
+    assert.equal(await pending,false);assert.notEqual(x.value('ocrProductNo'),'OLD');
+  }
+});
+
+
+test('editing the original text cancels a pending local worker without losing the correction', async () => {
+  const x = fixture({local:true}); x.upload(); await tick(); let finish;
+  x.b.ctx.Tesseract = {recognize: () => new Promise(resolve => {finish = resolve;})};
+  const pending = x.b.ctx.startOcr(); await tick(); await tick();
+  assert.equal(typeof finish, 'function');
+  x.b.elements.get('ocrRawText').value = 'MANUAL NEW TEXT';
+  x.b.elements.get('ocrProductNo').value = 'MANUAL-SKU';
+  x.b.ctx.invalidateOcrText();
+  finish({data:{text:'货号：STALE-SKU\n数量：12'}}); await pending;
+  assert.equal(x.value('ocrRawText'), 'MANUAL NEW TEXT');
+  assert.equal(x.value('ocrProductNo'), 'MANUAL-SKU');
+  assert.equal(x.b.ctx.__qcOcrTextNeedsParsing, true);
+  assert.match(x.status(), /原文已修改/);
+  assert.equal(x.b.run('_ocrWorkerBusy'), false);
+  assert.equal(x.b.ctx.applyOcrToForm(), false);
+});
+
+test('maintenance cancellation invalidates local OCR and permits a fresh result only after recovery', async () => {
+  const x = fixture({local:true}); x.upload(); await tick(); let finish;
+  x.b.ctx.Tesseract = {recognize: () => new Promise(resolve => {finish = resolve;})};
+  const pending = x.b.ctx.startOcr(); await tick(); await tick();
+  x.b.elements.get('ocrRawText').value = 'KEEP ORIGINAL';
+  x.b.elements.get('ocrProductNo').value = 'KEEP-SKU';
+  const originalImage = x.preview();
+  const listeners = {};
+  x.b.ctx.window.addEventListener = () => {};
+  x.b.ctx.document.addEventListener = (event, fn) => { listeners[event] = fn; };
+  x.b.ctx.setInterval = () => 1;
+  x.b.ctx.fetch = async () => ({ok:true,json:async()=>({enabled:true})});
+  vm.runInContext(source('maintenance.js'), x.b.ctx); await tick();
+  assert.equal(x.b.ctx.__QC_MAINTENANCE.blocked, true);
+  finish({data:{text:'货号：STALE-SKU\n数量：12'}}); await pending;
+  assert.equal(x.value('ocrRawText'), 'KEEP ORIGINAL');
+  assert.equal(x.value('ocrProductNo'), 'KEEP-SKU');
+  assert.equal(x.preview(), originalImage);
+  assert.equal(x.b.run('_ocrWorkerBusy'), false);
+  // Simulate the already-tested deliberate maintenance recovery/reload boundary.
+  x.b.ctx.__QC_MAINTENANCE.blocked = false;
+  x.b.ctx.invalidateOcrText();
+  const preview = x.b.elements.get('ocrItemsPreview');
+  preview.hidden = false; preview.innerHTML = 'OLD TABLE';
+  x.b.ctx.Tesseract = {recognize:async()=>({data:{text:'货号：FRESH-SKU\n数量：12'}})};
+  await x.b.ctx.startOcr();
+  assert.equal(x.value('ocrProductNo'), 'FRESH-SKU');
+  assert.equal(x.b.ctx.__qcOcrTextNeedsParsing, false);
+  assert.equal(preview.hidden, true); assert.equal(preview.innerHTML, '');
+  assert.match(x.status(), /本地识别完成/);
 });

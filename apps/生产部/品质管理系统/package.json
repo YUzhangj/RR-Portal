@@ -5,6 +5,9 @@
   "description": "兴信 QMS 品质管理系统（多厂区/多子公司 · Node + SQLite 零依赖后端 + 纯前端）",
   "scripts": {
     "dev": "node dev-server.js",
-    "start": "node server/server.js"
+    "start": "node server/server.js",
+    "maintenance:on": "node server/maintenance-control.js on",
+    "maintenance:off": "node server/maintenance-control.js off",
+    "maintenance:status": "node server/maintenance-control.js status"
   }
 }

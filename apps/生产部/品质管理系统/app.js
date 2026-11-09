@@ -210,6 +210,7 @@ function _clearSession() {
 
 /* ── 权限判断（基于权限矩阵；jc 主账号保底全权）── */
 function can(action) {
+  if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) return false;
   if (window.__QC_DRAFT_RECOVERY_BLOCKED && ['createRecord','editRecord','deleteRecord','batchDelete','importData','reviewRecord'].includes(action)) return false;
   const u = _liveUser();
   if (!u) return false;
@@ -2817,6 +2818,10 @@ function _sameOcrImage(snapshot) {
 function _clearOcrPreviewFields() {
   window.__qcAiResult = null;
   window.__qcOcrResultContext = null;
+  window.__qcOcrTextActor = null;
+  window.__qcOcrTextNeedsParsing = false;
+  const previewTable = document.getElementById('ocrItemsPreview');
+  if (previewTable) { previewTable.hidden = true; previewTable.innerHTML = ''; }
   const applyButton = document.getElementById('btnApplyOcrToForm');
   if (applyButton) applyButton.textContent = '应用到单条录入';
   setVal('ocrRawText', '');
@@ -2827,6 +2832,8 @@ function _clearOcrPreviewFields() {
 window.__QC_OCR_IMAGE = {
   snapshot: _ocrImageSnapshot,
   current: _sameOcrImage,
+  // Low-level invalidation avoids calling __QC_OCR_CANCEL recursively.
+  invalidatePending() { _ocrImageRevision++; },
   cancel: _cancelOcrWork,
   commit(snapshot, dataUrl, angle) {
     if (!_sameOcrImage(snapshot)) return null;
@@ -3021,12 +3028,27 @@ async function startOcr() {
       setText('ocrStatus', '识别失败，请重新上传清晰图片');
       showToast('未识别到文字，请上传更清晰的图片', 'error');
     } else {
-      window.__qcAiResult = null;
-      window.__qcOcrResultContext = snapshot;
+      const ids = ['ocrDate','ocrSupplier','ocrProductNo','ocrProductName','ocrDeliveryNo','ocrOrderNo','ocrQty','ocrType','ocrRemark'];
+      const previous = ids.map(id => document.getElementById(id)?.value || '');
+      ids.forEach(id => setVal(id, ''));
       setVal('ocrRawText', text);
       extractFieldsFromOcrText(text);
-      setText('ocrStatus', '识别完成');
-      showToast('✓ 识别完成，请核对字段', 'success');
+      const quantity = document.getElementById('ocrQty')?.value || '';
+      const identity = (document.getElementById('ocrProductNo')?.value || '').trim() || (document.getElementById('ocrProductName')?.value || '').trim();
+      if (!quantity || !identity) {
+        ids.forEach((id, i) => setVal(id, previous[i]));
+        setText('ocrStatus', '本地 OCR 未读出完整货品明细，原文已保留，请人工核对或重试');
+        showToast('表格文字识别不完整，未自动填入字段；请核对原文，不要按乱码提交', 'error');
+      } else {
+        window.__qcAiResult = null;
+        window.__qcOcrTextActor = null;
+        window.__qcOcrTextNeedsParsing = false;
+        window.__qcOcrResultContext = snapshot;
+        const previewTable = document.getElementById('ocrItemsPreview');
+        if (previewTable) { previewTable.hidden = true; previewTable.innerHTML = ''; }
+        setText('ocrStatus', '本地识别完成，请核对字段');
+        showToast('本地识别完成，请逐项核对货号、名称和数量', 'info');
+      }
     }
   } catch (err) {
     if (!_sameOcrImage(snapshot)) return;
@@ -6111,7 +6133,7 @@ function _backupDoImport(payload, mode) {
         return copy;
       });
     }
-    function normalize(r, id) {
+    function normalize(r, id, missingUpdatedAt = stamp) {
       if (!r || typeof r !== 'object' || Array.isArray(r)) throw new Error('备份记录格式无效');
       const row = {id};
       for (const key of fields) {
@@ -6121,7 +6143,7 @@ function _backupDoImport(payload, mode) {
         }
         if (value === undefined) {
           if (key === 'inspDate') value = owns(r,'date') ? r.date : '';
-          else if (key === 'updatedAt') value = stamp;
+          else if (key === 'updatedAt') value = missingUpdatedAt;
           else if (key === 'defects' || key === 'measurements') value = [];
           else if (key === 'type') value = '成品';
           else if (key === 'qty' || key === 'pass' || key === 'fail') value = 0;
@@ -6155,7 +6177,12 @@ function _backupDoImport(payload, mode) {
     for (const raw of incoming) {
       if (source.isDraft && (!raw || !safeId(raw.id))) throw new Error('草稿记录缺少有效原编号，整批恢复已暂停，请先核对原草稿');
       const id = raw && safeId(raw.id) ? Number(raw.id) : _newRecordId(used);
-      const row = normalize(raw, id), signature = JSON.stringify(row);
+      // 旧备份未记录修改时间时，仅借用现有同编号的时间做重复比较。
+      // 其余字段仍须完全一致；此分支只会跳过或报冲突，不会写回现有记录。
+      // 文件中明确提供的时间（含 null/空串）仍由 normalize 原样比较。
+      const prior = mode === 'append' ? existing.get(id) : undefined;
+      const missingUpdatedAt = prior && owns(prior, 'updatedAt') ? prior.updatedAt : stamp;
+      const row = normalize(raw, id, missingUpdatedAt), signature = JSON.stringify(row);
       if (seen.has(id)) {
         if (seen.get(id) !== signature) throw new Error('备份内编号 ' + id + ' 的内容冲突，整批导入已暂停');
         skipped++; continue;
