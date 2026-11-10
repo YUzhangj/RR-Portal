@@ -11,7 +11,8 @@
     document.getElementById('qcMaintenanceTitle').textContent = title;
     document.getElementById('qcMaintenanceMessage').textContent = message;
     document.getElementById('qcMaintenanceRefresh').hidden = !refresh;
-    document.getElementById('qcMaintenanceRetry').hidden = !retry;
+    var retryButton = document.getElementById('qcMaintenanceRetry');
+    if (retryButton) retryButton.hidden = !retry;
     ['appWrapper', 'loginScreen'].forEach(function (id) {
       var el = document.getElementById(id); if (el) el.inert = guard.blocked || checking;
     });
@@ -49,12 +50,21 @@
   ['click', 'submit', 'keydown'].forEach(function (event) {
     document.addEventListener(event, function (e) {
       var overlay = document.getElementById('qcMaintenance');
-      if ((guard.blocked || checking) && overlay && !overlay.contains(e.target)) { e.preventDefault(); e.stopImmediatePropagation(); }
+      if ((guard.blocked || checking) && overlay && !overlay.contains(e.target)) {
+        e.preventDefault(); e.stopImmediatePropagation();
+        if (event === 'keydown' && e.key === 'Tab') {
+          var button = ['qcMaintenanceRefresh', 'qcMaintenanceRetry'].map(function (id) {
+            return document.getElementById(id);
+          }).find(function (el) { return el && !el.hidden && !el.disabled; });
+          if (button) button.focus();
+        }
+      }
     }, true);
   });
   document.addEventListener('DOMContentLoaded', function () {
     document.getElementById('qcMaintenanceRefresh').onclick = function () { location.reload(); };
-    document.getElementById('qcMaintenanceRetry').onclick = function () { check(); };
+    var retryButton = document.getElementById('qcMaintenanceRetry');
+    if (retryButton) retryButton.onclick = function () { check(); };
     if (guard.blocked || checking) render(activated ? '系统修复中' : '正在检查系统状态', '请稍候。', false);
     check();
   });

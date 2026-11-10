@@ -22,18 +22,21 @@ test('a request body cannot pass its write boundary after maintenance is enabled
   await assert.rejects(pending, error => error.status === 503 && /修复中/.test(error.message));
 });
 
-function browser() {
+function browser({ legacy = false } = {}) {
   const nodes = Object.fromEntries(['qcMaintenance','qcMaintenanceRetry','qcMaintenanceTitle','qcMaintenanceMessage','qcMaintenanceRefresh','appWrapper','loginScreen']
     .map(id => [id, { id, hidden: false, textContent: '', inert: false }]));
-  nodes.qcMaintenance.contains = target => target === nodes.qcMaintenance;
+  if (legacy) delete nodes.qcMaintenanceRetry;
+  nodes.qcMaintenance.contains = target => Object.values(nodes).some(node =>
+    node === target && node.id.startsWith('qcMaintenance'));
   const events = {}, calls = [], storage = { pendingDraft: 'original draft' };
   let enabled = false, failed = false, response = null, poll, reloads = 0;
   const s = { window: { addEventListener() {} }, location: { pathname: '/qc/index.html', reload() { reloads++; } },
     AbortController, setTimeout() { return 1; }, clearTimeout() {}, setInterval(fn) { poll = fn; },
-    document: { getElementById: id => nodes[id], addEventListener(name, fn) { (events[name] ||= []).push(fn); } },
+    document: { activeElement: null, getElementById: id => nodes[id] || null, addEventListener(name, fn) { (events[name] ||= []).push(fn); } },
     localStorage: { removeItem() { throw new Error('must not clear drafts'); }, getItem: key => storage[key] },
     fetch: async (url, options) => { calls.push({url,options}); if (failed) throw new Error('offline'); return response || {ok:true,json:async()=>({enabled})}; },
   };
+  Object.values(nodes).forEach(node => { node.focus = () => { s.document.activeElement = node; }; });
   vm.createContext(s); vm.runInContext(client, s);
   return { s, nodes, events, storage, calls, get reloads() {return reloads;},
     set enabled(value) { enabled = value; }, set failed(value) { failed = value; },
@@ -78,6 +81,71 @@ test('retry checks the connection without refreshing or discarding the current f
   assert.equal(b.nodes.appWrapper.inert,false);
   assert.equal(b.reloads,0);
   assert.equal(b.storage.pendingDraft,'original draft');
+});
+
+test('Tab reaches Retry from outside the locked UI without enabling business operations', async () => {
+  const b = browser(); b.events.DOMContentLoaded.forEach(fn => fn()); await tick();
+  b.failed = true; b.poll(); await tick();
+  let prevented = 0, stopped = 0;
+  const outside = { target: b.nodes.loginScreen, key: 'Tab',
+    preventDefault() { prevented++; }, stopImmediatePropagation() { stopped++; } };
+  b.events.keydown[0](outside);
+  assert.equal(b.s.document.activeElement, b.nodes.qcMaintenanceRetry);
+  assert.equal(prevented, 1); assert.equal(stopped, 1);
+  assert.equal(b.nodes.appWrapper.inert, true);
+  assert.equal(b.s.window.__QC_MAINTENANCE.blocked, true);
+  // The guard must allow the focused control's normal keyboard activation.
+  b.events.keydown[0]({ ...outside, target: b.nodes.qcMaintenanceRetry, key: 'Enter' });
+  assert.equal(prevented, 1); assert.equal(stopped, 1);
+  b.failed = false; b.nodes.qcMaintenanceRetry.onclick();
+  assert.equal(b.nodes.qcMaintenanceRetry.disabled, true);
+  b.s.document.activeElement = null;
+  b.events.keydown[0](outside);
+  assert.equal(b.s.document.activeElement, null, 'a disabled retry must not receive focus');
+  assert.equal(b.s.window.__QC_MAINTENANCE.blocked, true);
+  await tick();
+  assert.equal(b.nodes.qcMaintenance.hidden, true);
+  assert.equal(b.nodes.appWrapper.inert, false);
+  assert.equal(b.reloads, 0);
+  assert.equal(b.storage.pendingDraft, 'original draft');
+});
+
+test('Tab reaches deliberate Refresh after maintenance ends, but does not refresh automatically', async () => {
+  const b = browser(); b.events.DOMContentLoaded.forEach(fn => fn()); await tick();
+  b.enabled = true; b.poll(); await tick();
+  const tab = { target: b.nodes.appWrapper, key: 'Tab', preventDefault() {}, stopImmediatePropagation() {} };
+  b.events.keydown[0](tab);
+  assert.equal(b.s.document.activeElement, null, 'hidden actions cannot receive focus during maintenance');
+  b.enabled = false; b.poll(); await tick();
+  b.events.keydown[0](tab);
+  assert.equal(b.s.document.activeElement, b.nodes.qcMaintenanceRefresh);
+  assert.equal(b.s.window.__QC_MAINTENANCE.blocked, true);
+  assert.equal(b.reloads, 0);
+  b.nodes.qcMaintenanceRefresh.onclick();
+  assert.equal(b.reloads, 1);
+  assert.equal(b.storage.pendingDraft, 'original draft');
+});
+
+test('new maintenance client remains safe with cached HTML that has no Retry button', async () => {
+  const b = browser({ legacy: true });
+  assert.doesNotThrow(() => b.events.DOMContentLoaded.forEach(fn => fn()));
+  await tick();
+  assert.equal(b.s.window.__QC_MAINTENANCE.blocked, false);
+  b.failed = true; b.poll(); await tick();
+  assert.equal(b.s.window.__QC_MAINTENANCE.blocked, true);
+  assert.equal(b.nodes.appWrapper.inert, true);
+  assert.equal(b.nodes.qcMaintenanceTitle.textContent, '暂时无法连接系统');
+  b.failed = false; b.poll(); await tick();
+  assert.equal(b.s.window.__QC_MAINTENANCE.blocked, false);
+  assert.equal(b.nodes.qcMaintenance.hidden, true);
+  b.enabled = true; b.poll(); await tick();
+  b.enabled = false; b.poll(); await tick();
+  assert.equal(b.nodes.qcMaintenanceRefresh.hidden, false);
+  assert.equal(b.s.window.__QC_MAINTENANCE.blocked, true);
+  assert.equal(b.reloads, 0);
+  b.nodes.qcMaintenanceRefresh.onclick();
+  assert.equal(b.reloads, 1);
+  assert.equal(b.storage.pendingDraft, 'original draft');
 });
 
 test('gateway maintenance HTML remains a maintenance lock until deliberate refresh after recovery', async () => {
