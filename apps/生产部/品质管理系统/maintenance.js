@@ -51,6 +51,8 @@
         return response.json().catch(function (error) { operation.reason = 'invalid-response'; throw error; });
       })
       .then(function (state) {
+        // 响应正文可能在 abort 后才完成；主动取消的成功结果也必须丢弃。
+        if (operation.suspended) return;
         if (!state || typeof state.enabled !== 'boolean') { operation.reason = 'invalid-status'; throw new Error('invalid status'); }
         checking = false;
         if (state.enabled) activate();

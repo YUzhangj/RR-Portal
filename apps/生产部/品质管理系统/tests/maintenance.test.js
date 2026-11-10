@@ -267,3 +267,23 @@ test('maintenance blocks local persistence and retry before they can overwrite a
   await assert.rejects(s.window.__QC_REQUEST('/api/records',{method:'POST'}),/修复中/);
   assert.equal(writes,0);assert.equal(requests,0);assert.deepEqual([...store],before);
 });
+
+for (const staleEnabled of [false, true]) {
+  test('hidden cancelled successful response '+staleEnabled+' cannot change protection before a fresh check', async () => {
+    const b=browser(); await tick(); b.failed=true;b.poll();await tick();
+    assert.equal(b.s.window.__QC_MAINTENANCE.blocked,true);
+    let resolveJson, cancelledOcr=0;
+    b.s.window.__QC_OCR_CANCEL=()=>cancelledOcr++;
+    b.failed=false;b.response={ok:true,json:()=>new Promise(resolve=>{resolveJson=resolve;})};
+    b.poll();await tick();
+    b.s.document.hidden=true;b.events.visibilitychange[0]();
+    resolveJson({enabled:staleEnabled});await tick();
+    assert.equal(b.s.window.__QC_MAINTENANCE.blocked,true);
+    assert.equal(b.nodes.qcConnectionNotice.hidden,false);
+    assert.equal(b.nodes.qcMaintenance.hidden,true);assert.equal(cancelledOcr,0);
+    assert.equal(b.warnings.length,1);
+    b.response=null;b.s.document.hidden=false;b.events.visibilitychange[0]();await tick();
+    assert.equal(b.s.window.__QC_MAINTENANCE.blocked,false);
+    assert.equal(b.reloads,0);assert.equal(b.storage.pendingDraft,'original draft');
+  });
+}
