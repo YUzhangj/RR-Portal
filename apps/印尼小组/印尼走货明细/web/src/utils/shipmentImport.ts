@@ -83,7 +83,22 @@ export function parseShipmentWorkbook(wb: XLSX.WorkBook): ShipmentImportResult {
   for (const sheet of wb.SheetNames) {
     const ws = wb.Sheets[sheet]
     const range = XLSX.utils.decode_range(ws['!ref'] || 'A1')
-    if (range.e.r > 10000 || range.e.c > 200) { warnings.push(`${sheet}：范围过大，未读取`); continue }
+    if (range.e.r > 10000 || range.e.c > 200) {
+      // Formatting can extend !ref to the end of Excel. Inspect stored cells
+      // instead of expanding that rectangle, preserving original coordinates.
+      let lastRow = 0, lastCol = 0
+      for (const address of Object.keys(ws)) {
+        if (!/^[A-Z]+[1-9]\d*$/.test(address)) continue
+        const cell = ws[address]
+        const populated = cell.f || (cell.v != null && (typeof cell.v !== 'string' || cell.v.trim() !== ''))
+        if (!populated) continue
+        const point = XLSX.utils.decode_cell(address)
+        lastRow = Math.max(lastRow, point.r)
+        lastCol = Math.max(lastCol, point.c)
+      }
+      range.e = { r: lastRow, c: lastCol }
+      if (lastRow > 10000 || lastCol > 200) { warnings.push(`${sheet}：范围过大，未读取`); continue }
+    }
     let hi = -1, names: string[] = []
     for (let r = 0; r <= Math.min(range.e.r, 29); r++) {
       const candidate = Array.from({ length: range.e.c + 1 }, (_, c) => norm(ws[XLSX.utils.encode_cell({ r, c })]?.v))
