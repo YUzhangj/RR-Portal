@@ -375,7 +375,6 @@ function lookupMaterialPrice(material, grade, prices) {
       }
       if (engineering?.mixed_part_selections) copy.parts_catalog.selections = JSON.parse(JSON.stringify(engineering.mixed_part_selections));
       const deleted = new Set(engineering?.mixed_deleted_part_ids || []);
-      const sourceIds = new Set((engineering?.mixed_imported_parts || []).map(p => p.id));
       // 旧导入保留了附录标题时，只清理同来源后续的序号说明行。
       const appendixSources = new Set();
       for (const p of copy.parts_catalog.parts) {
@@ -386,9 +385,10 @@ function lookupMaterialPrice(material, grade, prices) {
       }
 
       for (const p of copy.parts_catalog.parts) {
-        const owned = p.engineering_source || /^(numbered_|upload_)/.test(p.id || '');
-        if (isNonMoldPart({...p, ...(engineering?.mixed_part_edits?.[p.id] || {})}) ||
-            (Array.isArray(engineering?.mixed_imported_parts) && owned && !sourceIds.has(p.id))) deleted.add(p.id);
+        // 旧报价和部分加载的报价可能只有啤机目录，却把工程来源数组保存成空数组。
+        // 不能把“本次来源数组中未出现”当作删除，否则共用零件会在打开啤机部时全部消失。
+        // 真正的工程删除和完全替换均通过 mixed_deleted_part_ids 明确同步。
+        if (isNonMoldPart({...p, ...(engineering?.mixed_part_edits?.[p.id] || {})})) deleted.add(p.id);
       }
       copy.parts_catalog.parts = copy.parts_catalog.parts.filter(p => !deleted.has(p.id)).map(p => ({...p, ...(engineering?.mixed_part_edits?.[p.id] || {})}));
       copy.parts_catalog.parts.forEach(p => {

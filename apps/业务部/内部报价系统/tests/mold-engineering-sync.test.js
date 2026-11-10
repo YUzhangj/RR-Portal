@@ -2,7 +2,7 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const M=require('../frontend/mixed-molds'),I=require('../backend/services/mixedPartImport');
 test('工程更新和删除同步，保留啤机价格及手工零件并排除五金',()=>{
  const old={parts_catalog:{parts:[{id:'numbered_a',weight_g:1,production_demand:3000,shot_price:.3,loss_pct:5},{id:'numbered_removed'},{id:'hardware',mold_no:'五金',name:'弹簧'},{id:'manual',name:'塑胶弹簧座',mold_no:'M2'}],selections:{a:[{part_id:'numbered_a',usage:1},{part_id:'numbered_removed',usage:1},{part_id:'hardware',usage:1}]}}};
- const out=M.engineeringCatalog(old,{mixed_imported_parts:[{id:'numbered_a',weight_g:2,production_demand:3890,shot_price:0,loss_pct:3}]});
+ const out=M.engineeringCatalog(old,{mixed_imported_parts:[{id:'numbered_a',weight_g:2,production_demand:3890,shot_price:0,loss_pct:3}],mixed_deleted_part_ids:['numbered_removed']});
  assert.deepEqual(out.parts_catalog.parts.map(p=>p.id),['numbered_a','manual']);
  assert.equal(out.parts_catalog.parts[0].production_demand,3890);
  assert.equal(out.parts_catalog.parts[0].weight_g,2);
@@ -23,6 +23,20 @@ test('重复导入更新材质及需求但保留零件ID和价格',()=>{
 });
 test('没有工程来源目录时保留旧注塑零件',()=>{
  assert.equal(M.engineeringCatalog({parts_catalog:{parts:[{id:'numbered_old'}],selections:{}}},{}).parts_catalog.parts.length,1);
+});
+test('工程来源数组为空时保留啤机部已有共用零件',()=>{
+ const parts=[
+  {id:'upload_upper',name:'球上壳',mold_no:'01M',engineering_source:true},
+  {id:'numbered_lower',name:'球下壳',mold_no:'02M',engineering_source:true}
+ ];
+ const selections={__shared__:parts.map(p=>({part_id:p.id,usage:1}))};
+ const old={parts_catalog:{version:1,parts,selections}};
+ const out=M.engineeringCatalog(old,{mixed_imported_parts:[],mixed_part_selections:selections});
+ assert.deepEqual(out.parts_catalog.parts.map(p=>p.name),['球上壳','球下壳']);
+ assert.deepEqual(out.parts_catalog.selections.__shared__.map(p=>p.part_id),['upload_upper','numbered_lower']);
+ const deleted=M.engineeringCatalog(old,{mixed_imported_parts:[],mixed_part_selections:selections,mixed_deleted_part_ids:['upload_upper']});
+ assert.deepEqual(deleted.parts_catalog.parts.map(p=>p.name),['球下壳']);
+ assert.deepEqual(deleted.parts_catalog.selections.__shared__.map(p=>p.part_id),['numbered_lower']);
 });
 
 test('旧签字行从工程来源和啤机目录同时过滤，移除选用且不影响正常零件',()=>{
