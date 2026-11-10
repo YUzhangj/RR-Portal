@@ -22,6 +22,7 @@ function moduleAt(file, extra = {}, dependencies = {}) {
     Headers, Request, Response, URL, AbortController, Error, TypeError,
     require: name => {
       if (name === "next/server") return { NextResponse: FakeNextResponse };
+      if (name === "@/lib/page-permissions") return moduleAt("lib/page-permissions.ts");
       if (name in dependencies) return dependencies[name];
       throw new Error(`Unexpected test dependency: ${name}`);
     }, ...extra,
@@ -231,7 +232,8 @@ test("real app navigation permits the recovery tab only for admin", () => {
   const workspace = findNode(ast, node => ts.isFunctionDeclaration(node) && node.name?.text === "MailWorkspace");
   const available = findNode(workspace, node => ts.isVariableDeclaration(node) && node.name.getText(ast) === "available").initializer;
   for (const role of ["admin", "supervisor", "shipping", "warehouse"]) {
-    const context = { role, Inbox: 0, ContactRound: 0, Settings: 0, History: 0 };
+    const permissions = moduleAt("lib/page-permissions.ts");
+    const context = { role, grants: permissions.defaultPagePermissions(role), hasPage: permissions.hasPage, Inbox: 0, ContactRound: 0, Settings: 0, History: 0 };
     const keys = vm.runInNewContext(transpile(`const mailSections = ${sections.getText(ast)}; ${available.getText(ast)}.map(value=>value.key);`), context);
     assert.equal(keys.includes("recovery"), role === "admin");
     if (role === "supervisor") assert.ok(keys.includes("settings"), "existing supervisor settings permission stays unchanged");

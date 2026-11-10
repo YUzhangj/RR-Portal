@@ -26,6 +26,8 @@ import { FactoryMappingManagement } from "@/components/factory-mapping-managemen
 import { TemplateManagement } from "@/components/template-management";
 import { ProductWorkbookImport } from "@/components/product-workbook-import";
 
+import { defaultPagePermissions, hasPage, withinPageGrants, permissionPages, type PageGrants, type PagePermission } from "@/lib/page-permissions";
+
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
 const apiFetch = (path: string, init?: RequestInit) => fetch(`${basePath}${path}`, init);
 
@@ -81,7 +83,7 @@ type ShipmentTaskData = {
 };
 type LocalInventoryScan = {folder:string;exists:boolean;scanned_at?:string;total_rows:number;successful_files?:number;error?:string;files:Array<{filename:string;modified_at:string;size:number;status:string;kind:string;sheets:string[];row_count:number;warnings?:string[];error?:string}>};
 type UserRole = "admin" | "supervisor" | "shipping" | "warehouse";
-type CurrentUser = {mailboxAddress?:string;mailboxHost?:string;mailboxFolder?:string;mailboxConfigured?:boolean;companyAccess?:"Xingxin"|"Huadeng"|"Both";id:number;username:string;displayName:string;role:UserRole;isActive:boolean;createdAt:string;updatedAt:string;lastLoginAt?:string};
+type CurrentUser = {pagePermissions:PageGrants;mailboxAddress?:string;mailboxHost?:string;mailboxFolder?:string;mailboxConfigured?:boolean;companyAccess?:"Xingxin"|"Huadeng"|"Both";id:number;username:string;displayName:string;role:UserRole;isActive:boolean;createdAt:string;updatedAt:string;lastLoginAt?:string};
 type LocalDirectoryHandle = FileSystemDirectoryHandle & {
   queryPermission(options?: { mode: "read" | "readwrite" }): Promise<PermissionState>;
   requestPermission(options?: { mode: "read" | "readwrite" }): Promise<PermissionState>;
@@ -305,7 +307,9 @@ export function AppShell({ route }: { route: string }) {
   const role=user.role;
   const page = route.split("/")[0];
   const currentPath = page ? `/${page}` : "/";
-  const pageAllowed=navigation.find(item=>item.href===currentPath)?.roles.includes(role)??false;
+  const grants=user.pagePermissions || defaultPagePermissions(role);
+  const navAllowed=(href:string)=>href==="/mail"?Object.keys(grants).some(key=>key.startsWith("mail.")&&hasPage(grants,key)):href==="/settings"?Object.keys(grants).some(key=>key.startsWith("settings.")&&hasPage(grants,key)):hasPage(grants,href==="/"?"home":href.slice(1));
+  const pageAllowed=(navigation.find(item=>item.href===currentPath)?.roles.includes(role)??false)&&navAllowed(currentPath);
   return (
     <div className="app">
       <aside className="sidebar">
@@ -315,7 +319,7 @@ export function AppShell({ route }: { route: string }) {
         </div>
         <label className="company-switch"><span>公司板块</span><select aria-label="公司板块" value={company} onChange={event=>{document.cookie=`voyageplex_company=${event.target.value}; Path=/; SameSite=Lax`;window.location.assign(new URL(`${process.env.NEXT_PUBLIC_BASE_PATH || ""}/`,window.location.href).toString());}}>{(user.role==="admin"||user.companyAccess!=="Huadeng")&&<option value="Xingxin">兴信</option>}{(user.role==="admin"||user.companyAccess==="Both"||user.companyAccess==="Huadeng")&&<option value="Huadeng">华登</option>}</select></label>
         <nav aria-label="主要导航">
-          {navigation.filter(item=>item.roles.includes(role)).map((item) => {
+          {navigation.filter(item=>item.roles.includes(role)&&navAllowed(item.href)).map((item) => {
             const Icon = item.icon;
             return <Link key={item.href} href={item.href} className={currentPath === item.href ? "nav-item active" : "nav-item"}><Icon size={18} /><span>{item.label}</span></Link>;
           })}
@@ -326,7 +330,8 @@ export function AppShell({ route }: { route: string }) {
           <strong className="topbar-title">{company==="Huadeng"?"华登":"兴信"} · {titles[page] ?? "首页"}</strong>
           <div className="avatar">{role==="admin"?"管理":role==="warehouse"?"仓务":"船务"}</div><span className="user-name"><b>{user.displayName}</b><small>{roleLabel(role)}</small></span><button className="logout-button" onClick={()=>void logout()}>退出</button>
         </header>
-        {!pageAllowed?<AccessDenied/>:page === "mail" ? <MailWorkspace route={route} role={role} /> : page === "imports" ? <ImportCenter /> : page === "shipments" ? <ShipmentCenter route={route} role={role} /> : page === "inventory" ? <InventoryCenter route={route} role={role} /> : page === "users" ? <UserManagement currentUser={user}/> : page === "settings" ? <SettingsCenter role={role} /> : <Dashboard />}
+        {pageAllowed&&["imports","shipments","inventory","users"].includes(page)&&<PermissionNotice grants={grants} page={page}/>}
+        {!pageAllowed?<AccessDenied/>:page === "mail" ? <MailWorkspace route={route} role={role} grants={grants} /> : page === "imports" ? <ImportCenter /> : page === "shipments" ? <ShipmentCenter route={route} role={role} /> : page === "inventory" ? <InventoryCenter route={route} role={role} /> : page === "users" ? <UserManagement currentUser={user}/> : page === "settings" ? <SettingsCenter role={role} grants={grants} /> : <Dashboard />}
       </main>
     </div>
   );
@@ -359,16 +364,18 @@ function PersonalMailboxChooser({role}:{role:UserRole}) {
   return <section className="panel personal-mailbox-panel"><label><span>{(role==="admin"||role==="supervisor")?"查看船务员邮箱":"我的邮箱"}</span>{(role==="admin"||role==="supervisor")?<select aria-label="查看船务员邮箱" value={owner} onChange={event=>{document.cookie=`voyageplex_mail_owner=${event.target.value}; Path=/; SameSite=Lax`;window.location.reload();}}><option value="">全部人员邮件</option>{accounts.map(account=><option key={account.id} value={account.id}>{account.displayName} · {account.mailboxAddress||"未绑定邮箱"}</option>)}</select>:<strong>{current?.mailboxAddress||"尚未绑定邮箱，请联系管理员"}</strong>}</label>{current&&!current.configured&&<small>邮箱尚未配置授权码，请联系管理员。</small>}{(role==="admin"||role==="supervisor")&&!owner&&<small>选择人员后可读取其邮箱和调整同步设置。</small>}{error&&<div className="form-error">{error}</div>}</section>;
 }
 
-function MailWorkspace({route,role}:{route:string;role:UserRole}) {
+function MailWorkspace({route,role,grants}:{route:string;role:UserRole;grants:PageGrants}) {
   const requested=route.split("/")[1]||"workbench";
-  const available=mailSections.filter(section=>(!section.adminOnly||role==="admin"||role==="supervisor")&&(!section.recoveryAdminOnly||role==="admin"));
-  const active=available.find(section=>section.key===requested)??available[0];
+  const available=mailSections.filter(section=>(!section.adminOnly||role==="admin"||role==="supervisor")&&(!section.recoveryAdminOnly||role==="admin")&&hasPage(grants,`mail.${section.key}`));
+  const active=available.find(section=>section.key===requested)??(route.split("/")[1]?undefined:available[0]);
+  if(!active)return <AccessDenied/>;
   const ActiveIcon=active.icon;
   return <div className="content mail-module">
     {activeCompany()==="Huadeng"&&<PersonalMailboxChooser role={role}/>}
     <nav className="mail-section-nav" aria-label="邮件工作台功能">
       {available.map(section=>{const Icon=section.icon;return <Link key={section.key} href={`/mail/${section.key}`} className={section.key===active.key?"active":""}><Icon size={17}/><span>{section.label}</span>{section.temporary&&<small>阶段性</small>}</Link>;})}
     </nav>
+    {!hasPage(grants,`mail.${active.key}`,true)&&<div className="permission-readonly">当前页面仅有查看权限，修改提交会被拒绝。</div>}
     {active.key==="workbench"?<DailyMailWorkbench route={route}/>:active.key==="contacts"?<MailContactsWorkspace/>:active.key==="candidates"?<MailCandidatesWorkspace/>:active.key==="recovery"?<MailRecovery/>:active.key==="settings"?<MailSettingsWorkspace/>:active.key==="initialization"?<MailInitializationWorkspace role={role}/>:<section className="panel mail-foundation-panel">
       <div className="mail-foundation-heading"><span><ActiveIcon size={22}/></span><div><h2>{active.label}</h2><p>{active.description}</p></div>{active.temporary&&<b>初始化完成后隐藏</b>}</div>
       <div className="mail-foundation-grid">
@@ -445,8 +452,11 @@ function MailCandidatesWorkspace(){
 }
 
 
+type DashboardTaskData = Pick<ShipmentTaskData, "id"|"customer"|"soNumber"|"containerType"|"plannedShipDate"|"status"|"createdAt"|"updatedAt"> & {
+  inspectionFailed?:boolean; inventoryShortage?:boolean; items?:ShipmentItem[];
+};
 function Dashboard() {
-  const [tasks,setTasks]=useState<ShipmentTaskData[]>([]);
+  const [tasks,setTasks]=useState<DashboardTaskData[]>([]);
   useEffect(()=>{void(async()=>{try{const response=await apiFetch("/api/shipments",{cache:"no-store"});if(response.ok)setTasks(await response.json());}catch{/* 首页保留空状态，避免影响其他操作 */}})();},[]);
   const active=tasks.filter(task=>task.status!=="Cancelled");
   const counts={changes:active.filter(hasTaskChange).length,review:active.filter(task=>task.status==="PendingReview").length,shipment:active.filter(task=>task.status==="PendingShipment").length,completed:active.filter(task=>task.status==="Completed").length};
@@ -469,7 +479,7 @@ function Dashboard() {
 }
 
 const anomalyPriority={scheduleDelay:400,inspectionFailed:300,inventoryShortage:200,changed:100} as const;
-function hasTaskChange(task:ShipmentTaskData){return Boolean(task.updatedAt&&task.createdAt&&new Date(task.updatedAt).getTime()-new Date(task.createdAt).getTime()>1000);}
+function hasTaskChange(task:DashboardTaskData){return Boolean(task.updatedAt&&task.createdAt&&new Date(task.updatedAt).getTime()-new Date(task.createdAt).getTime()>1000);}
 function taskTimeDisplay(task:ShipmentTaskData){
   const modified=hasTaskChange(task);const value=modified?task.updatedAt:task.createdAt;
   if(!value)return {label:modified?"修改":"创建",value:"—"};
@@ -477,12 +487,12 @@ function taskTimeDisplay(task:ShipmentTaskData){
   const pad=(part:number)=>String(part).padStart(2,"0");
   return {label:modified?"修改":"创建",value:`${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`};
 }
-function taskAnomalies(task:ShipmentTaskData){
+function taskAnomalies(task:DashboardTaskData){
   if(task.status==="Completed")return [];
   const today=new Date().toLocaleDateString("sv-SE");const deadline=task.plannedShipDate||"9999-12-31";const result:Array<{reason:string;priority:number;deadline:string}>=[];
   if(task.plannedShipDate&&task.plannedShipDate<today)result.push({reason:"船期延误",priority:anomalyPriority.scheduleDelay,deadline});
-  if(task.items.some(item=>/不通过|未通过|fail|reject/i.test(String(item.inspection_result||item.qc_result||""))))result.push({reason:"验货不过",priority:anomalyPriority.inspectionFailed,deadline});
-  if(task.items.some(item=>item.inventory_quantity!==undefined&&item.inventory_quantity!==""&&Number(item.inventory_quantity)<Number(item.quantity)))result.push({reason:"货品数量不够",priority:anomalyPriority.inventoryShortage,deadline});
+  if(task.inspectionFailed??task.items?.some(item=>/不通过|未通过|fail|reject/i.test(String(item.inspection_result||item.qc_result||""))))result.push({reason:"验货不过",priority:anomalyPriority.inspectionFailed,deadline});
+  if(task.inventoryShortage??task.items?.some(item=>item.inventory_quantity!==undefined&&item.inventory_quantity!==""&&Number(item.inventory_quantity)<Number(item.quantity)))result.push({reason:"货品数量不够",priority:anomalyPriority.inventoryShortage,deadline});
   if(hasTaskChange(task))result.push({reason:"变更时间",priority:anomalyPriority.changed,deadline});
   return result;
 }
@@ -647,7 +657,7 @@ function ShipmentCenter({ route, role }: { route:string; role:UserRole }) {
   </div>;
 }
 
-function CalendarBoard({ tasks }: { tasks:ShipmentTaskData[] }) {
+function CalendarBoard({ tasks }: { tasks:DashboardTaskData[] }) {
   const today = new Date();
   const dateKey = (value:Date) => `${value.getFullYear()}-${String(value.getMonth()+1).padStart(2,"0")}-${String(value.getDate()).padStart(2,"0")}`;
   const [month,setMonth]=useState(`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}`);
@@ -835,14 +845,25 @@ function ShipmentDetail({ id, role, directoryRole=role, backHref="/shipments", b
   </fieldset><ExportTemplatePicker purpose={exportPurpose} company={task.company||"Xingxin"} mode={String(task.exportDetails?.shipmentMode||(task.warehouseGroups.length?"Warehouse":"Container"))} special={specialCargoTemplate} busy={saving} onClose={()=>setExportPurpose(null)} onConfirm={exportShipment}/></div>;
 }
 
+function PermissionEditor({role,actor,value,onChange}:{role:UserRole;actor:CurrentUser;value:PageGrants;onChange:(next:PageGrants)=>void}) {
+  const limits=defaultPagePermissions(role); const actorGrants=actor.pagePermissions||defaultPagePermissions(actor.role);
+  const rank=(permission:PagePermission)=>permission==="edit"?2:permission==="view"?1:0;
+  return <fieldset className="permission-editor"><legend>页面权限</legend><p>按页面设置查看或操作权限；角色和公司范围仍然生效。管理员拥有全部权限。主管只能授予自己拥有的权限。</p><div className="permission-grid">{permissionPages.map(([key,label])=>{const max=Math.min(rank(limits[key]),actor.role==="admin"?2:rank(actorGrants[key]||"none"));return <label key={key}><span>{label}</span><select aria-label={`${label}权限`} value={role==="admin"?"edit":value[key]||"none"} disabled={role==="admin"} onChange={event=>onChange({...value,[key]:event.target.value as PagePermission})}><option value="none">无权限</option>{rank(value[key]||"none")>max&&<option value={value[key]} disabled>当前权限超出你的范围，请调低</option>}{max>=1&&<option value="view">仅查看</option>}{max>=2&&<option value="edit">查看和操作</option>}</select></label>;})}</div></fieldset>;
+}
+
 function UserManagement({currentUser}:{currentUser:CurrentUser}){
-  const empty={username:"",displayName:"",role:"shipping" as UserRole,companyAccess:(currentUser.companyAccess||"Xingxin") as string,password:""};
+  const withinActor=(role:UserRole):PageGrants=>{const defaults=defaultPagePermissions(role);if(currentUser.role==="admin")return defaults;const own=currentUser.pagePermissions||defaultPagePermissions(currentUser.role);return Object.fromEntries(Object.entries(defaults).map(([key,value])=>[key,value==="none"||!hasPage(own,key)?"none":hasPage(own,key,true)?value:"view"])) as PageGrants;};
+  const empty={username:"",displayName:"",role:"shipping" as UserRole,companyAccess:(currentUser.companyAccess||"Xingxin") as string,password:"",pagePermissions:withinActor("shipping")};
+  const canManage=hasPage(currentUser.pagePermissions,"users",true);
+  const canManageUser=(target:CurrentUser)=>canManage&&(currentUser.role==="admin"||(
+    ["shipping","warehouse"].includes(target.role)&&target.companyAccess===currentUser.companyAccess&&
+    withinPageGrants(target.pagePermissions||defaultPagePermissions(target.role),currentUser.pagePermissions||defaultPagePermissions(currentUser.role))));
   const [users,setUsers]=useState<CurrentUser[]>([]);const [draft,setDraft]=useState(empty);const [editing,setEditing]=useState<CurrentUser|null>(null);const [error,setError]=useState("");const [notice,setNotice]=useState("");const [saving,setSaving]=useState(false);
   async function load(){const response=await apiFetch("/api/users",{cache:"no-store"});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"读取用户失败");setUsers(result);}
   useEffect(()=>{void load().catch(reason=>setError(reason instanceof Error?reason.message:"读取用户失败"));},[]);
   async function create(event:React.FormEvent){event.preventDefault();setSaving(true);setError("");setNotice("");try{const response=await apiFetch("/api/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(draft)});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"新增用户失败");setDraft(empty);setNotice("用户已创建");await load();}catch(reason){setError(reason instanceof Error?reason.message:"新增用户失败");}finally{setSaving(false);}}
-  async function saveEdit(event:React.FormEvent){event.preventDefault();if(!editing)return;setSaving(true);setError("");setNotice("");try{const response=await apiFetch(`/api/users/${editing.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({displayName:editing.displayName,role:editing.role,companyAccess:editing.companyAccess||"Xingxin",isActive:editing.isActive,mailboxAddress:editing.mailboxAddress||""})});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"保存失败");setEditing(null);setNotice("用户资料已更新");await load();}catch(reason){setError(reason instanceof Error?reason.message:"保存失败");}finally{setSaving(false);}}
-  async function toggle(user:CurrentUser){setError("");setNotice("");const response=await apiFetch(`/api/users/${user.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({displayName:user.displayName,role:user.role,isActive:!user.isActive})});const result=await readJsonResponse(response);if(!response.ok){setError(result.error||"操作失败");return;}setNotice(user.isActive?"用户已停用":"用户已启用");await load();}
+  async function saveEdit(event:React.FormEvent){event.preventDefault();if(!editing)return;setSaving(true);setError("");setNotice("");try{const response=await apiFetch(`/api/users/${editing.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({displayName:editing.displayName,role:editing.role,companyAccess:editing.companyAccess||"Xingxin",isActive:editing.isActive,mailboxAddress:editing.mailboxAddress||"",pagePermissions:editing.pagePermissions})});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"保存失败");setEditing(null);setNotice("用户资料已更新");await load();}catch(reason){setError(reason instanceof Error?reason.message:"保存失败");}finally{setSaving(false);}}
+  async function toggle(user:CurrentUser){setError("");setNotice("");const response=await apiFetch(`/api/users/${user.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({displayName:user.displayName,role:user.role,companyAccess:user.companyAccess||"Xingxin",isActive:!user.isActive})});const result=await readJsonResponse(response);if(!response.ok){setError(result.error||"操作失败");return;}setNotice(user.isActive?"用户已停用":"用户已启用");await load();}
   async function resetPassword(user:CurrentUser){
     const password=window.prompt(`请输入 ${user.displayName} 的新密码（8至128位）`);
     if(!password)return;
@@ -859,31 +880,33 @@ function UserManagement({currentUser}:{currentUser:CurrentUser}){
     finally{setSaving(false);}
   }
   return <div className="content"><PageHeading eyebrow="管理员功能" title="用户管理" description="创建系统账号并按岗位分配使用权限。" />
-    <form className="panel user-create-form" autoComplete="off" onSubmit={create}><div className="panel-title"><div><h2>新增用户</h2><p>账号创建后即可登录系统</p></div></div><div className="user-form-grid"><label><span>登录账号</span><input value={draft.username} onChange={event=>setDraft({...draft,username:event.target.value.toLowerCase()})} name="new-user-account" autoComplete="off" required/></label><label><span>姓名</span><input name="new-user-display-name" autoComplete="off" value={draft.displayName} onChange={event=>setDraft({...draft,displayName:event.target.value})} required/></label><label><span>角色</span><select value={draft.role} onChange={event=>setDraft({...draft,role:event.target.value as UserRole})}><option value="shipping">船务员</option><option value="warehouse">仓库文员</option>{currentUser.role==="admin"&&<><option value="supervisor">主管</option><option value="admin">管理员</option></>}</select></label><label><span>公司权限</span><select disabled={currentUser.role!=="admin"} value={draft.companyAccess} onChange={event=>setDraft({...draft,companyAccess:event.target.value})}><option value="Xingxin">兴信</option><option value="Huadeng">华登</option></select></label><label><span>初始密码</span><input type="password" name="new-user-password" autoComplete="new-password" value={draft.password} onChange={event=>setDraft({...draft,password:event.target.value})} minLength={8} required/></label><button className="primary-button" disabled={saving}>{saving?"创建中…":"新增用户"}</button></div></form>
+    {canManage&&<form className="panel user-create-form" autoComplete="off" onSubmit={create}><div className="panel-title"><div><h2>新增用户</h2><p>账号创建后即可登录系统</p></div></div><div className="user-form-grid"><label><span>登录账号</span><input value={draft.username} onChange={event=>setDraft({...draft,username:event.target.value.toLowerCase()})} name="new-user-account" autoComplete="off" required/></label><label><span>姓名</span><input name="new-user-display-name" autoComplete="off" value={draft.displayName} onChange={event=>setDraft({...draft,displayName:event.target.value})} required/></label><label><span>角色</span><select value={draft.role} onChange={event=>{const role=event.target.value as UserRole;setDraft({...draft,role,pagePermissions:withinActor(role)});}}><option value="shipping">船务员</option><option value="warehouse">仓库文员</option>{currentUser.role==="admin"&&<><option value="supervisor">主管</option><option value="admin">管理员</option></>}</select></label><label><span>公司权限</span><select disabled={currentUser.role!=="admin"} value={draft.companyAccess} onChange={event=>setDraft({...draft,companyAccess:event.target.value})}><option value="Xingxin">兴信</option><option value="Huadeng">华登</option></select></label><label><span>初始密码</span><input type="password" name="new-user-password" autoComplete="new-password" value={draft.password} onChange={event=>setDraft({...draft,password:event.target.value})} minLength={8} required/></label><button className="primary-button" disabled={saving}>{saving?"创建中…":"新增用户"}</button></div><PermissionEditor role={draft.role} actor={currentUser} value={draft.pagePermissions} onChange={pagePermissions=>setDraft({...draft,pagePermissions})}/></form>}
     {(error||notice)&&<div className={error?"form-error page-message":"form-notice page-message"}>{error||notice}</div>}
-    <section className="panel user-list"><div className="panel-title"><div><h2>系统用户</h2><p>共 {users.length} 个账号</p></div></div><div className="data-table"><div className="data-row header"><span>用户</span><span>角色</span><span>状态</span><span>最后登录</span><span>操作</span></div>{users.map(user=><div className="data-row" key={user.id}><span><b>{user.displayName}</b><small>{user.username}</small>{user.mailboxAddress&&<small>{user.mailboxAddress}</small>}</span><span>{roleLabel(user.role)}<small>{user.role==="admin"||user.companyAccess==="Both"?"兴信和华登":user.companyAccess==="Huadeng"?"华登":"兴信"}</small></span><span><b className={`status ${user.isActive?"ok":"danger"}`}>{user.isActive?"启用":"停用"}</b></span><span>{user.lastLoginAt?new Date(user.lastLoginAt).toLocaleString("zh-CN"):"尚未登录"}</span><span className="user-actions"><button className="table-action" onClick={()=>{setEditing({...user});}}>编辑</button><button className="table-action" disabled={saving} onClick={()=>void resetPassword(user)}>重置密码</button><button className="table-action danger-text" disabled={user.id===currentUser.id} onClick={()=>void toggle(user)}>{user.isActive?"停用":"启用"}</button></span></div>)}</div></section>
-    {editing&&<div className="modal-backdrop"><form className="modal-card user-edit-modal" onSubmit={saveEdit}><h2>编辑用户</h2><p>{editing.username}</p><label><span>姓名</span><input value={editing.displayName} onChange={event=>setEditing({...editing,displayName:event.target.value})} required/></label><label><span>角色</span><select value={editing.role} onChange={event=>setEditing({...editing,role:event.target.value as UserRole})}><option value="shipping">船务员</option><option value="warehouse">仓库文员</option>{currentUser.role==="admin"&&<><option value="supervisor">主管</option><option value="admin">管理员</option></>}</select></label><label><span>公司权限</span><select disabled={currentUser.role!=="admin"} value={editing.companyAccess||"Xingxin"} onChange={event=>setEditing({...editing,companyAccess:event.target.value as "Xingxin"|"Huadeng"|"Both"})}><option value="Xingxin">兴信</option><option value="Huadeng">华登</option></select></label>{(editing.companyAccess==="Huadeng"||editing.companyAccess==="Both"||editing.role==="admin")&&<fieldset className="personal-mailbox-fields"><legend>华登邮箱绑定</legend><label><span>邮箱地址</span><input type="email" value={editing.mailboxAddress||""} onChange={event=>{setEditing({...editing,mailboxAddress:event.target.value});}}/></label><small>服务器管理员在后台按此用户账号配置邮箱服务器、文件夹和授权码；这里仅绑定邮箱地址。留空邮箱地址可解除绑定。</small></fieldset>}<label className="checkbox-label"><input type="checkbox" checked={editing.isActive} disabled={editing.id===currentUser.id} onChange={event=>setEditing({...editing,isActive:event.target.checked})}/>账号启用</label><div className="modal-actions"><button type="button" className="ghost-button" onClick={()=>setEditing(null)}>取消</button><button className="primary-button" disabled={saving}>保存</button></div></form></div>}
+    <section className="panel user-list"><div className="panel-title"><div><h2>系统用户</h2><p>共 {users.length} 个账号</p></div></div><div className="data-table"><div className="data-row header"><span>用户</span><span>角色</span><span>状态</span><span>最后登录</span><span>操作</span></div>{users.map(user=><div className="data-row" key={user.id}><span><b>{user.displayName}</b><small>{user.username}</small>{user.mailboxAddress&&<small>{user.mailboxAddress}</small>}</span><span>{roleLabel(user.role)}<small>{user.role==="admin"||user.companyAccess==="Both"?"兴信和华登":user.companyAccess==="Huadeng"?"华登":"兴信"}</small></span><span><b className={`status ${user.isActive?"ok":"danger"}`}>{user.isActive?"启用":"停用"}</b></span><span>{user.lastLoginAt?new Date(user.lastLoginAt).toLocaleString("zh-CN"):"尚未登录"}</span><span className="user-actions">{!canManageUser(user)&&<small>仅可查看</small>}{canManageUser(user)&&<><button className="table-action" onClick={()=>{setEditing({...user});}}>编辑</button><button className="table-action" disabled={saving} onClick={()=>void resetPassword(user)}>重置密码</button><button className="table-action danger-text" disabled={user.id===currentUser.id} onClick={()=>void toggle(user)}>{user.isActive?"停用":"启用"}</button></>}</span></div>)}</div></section>
+    {editing&&<div className="modal-backdrop"><form className="modal-card user-edit-modal" onSubmit={saveEdit}><h2>编辑用户</h2><p>{editing.username}</p><label><span>姓名</span><input value={editing.displayName} onChange={event=>setEditing({...editing,displayName:event.target.value})} required/></label><label><span>角色</span><select value={editing.role} onChange={event=>{const role=event.target.value as UserRole;setEditing({...editing,role,pagePermissions:withinActor(role)});}}><option value="shipping">船务员</option><option value="warehouse">仓库文员</option>{currentUser.role==="admin"&&<><option value="supervisor">主管</option><option value="admin">管理员</option></>}</select></label><label><span>公司权限</span><select disabled={currentUser.role!=="admin"} value={editing.companyAccess||"Xingxin"} onChange={event=>setEditing({...editing,companyAccess:event.target.value as "Xingxin"|"Huadeng"|"Both"})}><option value="Xingxin">兴信</option><option value="Huadeng">华登</option></select></label>{(editing.companyAccess==="Huadeng"||editing.companyAccess==="Both"||editing.role==="admin")&&<fieldset className="personal-mailbox-fields"><legend>华登邮箱绑定</legend><label><span>邮箱地址</span><input type="email" value={editing.mailboxAddress||""} onChange={event=>{setEditing({...editing,mailboxAddress:event.target.value});}}/></label><small>服务器管理员在后台按此用户账号配置邮箱服务器、文件夹和授权码；这里仅绑定邮箱地址。留空邮箱地址可解除绑定。</small></fieldset>}<PermissionEditor role={editing.role} actor={currentUser} value={editing.pagePermissions} onChange={pagePermissions=>setEditing({...editing,pagePermissions})}/><label className="checkbox-label"><input type="checkbox" checked={editing.isActive} disabled={editing.id===currentUser.id} onChange={event=>setEditing({...editing,isActive:event.target.checked})}/>账号启用</label><div className="modal-actions"><button type="button" className="ghost-button" onClick={()=>setEditing(null)}>取消</button><button className="primary-button" disabled={saving}>保存</button></div></form></div>}
   </div>;
 }
 
-function SettingsCenter({role}:{role:UserRole}) {
+function PermissionNotice({grants,page}:{grants:PageGrants;page:string}) { return !hasPage(grants,page,true)?<div className="permission-readonly">当前页面仅有查看权限，修改提交会被拒绝。</div>:null; }
+
+function SettingsCenter({role,grants}:{role:UserRole;grants:PageGrants}) {
   const [section, setSection] = useState<"home" | "inspection-mapping" | "product-info" | "templates" | "factory-mapping">("home");
   const [localFolder,setLocalFolder]=useState("");
   const [directoryMessage,setDirectoryMessage]=useState("");
   useEffect(()=>{void loadConfiguredDirectory(role).then(handle=>setLocalFolder(handle?.name||""));},[role]);
-  async function chooseLocalFolder(){setDirectoryMessage("");try{const picker=(window as Window & {showDirectoryPicker?:()=>Promise<LocalDirectoryHandle>}).showDirectoryPicker;if(!picker)throw new Error("当前浏览器不支持文件夹授权，请使用最新版 Chrome 或 Edge");const handle=await picker();const permission=await handle.requestPermission({mode:"readwrite"});if(permission!=="granted")throw new Error("未获得文件夹读写权限");await saveLocalDirectory(role,handle);setLocalFolder(handle.name);setDirectoryMessage("本地库存文件夹已保存，仅对当前用户和当前浏览器生效");}catch(reason){if(reason instanceof DOMException&&reason.name==="AbortError")return;setDirectoryMessage(reason instanceof Error?reason.message:"选择文件夹失败");}}
-  if (section === "factory-mapping") return <FactoryMappingManagement onBack={()=>setSection("home")} />;
-  if (section === "templates") return <TemplateManagement company={activeCompany()} onBack={()=>setSection("home")} />;
-  if (section === "inspection-mapping") return <InspectionMappingSettings onBack={() => setSection("home")} />;
-  if (section === "product-info") return <ProductInfoSettings onBack={() => setSection("home")} />;
+  async function chooseLocalFolder(){if(!hasPage(grants,"settings.directory",true))return;setDirectoryMessage("");try{const picker=(window as Window & {showDirectoryPicker?:()=>Promise<LocalDirectoryHandle>}).showDirectoryPicker;if(!picker)throw new Error("当前浏览器不支持文件夹授权，请使用最新版 Chrome 或 Edge");const handle=await picker();const permission=await handle.requestPermission({mode:"readwrite"});if(permission!=="granted")throw new Error("未获得文件夹读写权限");await saveLocalDirectory(role,handle);setLocalFolder(handle.name);setDirectoryMessage("本地库存文件夹已保存，仅对当前用户和当前浏览器生效");}catch(reason){if(reason instanceof DOMException&&reason.name==="AbortError")return;setDirectoryMessage(reason instanceof Error?reason.message:"选择文件夹失败");}}
+  if (section === "factory-mapping") return <><PermissionNotice grants={grants} page="settings.factory"/><FactoryMappingManagement onBack={()=>setSection("home")} /></>;
+  if (section === "templates") return <><PermissionNotice grants={grants} page="settings.templates"/><TemplateManagement company={activeCompany()} onBack={()=>setSection("home")} /></>;
+  if (section === "inspection-mapping") return <><PermissionNotice grants={grants} page="settings.inspection"/><InspectionMappingSettings onBack={() => setSection("home")} /></>;
+  if (section === "product-info") return <><PermissionNotice grants={grants} page="settings.products"/><ProductInfoSettings onBack={() => setSection("home")} /></>;
   return <div className="content"><PageHeading eyebrow="基础配置" title="系统设置" description="按用户权限配置本地文件夹、共享盘目录、导入规则和模板。" />
     {directoryMessage&&<div className="notice">{directoryMessage}</div>}
     <div className="settings-grid">
-      <section className="panel setting-card directory-setting-card"><Database size={22}/><div><h2>文件夹目录</h2><p>本地库存：{localFolder||"尚未设置"}</p><small>{role==="admin"?"管理员":role==="warehouse"?"仓务文员":"船务用户"}的独立本地配置</small></div><button className="ghost-button" onClick={()=>void chooseLocalFolder()}>{localFolder?"重新选择":"选择文件夹"}</button><div className="directory-shared-row"><span><b>共享盘目录</b><small>仅管理员可以设置，本次保持原配置</small></span><button className="ghost-button" disabled>{role==="admin"?"待配置":"仅管理员"}</button></div></section>
-      <section className="panel setting-card"><MappingIcon size={22}/><div><h2>工厂名映射</h2><p>管理生产工厂英文名和中文简称，支持Excel导入。</p></div><button className="ghost-button" onClick={()=>setSection("factory-mapping")}>管理</button></section>
-      <section className="panel setting-card"><Container size={22}/><div><h2>导出模板管理</h2><p>分别管理走柜、交仓及船务、仓务模板配置。</p></div><button className="ghost-button" onClick={()=>setSection("templates")}>管理</button></section>
-      <section className="panel setting-card"><MappingIcon size={22}/><div><h2>验货映射</h2><p>按车间管理货号、负责人和验货总结表来源。</p></div><button className="ghost-button" onClick={() => setSection("inspection-mapping")}>管理</button></section>
-      <section className="panel setting-card"><Database size={22}/><div><h2>产品信息库</h2><p>管理装箱规格、毛净重及旧系统产品资料。</p></div><button className="ghost-button" onClick={() => setSection("product-info")}>管理</button></section>
+      {hasPage(grants,"settings.directory")&&<section className="panel setting-card directory-setting-card"><Database size={22}/><div><h2>文件夹目录</h2><p>本地库存：{localFolder||"尚未设置"}</p><small>{role==="admin"?"管理员":role==="warehouse"?"仓务文员":"船务用户"}的独立本地配置</small></div><button className="ghost-button" disabled={!hasPage(grants,"settings.directory",true)} onClick={()=>void chooseLocalFolder()}>{localFolder?"重新选择":"选择文件夹"}</button><div className="directory-shared-row"><span><b>共享盘目录</b><small>仅管理员可以设置，本次保持原配置</small></span><button className="ghost-button" disabled>{role==="admin"?"待配置":"仅管理员"}</button></div></section>}
+      {hasPage(grants,"settings.factory")&&<section className="panel setting-card"><MappingIcon size={22}/><div><h2>工厂名映射</h2><p>管理生产工厂英文名和中文简称，支持Excel导入。</p></div><button className="ghost-button" onClick={()=>setSection("factory-mapping")}>管理</button></section>}
+      {hasPage(grants,"settings.templates")&&<section className="panel setting-card"><Container size={22}/><div><h2>导出模板管理</h2><p>分别管理走柜、交仓及船务、仓务模板配置。</p></div><button className="ghost-button" onClick={()=>setSection("templates")}>管理</button></section>}
+      {hasPage(grants,"settings.inspection")&&<section className="panel setting-card"><MappingIcon size={22}/><div><h2>验货映射</h2><p>按车间管理货号、负责人和验货总结表来源。</p></div><button className="ghost-button" onClick={() => setSection("inspection-mapping")}>管理</button></section>}
+      {hasPage(grants,"settings.products")&&<section className="panel setting-card"><Database size={22}/><div><h2>产品信息库</h2><p>管理装箱规格、毛净重及旧系统产品资料。</p></div><button className="ghost-button" onClick={() => setSection("product-info")}>管理</button></section>}
     </div>
   </div>;
 }

@@ -9,6 +9,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 {
     public string Company { get; set; } = "Xingxin";
     public long? CurrentUserId { get; set; }
+    public string AuthorizedPath { get; set; } = "";
+    public string AuthorizedMethod { get; set; } = "";
+    public string AuthorizedRole { get; set; } = "";
     public Dictionary<long,long> ConfirmedTaskOwners { get; } = [];
     public long? MailOwnerId { get; set; }
     public int CompanySettingId => Company == "Huadeng" ? (MailOwnerId > 0 ? checked(1000 + (int)MailOwnerId.Value) : 2) : 1;
@@ -61,8 +64,17 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         var changed = ChangeTracker.Entries<ShipmentTask>().Where(entry => entry.State is EntityState.Modified or EntityState.Deleted).Select(entry => entry.Entity).ToArray();
         // SQLite's immediate transaction serializes the reservation check and the
         // task write. Without it a writeback can begin between the check and save.
-        await using var taskTransaction = CurrentUserId > 0 && changed.Length > 0 && Database.CurrentTransaction is null
+        var checkPage = CurrentUserId > 0 && AuthorizedPath != "" && !AuthorizedPath.StartsWith("/api/auth/", StringComparison.Ordinal);
+        await using var taskTransaction = CurrentUserId > 0 && (changed.Length > 0 || checkPage) && Database.CurrentTransaction is null
             ? await Database.BeginTransactionAsync(ct) : null;
+        if (checkPage)
+        {
+            var current = await Users.AsNoTracking().SingleOrDefaultAsync(value => value.Id == CurrentUserId, ct);
+            if (current is null || !current.IsActive || current.Role != AuthorizedRole ||
+                (current.Role != "admin" && current.CompanyAccess != Company) ||
+                !PagePermissions.Allows(current, AuthorizedPath, AuthorizedMethod))
+                throw new PagePermissionDeniedException();
+        }
         if (CurrentUserId > 0 && changed.Length > 0)
         {
             var actor = await Users.AsNoTracking().SingleAsync(value => value.Id == CurrentUserId, ct);

@@ -14,6 +14,7 @@ public sealed class AppUser
     public DateTime? MailboxTestedAt { get; set; }
     public string MailboxTestConfigurationKey { get; set; } = "";
     public string Role { get; set; } = "shipping";
+    public string PagePermissionsJson { get; set; } = "";
     public string PasswordHash { get; set; } = string.Empty;
     public bool IsActive { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
