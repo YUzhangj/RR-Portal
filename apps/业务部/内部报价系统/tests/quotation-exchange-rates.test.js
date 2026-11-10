@@ -86,6 +86,9 @@ for (const status of ['filled', 'approved']) test(`rate redraw rebinds the actua
   const f = moldingRateRefreshFixture(status);
   const original = f.body.preview;
   assert.equal(typeof original.onclick, 'function');
+  const initialRenderCount = f.renders.length;
+  f.context.rateRefreshers.get('molding')();
+  assert.equal(f.renders.length, initialRenderCount + 1, 'entering molding refreshes newly saved engineering parts even when rates did not change');
   f.context.sectionDraft(f.sales).header.fx_rmb_hkd = .87;
   f.context.rateRefreshers.get('molding')();
   const refreshed = f.body.preview;
