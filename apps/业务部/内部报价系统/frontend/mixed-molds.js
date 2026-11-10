@@ -200,9 +200,10 @@ function lookupMaterialPrice(material, grade, prices) {
     });
     return match;
   }
+  const catalogMoldGroupKey = part => part.legacy_shared_mold_key || String(part.mold_no || '').trim();
   function catalogMoldParts(root, part) {
     const mold = String(part.mold_no || '').trim();
-    const peers = mold ? (root.parts_catalog?.parts || []).filter(p => String(p.mold_no || '').trim() === mold) : [];
+    const peers = mold ? (root.parts_catalog?.parts || []).filter(p => catalogMoldGroupKey(p) === catalogMoldGroupKey(part)) : [];
     return peers.length ? peers : [part];
   }
   function catalogMoldField(root, part, key) {
@@ -211,8 +212,8 @@ function lookupMaterialPrice(material, grade, prices) {
         key === 'machine_model' ? String(value).replace(/\s+/g,'').toUpperCase() : Number.isFinite(Number(value)) ? String(Number(value)) : String(value)))];
     return {value:values.length === 1 ? values[0] : '', conflict:values.length > 1};
   }
-  const catalogMoldParameterKey = part => String(part.mold_no || '').trim()
-    ? 'mold:' + String(part.mold_no).trim() : 'part:' + part.id;
+  const catalogMoldParameterKey = part => part.legacy_shared_mold_key || (String(part.mold_no || '').trim()
+    ? 'mold:' + String(part.mold_no).trim() : 'part:' + part.id);
   function updateCatalogMoldField(root, part, key, value) {
     if (!['machine_model','target'].includes(key)) throw new Error('不支持的共用模具参数');
     const peers = catalogMoldParts(root, part);
@@ -239,7 +240,7 @@ function lookupMaterialPrice(material, grade, prices) {
     const groups = new Map(), result = new Map();
     const catalog = root.parts_catalog;
     for (const part of catalog.parts) {
-      const key = String(part.mold_no || '').trim() || part.id;
+      const key = catalogMoldGroupKey(part) || part.id;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(part);
     }
@@ -361,6 +362,56 @@ function lookupMaterialPrice(material, grade, prices) {
     }
     return root;
   }
+  // Older shared imports were saved as molds, outside the unified parts list.
+  // Resolve them on both client and server; do not require a destructive re-import.
+  function syncLegacySharedMolds(catalog, engineering) {
+    const deleted = new Set(engineering?.mixed_deleted_part_ids || []);
+    const explicitShared = Object.hasOwn(engineering?.mixed_part_selections || {}, '__shared__');
+    const occurrences = new Map();
+    for (const mold of engineering?.mixed_shared?.molds || []) {
+      for (const part of mold.parts?.length ? mold.parts : [mold]) {
+        const incoming = inheritMoldFields({
+          ...part, mold_no: mold.mold_no || part.mold_no || '',
+          name: part.name || mold.name || '', material: part.material || mold.material || '',
+          color: part.color || mold.color || '', images: part.images?.length ? part.images : mold.images || [],
+        }, mold);
+        if (!incoming.name || isNonMoldPart(incoming)) continue;
+        const key = JSON.stringify([incoming.mold_no, incoming.name, incoming.material, incoming.color, incoming.injection_run_id || '']);
+        const occurrence = occurrences.get(key) || 0;
+        occurrences.set(key, occurrence + 1);
+        // Full UTF-16 encoding is deterministic, browser-safe and collision-free.
+        const encode = value => value.split('').map(char => char.charCodeAt(0).toString(16).padStart(4, '0')).join('');
+        const id = 'legacy_shared_' + encode(key) + '_' + occurrence;
+        if (deleted.has(id) || (part.id && deleted.has(part.id))) continue;
+        let existing = catalog.parts.find(row => row.id === id || (part.id && row.id === part.id));
+        if (!existing) {
+          const matches = catalog.parts.filter(row => row.mold_no === incoming.mold_no && row.name === incoming.name
+            && ['material', 'color', 'source_file', 'injection_run_id'].every(field => !row[field] || !incoming[field] || row[field] === incoming[field]));
+          // Ambiguous matches need an explicit selection; never create a duplicate.
+          if (matches.length > 1) continue;
+          existing = matches[0];
+        }
+        if (existing && deleted.has(existing.id)) continue;
+        if (!existing) {
+          existing = { ...incoming, id, engineering_source: true };
+          catalog.parts.push(existing);
+        }
+        // Shared shell mold numbers can overlap the small-product mold numbers.
+        // Keep their machine parameters and pricing groups independent.
+        existing.legacy_shared_mold_key = 'shared_mold_' + encode(JSON.stringify([mold.mold_no || '', mold.name || '', mold.source_file || '']));
+        // Catalog edits and prices take precedence over the legacy snapshot.
+        for (const [field, value] of Object.entries(incoming)) {
+          if ((existing[field] == null || existing[field] === '') && value != null && value !== '') existing[field] = value;
+        }
+        // A direct shared mold historically meant one item per sales pack.
+        // An explicit shared list (including []) always overrides that fallback.
+        if (!explicitShared) {
+          const refs = catalog.selections.__shared__ ||= [];
+          if (!refs.some(ref => ref.part_id === existing.id)) refs.push({ part_id: existing.id, usage: 1 });
+        }
+      }
+    }
+  }
   function engineeringCatalog(root, engineering) {
     const copy = JSON.parse(JSON.stringify(root));
     if (!copy.parts_catalog && engineering?.mixed_imported_parts?.length) copy.parts_catalog = { version: 1, parts: [], selections: {} };
@@ -373,9 +424,15 @@ function lookupMaterialPrice(material, grade, prices) {
         else Object.assign(existing, updateEngineeringFields(existing, inherited));
         (existing || copy.parts_catalog.parts[copy.parts_catalog.parts.length - 1]).engineering_source = true;
       }
-      if (engineering?.mixed_part_selections) copy.parts_catalog.selections = JSON.parse(JSON.stringify(engineering.mixed_part_selections));
+      if (engineering?.mixed_part_selections) {
+        const previousShared = copy.parts_catalog.selections?.__shared__;
+        copy.parts_catalog.selections = JSON.parse(JSON.stringify(engineering.mixed_part_selections));
+        if (!Object.hasOwn(engineering.mixed_part_selections, '__shared__') && previousShared)
+          copy.parts_catalog.selections.__shared__ = previousShared;
+      }
+      copy.parts_catalog.selections ||= {};
+      syncLegacySharedMolds(copy.parts_catalog, engineering);
       const deleted = new Set(engineering?.mixed_deleted_part_ids || []);
-      const sourceIds = new Set((engineering?.mixed_imported_parts || []).map(p => p.id));
       // 旧导入保留了附录标题时，只清理同来源后续的序号说明行。
       const appendixSources = new Set();
       for (const p of copy.parts_catalog.parts) {
@@ -386,9 +443,8 @@ function lookupMaterialPrice(material, grade, prices) {
       }
 
       for (const p of copy.parts_catalog.parts) {
-        const owned = p.engineering_source || /^(numbered_|upload_)/.test(p.id || '');
-        if (isNonMoldPart({...p, ...(engineering?.mixed_part_edits?.[p.id] || {})}) ||
-            (Array.isArray(engineering?.mixed_imported_parts) && owned && !sourceIds.has(p.id))) deleted.add(p.id);
+        // Missing from an old/partial source list is not a deletion request.
+        if (isNonMoldPart({...p, ...(engineering?.mixed_part_edits?.[p.id] || {})})) deleted.add(p.id);
       }
       copy.parts_catalog.parts = copy.parts_catalog.parts.filter(p => !deleted.has(p.id)).map(p => ({...p, ...(engineering?.mixed_part_edits?.[p.id] || {})}));
       copy.parts_catalog.parts.forEach(p => {
@@ -475,5 +531,5 @@ function lookupMaterialPrice(material, grade, prices) {
     if (Math.abs(columns.other) < 1e-10) columns.other = 0;
     return { columns, labels, total: base.total };
   }
-  return { catalogMoldParts, catalogMoldField, updateCatalogMoldField, prepareMoldImport, isNonMoldPart, updateEngineeringFields, pricingWeights, ratioValue, catalogMachineReference, DEFAULT_MACHINE_PRICES, catalogMachinePrice, inheritMoldFields, engineeringCatalogRows, DEFAULT_MATERIAL_PRICES, lookupMaterialPrice, materialPricePerGram, catalogMaterialPrice, productionDemand, automaticCatalogLabor, validateConfig, weights, calculate, number, enableCatalog, catalogRows, applyCatalog, engineeringCatalog, costBreakdown, dynamicCostBreakdown };
+  return { catalogMoldGroupKey, catalogMoldParts, catalogMoldField, updateCatalogMoldField, prepareMoldImport, isNonMoldPart, updateEngineeringFields, pricingWeights, ratioValue, catalogMachineReference, DEFAULT_MACHINE_PRICES, catalogMachinePrice, inheritMoldFields, engineeringCatalogRows, DEFAULT_MATERIAL_PRICES, lookupMaterialPrice, materialPricePerGram, catalogMaterialPrice, productionDemand, automaticCatalogLabor, validateConfig, weights, calculate, number, enableCatalog, catalogRows, applyCatalog, engineeringCatalog, costBreakdown, dynamicCostBreakdown };
 });

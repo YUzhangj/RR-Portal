@@ -77,14 +77,14 @@ function element(html='') {
     },
   };return node;
 }
-function render(edit=true) {
-  const root=fixture(),host=element();let changes=0;
-  const window={MixedMolds:M,__data:{quote:{id:12,qty:100},mixed_quote:config,sections:[]},renderImageCell(){},renderTable(){}};
+function render(edit=true, options={}) {
+  const root=options.root || fixture(),host=element();let changes=0;
+  const window={MixedMolds:M,__data:{quote:{id:12,qty:100},mixed_quote:config,sections:options.sections || []},renderImageCell(){},renderTable(){}};
   vm.runInNewContext(fs.readFileSync(require.resolve('../frontend/mixed-quotation.js'),'utf8'),{
-    window,document:{createElement:()=>element()},sessionStorage:{getItem:()=>null,setItem(){}},
+    window,document:{createElement:()=>element()},sessionStorage:{getItem:()=>options.selected || null,setItem(){}},
   });
   window.MixedQuotation.wrap(()=>assert.fail('统一目录不应进入单品编辑器'),'molding')(host,root,edit,()=>changes++);
-  return {root,host:host.querySelector('.mixed-detail').children[0],changes:()=>changes};
+  return {root,host:host.querySelector('.mixed-detail').children[0],detail:host.querySelector('.mixed-detail'),changes:()=>changes};
 }
 
 test('页面将同模三列合并，输入一次同步整模，搜索保留合并单元格和同模零件',()=>{
@@ -114,4 +114,24 @@ test('changing a whole mold to a different model stores every matching machine c
   assert.deepEqual([a.machine,b.machine],['150T','150T']);
   const restored=JSON.parse(JSON.stringify(root));
   assert.deepEqual(restored.parts_catalog.parts.slice(0,2).map(part=>part.machine),['150T','150T']);
+});
+
+test('旧共有球壳缺目标数时仍展示可编辑目录，同号产品机台不合并，搜索可找到球', () => {
+  const root=fixture(),engineering={mixed_imported_parts:[],mixed_shared:{molds:[
+    {mold_no:'M1',name:'球上壳',machine_model:'10A',parts:[{name:'球上壳',cavity:6,weight_g:15}]},
+  ]}};
+  const view=render(true,{root,sections:[{dept:'engineering',payload_json:JSON.stringify(engineering)}],selected:'__shared__'});
+  assert.match(view.detail.children[0].textContent,/核价参数待补齐/);
+  const catalog=view.detail.children[1];
+  assert.match(catalog.innerHTML,/球上壳/);
+  assert.match(catalog.innerHTML,/M1（共有费用）/);
+  const rows=catalog.querySelectorAll('[data-part-id]');
+  const shell=rows.find(row=>row.innerHTML.includes('球上壳'));
+  assert.match(shell.innerHTML,/data-catalog-cell="target" rowspan="1"/);
+  const input=shell.querySelectorAll('[data-field]').find(field=>field.dataset.field==='target');
+  assert.ok(input);input.value='4000';input.oninput();
+  assert.equal(root.parts_catalog.parts.find(p=>p.name==='球上壳').target,4000);
+  assert.equal(root.parts_catalog.parts[0].target,3000);
+  catalog.querySelector('[data-part-search]').oninput({target:{value:'球'}});
+  assert.equal(shell.hidden,false);assert.equal(rows[0].hidden,true);
 });
