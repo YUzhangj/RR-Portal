@@ -28,19 +28,24 @@ function browser({ legacy = false, initialFailed = false } = {}) {
   if (legacy) ['qcMaintenanceRetry','qcConnectionNotice','qcConnectionRetry'].forEach(id=>delete nodes[id]);
   nodes.qcMaintenance.contains = target => Object.values(nodes).some(node =>
     node === target && node.id.startsWith('qcMaintenance'));
-  const events = {}, calls = [], storage = { pendingDraft: 'original draft' };
-  let enabled = false, failed = initialFailed, response = null, poll, reloads = 0;
-  const s = { window: { addEventListener() {} }, location: { pathname: '/qc/index.html', reload() { reloads++; } },
+  const events = {}, calls = [], warnings = [], storage = { pendingDraft: 'original draft' };
+  let enabled = false, failed = initialFailed, response = null, held = false, poll, reloads = 0;
+  const s = { console:{warn:(...args)=>warnings.push(args)},window: { addEventListener() {} }, location: { pathname: '/qc/index.html', reload() { reloads++; } },
     AbortController, setTimeout() { return 1; }, clearTimeout() {}, setInterval(fn) { poll = fn; },
-    document: { activeElement: null, getElementById: id => nodes[id] || null, addEventListener(name, fn) { (events[name] ||= []).push(fn); } },
+    document: { hidden:false,activeElement: null, getElementById: id => nodes[id] || null, addEventListener(name, fn) { (events[name] ||= []).push(fn); } },
     localStorage: { removeItem() { throw new Error('must not clear drafts'); }, getItem: key => storage[key] },
-    fetch: async (url, options) => { calls.push({url,options}); if (failed) throw new Error('offline'); return response || {ok:true,json:async()=>({enabled})}; },
+    fetch: async (url, options) => {
+      calls.push({url,options}); if (failed) throw new Error('offline');
+      if(held) return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new Error('aborted')),{once:true}));
+      return response || {ok:true,json:async()=>({enabled})};
+    },
   };
   Object.values(nodes).forEach(node => { node.focus = () => { s.document.activeElement = node; }; });
   vm.createContext(s); vm.runInContext(client, s);
-  return { s, nodes, events, storage, calls, get reloads() {return reloads;},
+  return { s, nodes, events, storage, calls, warnings,get reloads() {return reloads;},
     set enabled(value) { enabled = value; }, set failed(value) { failed = value; },
     set response(value) { response = value; },
+    set held(value) { held = value; },
     poll: () => poll(),
   };
 }
@@ -63,6 +68,43 @@ test('maintenance locks existing UI, preserves drafts and requires deliberate re
   assert.equal(b.reloads, 0);
   assert.equal(b.storage.pendingDraft, 'original draft');
   assert.ok(b.calls.every(call => call.url === '/qc/api/maintenance' && call.options.cache === 'no-store'));
+});
+
+test('hiding a page cancels its pending check without reporting disconnection and resumes with a fresh check', async () => {
+  const b=browser(); await tick(); b.held=true; b.poll();
+  const interrupted=b.calls.at(-1).options.signal;
+  b.s.document.hidden=true; b.events.visibilitychange[0](); await tick();
+  assert.equal(interrupted.aborted,true);
+  assert.equal(b.s.window.__QC_MAINTENANCE.blocked,false);
+  assert.equal(b.nodes.qcConnectionNotice.hidden,true);
+  assert.equal(b.warnings.length,0);
+  const count=b.calls.length; b.poll(); assert.equal(b.calls.length,count);
+  b.held=false; b.s.document.hidden=false; b.events.visibilitychange[0](); await tick();
+  assert.equal(b.calls.length,count+1);
+  assert.equal(b.nodes.qcMaintenance.hidden,true);
+  assert.equal(b.storage.pendingDraft,'original draft');
+  assert.equal(b.reloads,0);
+});
+
+test('real HTTP status failures retain a useful diagnostic without logging form or account data', async () => {
+  const b=browser(); await tick(); b.response={ok:false,status:502}; b.poll(); await tick();
+  assert.equal(b.warnings.length,1);
+  assert.equal(b.warnings[0][1],'http-502');
+  assert.equal(b.warnings[0][2],'/qc/api/maintenance');
+  assert.equal(b.nodes.qcConnectionNotice.hidden,false);
+  assert.equal(b.s.window.__QC_MAINTENANCE.blocked,true);
+});
+
+test('returning before cancellation settles starts a fresh check instead of leaving the poll stuck', async () => {
+  const b=browser(); await tick();b.held=true;b.poll();
+  const count=b.calls.length;
+  b.s.document.hidden=true;b.events.visibilitychange[0]();
+  b.held=false;b.s.document.hidden=false;b.events.visibilitychange[0]();
+  await tick();
+  assert.equal(b.calls.length,count+1);
+  assert.equal(b.warnings.length,0);
+  assert.equal(b.s.window.__QC_MAINTENANCE.blocked,false);
+  assert.equal(b.nodes.qcConnectionNotice.hidden,true);
 });
 
 test('retry checks the connection without refreshing or discarding the current form', async () => {

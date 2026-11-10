@@ -5,6 +5,6 @@ for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === '--port' && args[i + 1]) process.env.PORT = args[i + 1];
   else if (a.startsWith('--port=')) process.env.PORT = a.slice('--port='.length);
-  // server.js 固定监听 0.0.0.0，--host 无需处理
+  // server.js 默认监听双栈地址，--host 无需处理
 }
 require('./server/server.js');

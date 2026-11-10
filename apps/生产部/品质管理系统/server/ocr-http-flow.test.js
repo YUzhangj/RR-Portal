@@ -37,8 +37,8 @@ test('isolated real OCR HTTP, explicit save, SQLite and reopen retain rows and p
   for (const filename of ['server.js', 'auth.js']) {
     let body = fs.readFileSync(path.join(__dirname, filename), 'utf8');
     if (filename === 'server.js') {
-      assert.ok(body.includes("server.listen(PORT, '0.0.0.0'"));
-      body = body.replace("server.listen(PORT, '0.0.0.0'", "server.listen(PORT, '127.0.0.1'");
+      assert.ok(body.includes("server.listen(PORT, undefined"));
+      body = body.replace("server.listen(PORT, undefined", "server.listen(PORT, '127.0.0.1'");
     }
     fs.writeFileSync(path.join(serverDir, filename), body);
   }

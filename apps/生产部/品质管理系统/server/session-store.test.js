@@ -241,7 +241,7 @@ test('real isolated API leaves all user rows intact when required revoke persist
   fs.mkdirSync(serverDir, { recursive: true }); fs.mkdirSync(dataDir);
   for (const name of ['server.js', 'auth.js']) {
     let contents = fs.readFileSync(path.join(__dirname, name), 'utf8');
-    if (name === 'server.js') { assert.ok(contents.includes("server.listen(PORT, '0.0.0.0'")); contents = contents.replace("server.listen(PORT, '0.0.0.0'", "server.listen(PORT, '127.0.0.1'"); }
+    if (name === 'server.js') { assert.ok(contents.includes("server.listen(PORT, undefined")); contents = contents.replace("server.listen(PORT, undefined", "server.listen(PORT, '127.0.0.1'"); }
     fs.writeFileSync(path.join(serverDir, name), contents);
   }
   const password = 'synthetic-session-api-password';
