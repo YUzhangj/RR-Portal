@@ -4067,7 +4067,8 @@ function renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd,
           ${j.images_extract_error ? `<p style="color:#dc2626;margin-top:8px">图片抽取失败: ${j.images_extract_error}</p>` : ''}
         </div>`;
       preview.querySelector('#btn-apply-replace').onclick = () => {
-        payload.molds = importedMolds();
+        const nextMolds = importedMolds();
+        if (!window.MixedQuotation?.replaceSharedMolds?.(payload, nextMolds)) payload.molds = nextMolds;
         preview.innerHTML = ''; fileInp.value = '';
         renderEngineering(host, payload, canEdit, onChange, fxRmbHkd, fxHkdUsd, quoteQty, quoteCustomer);
         onChange();

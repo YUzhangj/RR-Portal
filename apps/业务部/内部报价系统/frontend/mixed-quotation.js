@@ -393,6 +393,17 @@
     return context ? showNumberedImport(preview,result,file,context.root) : false;
   }
 
+  function replaceSharedMolds(payload, nextMolds) {
+    const context = engineeringContexts.get(payload);
+    if (!context || context.productId !== '__shared__') return false;
+    const molding = JSON.parse(window.__data.sections.find(section => section.dept === 'molding')?.payload_json || '{}');
+    const next = window.MixedMolds.replaceLegacySharedMolds(context.root, molding, nextMolds);
+    // Preserve the payload object held by the editor and its event handlers.
+    Object.assign(payload, next.mixed_shared);
+    Object.assign(context.root, next, {mixed_shared: payload});
+    return true;
+  }
+
   function unifiedMoldUpload(host, root, edit, changed, redraw) {
     if (!edit) return;
     const box = document.createElement('section'); box.className = 'mixed-upload-card';
@@ -1509,5 +1520,5 @@
     }
   }
   const componentNames = { injection_labor: '啤工', assembly_labor: '装配人工', painting_labor: '喷油人工', paint_material: '油料', imp_mat: '进口塑胶', dom_mat: '国产塑胶', blow: '吹气', slush: '搪胶', sewing_hair: '车发', sewing_cloth: '车衣', hardware: '五金', electronic: '电子', motor: '马达', suction: '吸塑', glue_bag: '胶袋', color_box: '彩盒/内咭', battery: '电池', libao: '利宝', plating: '电镀', flocking: '植绒', other_buy: '其他外购', carton: '纸箱', freight: '运费', cabinet: '吊柜', misc: '印尼运费', abs_material: '其中 ABS 材料' };
-  window.MixedQuotation = { showsEngineeringMoldCosts, applyAssemblyTarget, applyAssemblyBaseRate, previewNumberedImport, wrap, salesPanel, summary, componentNames, renderMoldingAllocation, renderEngineeringSharedMolds, refreshEngineeringSharedMolds };
+  window.MixedQuotation = { replaceSharedMolds, showsEngineeringMoldCosts, applyAssemblyTarget, applyAssemblyBaseRate, previewNumberedImport, wrap, salesPanel, summary, componentNames, renderMoldingAllocation, renderEngineeringSharedMolds, refreshEngineeringSharedMolds };
 })();
