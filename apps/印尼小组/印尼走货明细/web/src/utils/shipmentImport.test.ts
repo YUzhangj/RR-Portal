@@ -97,3 +97,42 @@ it.skipIf(!process.env.SHIPMENT_IMPORT_SAMPLES)('真实样表图片保持行对�
     }
   } finally { vi.unstubAllGlobals() }
 })
+
+
+it('走货范围被末尾空白格式撑大时仍按原始坐标识别资料和图片列', async () => {
+  const wb = book([
+    ['货号', '产品中文名称', '图片', '送货数量', '申报数量', '申报单位', '采购单价'],
+    ['001', '测试物料', '', 1500, 149.30, 'KGM', 0.34],
+  ])
+  const sheet = wb.Sheets['明细']
+  sheet.IR138 = { t: 'z' }
+  sheet.XFD1048576 = { t: 's', v: '  ' }
+  sheet['!ref'] = 'A1:XFD1048576'
+  const result = parseShipmentWorkbook(wb)
+  expect(result.rows).toHaveLength(1)
+  expect(result.warnings).not.toContain('明细：范围过大，未读取')
+  expect(result.rows[0]).toMatchObject({ row: 2, imageCol: 2,
+    item: { qty: 1500, kg: 149.3, price: .34 } })
+  expect(sheet['!ref']).toBe('A1:XFD1048576')
+  const ordinary = book([['货号', '产品中文名称'], ['001', '测试物料']])
+  const archive = await JSZip.loadAsync(XLSX.write(ordinary, { type: 'array', bookType: 'xlsx' }))
+  const xml = await archive.file('xl/worksheets/sheet1.xml')!.async('string')
+  archive.file('xl/worksheets/sheet1.xml', xml.replace(/<dimension ref="[^"]+"\/>/, '<dimension ref="A1:IR138"/>'))
+  const bytes = await archive.generateAsync({ type: 'arraybuffer' })
+  const imported = await importShipmentFile(new File([bytes], '含空白格式.xlsx'))
+  expect(imported.rows).toHaveLength(1)
+  expect(imported.rows[0].item.material_snapshot.product_code).toBe('001')
+})
+
+it.each([
+  { address: 'IR138', value: { t: 'n', v: 0 } },
+  { address: 'A10002', value: { t: 's', v: '真实资料' } },
+  { address: 'IR138', value: { t: 's', v: '', f: 'IF(A1=1,"","")' } },
+])('真实资料超出安全范围时仍保留拒绝提示 $address', ({ address, value }) => {
+  const wb = book([['货号', '产品中文名称'], ['001', '测试物料']])
+  wb.Sheets['明细'][address] = value as XLSX.CellObject
+  wb.Sheets['明细']['!ref'] = 'A1:XFD1048576'
+  const result = parseShipmentWorkbook(wb)
+  expect(result.rows).toHaveLength(0)
+  expect(result.warnings).toContain('明细：范围过大，未读取')
+})
