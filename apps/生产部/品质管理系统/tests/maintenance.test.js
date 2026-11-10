@@ -23,20 +23,21 @@ test('a request body cannot pass its write boundary after maintenance is enabled
 });
 
 function browser() {
-  const nodes = Object.fromEntries(['qcMaintenance','qcMaintenanceState','qcMaintenanceCheck','qcMaintenanceTitle','qcMaintenanceMessage','qcMaintenanceRefresh','appWrapper','loginScreen']
+  const nodes = Object.fromEntries(['qcMaintenance','qcMaintenanceRetry','qcMaintenanceTitle','qcMaintenanceMessage','qcMaintenanceRefresh','appWrapper','loginScreen']
     .map(id => [id, { id, hidden: false, textContent: '', inert: false }]));
   nodes.qcMaintenance.contains = target => target === nodes.qcMaintenance;
   const events = {}, calls = [], storage = { pendingDraft: 'original draft' };
-  let enabled = false, failed = false, poll, reloads = 0;
+  let enabled = false, failed = false, response = null, poll, reloads = 0;
   const s = { window: { addEventListener() {} }, location: { pathname: '/qc/index.html', reload() { reloads++; } },
     AbortController, setTimeout() { return 1; }, clearTimeout() {}, setInterval(fn) { poll = fn; },
     document: { getElementById: id => nodes[id], addEventListener(name, fn) { (events[name] ||= []).push(fn); } },
     localStorage: { removeItem() { throw new Error('must not clear drafts'); }, getItem: key => storage[key] },
-    fetch: async (url, options) => { calls.push({url,options}); if (failed) throw new Error('offline'); return {ok:true,json:async()=>({enabled})}; },
+    fetch: async (url, options) => { calls.push({url,options}); if (failed) throw new Error('offline'); return response || {ok:true,json:async()=>({enabled})}; },
   };
   vm.createContext(s); vm.runInContext(client, s);
   return { s, nodes, events, storage, calls, get reloads() {return reloads;},
     set enabled(value) { enabled = value; }, set failed(value) { failed = value; },
+    set response(value) { response = value; },
     poll: () => poll(),
   };
 }
@@ -59,6 +60,38 @@ test('maintenance locks existing UI, preserves drafts and requires deliberate re
   assert.equal(b.reloads, 0);
   assert.equal(b.storage.pendingDraft, 'original draft');
   assert.ok(b.calls.every(call => call.url === '/qc/api/maintenance' && call.options.cache === 'no-store'));
+});
+
+test('retry checks the connection without refreshing or discarding the current form', async () => {
+  const b = browser(); b.events.DOMContentLoaded.forEach(fn=>fn()); await tick();
+  b.failed = true; b.poll(); await tick();
+  assert.equal(b.nodes.qcMaintenanceRetry.hidden,false);
+  assert.equal(b.nodes.qcMaintenanceRefresh.hidden,true);
+  const count=b.calls.length;
+  b.failed=false; b.nodes.qcMaintenanceRetry.onclick();
+  b.nodes.qcMaintenanceRetry.onclick(); // A double click must not start another request.
+  assert.equal(b.nodes.qcMaintenanceRetry.disabled,true);
+  assert.equal(b.s.window.__QC_MAINTENANCE.blocked,true);
+  await tick();
+  assert.equal(b.calls.length,count+1);
+  assert.equal(b.nodes.qcMaintenance.hidden,true);
+  assert.equal(b.nodes.appWrapper.inert,false);
+  assert.equal(b.reloads,0);
+  assert.equal(b.storage.pendingDraft,'original draft');
+});
+
+test('gateway maintenance HTML remains a maintenance lock until deliberate refresh after recovery', async () => {
+  const b = browser(); await tick();
+  b.response={ok:false,status:503,headers:{get:key=>key==='Retry-After'?'60':null},json(){throw new Error('HTML must not be parsed');}};
+  b.poll(); await tick();
+  assert.equal(b.nodes.qcMaintenanceTitle.textContent,'系统修复中');
+  assert.equal(b.nodes.qcMaintenanceRetry.hidden,true);
+  assert.equal(b.nodes.appWrapper.inert,true);
+  b.response=null; b.poll(); await tick();
+  assert.equal(b.nodes.qcMaintenanceTitle.textContent,'修复已完成');
+  assert.equal(b.nodes.qcMaintenanceRefresh.hidden,false);
+  assert.equal(b.s.window.__QC_MAINTENANCE.blocked,true);
+  assert.equal(b.reloads,0);
 });
 test('loss of status connection prevents further operations until a healthy status is available', async () => {
   const b = browser(); await tick(); b.failed = true; b.poll(); await tick();
