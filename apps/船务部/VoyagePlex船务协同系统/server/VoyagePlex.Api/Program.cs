@@ -254,6 +254,7 @@ app.Use(async (context, next) =>
     var allowed = role is "admin" or "supervisor" || shippingAllowed || warehouseShipmentAllowed ||
         (role == "warehouse" && (path.StartsWith("/api/inventory", StringComparison.Ordinal) || (path == "/api/export-templates/available" && context.Request.Method == "GET"))) || path is "/api/auth/me" or "/api/auth/logout";
     if (!allowed) { context.Response.StatusCode = StatusCodes.Status403Forbidden; await context.Response.WriteAsJsonAsync(new { error = "当前账号无权使用此功能" }); return; }
+    if (!PagePermissions.Allows(session.User, path, context.Request.Method)) { context.Response.StatusCode = StatusCodes.Status403Forbidden; await context.Response.WriteAsJsonAsync(new { error = "当前账号没有此页面的查看或操作权限" }); return; }
     if (role == "supervisor" && path.StartsWith("/api/users", StringComparison.Ordinal))
     {
         var segments = path.Split('/');
@@ -409,7 +410,7 @@ app.MapPost("/api/auth/logout", async (HttpContext context, AppDbContext db, Can
 app.MapGet("/api/users", async (HttpContext context, AppDbContext db, CancellationToken cancellationToken) =>
     Results.Ok((await db.Users.AsNoTracking().Where(value => ((AppUser)context.Items["CurrentUser"]!).Role == "admin" || (value.CompanyAccess == db.Company && (value.Role == "shipping" || value.Role == "warehouse"))).OrderBy(value => value.Username).ToListAsync(cancellationToken)).Select(UserResponse)));
 
-app.MapPost("/api/users", async (JsonObject payload, AppDbContext db, CancellationToken cancellationToken) =>
+app.MapPost("/api/users", async (JsonObject payload, HttpContext context, AppDbContext db, CancellationToken cancellationToken) =>
 {
     var username = payload["username"]?.ToString().Trim().ToLowerInvariant() ?? "";
     var displayName = payload["displayName"]?.ToString().Trim() ?? "";
@@ -421,7 +422,11 @@ app.MapPost("/api/users", async (JsonObject payload, AppDbContext db, Cancellati
     if (await db.Users.AnyAsync(value => value.Username == username, cancellationToken)) return Results.Conflict(new { error = "账号已存在" });
     var companyAccess = payload["companyAccess"]?.ToString() ?? "Xingxin";
     if (companyAccess is not ("Xingxin" or "Huadeng" or "Both") || (role != "admin" && companyAccess == "Both")) return Results.BadRequest(new { error = "公司权限无效" });
-    var user = new AppUser { CompanyAccess = companyAccess, Username = username, DisplayName = displayName, Role = role, PasswordHash = PasswordService.Hash(password) };
+    var actor = (AppUser)context.Items["CurrentUser"]!;
+    var grants = "";
+    if (payload.ContainsKey("pagePermissions")) { var permissionError = PagePermissions.Validate(payload["pagePermissions"], role, actor, out grants); if (permissionError is not null) return Results.BadRequest(new { error = permissionError }); }
+    else if (actor.Role != "admin" && PagePermissions.Defaults(role).Any(p => PagePermissions.Rank(p.Value) > PagePermissions.Rank(PagePermissions.Effective(actor)[p.Key]))) return Results.BadRequest(new { error = "不能授予超出自己拥有的页面权限" });
+    var user = new AppUser { CompanyAccess = companyAccess, Username = username, DisplayName = displayName, Role = role, PagePermissionsJson = grants, PasswordHash = PasswordService.Hash(password) };
     db.Users.Add(user); await db.SaveChangesAsync(cancellationToken);
     return Results.Created($"/api/users/{user.Id}", UserResponse(user));
 });
@@ -462,6 +467,13 @@ app.MapPut("/api/users/{id:long}", async (long id, JsonObject payload, HttpConte
         }
         user.MailboxAddress = address;
     }
+    if (payload.ContainsKey("pagePermissions"))
+    {
+        var permissionError = PagePermissions.Validate(payload["pagePermissions"], role, current, out var grants);
+        if (permissionError is not null) return Results.BadRequest(new { error = permissionError });
+        user.PagePermissionsJson = grants;
+    }
+    else if (role != user.Role) { user.PagePermissionsJson = ""; if (current.Role != "admin" && PagePermissions.Defaults(role).Any(p => PagePermissions.Rank(p.Value) > PagePermissions.Rank(PagePermissions.Effective(current)[p.Key]))) return Results.BadRequest(new { error = "不能授予超出自己拥有的页面权限" }); }
     user.CompanyAccess = companyAccess;
     user.DisplayName = displayName; user.Role = role; user.IsActive = isActive; user.UpdatedAt = DateTime.UtcNow;
     if (!isActive) await db.UserSessions.Where(value => value.UserId == id).ExecuteDeleteAsync(cancellationToken);
@@ -1879,7 +1891,7 @@ static Task<bool> ProductInfoExists(AppDbContext db, string productCode, int? qu
 static object UserResponse(AppUser user) => new
 {
     user.Id, user.Username, user.DisplayName, user.Role, user.CompanyAccess, user.IsActive, user.MailboxAddress, mailboxConfigured = ServerMailboxConfiguration.IsConfigured(user),
-    user.CreatedAt, user.UpdatedAt, user.LastLoginAt,
+    user.CreatedAt, user.UpdatedAt, user.LastLoginAt, pagePermissions = PagePermissions.Effective(user),
 };
 
 static string? ValidateUserInput(string username, string displayName, string password, bool requirePassword)

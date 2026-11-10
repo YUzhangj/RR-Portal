@@ -4,9 +4,9 @@ const ts = require('typescript');
 const assert = require('assert/strict');
 const source = ts.transpileModule(fs.readFileSync('lib/backend-proxy.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
 let user;
-const context = {exports:{},process,Headers,fetch:async()=>({ok:true,json:async()=>user}),require:()=>({NextResponse:{json:(body,options)=>({body,status:options.status})}})};
+const context = {exports:{},process,Headers,fetch:async()=>({ok:true,json:async()=>user}),require:(name)=>name==='next/server'?({NextResponse:{json:(body,options)=>({body,status:options.status})}}):({hasPage:(grants,key,edit)=>grants[key]==='edit'||(!edit&&grants[key]==='view')})};
 vm.runInNewContext(source,context);
-const request = company=>({headers:new Headers(),cookies:{get:()=>({value:company})}});
+const request = (company,path="/api/auth/me",method="GET")=>({headers:new Headers(),cookies:{get:()=>({value:company})},nextUrl:{pathname:path},method});
 (async()=>{
  const check=async(role,companyAccess,company,roles,status)=>{user={role,companyAccess};const result=await context.exports.requireRole(request(company),roles);assert.equal(result.response?.status||200,status);};
  await check('admin','Xingxin','Huadeng',['admin'],200);
@@ -17,5 +17,10 @@ const request = company=>({headers:new Headers(),cookies:{get:()=>({value:compan
  await check('warehouse','Both','Xingxin',['admin','warehouse'],403);
  await check('shipping','Huadeng','Huadeng',['admin'],403);
  await check('shipping','Huadeng','Huadeng',['admin','shipping'],200);
- console.log('Frontend role/company permission checks passed.');
+ user={role:'supervisor',companyAccess:'Huadeng',pagePermissions:{inventory:'view','settings.inspection':'view'}};
+ assert.equal((await context.exports.requireRole(request('Huadeng','/api/inventory/local-files/scan','POST'),['admin','warehouse'])).response?.status||200,200);
+ assert.equal((await context.exports.requireRole(request('Huadeng','/api/inventory/local-files/writeback','POST'),['admin','warehouse'])).response?.status,403);
+ assert.equal((await context.exports.requireRole(request('Huadeng','/api/inspection-mappings','GET'),['admin'])).response?.status||200,200);
+ assert.equal((await context.exports.requireRole(request('Huadeng','/api/inspection-mappings','POST'),['admin'])).response?.status,403);
+ console.log('Frontend role, company and page permission checks passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});
