@@ -7398,7 +7398,11 @@ async function renderQuotePage() {
     renderMyDepartment();
     rateRefreshers.set(mySec.dept, () => {
       const rates = quotationExchangeRates(sections, data.quotation_rates);
-      if (rates.rmb_hkd !== renderedRates.rmb_hkd || rates.hkd_usd !== renderedRates.hkd_usd) renderMyDepartment();
+      // 啤机部依赖工程部保存的零件库和产品组成。所有部门面板会在
+      // 页面打开时预先渲染，因此仅切换面板不会自动拿到随后保存的
+      // 工程草稿。每次进入啤机部都重新渲染，避免共用零件和普通
+      // 小产品零件继续显示为空。
+      if (mySec.dept === 'molding' || rates.rmb_hkd !== renderedRates.rmb_hkd || rates.hkd_usd !== renderedRates.hkd_usd) renderMyDepartment();
     });
   }
 
@@ -7464,7 +7468,10 @@ async function renderQuotePage() {
       renderBody();
       rateRefreshers.set(s.dept, () => {
         const rates = quotationExchangeRates(sections, data.quotation_rates);
-        if (rates.rmb_hkd !== renderedRates.rmb_hkd || rates.hkd_usd !== renderedRates.hkd_usd) {
+        // 啤机部的统一零件表必须在每次进入时读取最新工程草稿；
+        // 不能只在汇率变化时刷新，否则工程部刚保存的共用零件仍会
+        // 停留在页面初次加载时的空缓存中。
+        if (s.dept === 'molding' || rates.rmb_hkd !== renderedRates.rmb_hkd || rates.hkd_usd !== renderedRates.hkd_usd) {
           renderBody();
           bindActs();
         }
