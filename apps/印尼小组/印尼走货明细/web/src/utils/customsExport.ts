@@ -9,7 +9,7 @@ import { DOMParser, XMLSerializer } from '@xmldom/xmldom'
 import type { Material, SupplierDict } from '../api/client'
 import { documentSellerForLine, supplierForLine } from './supplierProfiles'
 import { deliveryDeadline, syncedShipmentDeadline } from './shipmentDeadline'
-import { isPaperRope, shipmentCbmPerCarton, shipmentGrossPerPc, shipmentPackingAverageQty, shipmentWeightQuantity } from './shipmentWeight'
+import { isPaperRope, shipmentCbmPerCarton, shipmentNetTotalKg, shipmentGrossPerPc, shipmentPackingAverageQty, shipmentWeightQuantity } from './shipmentWeight'
 import { bindInvoiceLookupSerial, documentRow, rebindDocumentFormula, type DocumentTableLayout } from './documentTemplateFormula'
 import auxiliaryDocumentLayout from './auxiliaryDocumentLayout.json'
 import { AUXILIARY_TABLES, auxiliaryDetailFormulas } from './auxiliaryDocumentFormula'
@@ -1326,7 +1326,7 @@ export async function buildCustomsWorkbook(input: CustomsExportInput): Promise<B
       const weighing = source.weighing_qty ?? shipmentWeightQuantity(sourceMaterial?.name_zh, shipmentPackingAverageQty(source.qty_per_carton))
       return {
         gross: shipmentGrossPerPc(sourceMaterial?.weight_per_carton, weighing) * quantity,
-        net: (Number(sourceMaterial?.net_per_pc) || 0) * quantity,
+        net: shipmentNetTotalKg(source, sourceMaterial),
       }
     })
     const grossTotal = sourceWeights.reduce((total, source) => total + source.gross, 0)

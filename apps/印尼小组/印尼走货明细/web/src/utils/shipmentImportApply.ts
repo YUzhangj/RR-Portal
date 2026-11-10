@@ -15,9 +15,10 @@ function importValues(row: ShipmentImportItem) {
 
 /** A file may update declaration/packing data, never the linked stock or PO basis. */
 export function applyShipmentImport(existing: readonly ExistingShipmentImportRow[], materials: ReadonlyMap<number, Material>,
-  imported: readonly ShipmentImportItem[], targets: readonly number[]): ExistingShipmentImportRow[] {
+  imported: readonly ShipmentImportItem[], targets: readonly number[],
+  reviewedTargets: readonly (number | undefined)[] = []): ExistingShipmentImportRow[] {
   const current = existing.map(row => ({ ...row, material_snapshot: materials.get(row.material_id!) || row.material_snapshot }))
-  const planned = planShipmentImport([...imported], current)
+  const planned = planShipmentImport([...imported], current, reviewedTargets)
   if (targets.length !== imported.length || planned.some((target, index) => target < -1 || target !== targets[index]))
     throw new Error('匹配结果已变化或存在重复匹配，请重新核对后导入')
   const next = [...existing]

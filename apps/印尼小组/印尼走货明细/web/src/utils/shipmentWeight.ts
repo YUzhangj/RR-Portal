@@ -107,3 +107,25 @@ export function shipmentKgWeight(
   }
   return qty
 }
+
+/** Physical net totals are always kg, including tonne declarations. */
+export function shipmentNetTotalKg(
+  item: { qty?: number; kg?: number },
+  material?: { unit_kg?: string; net_per_pc?: number; name_zh?: string },
+): number {
+  const unit = String(material?.unit_kg || '').trim().toUpperCase()
+  const technical = (Number(material?.net_per_pc) || 0) * shipmentWeightQuantity(material?.name_zh, item.qty)
+  const tonnes = ['TNE', 'TON', '吨'].includes(unit)
+  const kilograms = ['KGM', 'KG', 'KGS', '千克', '公斤'].includes(unit)
+  if ((tonnes || kilograms) && item.kg != null && Number.isFinite(Number(item.kg)) && Number(item.kg) >= 0) {
+    const declaredKg = Number(item.kg) * (tonnes ? 1000 : 1)
+    // Preserve each batch's precise physical weight when its declaration merely
+    // rounded it (2dp kg / 4dp tonnes). A factor-of-1000 mismatch is not rounding.
+    const roundingKg = tonnes ? .05 : .005
+    if (declaredKg > 0 && technical > 0 && Math.abs(technical - declaredKg) <= roundingKg + 1e-9)
+      return technical
+    return declaredKg
+  }
+  // Piece/set/metre declarations still need their physical per-piece weight.
+  return technical
+}

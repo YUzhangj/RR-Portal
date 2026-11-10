@@ -93,7 +93,7 @@ it('实际确认按钮允许已关联行的缺省币种，不接受重复匹配�
     ts.forEachChild(node, walk)
   }
   walk(tree)
-  const context = createContext({ selected: [{ item: { ...incoming, currency: undefined } }], targets: [0], linkedTarget: () => old,
+  const context = createContext({ selected: [{ item: { ...incoming, currency: undefined } }], targets: [0], reviewedTargets: [], linkedTarget: () => old,
     busy: false, loadImages: undefined, importContext: { current: { active: true } },
     onImport: vi.fn(() => false), setRows: vi.fn(), message: { warning: vi.fn(), success: vi.fn() } })
   runInContext(ts.transpileModule(code, { fileName: 'ShipmentImport.tsx', compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText, context)
@@ -143,4 +143,22 @@ it('实际页面导入、保存及重读保留真实出库 ID 与采购金额，
   expect(saved.material_snapshot).toMatchObject({ id: 137, length: 25, unit_kg: 'TNE' })
   expect(shipmentPurchaseAmount(saved)).toBe(shipmentPurchaseAmount(old))
   expect(material.length).toBe(10)
+})
+
+
+it('手动核对只能选择兼容的当前明细，拒绝过期或重复目标', () => {
+  const rows = [{ ...old }, { ...old, outbound_id: 71, qty: 20 }, { ...old, po_no: 'OTHER' }]
+  const matching = rows.map(row => ({ ...row, material_snapshot: material }))
+  expect(planShipmentImport([incoming], matching)).toEqual([-2])
+  expect(planShipmentImport([incoming], matching, [1])).toEqual([1])
+  expect(planShipmentImport([incoming], matching, [2])).toEqual([-2])
+  expect(() => applyShipmentImport(rows, materials, [incoming], [2])).toThrow('匹配结果已变化')
+  expect(() => applyShipmentImport(rows, materials, [incoming], [-1])).toThrow('匹配结果已变化')
+  expect(() => applyShipmentImport(rows, materials, [incoming, incoming], [1, 1])).toThrow('重复匹配')
+  expect(() => applyShipmentImport(rows, materials, [incoming], [1])).toThrow('重复匹配')
+  const updated = applyShipmentImport(rows, materials, [incoming], [1], [1])
+  expect(updated[0]).toEqual(rows[0])
+  expect(updated[2]).toEqual(rows[2])
+  expect(updated[1].outbound_id).toBe(71)
+  expect(updated[1].qty).toBe(20)
 })

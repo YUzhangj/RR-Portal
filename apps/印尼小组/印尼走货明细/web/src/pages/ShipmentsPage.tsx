@@ -11,7 +11,7 @@ import { sortShipmentItems, cartonLayout, cartonGroupKey, shipmentScope } from '
 import { withShipmentInvoicePrices } from '../utils/shipmentInvoice'
 import { consolidateShipmentItems } from '../utils/shipmentConsolidation'
 import { createCartonGroupId } from '../utils/cartonGroupId'
-import { receiptChargeRatio, shipmentChargeQuantity, shipmentPurchaseAmount, shipmentUsesDeclarationPrice } from '../utils/shipmentPurchase'
+import { receiptChargeRatio, shipmentChargeQuantity, shipmentDeclarationPrice, shipmentPurchaseAmount, shipmentUsesDeclarationPrice } from '../utils/shipmentPurchase'
 import ShipmentImport from '../components/ShipmentImport'
 import ShipmentImportSource from '../components/ShipmentImportSource'
 import ShipmentSheetTable from '../components/ShipmentSheetTable'
@@ -35,7 +35,7 @@ import { publicAsset } from '../deployment'
 import './ShipmentsPage.css'
 import {
   formatShipmentPackingLines, isPaperRope, parseShipmentPacking,
-  shipmentCbmPerCarton, shipmentGrossPerPc, shipmentKgWeight, shipmentPackingAverageQty, shipmentWeightQuantity,
+  shipmentCbmPerCarton, shipmentNetTotalKg, shipmentGrossPerPc, shipmentKgWeight, shipmentPackingAverageQty, shipmentWeightQuantity,
 } from '../utils/shipmentWeight'
 
 interface ShipmentSummary {
@@ -524,7 +524,7 @@ export default function ShipmentsPage() {
       : shipmentGrossPerPc(m?.weight_per_carton, effectiveWeighingQty(it, m)) * weightQty
     const netTotal = sourceTotals
       ? sourceTotals.reduce((total, source) => total + source.netTotal, 0)
-      : num(m?.net_per_pc) * weightQty
+      : shipmentNetTotalKg(it, m)
     const cbmEach = shipmentCbmPerCarton(m?.length, m?.width, m?.height)
     const cbmTotal = cbmEach * num(it.cartons)
     const invoiceAmount = num(it.invoice_price) * num(it.kg)
@@ -1145,6 +1145,7 @@ export default function ShipmentsPage() {
   function mergedCellValue(row: number, field: string): string | number | undefined {
     const item = consolidatedItems[row]
     const material = item?.material_id != null ? matMap.get(item.material_id) : undefined
+    if (field === 'price') return item ? shipmentDeclarationPrice(item).toFixed(4) : ''
     if (field === 'currency') return item?.currency || '¥'
     if (field === 'material:unit_kg') return material?.unit_kg || 'KGM'
     if (field === 'material:net_per_pc' && item?.packing_source)
@@ -1197,6 +1198,7 @@ export default function ShipmentsPage() {
     const checksQuantity = edits.some(edit => edit.field === 'qty')
     if (checksQuantity) setSheetEditing(true)
     try {
+      if (edits.some(edit => edit.field === 'price')) throw new Error('采购单价按采购金额÷申报数量自动计算，请在采购来源中核对原单价')
       for (const edit of edits) if (edit.field === 'customs_company' && edit.value.trim()
         && !customsOptions.some(option => option.value === edit.value.trim()))
         throw new Error(`第 ${edit.row + 1} 行：报关出口公司不在可选名单中，请先维护供应商资料`)
@@ -1378,7 +1380,7 @@ export default function ShipmentsPage() {
         cbm += (Number(m?.length) || 0) * (Number(m?.width) || 0) * (Number(m?.height) || 0) / 1e6 * (Number(it.cartons) || 0)
       const weightQty = shipmentWeightQuantity(m?.name_zh, it.qty)
       gross += shipmentGrossPerPc(m?.weight_per_carton, effectiveWeighingQty(it, m)) * weightQty
-      net += (Number(m?.net_per_pc) || 0) * weightQty
+      net += shipmentNetTotalKg(it, m)
     }
     return {
       rows: items.length,
@@ -1547,12 +1549,12 @@ export default function ShipmentsPage() {
               <Button size="small" onClick={openTools}>从工具库选择</Button>
               <Button size="small" onClick={() => { loadLatestSchedule(); setSchedPickerOpen(true) }}>🔗 从排期勾选</Button>
               <Button size="small" onClick={addItem}>➕ 加一行</Button>
-              <ShipmentImport existing={items} materials={matMap} onImport={(imported: ShipmentImportItem[], targets: number[]) => {
+              <ShipmentImport existing={items} materials={matMap} onImport={(imported: ShipmentImportItem[], targets: number[], reviewedTargets?: readonly (number | undefined)[]) => {
                 try {
                   if (sheetWritePending.current || editorLoadState.current !== 'ready') {
                     message.info('资料正在加载或校验，请完成后再导入'); return false
                   }
-                  const nextItems = applyShipmentImport(items, matMap, imported, targets)
+                  const nextItems = applyShipmentImport(items, matMap, imported, targets, reviewedTargets)
                   setItems(nextItems)
                   setMatMap(current => {
                     const next = new Map(current)
@@ -1591,7 +1593,7 @@ export default function ShipmentsPage() {
             editableAt={(row, field) => {
               const item = consolidatedItems[row]
               const material = item?.material_id != null ? matMap.get(item.material_id) : undefined
-              return mergedFieldEditable(item, field)
+              return field !== 'price' && mergedFieldEditable(item, field)
                 && (field !== 'kg' || !isShipmentCountUnit(material?.unit_kg))
             }}
             onEdits={editSheetCells}
@@ -1666,12 +1668,12 @@ export default function ShipmentsPage() {
               { title: '合同日期', width: 155, render: (_v, r, i) => fillable(i, 'contract_date', <DatePicker size="small" style={{ width: '100%' }} format="YYYY-MM-DD" value={shipmentDateOnly(r.contract_date) ? dayjs(shipmentDateOnly(r.contract_date)) : null} onChange={(v) => patchItem(i, 'contract_date', v ? v.format('YYYY-MM-DD') : '')} />) },
               { title: '发票号', width: 180, render: (_v, r, i) => fillable(i, 'invoice_no', <ShipmentTextCell value={r.invoice_no} onCommit={value => patchItem(i, 'invoice_no', value)} />) },
               { title: '发票日期', width: 155, render: (_v, r, i) => fillable(i, 'invoice_date', <DatePicker size="small" style={{ width: '100%' }} format="YYYY-MM-DD" value={shipmentDateOnly(r.invoice_date) ? dayjs(shipmentDateOnly(r.invoice_date)) : null} onChange={(v) => patchItem(i, 'invoice_date', v ? v.format('YYYY-MM-DD') : '')} />) },
-              { title: '发票单价', width: 120, onCell: () => ({ style: GRAY }), render: (_v, r) => <span title="自动按导出公式计算；金额按申报数量及申报单位计算">{r.invoice_price?.toFixed(4)}</span> },
+              { title: '发票单价', width: 120, onCell: () => ({ style: GRAY }), render: (_v, r) => <span title="除华胜益外等于采购金额÷申报数量；华胜益保留原报关公式">{r.invoice_price?.toFixed(4)}</span> },
               { title: '金额', width: 90, align: 'right', onCell: () => ({ style: GRAY }), render: (_v, r) => { const c = calc(r); return c.invoiceAmount ? c.invoiceAmount.toFixed(2) : '' } },
               { title: '供应商', width: 160, render: (_v, r, i) => fillable(i, 'supplier', <ShipmentTextCell value={r.supplier} onCommit={value => patchItem(i, 'supplier', value)} />) },
               { title: '采购单日期', width: 160, onCell: r => ({ style: r.sources.length > 1 ? GRAY : undefined }), render: (_v, r, i) => r.sources.length > 1 ? mergedCellValue(i, 'po_date') : fillable(i, 'po_date', <DatePicker size="small" style={{ width: '100%' }} format="YYYY-MM-DD" value={shipmentDateOnly(r.po_date) ? dayjs(shipmentDateOnly(r.po_date)) : null} onChange={(v) => patchItem(i, 'po_date', v ? v.format('YYYY-MM-DD') : '')} />) },
               { title: '采购单号', width: 160, onCell: r => ({ style: r.sources.length > 1 ? GRAY : undefined }), render: (_v, r, i) => r.sources.length > 1 ? r.po_no : fillable(i, 'po_no', <ShipmentTextCell value={r.po_no} onCommit={value => patchItem(i, 'po_no', value)} />) },
-              { title: '采购单价', width: 120, render: (_v, r, i) => fillable(i, 'price', <ShipmentNumberCell value={r.price} title={r.sources.length > 1 ? '按计费数量加权的采购单价；修改后各来源批次统一采用新单价，备品不收费' : shipmentUsesDeclarationPrice(r) ? '导入单价：按送货重量/申报数量计价' : `原采购单价：按计费数量（${r.purchase_unit || '个'}）计价，备品不收费；导出时换算申报单位单价`} onCommit={v => patchItem(i, 'price', v)} />) },
+              { title: '采购单价', width: 120, onCell: () => ({ style: GRAY }), render: (_v, r) => <span title="本次走货对应的采购金额÷申报数量；原采购单位单价保留在来源批次中，免费备品不收费">{shipmentDeclarationPrice(r).toFixed(4)}</span> },
               { title: '币种', width: 90, render: (_v, r, i) => fillable(i, 'currency', <Select size="small" value={r.currency || '¥'} options={CURR} onChange={(v) => patchItem(i, 'currency', v)} style={{ width: '100%' }} />) },
               { title: '采购金额', width: 90, align: 'right', onCell: () => ({ style: GRAY }), render: (_v, r) => { const c = calc(r); return <span title={`备品不收费；计费数量 ${shipmentChargeQuantity(r).toLocaleString('en-US', { maximumFractionDigits: 6 })}，实际走货数量和重量不变`}>{c.purchaseAmount.toFixed(2)}</span> } },
               { title: '报关出口公司', width: 240, render: (_v, r, i) => fillable(i, 'customs_company',
