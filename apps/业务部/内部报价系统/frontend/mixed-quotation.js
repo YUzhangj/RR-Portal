@@ -172,7 +172,7 @@
     const lossRates = [...new Set(catalog.parts.map(p => Number(p.loss_pct ?? 3)))];
     const uniformLoss = lossRates.length === 1 ? lossRates[0] : catalog.parts.length ? '' : (root.catalog_loss_pct ?? 3);
     const selection = catalog.selections[productId] || [];
-    const moldKey = p => String(p.mold_no || '').trim();
+    const moldKey = p => window.MixedMolds.catalogMoldGroupKey(p);
     const orderedParts = [...catalog.parts].sort((a,b) => {
       if (selectionMode) {
         const priority = part => Number(selection.some(r => r.part_id === part.id)) * 2 + Number(preferredPartIds.includes(part.id));
@@ -207,7 +207,7 @@
       const groupStart = !selectionMode && (index === 0 || moldKey(orderedParts[index - 1]) !== moldKey(part));
       const models = [...new Set(group.map(p => String(p.machine_model || '待填')))];
       const targets = [...new Set(group.map(p => String(p.target || '待填')))];
-      const heading = groupStart ? `<tr data-mold-heading="${esc(moldKey(part))}"><th colspan="${fields.length + 5}" style="text-align:left;background:#edf3fa;padding:10px 12px">${esc(moldKey(part) || '未填写模号')} · ${group.length} 个零件　<span style="font-weight:normal">机型：${esc(models.join(' / '))}　日产啤次：${esc(targets.join(' / '))}${moldKey(part) && (models.length > 1 || targets.length > 1) ? '　⚠ 同模参数不一致，请核对' : ''}</span></th></tr>` : '';
+      const heading = groupStart ? `<tr data-mold-heading="${esc(moldKey(part))}"><th colspan="${fields.length + 5}" style="text-align:left;background:#edf3fa;padding:10px 12px">${esc(part.mold_no || '未填写模号')}${part.legacy_shared_mold_key ? '（共有费用）' : ''} · ${group.length} 个零件　<span style="font-weight:normal">机型：${esc(models.join(' / '))}　日产啤次：${esc(targets.join(' / '))}${moldKey(part) && (models.length > 1 || targets.length > 1) ? '　⚠ 同模参数不一致，请核对' : ''}</span></th></tr>` : '';
       return `${heading}<tr data-part-id="${esc(part.id)}">${selectionMode ? `<td><input type="checkbox" aria-label="选用 ${esc(part.name)}" data-pick ${ref ? 'checked' : ''} ${edit ? '' : 'disabled'}></td><td><input type="number" aria-label="${esc(part.name)} 用量" data-usage min="0.000001" step="any" value="${esc(ref?.usage ?? 1)}" ${edit && ref ? '' : 'disabled'}></td>` : ''}${fields.map(([key,,type]) => catalogCell(part, key, type, group, groupStart)).join('')}<td>${resolved.get(part.id)?.direct_labor ? '直接计算' : '完成后封穴'}</td><td data-shot-cost>${resolved.has(part.id) ? fmt(resolved.get(part.id).shot_cost) : '待补参数'}</td><td data-shot-price>${resolved.has(part.id) ? fmt(resolved.get(part.id).shot_price) : '待补参数'}</td>${selectionMode ? '' : `<td>${esc(owners.join('、') || '未选用')}</td><td>${edit ? '<button type="button" data-delete>删除</button>' : ''}</td>`}</tr>`;
     }).join('')}</tbody></table></div>${edit && !selectionMode ? '<button type="button" data-add>＋ 新增零件</button>' : ''}`;
     host.querySelectorAll('[data-part-id]').forEach(row => {
@@ -391,6 +391,17 @@
   function previewNumberedImport(preview, result, file, payload) {
     const context = engineeringContexts.get(payload);
     return context ? showNumberedImport(preview,result,file,context.root) : false;
+  }
+
+  function replaceSharedMolds(payload, nextMolds) {
+    const context = engineeringContexts.get(payload);
+    if (!context || context.productId !== '__shared__') return false;
+    const molding = JSON.parse(window.__data.sections.find(section => section.dept === 'molding')?.payload_json || '{}');
+    const next = window.MixedMolds.replaceLegacySharedMolds(context.root, molding, nextMolds);
+    // Preserve the payload object held by the editor and its event handlers.
+    Object.assign(payload, next.mixed_shared);
+    Object.assign(context.root, next, {mixed_shared: payload});
+    return true;
   }
 
   function unifiedMoldUpload(host, root, edit, changed, redraw) {
@@ -1017,7 +1028,16 @@
           return;
         }
         if (dept === 'molding' && root.parts_catalog && selected !== '__molds__') {
-          const data = nativeCatalogData(root, cfg, selected);
+          let data;
+          try { data = nativeCatalogData(root, cfg, selected); }
+          catch (error) {
+            const notice = document.createElement('p'); notice.className = 'mixed-error';
+            notice.textContent = `核价参数待补齐：${error.message}。请在下方统一零件明细填写，保存本部门草稿后重算。`;
+            detail.appendChild(notice);
+            const catalogHost = document.createElement('div'); detail.appendChild(catalogHost);
+            renderCatalog(catalogHost, root, cfg, edit, onChange, '__catalog__');
+            return;
+          }
           const saved = selected === '__shared__' ? root.mixed_shared : root.mixed_products[selected] || {};
           const refs = root.parts_catalog.selections?.[selected] || [];
           const targetParts = root.parts_catalog.parts.filter(part => selected === '__all_molds__' || refs.some(ref => ref.part_id === part.id));
@@ -1099,7 +1119,6 @@
         if (dept === 'engineering') {
           const moldingRoot = window.MixedMolds.engineeringCatalog(JSON.parse(window.__data.sections.find(s => s.dept === 'molding')?.payload_json || '{}'), root);
           if (moldingRoot.parts_catalog) {
-            moldingRoot.parts_catalog.selections = root.mixed_part_selections || moldingRoot.parts_catalog.selections;
             const compositionPanel = document.createElement('details'); compositionPanel.className = 'mixed-config';
             const sharedParts = selected === '__shared__' ? engineeringDisplayMolds(moldingRoot, cfg, selected, payload) : [];
             const sharedRefs = moldingRoot.parts_catalog.selections.__shared__ || [];
@@ -1501,5 +1520,5 @@
     }
   }
   const componentNames = { injection_labor: '啤工', assembly_labor: '装配人工', painting_labor: '喷油人工', paint_material: '油料', imp_mat: '进口塑胶', dom_mat: '国产塑胶', blow: '吹气', slush: '搪胶', sewing_hair: '车发', sewing_cloth: '车衣', hardware: '五金', electronic: '电子', motor: '马达', suction: '吸塑', glue_bag: '胶袋', color_box: '彩盒/内咭', battery: '电池', libao: '利宝', plating: '电镀', flocking: '植绒', other_buy: '其他外购', carton: '纸箱', freight: '运费', cabinet: '吊柜', misc: '印尼运费', abs_material: '其中 ABS 材料' };
-  window.MixedQuotation = { showsEngineeringMoldCosts, applyAssemblyTarget, applyAssemblyBaseRate, previewNumberedImport, wrap, salesPanel, summary, componentNames, renderMoldingAllocation, renderEngineeringSharedMolds, refreshEngineeringSharedMolds };
+  window.MixedQuotation = { replaceSharedMolds, showsEngineeringMoldCosts, applyAssemblyTarget, applyAssemblyBaseRate, previewNumberedImport, wrap, salesPanel, summary, componentNames, renderMoldingAllocation, renderEngineeringSharedMolds, refreshEngineeringSharedMolds };
 })();

@@ -39,7 +39,7 @@ async function addTemplateDetails(wb,args,result){
  const labor=wb.addWorksheet('封穴啤工计算');
  labor.addRow(['模号','零件','日费用 HKD','日产啤次','出模数','需求量（手填）','完成啤次','阶段每穴费用','累计啤工 HKD','每件啤工 HKD','每啤价 HKD','上一阶段完成啤次']);
  const groups=new Map(), laborRefs=new Map();
- for(const part of root.parts_catalog.parts){const key=String(part.mold_no||'').trim()||part.id;if(!groups.has(key))groups.set(key,[]);groups.get(key).push(part);}
+ for(const part of root.parts_catalog.parts.filter(part=>resolved.has(part.id))){const key=M.catalogMoldGroupKey(part)||part.id;if(!groups.has(key))groups.set(key,[]);groups.get(key).push(part);}
  for(const [key,parts] of groups){
    const start=labor.rowCount+1,end=start+parts.length-1;
    const cycles='$G$'+start+':$G$'+end,cav='$E$'+start+':$E$'+end,stage='$H$'+start+':$H$'+end;
@@ -51,11 +51,11 @@ async function addTemplateDetails(wb,args,result){
      const active=parts.reduce((n,p,j)=>n+(allCycles[j]>=cycle?Number(p.cavity):0),0);
      const stageCache=cycle?(cycle-previous)*v.shot_cost/active/allCycles.filter(n=>n===cycle).length:0;
      labor.addRow([part.mold_no||part.name,part.name,v.shot_cost*target,target,part.cavity,
-       Number(v.labor_demand),
+       v.direct_labor && part.legacy_shared_mold_key ? formula(usageRefs.get('__shared__:'+part.id)+(v.shared_demand_is_batch?'*'+ref(params.name,'B2'):''),Number(v.labor_demand)) : Number(v.labor_demand),
        formula('F'+r+'/E'+r,v.labor_demand/part.cavity),
        formula('IF(G'+r+'=0,0,(G'+r+'-L'+r+')*K'+r+'/SUMIF('+cycles+',">="&G'+r+','+cav+')/COUNTIF('+cycles+',G'+r+'))',stageCache),
        formula('SUMIF('+cycles+',"<="&G'+r+','+stage+')*E'+r,v.shot_price*v.labor_demand),
-       formula(v.direct_labor ? 'K'+r+'/E'+r : 'IFERROR(I'+r+'/F'+r+',0)',v.shot_price),
+       formula(v.direct_labor && !part.legacy_shared_mold_key ? 'K'+r+'/E'+r : 'IFERROR(I'+r+'/F'+r+',0)',v.shot_price),
        formula('C'+r+'/D'+r,v.shot_cost),
        formula('MAX(0,'+parts.map((_,j)=>'IF(G'+(start+j)+'<G'+r+',G'+(start+j)+',0)').join(',')+')',previous)]);
      laborRefs.set(part.id,ref(labor.name,'J'+r));
@@ -85,12 +85,17 @@ async function addTemplateDetails(wb,args,result){
    const injection=JSON.parse(sections.find(s=>s.dept==='molding')?.payload_json||'{}').injection||[];
    injectionByProduct.set(p.code,injection);
    for(const sheet of copies){
-     let priceCol=0,nameCol=0;
+     let priceCol=0,nameCol=0,sequenceCol=0,insideInjection=false;
      sheet.eachRow(row=>{
-       row.eachCell((cell,c)=>{if(typeof cell.value==='string' && /^啤价 HK/.test(cell.value))priceCol=c;if(cell.value==='模具名称')nameCol=c;});
-       if(!priceCol||!nameCol)return;
-       const part=injection.find(x=>x.name===row.getCell(nameCol).value);
-       if(part?.catalog_part_id){const link=laborRefs.get(part.catalog_part_id),usage=usageRefs.get(p.id+':'+part.catalog_part_id);if(link&&usage)row.getCell(priceCol).value=formula(link+'*'+usage,part.shot_price);}
+       let nextPrice=0,nextName=0,nextSequence=0;
+       row.eachCell((cell,c)=>{if(typeof cell.value==='string' && /^啤价 HK/.test(cell.value))nextPrice=c;if(cell.value==='模具名称')nextName=c;if(cell.value==='序号')nextSequence=c;});
+       if(nextPrice&&nextName&&nextSequence){priceCol=nextPrice;nameCol=nextName;sequenceCol=nextSequence;insideInjection=true;return;}
+       if(!insideInjection)return;
+       const sequence=row.getCell(sequenceCol).value;
+       if(!Number.isInteger(sequence)||sequence<1){insideInjection=false;return;}
+       const part=injection[sequence-1];
+       if(!part||String(part.name||'')!==String(row.getCell(nameCol).value||''))throw new Error('注塑行序号与零件不一致');
+       if(part.catalog_part_id){const link=laborRefs.get(part.catalog_part_id),usage=usageRefs.get(p.id+':'+part.catalog_part_id);if(link&&usage)row.getCell(priceCol).value=formula(link+'*'+usage,part.shot_price);}
      });
    }
    const main=copies[0],cells={},amortRefs=[];

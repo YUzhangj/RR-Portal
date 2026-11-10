@@ -82,16 +82,27 @@ function consolidateMixedWorkbook(wb,quote) {
   }
   if(labor&&injection){
     const key=(mold,part)=>JSON.stringify([String(mold||part||'').trim(),String(part||'').trim()]);
-    const targets=new Map();
+    const targets=new Map(), legacyTargets=new Map();
     injection.eachRow(r=>{if(r.number>1&&r.getCell(1).value!=='总合计'){
-      const k=key(r.getCell(1).value,r.getCell(2).value);
-      if(targets.has(k))throw Error('注塑零件存在重复模号及名称，无法对应啤工计算');
-      targets.set(k,r.number);
+      // The price formula was linked by catalog_part_id before the unique-part
+      // projection. Its labor row survives XLSX save/reopen and disambiguates
+      // identical names from different files/sheets without guessing ownership.
+      const formula=molding?.getCell(r.number,9).formula || '';
+      const rows=[...new Set([...formula.matchAll(/'封穴啤工计算'!\$?J\$?(\d+)/g)].map(match=>Number(match[1])))];
+      if(rows.length>1)throw Error('注塑零件引用多个啤工计算行');
+      if(rows.length===1){
+        if(targets.has(rows[0]))throw Error('同一啤工计算行引用多个注塑零件');
+        targets.set(rows[0],r.number);
+      }else{
+        const k=key(r.getCell(1).value,r.getCell(2).value);
+        if(legacyTargets.has(k))throw Error('注塑零件存在重复模号及名称，无法对应啤工计算');
+        legacyTargets.set(k,r.number);
+      }
     }});
     for(let col=3;col<=12;col++)injection.getCell(1,col+12).value=labor.getCell(1,col).value;
     labor.eachRow(r=>{
       if(r.number===1)return;
-      const target=targets.get(key(r.getCell(1).value,r.getCell(2).value));
+      const target=targets.get(r.number) || legacyTargets.get(key(r.getCell(1).value,r.getCell(2).value));
       if(!target)throw Error('啤工计算找不到对应注塑零件：'+r.getCell(2).value);
       for(let col=3;col<=12;col++){
         const source=r.getCell(col),dest=injection.getCell(target,col+12);

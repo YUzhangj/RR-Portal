@@ -200,9 +200,10 @@ function lookupMaterialPrice(material, grade, prices) {
     });
     return match;
   }
+  const catalogMoldGroupKey = part => part.legacy_shared_mold_key || String(part.mold_no || '').trim();
   function catalogMoldParts(root, part) {
     const mold = String(part.mold_no || '').trim();
-    const peers = mold ? (root.parts_catalog?.parts || []).filter(p => String(p.mold_no || '').trim() === mold) : [];
+    const peers = mold ? (root.parts_catalog?.parts || []).filter(p => catalogMoldGroupKey(p) === catalogMoldGroupKey(part)) : [];
     return peers.length ? peers : [part];
   }
   function catalogMoldField(root, part, key) {
@@ -211,8 +212,8 @@ function lookupMaterialPrice(material, grade, prices) {
         key === 'machine_model' ? String(value).replace(/\s+/g,'').toUpperCase() : Number.isFinite(Number(value)) ? String(Number(value)) : String(value)))];
     return {value:values.length === 1 ? values[0] : '', conflict:values.length > 1};
   }
-  const catalogMoldParameterKey = part => String(part.mold_no || '').trim()
-    ? 'mold:' + String(part.mold_no).trim() : 'part:' + part.id;
+  const catalogMoldParameterKey = part => part.legacy_shared_mold_key || (String(part.mold_no || '').trim()
+    ? 'mold:' + String(part.mold_no).trim() : 'part:' + part.id);
   function updateCatalogMoldField(root, part, key, value) {
     if (!['machine_model','target'].includes(key)) throw new Error('不支持的共用模具参数');
     const peers = catalogMoldParts(root, part);
@@ -235,11 +236,18 @@ function lookupMaterialPrice(material, grade, prices) {
     const match = catalogMachineReference(root, part);
     return match?.price ?? (root.mixed_molds || []).find(m => m.mold_no === part.mold_no)?.machine_price;
   }
+  function activePricingCatalog(root) {
+    const catalog = root.parts_catalog;
+    const selected = new Set(Object.values(catalog.selections || {}).flatMap(refs => refs.map(ref => ref.part_id)));
+    return {...root, parts_catalog: {...catalog,
+      parts: catalog.parts.filter(part => !part.legacy_shared_owned || selected.has(part.id))}};
+  }
   function automaticCatalogLabor(root, config, qty) {
+    root = activePricingCatalog(root);
     const groups = new Map(), result = new Map();
     const catalog = root.parts_catalog;
     for (const part of catalog.parts) {
-      const key = String(part.mold_no || '').trim() || part.id;
+      const key = catalogMoldGroupKey(part) || part.id;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(part);
     }
@@ -249,6 +257,9 @@ function lookupMaterialPrice(material, grade, prices) {
       const sharedModel = catalogMoldField(root, parts[0], 'machine_model');
       const sharedTarget = catalogMoldField(root, parts[0], 'target');
       if (sharedModel.conflict || sharedTarget.conflict) throw new Error(key + ' 同模具的机型和日产啤次必须一致，请统一填写');
+      const sharedDemandIsBatch = parts.some(part => Object.entries(catalog.selections || {}).some(([id, refs]) =>
+        id !== '__shared__' && refs.some(ref => ref.part_id === part.id)));
+      const sharedDemandScale = sharedDemandIsBatch ? qty : 1;
       const jobs = parts.map(part => {
         const model = String(sharedModel.value).replace(/\s+/g, '').toUpperCase();
         const matched = rates.find(r => {
@@ -264,6 +275,11 @@ function lookupMaterialPrice(material, grade, prices) {
         const sharedRef = catalog.selections?.__shared__?.find(r => r.part_id === part.id);
         const usedByProduct = Object.entries(catalog.selections || {}).some(([id, refs]) =>
           id !== '__shared__' && refs.some(r => r.part_id === part.id));
+        if (sharedRef && !usedByProduct && part.legacy_shared_mold_key) {
+          const scale = number(sharedDemandScale, part.name + ' 出货包装数量', true);
+          const demand = number(sharedRef.usage, part.name + ' 每包装用量', true) * scale;
+          return { part, price, target, cavity, demand, cycles: demand / cavity, total: 0, direct_labor: true, shared_demand_scale: scale, shared_demand_is_batch: sharedDemandIsBatch };
+        }
         if (sharedRef && !usedByProduct) {
           result.set(part.id, { unit_labor: price / target / cavity, shot_cost: price / target,
             machine_price: price, demand: 0, direct_labor: true });
@@ -283,14 +299,15 @@ function lookupMaterialPrice(material, grade, prices) {
         active.forEach(j => { j.total += (end-previous)*shot*j.cavity/cavities; });
         previous = end;
       }
-      jobs.forEach(j => result.set(j.part.id, { unit_labor: j.demand ? j.total/j.demand : 0, shot_cost: shot, machine_price: j.price, demand: j.demand }));
+      jobs.forEach(j => result.set(j.part.id, { unit_labor: j.demand ? j.total/j.demand : 0, shot_cost: shot, machine_price: j.price, demand: j.demand, direct_labor: !!j.direct_labor, shared_demand_scale: j.shared_demand_scale ?? 1, shared_demand_is_batch: !!j.shared_demand_is_batch }));
     }
     return result;
   }
 
   function catalogRows(root, config, qty) {
-    const catalog = root.parts_catalog;
+    let catalog = root.parts_catalog;
     if (!catalog || catalog.version !== 1 || !Array.isArray(catalog.parts)) throw new Error('统一零件资料无效');
+    root = activePricingCatalog(root); catalog = root.parts_catalog;
     const automatic = automaticCatalogLabor(root, config, qty);
     const ids = new Set(), resolved = new Map();
     for (const part of catalog.parts) {
@@ -299,7 +316,7 @@ function lookupMaterialPrice(material, grade, prices) {
       if (!String(part.name || '').trim()) throw new Error('请填写零件名称');
       const calculated = automatic.get(part.id);
       const labor = calculated.unit_labor;
-      resolved.set(part.id, { ...part, machine: catalogMachineReference(root, part)?.normal || part.machine || '', note: String(part.note || '').replace(/啤工沿用原表核定值[^。]*。?/g, '').replace(/啤工由共模分摊自动计入。?/g, '').replace(/按原表K\d+材料价、J\d+啤工[^。]*。?/g, '') + '；啤工按需求完成后封穴自动计算，原表啤价不参与。', shot_price: labor, shot_cost: calculated.shot_cost, effective_machine_price: calculated.machine_price, labor_demand: calculated.demand, direct_labor: !!calculated.direct_labor, production_demand: productionDemand(root, part),
+      resolved.set(part.id, { ...part, machine: catalogMachineReference(root, part)?.normal || part.machine || '', note: String(part.note || '').replace(/啤工沿用原表核定值[^。]*。?/g, '').replace(/啤工由共模分摊自动计入。?/g, '').replace(/按原表K\d+材料价、J\d+啤工[^。]*。?/g, '') + '；啤工按需求完成后封穴自动计算，原表啤价不参与。', shot_price: labor, shot_cost: calculated.shot_cost, effective_machine_price: calculated.machine_price, labor_demand: calculated.demand, direct_labor: !!calculated.direct_labor, shared_demand_scale: calculated.shared_demand_scale ?? 1, shared_demand_is_batch: !!calculated.shared_demand_is_batch, production_demand: productionDemand(root, part),
         weight_g: number(part.weight_g ?? 0, `${part.name} 重量`),
         material_unit_price: catalogMaterialPrice(root, part),
         loss_pct: number(part.loss_pct ?? 3, `${part.name} 料损`) });
@@ -361,6 +378,105 @@ function lookupMaterialPrice(material, grade, prices) {
     }
     return root;
   }
+  // Older shared imports were saved as molds, outside the unified parts list.
+  // Resolve them on both client and server; do not require a destructive re-import.
+  function syncLegacySharedMolds(catalog, engineering) {
+    const deleted = new Set(engineering?.mixed_deleted_part_ids || []);
+    const explicitShared = Object.hasOwn(engineering?.mixed_part_selections || {}, '__shared__');
+    const sharedRefs = catalog.selections.__shared__ || [];
+    const productIds = new Set(Object.entries(catalog.selections).filter(([key]) => key !== '__shared__')
+      .flatMap(([, refs]) => refs.map(ref => ref.part_id)));
+    const occurrences = new Map(), parentOccurrences = new Map(), claimed = new Set();
+    const encode = value => value.split('').map(char => char.charCodeAt(0).toString(16).padStart(4, '0')).join('');
+    const revision = engineering?.mixed_shared?.mold_import_revision || 0;
+    for (const mold of engineering?.mixed_shared?.molds || []) {
+      const parentKey = JSON.stringify([revision, mold.id || '', mold.source_file || '',
+        mold.source_sheet || mold._sheet_name || '', mold._sheet_index ?? '', mold.mold_no || '', mold.name || '']);
+      const parentOccurrence = parentOccurrences.get(parentKey) || 0;
+      parentOccurrences.set(parentKey, parentOccurrence + 1);
+      for (const part of mold.parts?.length ? mold.parts : [mold]) {
+        const incoming = inheritMoldFields({
+          ...part, mold_no: mold.mold_no || part.mold_no || '',
+          name: part.name || mold.name || '', material: part.material || mold.material || '',
+          color: part.color || mold.color || '', images: part.images?.length ? part.images : mold.images || [],
+          source_file: part.source_file || mold.source_file || '',
+          source_sheet: part.source_sheet || part._sheet_name || mold.source_sheet || mold._sheet_name || '',
+          source_sheet_index: part.source_sheet_index ?? part._sheet_index ?? mold.source_sheet_index ?? mold._sheet_index ?? '',
+        }, mold);
+        if (!incoming.name || isNonMoldPart(incoming)) continue;
+        const key = JSON.stringify([parentKey, parentOccurrence, part.id || '', incoming.source_file, incoming.source_sheet, incoming.source_sheet_index,
+          incoming.mold_no, incoming.name, incoming.material, incoming.color,
+          incoming.injection_run_id || '', incoming.injection_run_part_index ?? '']);
+        const occurrence = occurrences.get(key) || 0;
+        occurrences.set(key, occurrence + 1);
+        const id = 'legacy_shared_' + encode(key) + '_' + occurrence;
+        if (deleted.has(id) || (part.id && deleted.has(part.id))) continue;
+        let existing = catalog.parts.find(row => row.id === id || (part.id && row.id === part.id));
+        if (!existing) {
+          // Old imports may have no ID. Match a unique, complete specification,
+          // never a product-owned row or one already claimed by another source.
+          const matches = catalog.parts.filter(row => !claimed.has(row.id) && !productIds.has(row.id)
+            && !row.legacy_shared_owned
+            && ['mold_no', 'name', 'material', 'color'].every(field => String(row[field] || '') === String(incoming[field] || ''))
+            && ['weight_g', 'cavity'].every(field => row[field] != null && incoming[field] != null && Number(row[field]) === Number(incoming[field]))
+            && ['source_file', 'injection_run_id'].every(field => !row[field] || !incoming[field] || row[field] === incoming[field])
+            && (() => {
+              const oldSheet = row.source_sheet || row._sheet_name || '';
+              const oldIndex = row.source_sheet_index ?? row._sheet_index ?? '';
+              return (!oldSheet || !incoming.source_sheet || oldSheet === incoming.source_sheet)
+                && (oldIndex === '' || incoming.source_sheet_index === '' || String(oldIndex) === String(incoming.source_sheet_index));
+            })());
+          if (matches.length > 1) continue;
+          existing = matches[0];
+        }
+        if (existing && deleted.has(existing.id)) continue;
+        const created = !existing;
+        if (created) {
+          // An explicit composition is authoritative, including an empty list.
+          if (explicitShared && !sharedRefs.some(ref => ref.part_id === id || (part.id && ref.part_id === part.id))) continue;
+          existing = { ...incoming, id, engineering_source: true, legacy_shared_owned: true };
+          catalog.parts.push(existing);
+        }
+        claimed.add(existing.id);
+        // Explicitly shared product IDs keep their original production group.
+        if (!productIds.has(existing.id) && (created || existing.legacy_shared_owned || sharedRefs.some(ref => ref.part_id === existing.id))) existing.legacy_shared_mold_key = 'shared_mold_' + encode(JSON.stringify([
+          parentKey, parentOccurrence, incoming.source_file, incoming.source_sheet, incoming.source_sheet_index, incoming.injection_run_id || ''
+        ]));
+        existing.legacy_shared_source_key = id;
+        for (const [field, value] of Object.entries(incoming)) {
+          if ((existing[field] == null || existing[field] === '') && value != null && value !== '') existing[field] = value;
+        }
+        // Only genuinely separate legacy rows inherit the old one-per-pack
+        // behavior. Existing unselected catalog rows still need confirmation.
+        if (!explicitShared && (created || existing.legacy_shared_owned)) {
+          const refs = catalog.selections.__shared__ ||= [];
+          if (!refs.some(ref => ref.part_id === existing.id)) refs.push({ part_id: existing.id, usage: 1 });
+        }
+      }
+    }
+  }
+  // Called only by the shared editor's explicit replacement action. A partial
+  // source list encountered during a read must never delete saved catalog rows.
+  function replaceLegacySharedMolds(engineering, molding, nextMolds) {
+    const root = JSON.parse(JSON.stringify(engineering));
+    const previous = engineeringCatalog(molding, root);
+    const catalog = previous.parts_catalog;
+    if (!catalog) { root.mixed_shared ||= {}; root.mixed_shared.molds = nextMolds; return root; }
+    const oldIds = new Set(catalog.parts.filter(part => part.legacy_shared_source_key).map(part => part.id));
+    const productIds = new Set(Object.entries(catalog.selections).filter(([key]) => key !== '__shared__')
+      .flatMap(([, refs]) => refs.map(ref => ref.part_id)));
+    root.mixed_deleted_part_ids = [...new Set([...(root.mixed_deleted_part_ids || []),
+      ...catalog.parts.filter(part => oldIds.has(part.id) && part.legacy_shared_owned && !productIds.has(part.id)).map(part => part.id)])];
+    catalog.selections.__shared__ = (catalog.selections.__shared__ || []).filter(ref => !oldIds.has(ref.part_id));
+    root.mixed_shared ||= {};
+    root.mixed_shared.molds = JSON.parse(JSON.stringify(nextMolds));
+    root.mixed_shared.mold_import_revision = (Number(root.mixed_shared.mold_import_revision) || 0) + 1;
+    root.mixed_part_selections ||= JSON.parse(JSON.stringify(catalog.selections));
+    delete root.mixed_part_selections.__shared__;
+    const next = engineeringCatalog(previous, root);
+    root.mixed_part_selections.__shared__ = next.parts_catalog.selections.__shared__ || [];
+    return root;
+  }
   function engineeringCatalog(root, engineering) {
     const copy = JSON.parse(JSON.stringify(root));
     if (!copy.parts_catalog && engineering?.mixed_imported_parts?.length) copy.parts_catalog = { version: 1, parts: [], selections: {} };
@@ -373,9 +489,15 @@ function lookupMaterialPrice(material, grade, prices) {
         else Object.assign(existing, updateEngineeringFields(existing, inherited));
         (existing || copy.parts_catalog.parts[copy.parts_catalog.parts.length - 1]).engineering_source = true;
       }
-      if (engineering?.mixed_part_selections) copy.parts_catalog.selections = JSON.parse(JSON.stringify(engineering.mixed_part_selections));
+      if (engineering?.mixed_part_selections) {
+        const previousShared = copy.parts_catalog.selections?.__shared__;
+        copy.parts_catalog.selections = JSON.parse(JSON.stringify(engineering.mixed_part_selections));
+        if (!Object.hasOwn(engineering.mixed_part_selections, '__shared__') && previousShared)
+          copy.parts_catalog.selections.__shared__ = previousShared;
+      }
+      copy.parts_catalog.selections ||= {};
+      syncLegacySharedMolds(copy.parts_catalog, engineering);
       const deleted = new Set(engineering?.mixed_deleted_part_ids || []);
-      const sourceIds = new Set((engineering?.mixed_imported_parts || []).map(p => p.id));
       // 旧导入保留了附录标题时，只清理同来源后续的序号说明行。
       const appendixSources = new Set();
       for (const p of copy.parts_catalog.parts) {
@@ -386,9 +508,8 @@ function lookupMaterialPrice(material, grade, prices) {
       }
 
       for (const p of copy.parts_catalog.parts) {
-        const owned = p.engineering_source || /^(numbered_|upload_)/.test(p.id || '');
-        if (isNonMoldPart({...p, ...(engineering?.mixed_part_edits?.[p.id] || {})}) ||
-            (Array.isArray(engineering?.mixed_imported_parts) && owned && !sourceIds.has(p.id))) deleted.add(p.id);
+        // Missing from an old/partial source list is not a deletion request.
+        if (isNonMoldPart({...p, ...(engineering?.mixed_part_edits?.[p.id] || {})})) deleted.add(p.id);
       }
       copy.parts_catalog.parts = copy.parts_catalog.parts.filter(p => !deleted.has(p.id)).map(p => ({...p, ...(engineering?.mixed_part_edits?.[p.id] || {})}));
       copy.parts_catalog.parts.forEach(p => {
@@ -475,5 +596,5 @@ function lookupMaterialPrice(material, grade, prices) {
     if (Math.abs(columns.other) < 1e-10) columns.other = 0;
     return { columns, labels, total: base.total };
   }
-  return { catalogMoldParts, catalogMoldField, updateCatalogMoldField, prepareMoldImport, isNonMoldPart, updateEngineeringFields, pricingWeights, ratioValue, catalogMachineReference, DEFAULT_MACHINE_PRICES, catalogMachinePrice, inheritMoldFields, engineeringCatalogRows, DEFAULT_MATERIAL_PRICES, lookupMaterialPrice, materialPricePerGram, catalogMaterialPrice, productionDemand, automaticCatalogLabor, validateConfig, weights, calculate, number, enableCatalog, catalogRows, applyCatalog, engineeringCatalog, costBreakdown, dynamicCostBreakdown };
+  return { replaceLegacySharedMolds, catalogMoldGroupKey, catalogMoldParts, catalogMoldField, updateCatalogMoldField, prepareMoldImport, isNonMoldPart, updateEngineeringFields, pricingWeights, ratioValue, catalogMachineReference, DEFAULT_MACHINE_PRICES, catalogMachinePrice, inheritMoldFields, engineeringCatalogRows, DEFAULT_MATERIAL_PRICES, lookupMaterialPrice, materialPricePerGram, catalogMaterialPrice, productionDemand, automaticCatalogLabor, validateConfig, weights, calculate, number, enableCatalog, catalogRows, applyCatalog, engineeringCatalog, costBreakdown, dynamicCostBreakdown };
 });
