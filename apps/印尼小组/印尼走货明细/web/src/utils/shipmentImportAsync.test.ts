@@ -22,7 +22,7 @@ function component(parsed: { rows: ShipmentImportRow[]; warnings: string[]; load
   const imageReview = { confirm: vi.fn() }
   const original = { id: 1, product_code: 'A', name_zh: '合成A', supplier: '合成供应商', image: 'original-local-image' }
   let props = { existing: [{ material_id: 1, material_snapshot: original, outbound_id: 22, qty: 7, kg: 3, price: 5, currency: 'US$', cartons: 1 }],
-    materials: new Map([[1, original]]), onImport: vi.fn((_rows: ShipmentImportItem[], _targets: number[], _reviewed?: readonly (number | undefined)[]) => true) }
+    materials: new Map([[1, original]]), onImport: vi.fn<(rows: ShipmentImportItem[], targets: number[], reviewed?: readonly (number | undefined)[]) => boolean>(() => true) }
   const context = createContext({
     React: { Fragment: 'Fragment', createElement: (type: unknown, attributes: object, ...children: unknown[]) => ({ type, props: { ...attributes, children } }) },
     App: { useApp: () => ({ message, modal: imageReview }) },

@@ -11,10 +11,28 @@ import { parseShipmentWorkbook } from './shipmentImport'
 
 it.each([
   ['TNE', .028, 28], ['吨', .028, 28], ['TON', .028, 28],
-  ['KGM', 28, 28], ['KG', 28, 28], ['KGM', 0, 0],
+  ['KGM', 28, .028], ['KG', 28, .028], ['KGM', 0, .028],
   ['PCE', 20, .028], ['SET', 20, .028],
 ] as const)('申报%s=%s，实物净重为%s千克', (unit_kg, kg, expected) => {
   expect(shipmentNetTotalKg({ qty: 20000, kg }, { unit_kg, name_zh: '纸绳1.5MM', net_per_pc: .0014 })).toBeCloseTo(expected)
+})
+
+it.each(['KGM', 'KG', 'KGS', '千克', '公斤'])('%s申报数量冲突或为零仍保留原物理净重', unit_kg => {
+  const material = { unit_kg, net_per_pc: .2 }
+  for (const kg of [.25, 0]) {
+    expect(shipmentNetTotalKg({ qty: 100, kg }, material)).toBe(20)
+  }
+})
+
+it.each(['TNE', 'TON', '吨'])('%s净重换算不改已保存申报量、单重或采购金额', unit_kg => {
+  const item = { outbound_id: 7, qty: 20000, kg: .028, price: .01, purchase_unit: '个' }
+  const material = { unit_kg, name_zh: '纸绳1.5MM', net_per_pc: .0014 }
+  const original = structuredClone({ item, material })
+  const paidAmount = shipmentPurchaseAmount(item)
+  expect(shipmentNetTotalKg(item, material)).toBe(28)
+  expect({ item, material }).toEqual(original)
+  expect(shipmentPurchaseAmount(item)).toBe(paidAmount)
+  expect(paidAmount).toBe(200)
 })
 
 it('逐批申报四舍五入不抹掉更精确的实物净重', () => {
