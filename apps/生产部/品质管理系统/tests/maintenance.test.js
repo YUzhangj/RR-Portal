@@ -22,14 +22,14 @@ test('a request body cannot pass its write boundary after maintenance is enabled
   await assert.rejects(pending, error => error.status === 503 && /修复中/.test(error.message));
 });
 
-function browser({ legacy = false } = {}) {
-  const nodes = Object.fromEntries(['qcMaintenance','qcMaintenanceRetry','qcMaintenanceTitle','qcMaintenanceMessage','qcMaintenanceRefresh','appWrapper','loginScreen']
+function browser({ legacy = false, initialFailed = false } = {}) {
+  const nodes = Object.fromEntries(['qcMaintenance','qcMaintenanceRetry','qcMaintenanceTitle','qcMaintenanceMessage','qcMaintenanceRefresh','qcConnectionNotice','qcConnectionRetry','appWrapper','loginScreen']
     .map(id => [id, { id, hidden: false, textContent: '', inert: false }]));
-  if (legacy) delete nodes.qcMaintenanceRetry;
+  if (legacy) ['qcMaintenanceRetry','qcConnectionNotice','qcConnectionRetry'].forEach(id=>delete nodes[id]);
   nodes.qcMaintenance.contains = target => Object.values(nodes).some(node =>
     node === target && node.id.startsWith('qcMaintenance'));
   const events = {}, calls = [], storage = { pendingDraft: 'original draft' };
-  let enabled = false, failed = false, response = null, poll, reloads = 0;
+  let enabled = false, failed = initialFailed, response = null, poll, reloads = 0;
   const s = { window: { addEventListener() {} }, location: { pathname: '/qc/index.html', reload() { reloads++; } },
     AbortController, setTimeout() { return 1; }, clearTimeout() {}, setInterval(fn) { poll = fn; },
     document: { activeElement: null, getElementById: id => nodes[id] || null, addEventListener(name, fn) { (events[name] ||= []).push(fn); } },
@@ -68,12 +68,13 @@ test('maintenance locks existing UI, preserves drafts and requires deliberate re
 test('retry checks the connection without refreshing or discarding the current form', async () => {
   const b = browser(); b.events.DOMContentLoaded.forEach(fn=>fn()); await tick();
   b.failed = true; b.poll(); await tick();
-  assert.equal(b.nodes.qcMaintenanceRetry.hidden,false);
+  assert.equal(b.nodes.qcConnectionNotice.hidden,false);
+  assert.equal(b.nodes.qcMaintenance.hidden,true);
   assert.equal(b.nodes.qcMaintenanceRefresh.hidden,true);
   const count=b.calls.length;
-  b.failed=false; b.nodes.qcMaintenanceRetry.onclick();
-  b.nodes.qcMaintenanceRetry.onclick(); // A double click must not start another request.
-  assert.equal(b.nodes.qcMaintenanceRetry.disabled,true);
+  b.failed=false; b.nodes.qcConnectionRetry.onclick();
+  b.nodes.qcConnectionRetry.onclick(); // A double click must not start another request.
+  assert.equal(b.nodes.qcConnectionRetry.disabled,true);
   assert.equal(b.s.window.__QC_MAINTENANCE.blocked,true);
   await tick();
   assert.equal(b.calls.length,count+1);
@@ -84,8 +85,7 @@ test('retry checks the connection without refreshing or discarding the current f
 });
 
 test('Tab reaches Retry from outside the locked UI without enabling business operations', async () => {
-  const b = browser(); b.events.DOMContentLoaded.forEach(fn => fn()); await tick();
-  b.failed = true; b.poll(); await tick();
+  const b = browser({ initialFailed: true }); b.events.DOMContentLoaded.forEach(fn => fn()); await tick();
   let prevented = 0, stopped = 0;
   const outside = { target: b.nodes.loginScreen, key: 'Tab',
     preventDefault() { prevented++; }, stopImmediatePropagation() { stopped++; } };
@@ -161,13 +161,48 @@ test('gateway maintenance HTML remains a maintenance lock until deliberate refre
   assert.equal(b.s.window.__QC_MAINTENANCE.blocked,true);
   assert.equal(b.reloads,0);
 });
-test('loss of status connection prevents further operations until a healthy status is available', async () => {
+test('repeated status failures pause writes without masking or intercepting an existing form', async () => {
   const b = browser(); await tick(); b.failed = true; b.poll(); await tick();
+  b.poll(); await tick(); b.poll(); await tick();
   assert.equal(b.s.window.__QC_MAINTENANCE.blocked, true);
-  assert.equal(b.nodes.qcMaintenanceTitle.textContent, '暂时无法连接系统');
+  assert.equal(b.nodes.qcMaintenance.hidden,true);
+  assert.equal(b.nodes.qcConnectionNotice.hidden,false);
+  assert.equal(b.nodes.appWrapper.inert,false);
+  let prevented=0;
+  for (const name of ['click','keydown']) b.events[name][0]({target:b.nodes.appWrapper,preventDefault(){prevented++;},stopImmediatePropagation(){}});
+  assert.equal(prevented,0);
+  assert.match(b.s.window.__QC_MAINTENANCE.message,/保存已暂停/);
   b.failed = false; b.poll(); await tick();
   assert.equal(b.s.window.__QC_MAINTENANCE.blocked, false);
   assert.equal(b.nodes.qcMaintenance.hidden, true);
+  assert.equal(b.nodes.qcConnectionNotice.hidden,true);
+  assert.equal(b.reloads,0);
+  assert.equal(b.storage.pendingDraft,'original draft');
+});
+
+test('an unknown initial status still blocks the page; confirmed maintenance immediately replaces the small notice', async () => {
+  const first=browser({initialFailed:true}); await tick();
+  assert.equal(first.nodes.qcMaintenance.hidden,false);
+  assert.equal(first.nodes.appWrapper.inert,true);
+  assert.equal(first.nodes.qcConnectionNotice.hidden,true);
+  const b=browser(); await tick(); b.failed=true; b.poll(); await tick();
+  b.failed=false; b.enabled=true; b.poll(); await tick();
+  assert.equal(b.nodes.qcMaintenance.hidden,false);
+  assert.equal(b.nodes.qcMaintenanceTitle.textContent,'系统修复中');
+  assert.equal(b.nodes.qcConnectionNotice.hidden,true);
+  assert.equal(b.nodes.appWrapper.inert,true);
+  b.failed=true; b.poll(); await tick();
+  assert.equal(b.nodes.qcMaintenanceTitle.textContent,'系统修复中');
+  assert.equal(b.nodes.qcMaintenance.hidden,false);
+});
+
+test('record save stops before reading or changing the form when connection checks have paused writes', () => {
+  const app=fs.readFileSync(path.join(root,'app.js'),'utf8');
+  const start=app.indexOf('function saveRecord('),end=app.indexOf('\nfunction ',start+1);
+  const messages=[],s={window:{__QC_MAINTENANCE:{blocked:true,message:'连接中断，保存已暂停，请重试'}},showToast:m=>messages.push(m)};
+  vm.createContext(s);vm.runInContext(app.slice(start,end),s);
+  assert.equal(s.saveRecord(),false);
+  assert.deepEqual(messages,['连接中断，保存已暂停，请重试']);
 });
 
 test('maintenance blocks local persistence and retry before they can overwrite an existing pending draft', async () => {

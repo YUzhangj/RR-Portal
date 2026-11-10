@@ -4971,6 +4971,9 @@ function _syncFormResult() {
 }
 
 function saveRecord(options = {}) {
+  if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) {
+    showToast(window.__QC_MAINTENANCE.message || '系统修复中，暂时无法操作', 'error'); return false;
+  }
   const ocrSaveContext = window.__qcOcrFormContext || window.__qcQueue?.context;
   if (typeof window.__QC_OCR_CAN_SAVE === 'function' && !window.__QC_OCR_CAN_SAVE(ocrSaveContext)) return false;
   const editingRecord = editingId !== null ? state.records.find(r => r.id === editingId) : null;

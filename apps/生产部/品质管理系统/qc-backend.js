@@ -115,7 +115,7 @@
   window.__QC_CLEAR_AUTH = clearAuth;
   window.__QC_API_URL = apiUrl;
   window.__QC_REQUEST = function (path, options) {
-    if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) return Promise.reject(new Error('系统修复中，暂时无法操作'));
+    if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) return Promise.reject(new Error(window.__QC_MAINTENANCE.message || '系统修复中，暂时无法操作'));
     options = Object.assign({}, options || {});
     options.credentials = 'same-origin';
     options.cache = 'no-store';
@@ -540,7 +540,7 @@
     if (typeof window.persist === 'function' && !window.persist.__qcPatched) {
       var origPersist = window.persist;
       window.persist = function () {
-        if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) { notice('系统修复中，记录未提交，请保留当前页面。', true); return false; }
+        if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) { notice(window.__QC_MAINTENANCE.message || '系统修复中，记录未提交，请保留当前页面。', true); return false; }
         if (!window.__QC_AUTH) { notice('请先登录当前公司，记录尚未保存。', true); return false; }
         if (recoveryIsCurrent()) { notice(recoveryMessage(), true); return false; }
         var ret = origPersist.apply(this, arguments);
