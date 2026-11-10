@@ -24,6 +24,7 @@ export async function POST(request: NextRequest) {
     const {stdout}=await run("python3",[script,input],{maxBuffer:20*1024*1024});
     const rows=JSON.parse(stdout) as MappingRecord[];
     if (!rows.length) return NextResponse.json({error:"未识别到验货映射"},{status:400});
+    const currentAuth=await requireRole(request,["admin"]); if(currentAuth.response)return currentAuth.response;
     await writeMappings(rows);
     return NextResponse.json({filename:file.name,total:rows.length});
   } catch (error) {

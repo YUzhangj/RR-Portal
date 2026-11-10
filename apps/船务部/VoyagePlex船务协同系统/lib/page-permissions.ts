@@ -12,3 +12,7 @@ export function defaultPagePermissions(role: PermissionRole): PageGrants {
   return Object.fromEntries(permissionPages.map(([key]) => [key, role === "admin" || (role === "supervisor" && key !== "mail.recovery") || (role === "shipping" && shipping.includes(key)) || (role === "warehouse" && warehouse.includes(key)) ? "edit" : "none"]));
 }
 export function hasPage(grants: PageGrants, key: string, edit = false) { return grants[key] === "edit" || (!edit && grants[key] === "view"); }
+export function withinPageGrants(target: PageGrants, actor: PageGrants) {
+  const rank = (value?: PagePermission) => value === "edit" ? 2 : value === "view" ? 1 : 0;
+  return permissionPages.every(([key]) => rank(target[key]) <= rank(actor[key]));
+}

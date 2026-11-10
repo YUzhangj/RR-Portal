@@ -10,6 +10,8 @@ export async function POST(request: NextRequest) {
   const rows = await readMappings();
   const value = await request.json() as MappingRecord;
   value.id = rows.reduce((max,row) => Math.max(max,row.id),0) + 1;
-  rows.push(value); await writeMappings(rows);
+  rows.push(value);
+  const currentAuth=await requireRole(request,["admin"]); if(currentAuth.response)return currentAuth.response;
+  await writeMappings(rows);
   return NextResponse.json(value, { status:201 });
 }

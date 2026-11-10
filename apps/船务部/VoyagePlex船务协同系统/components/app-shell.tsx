@@ -26,7 +26,7 @@ import { FactoryMappingManagement } from "@/components/factory-mapping-managemen
 import { TemplateManagement } from "@/components/template-management";
 import { ProductWorkbookImport } from "@/components/product-workbook-import";
 
-import { defaultPagePermissions, hasPage, permissionPages, type PageGrants, type PagePermission } from "@/lib/page-permissions";
+import { defaultPagePermissions, hasPage, withinPageGrants, permissionPages, type PageGrants, type PagePermission } from "@/lib/page-permissions";
 
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
 const apiFetch = (path: string, init?: RequestInit) => fetch(`${basePath}${path}`, init);
@@ -452,8 +452,11 @@ function MailCandidatesWorkspace(){
 }
 
 
+type DashboardTaskData = Pick<ShipmentTaskData, "id"|"customer"|"soNumber"|"containerType"|"plannedShipDate"|"status"|"createdAt"|"updatedAt"> & {
+  inspectionFailed?:boolean; inventoryShortage?:boolean; items?:ShipmentItem[];
+};
 function Dashboard() {
-  const [tasks,setTasks]=useState<ShipmentTaskData[]>([]);
+  const [tasks,setTasks]=useState<DashboardTaskData[]>([]);
   useEffect(()=>{void(async()=>{try{const response=await apiFetch("/api/shipments",{cache:"no-store"});if(response.ok)setTasks(await response.json());}catch{/* 首页保留空状态，避免影响其他操作 */}})();},[]);
   const active=tasks.filter(task=>task.status!=="Cancelled");
   const counts={changes:active.filter(hasTaskChange).length,review:active.filter(task=>task.status==="PendingReview").length,shipment:active.filter(task=>task.status==="PendingShipment").length,completed:active.filter(task=>task.status==="Completed").length};
@@ -476,7 +479,7 @@ function Dashboard() {
 }
 
 const anomalyPriority={scheduleDelay:400,inspectionFailed:300,inventoryShortage:200,changed:100} as const;
-function hasTaskChange(task:ShipmentTaskData){return Boolean(task.updatedAt&&task.createdAt&&new Date(task.updatedAt).getTime()-new Date(task.createdAt).getTime()>1000);}
+function hasTaskChange(task:DashboardTaskData){return Boolean(task.updatedAt&&task.createdAt&&new Date(task.updatedAt).getTime()-new Date(task.createdAt).getTime()>1000);}
 function taskTimeDisplay(task:ShipmentTaskData){
   const modified=hasTaskChange(task);const value=modified?task.updatedAt:task.createdAt;
   if(!value)return {label:modified?"修改":"创建",value:"—"};
@@ -484,12 +487,12 @@ function taskTimeDisplay(task:ShipmentTaskData){
   const pad=(part:number)=>String(part).padStart(2,"0");
   return {label:modified?"修改":"创建",value:`${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`};
 }
-function taskAnomalies(task:ShipmentTaskData){
+function taskAnomalies(task:DashboardTaskData){
   if(task.status==="Completed")return [];
   const today=new Date().toLocaleDateString("sv-SE");const deadline=task.plannedShipDate||"9999-12-31";const result:Array<{reason:string;priority:number;deadline:string}>=[];
   if(task.plannedShipDate&&task.plannedShipDate<today)result.push({reason:"船期延误",priority:anomalyPriority.scheduleDelay,deadline});
-  if(task.items.some(item=>/不通过|未通过|fail|reject/i.test(String(item.inspection_result||item.qc_result||""))))result.push({reason:"验货不过",priority:anomalyPriority.inspectionFailed,deadline});
-  if(task.items.some(item=>item.inventory_quantity!==undefined&&item.inventory_quantity!==""&&Number(item.inventory_quantity)<Number(item.quantity)))result.push({reason:"货品数量不够",priority:anomalyPriority.inventoryShortage,deadline});
+  if(task.inspectionFailed??task.items?.some(item=>/不通过|未通过|fail|reject/i.test(String(item.inspection_result||item.qc_result||""))))result.push({reason:"验货不过",priority:anomalyPriority.inspectionFailed,deadline});
+  if(task.inventoryShortage??task.items?.some(item=>item.inventory_quantity!==undefined&&item.inventory_quantity!==""&&Number(item.inventory_quantity)<Number(item.quantity)))result.push({reason:"货品数量不够",priority:anomalyPriority.inventoryShortage,deadline});
   if(hasTaskChange(task))result.push({reason:"变更时间",priority:anomalyPriority.changed,deadline});
   return result;
 }
@@ -654,7 +657,7 @@ function ShipmentCenter({ route, role }: { route:string; role:UserRole }) {
   </div>;
 }
 
-function CalendarBoard({ tasks }: { tasks:ShipmentTaskData[] }) {
+function CalendarBoard({ tasks }: { tasks:DashboardTaskData[] }) {
   const today = new Date();
   const dateKey = (value:Date) => `${value.getFullYear()}-${String(value.getMonth()+1).padStart(2,"0")}-${String(value.getDate()).padStart(2,"0")}`;
   const [month,setMonth]=useState(`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}`);
@@ -852,6 +855,9 @@ function UserManagement({currentUser}:{currentUser:CurrentUser}){
   const withinActor=(role:UserRole):PageGrants=>{const defaults=defaultPagePermissions(role);if(currentUser.role==="admin")return defaults;const own=currentUser.pagePermissions||defaultPagePermissions(currentUser.role);return Object.fromEntries(Object.entries(defaults).map(([key,value])=>[key,value==="none"||!hasPage(own,key)?"none":hasPage(own,key,true)?value:"view"])) as PageGrants;};
   const empty={username:"",displayName:"",role:"shipping" as UserRole,companyAccess:(currentUser.companyAccess||"Xingxin") as string,password:"",pagePermissions:withinActor("shipping")};
   const canManage=hasPage(currentUser.pagePermissions,"users",true);
+  const canManageUser=(target:CurrentUser)=>canManage&&(currentUser.role==="admin"||(
+    ["shipping","warehouse"].includes(target.role)&&target.companyAccess===currentUser.companyAccess&&
+    withinPageGrants(target.pagePermissions||defaultPagePermissions(target.role),currentUser.pagePermissions||defaultPagePermissions(currentUser.role))));
   const [users,setUsers]=useState<CurrentUser[]>([]);const [draft,setDraft]=useState(empty);const [editing,setEditing]=useState<CurrentUser|null>(null);const [error,setError]=useState("");const [notice,setNotice]=useState("");const [saving,setSaving]=useState(false);
   async function load(){const response=await apiFetch("/api/users",{cache:"no-store"});const result=await readJsonResponse(response);if(!response.ok)throw new Error(result.error||"读取用户失败");setUsers(result);}
   useEffect(()=>{void load().catch(reason=>setError(reason instanceof Error?reason.message:"读取用户失败"));},[]);
@@ -876,7 +882,7 @@ function UserManagement({currentUser}:{currentUser:CurrentUser}){
   return <div className="content"><PageHeading eyebrow="管理员功能" title="用户管理" description="创建系统账号并按岗位分配使用权限。" />
     {canManage&&<form className="panel user-create-form" autoComplete="off" onSubmit={create}><div className="panel-title"><div><h2>新增用户</h2><p>账号创建后即可登录系统</p></div></div><div className="user-form-grid"><label><span>登录账号</span><input value={draft.username} onChange={event=>setDraft({...draft,username:event.target.value.toLowerCase()})} name="new-user-account" autoComplete="off" required/></label><label><span>姓名</span><input name="new-user-display-name" autoComplete="off" value={draft.displayName} onChange={event=>setDraft({...draft,displayName:event.target.value})} required/></label><label><span>角色</span><select value={draft.role} onChange={event=>{const role=event.target.value as UserRole;setDraft({...draft,role,pagePermissions:withinActor(role)});}}><option value="shipping">船务员</option><option value="warehouse">仓库文员</option>{currentUser.role==="admin"&&<><option value="supervisor">主管</option><option value="admin">管理员</option></>}</select></label><label><span>公司权限</span><select disabled={currentUser.role!=="admin"} value={draft.companyAccess} onChange={event=>setDraft({...draft,companyAccess:event.target.value})}><option value="Xingxin">兴信</option><option value="Huadeng">华登</option></select></label><label><span>初始密码</span><input type="password" name="new-user-password" autoComplete="new-password" value={draft.password} onChange={event=>setDraft({...draft,password:event.target.value})} minLength={8} required/></label><button className="primary-button" disabled={saving}>{saving?"创建中…":"新增用户"}</button></div><PermissionEditor role={draft.role} actor={currentUser} value={draft.pagePermissions} onChange={pagePermissions=>setDraft({...draft,pagePermissions})}/></form>}
     {(error||notice)&&<div className={error?"form-error page-message":"form-notice page-message"}>{error||notice}</div>}
-    <section className="panel user-list"><div className="panel-title"><div><h2>系统用户</h2><p>共 {users.length} 个账号</p></div></div><div className="data-table"><div className="data-row header"><span>用户</span><span>角色</span><span>状态</span><span>最后登录</span><span>操作</span></div>{users.map(user=><div className="data-row" key={user.id}><span><b>{user.displayName}</b><small>{user.username}</small>{user.mailboxAddress&&<small>{user.mailboxAddress}</small>}</span><span>{roleLabel(user.role)}<small>{user.role==="admin"||user.companyAccess==="Both"?"兴信和华登":user.companyAccess==="Huadeng"?"华登":"兴信"}</small></span><span><b className={`status ${user.isActive?"ok":"danger"}`}>{user.isActive?"启用":"停用"}</b></span><span>{user.lastLoginAt?new Date(user.lastLoginAt).toLocaleString("zh-CN"):"尚未登录"}</span><span className="user-actions">{canManage&&<><button className="table-action" onClick={()=>{setEditing({...user});}}>编辑</button><button className="table-action" disabled={saving} onClick={()=>void resetPassword(user)}>重置密码</button><button className="table-action danger-text" disabled={user.id===currentUser.id} onClick={()=>void toggle(user)}>{user.isActive?"停用":"启用"}</button></>}</span></div>)}</div></section>
+    <section className="panel user-list"><div className="panel-title"><div><h2>系统用户</h2><p>共 {users.length} 个账号</p></div></div><div className="data-table"><div className="data-row header"><span>用户</span><span>角色</span><span>状态</span><span>最后登录</span><span>操作</span></div>{users.map(user=><div className="data-row" key={user.id}><span><b>{user.displayName}</b><small>{user.username}</small>{user.mailboxAddress&&<small>{user.mailboxAddress}</small>}</span><span>{roleLabel(user.role)}<small>{user.role==="admin"||user.companyAccess==="Both"?"兴信和华登":user.companyAccess==="Huadeng"?"华登":"兴信"}</small></span><span><b className={`status ${user.isActive?"ok":"danger"}`}>{user.isActive?"启用":"停用"}</b></span><span>{user.lastLoginAt?new Date(user.lastLoginAt).toLocaleString("zh-CN"):"尚未登录"}</span><span className="user-actions">{!canManageUser(user)&&<small>仅可查看</small>}{canManageUser(user)&&<><button className="table-action" onClick={()=>{setEditing({...user});}}>编辑</button><button className="table-action" disabled={saving} onClick={()=>void resetPassword(user)}>重置密码</button><button className="table-action danger-text" disabled={user.id===currentUser.id} onClick={()=>void toggle(user)}>{user.isActive?"停用":"启用"}</button></>}</span></div>)}</div></section>
     {editing&&<div className="modal-backdrop"><form className="modal-card user-edit-modal" onSubmit={saveEdit}><h2>编辑用户</h2><p>{editing.username}</p><label><span>姓名</span><input value={editing.displayName} onChange={event=>setEditing({...editing,displayName:event.target.value})} required/></label><label><span>角色</span><select value={editing.role} onChange={event=>{const role=event.target.value as UserRole;setEditing({...editing,role,pagePermissions:withinActor(role)});}}><option value="shipping">船务员</option><option value="warehouse">仓库文员</option>{currentUser.role==="admin"&&<><option value="supervisor">主管</option><option value="admin">管理员</option></>}</select></label><label><span>公司权限</span><select disabled={currentUser.role!=="admin"} value={editing.companyAccess||"Xingxin"} onChange={event=>setEditing({...editing,companyAccess:event.target.value as "Xingxin"|"Huadeng"|"Both"})}><option value="Xingxin">兴信</option><option value="Huadeng">华登</option></select></label>{(editing.companyAccess==="Huadeng"||editing.companyAccess==="Both"||editing.role==="admin")&&<fieldset className="personal-mailbox-fields"><legend>华登邮箱绑定</legend><label><span>邮箱地址</span><input type="email" value={editing.mailboxAddress||""} onChange={event=>{setEditing({...editing,mailboxAddress:event.target.value});}}/></label><small>服务器管理员在后台按此用户账号配置邮箱服务器、文件夹和授权码；这里仅绑定邮箱地址。留空邮箱地址可解除绑定。</small></fieldset>}<PermissionEditor role={editing.role} actor={currentUser} value={editing.pagePermissions} onChange={pagePermissions=>setEditing({...editing,pagePermissions})}/><label className="checkbox-label"><input type="checkbox" checked={editing.isActive} disabled={editing.id===currentUser.id} onChange={event=>setEditing({...editing,isActive:event.target.checked})}/>账号启用</label><div className="modal-actions"><button type="button" className="ghost-button" onClick={()=>setEditing(null)}>取消</button><button className="primary-button" disabled={saving}>保存</button></div></form></div>}
   </div>;
 }

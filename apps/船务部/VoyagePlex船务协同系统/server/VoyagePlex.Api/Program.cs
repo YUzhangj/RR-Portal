@@ -183,7 +183,7 @@ var validRoles = new[] { "admin", "supervisor", "shipping", "warehouse" };
 
 app.Use(async (context, next) =>
 {
-    var path = context.Request.Path.Value ?? "";
+    var path = PagePermissions.NormalizePath(context.Request.Path.Value ?? "");
     var anonymous = path is "/api/health" or "/api/auth/login" or "/api/auth/setup-status" or "/api/auth/setup" or "/api/auth/sso" ||
         (app.Environment.IsDevelopment() && path.StartsWith("/swagger", StringComparison.Ordinal));
     if (anonymous) { await next(); return; }
@@ -228,14 +228,7 @@ app.Use(async (context, next) =>
             if (owner is null) context.Response.Cookies.Delete("voyageplex_mail_owner", new CookieOptions { Path = "/" });
             else db.MailOwnerId = owner.Id;
         }
-        // Candidate browsing is read-only, including when this mailbox has no settings yet.
-        if (!(HttpMethods.IsGet(context.Request.Method) &&
-              path.TrimEnd('/').Equals("/api/imports/email/mailbox/failed", StringComparison.OrdinalIgnoreCase)) &&
-            !await db.MailSystemSettings.AnyAsync())
-        {
-            db.MailSystemSettings.Add(new MailSystemSetting { Id = db.CompanySettingId, DailyWorkflowVersion = DailyMailRules.WorkflowVersion });
-            await db.SaveChangesAsync();
-        }
+
     }
     context.Items["CurrentUser"] = session.User;
     db.CurrentUserId = session.User.Id;
@@ -255,14 +248,17 @@ app.Use(async (context, next) =>
         (role == "warehouse" && (path.StartsWith("/api/inventory", StringComparison.Ordinal) || (path == "/api/export-templates/available" && context.Request.Method == "GET"))) || path is "/api/auth/me" or "/api/auth/logout";
     if (!allowed) { context.Response.StatusCode = StatusCodes.Status403Forbidden; await context.Response.WriteAsJsonAsync(new { error = "当前账号无权使用此功能" }); return; }
     if (!PagePermissions.Allows(session.User, path, context.Request.Method)) { context.Response.StatusCode = StatusCodes.Status403Forbidden; await context.Response.WriteAsJsonAsync(new { error = "当前账号没有此页面的查看或操作权限" }); return; }
+    db.AuthorizedPath = path;
+    db.AuthorizedMethod = context.Request.Method;
+    db.AuthorizedRole = role;
     if (role == "supervisor" && path.StartsWith("/api/users", StringComparison.Ordinal))
     {
         var segments = path.Split('/');
         if (segments.Length > 3 && long.TryParse(segments[3], out var targetId))
         {
             var target = await db.Users.AsNoTracking().FirstOrDefaultAsync(value => value.Id == targetId);
-            if (target is null || target.CompanyAccess != db.Company || target.Role is not ("shipping" or "warehouse"))
-            { context.Response.StatusCode = 403; await context.Response.WriteAsJsonAsync(new { error = "主管只能管理本厂区船务员和仓库文员" }); return; }
+            if (target is null || !PagePermissions.CanManage(session.User, target, db.Company))
+            { context.Response.StatusCode = 403; await context.Response.WriteAsJsonAsync(new { error = "主管只能管理本厂区且权限不超出自己的船务员和仓库文员" }); return; }
         }
         if (context.Request.Method is "POST" or "PUT" && (segments.Length == 3 || context.Request.Method == "PUT"))
         {
@@ -273,6 +269,23 @@ app.Use(async (context, next) =>
             finally { context.Request.Body.Position = 0; }
             if (payload is null || payload["role"]?.ToString() is not ("shipping" or "warehouse") || payload["companyAccess"]?.ToString() != db.Company)
             { context.Response.StatusCode = 403; await context.Response.WriteAsJsonAsync(new { error = "主管不能授予管理角色或跨厂区权限" }); return; }
+        }
+    }
+    if (db.Company == "Huadeng")
+    {
+        // Candidate browsing is read-only, including when this mailbox has no settings yet.
+        if (!(HttpMethods.IsGet(context.Request.Method) &&
+              path.TrimEnd('/').Equals("/api/imports/email/mailbox/failed", StringComparison.OrdinalIgnoreCase)) &&
+            !await db.MailSystemSettings.AnyAsync())
+        {
+            db.MailSystemSettings.Add(new MailSystemSetting { Id = db.CompanySettingId, DailyWorkflowVersion = DailyMailRules.WorkflowVersion });
+            try { await db.SaveChangesAsync(); }
+            catch (PagePermissionDeniedException error)
+            {
+                context.Response.StatusCode = 403;
+                await context.Response.WriteAsJsonAsync(new { error = error.Message });
+                return;
+            }
         }
     }
     if (context.Request.Method is "POST" or "PUT" or "PATCH" or "DELETE" && context.Request.ContentType?.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) == true)
@@ -291,6 +304,11 @@ app.Use(async (context, next) =>
         finally { context.Request.Body.Position = 0; }
     }
     try { await next(); }
+    catch (PagePermissionDeniedException error)
+    {
+        context.Response.StatusCode = 403;
+        await context.Response.WriteAsJsonAsync(new { error = error.Message });
+    }
     catch (TaskWritebackConflictException error)
     {
         context.Response.StatusCode = 409;
@@ -412,6 +430,9 @@ app.MapGet("/api/users", async (HttpContext context, AppDbContext db, Cancellati
 
 app.MapPost("/api/users", async (JsonObject payload, HttpContext context, AppDbContext db, CancellationToken cancellationToken) =>
 {
+    await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+    var actor = await db.Users.AsNoTracking().SingleAsync(value => value.Id == db.CurrentUserId, cancellationToken);
+    if (!PagePermissions.CanManage(actor, null, db.Company)) return Results.Json(new { error = "当前账号无权管理用户" }, statusCode: 403);
     var username = payload["username"]?.ToString().Trim().ToLowerInvariant() ?? "";
     var displayName = payload["displayName"]?.ToString().Trim() ?? "";
     var password = payload["password"]?.ToString() ?? "";
@@ -422,19 +443,23 @@ app.MapPost("/api/users", async (JsonObject payload, HttpContext context, AppDbC
     if (await db.Users.AnyAsync(value => value.Username == username, cancellationToken)) return Results.Conflict(new { error = "账号已存在" });
     var companyAccess = payload["companyAccess"]?.ToString() ?? "Xingxin";
     if (companyAccess is not ("Xingxin" or "Huadeng" or "Both") || (role != "admin" && companyAccess == "Both")) return Results.BadRequest(new { error = "公司权限无效" });
-    var actor = (AppUser)context.Items["CurrentUser"]!;
     var grants = "";
     if (payload.ContainsKey("pagePermissions")) { var permissionError = PagePermissions.Validate(payload["pagePermissions"], role, actor, out grants); if (permissionError is not null) return Results.BadRequest(new { error = permissionError }); }
     else if (actor.Role != "admin" && PagePermissions.Defaults(role).Any(p => PagePermissions.Rank(p.Value) > PagePermissions.Rank(PagePermissions.Effective(actor)[p.Key]))) return Results.BadRequest(new { error = "不能授予超出自己拥有的页面权限" });
     var user = new AppUser { CompanyAccess = companyAccess, Username = username, DisplayName = displayName, Role = role, PagePermissionsJson = grants, PasswordHash = PasswordService.Hash(password) };
+    if (!PagePermissions.CanManage(actor, user, db.Company)) return Results.Json(new { error = "不能创建超出自己角色、公司或页面权限范围的用户" }, statusCode: 403);
     db.Users.Add(user); await db.SaveChangesAsync(cancellationToken);
+    await transaction.CommitAsync(cancellationToken);
     return Results.Created($"/api/users/{user.Id}", UserResponse(user));
 });
 
 app.MapPut("/api/users/{id:long}", async (long id, JsonObject payload, HttpContext context, AppDbContext db, CancellationToken cancellationToken) =>
 {
+    await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+    var current = await db.Users.AsNoTracking().SingleAsync(value => value.Id == db.CurrentUserId, cancellationToken);
     var user = await db.Users.FindAsync([id], cancellationToken);
     if (user is null) return Results.NotFound(new { error = "用户不存在" });
+    if (!PagePermissions.CanManage(current, user, db.Company)) return Results.Json(new { error = "不能管理超出自己权限范围的用户" }, statusCode: 403);
     var displayName = payload["displayName"]?.ToString().Trim() ?? "";
     var role = payload["role"]?.ToString() ?? "";
     var isActive = payload["isActive"]?.GetValue<bool>() ?? user.IsActive;
@@ -445,7 +470,6 @@ app.MapPut("/api/users/{id:long}", async (long id, JsonObject payload, HttpConte
         var activeAdmins = await db.Users.CountAsync(value => value.Role == "admin" && value.IsActive, cancellationToken);
         if (activeAdmins <= 1) return Results.BadRequest(new { error = "必须保留至少一个启用的管理员" });
     }
-    var current = (AppUser)context.Items["CurrentUser"]!;
     if (current.Id == user.Id && !isActive) return Results.BadRequest(new { error = "不能停用当前登录账号" });
     var companyAccess = payload["companyAccess"]?.ToString() ?? user.CompanyAccess;
     if (companyAccess is not ("Xingxin" or "Huadeng" or "Both") || (role != "admin" && companyAccess == "Both")) return Results.BadRequest(new { error = "公司权限无效" });
@@ -476,15 +500,19 @@ app.MapPut("/api/users/{id:long}", async (long id, JsonObject payload, HttpConte
     else if (role != user.Role) { user.PagePermissionsJson = ""; if (current.Role != "admin" && PagePermissions.Defaults(role).Any(p => PagePermissions.Rank(p.Value) > PagePermissions.Rank(PagePermissions.Effective(current)[p.Key]))) return Results.BadRequest(new { error = "不能授予超出自己拥有的页面权限" }); }
     user.CompanyAccess = companyAccess;
     user.DisplayName = displayName; user.Role = role; user.IsActive = isActive; user.UpdatedAt = DateTime.UtcNow;
+    if (!PagePermissions.CanManage(current, user, db.Company)) return Results.Json(new { error = "不能授予超出自己角色、公司或页面权限范围的权限" }, statusCode: 403);
     if (!isActive) await db.UserSessions.Where(value => value.UserId == id).ExecuteDeleteAsync(cancellationToken);
     await db.SaveChangesAsync(cancellationToken);
+    await transaction.CommitAsync(cancellationToken);
     return Results.Ok(UserResponse(user));
 });
 
 app.MapPost("/api/users/{id:long}/mailbox-test", async (long id, AppDbContext db, EmailParserClient parser, CancellationToken cancellationToken) =>
 {
+    var actor = await db.Users.AsNoTracking().SingleAsync(value => value.Id == db.CurrentUserId, cancellationToken);
     var user = await db.Users.FirstOrDefaultAsync(value => value.Id == id, cancellationToken);
     if (user is null) return Results.NotFound(new { error = "用户不存在" });
+    if (!PagePermissions.CanManage(actor, user, db.Company)) return Results.Json(new { error = "不能管理超出自己权限范围的用户" }, statusCode: 403);
     if (!ServerMailboxConfiguration.TryGet(user, out var credentials, out var configurationError))
         return Results.BadRequest(new { error = configurationError });
     var configurationKey = ServerMailboxConfiguration.ConfigurationKey(credentials);
@@ -495,7 +523,10 @@ app.MapPost("/api/users/{id:long}/mailbox-test", async (long id, AppDbContext db
         var result = JsonNode.Parse(response.Body)?.AsObject();
         if (result?["connected"] is null) return Results.Json(new { error = "邮箱测试服务返回异常，请稍后重试" }, statusCode: 502);
         var connected = result["connected"]!.GetValue<bool>(); var testedAt = DateTime.UtcNow;
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        actor = await db.Users.AsNoTracking().SingleAsync(value => value.Id == db.CurrentUserId, cancellationToken);
         await db.Entry(user).ReloadAsync(cancellationToken);
+        if (!PagePermissions.CanManage(actor, user, db.Company)) return Results.Json(new { error = "账号权限已更改，请刷新后重试" }, statusCode: 403);
         if (!ServerMailboxConfiguration.TryGet(user, out var currentCredentials, out _) ||
             ServerMailboxConfiguration.ConfigurationKey(currentCredentials) != configurationKey)
             return Results.Conflict(new { error = "邮箱绑定或服务器配置已更改，请重新测试连接" });
@@ -504,6 +535,7 @@ app.MapPost("/api/users/{id:long}/mailbox-test", async (long id, AppDbContext db
                 .SetProperty(value => value.MailboxTestedAt, (DateTime?)testedAt)
                 .SetProperty(value => value.MailboxTestConfigurationKey, configurationKey), cancellationToken);
         if (updated == 0) return Results.Conflict(new { error = "邮箱绑定已更改，请重新测试连接" });
+        await transaction.CommitAsync(cancellationToken);
         return Results.Ok(new { connected, testedAt, message = result["message"]?.ToString() ?? "连接测试完成" });
     }
     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -514,13 +546,17 @@ app.MapPost("/api/users/{id:long}/mailbox-test", async (long id, AppDbContext db
 
 app.MapPost("/api/users/{id:long}/reset-password", async (long id, JsonObject payload, AppDbContext db, CancellationToken cancellationToken) =>
 {
+    await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+    var actor = await db.Users.AsNoTracking().SingleAsync(value => value.Id == db.CurrentUserId, cancellationToken);
     var user = await db.Users.FindAsync([id], cancellationToken);
     if (user is null) return Results.NotFound(new { error = "用户不存在" });
+    if (!PagePermissions.CanManage(actor, user, db.Company)) return Results.Json(new { error = "不能重置超出自己权限范围的用户密码" }, statusCode: 403);
     var password = payload["password"]?.ToString() ?? "";
     if (password.Length < 8 || password.Length > 128) return Results.BadRequest(new { error = "密码需为8至128个字符" });
     user.PasswordHash = PasswordService.Hash(password); user.UpdatedAt = DateTime.UtcNow;
     await db.UserSessions.Where(value => value.UserId == id).ExecuteDeleteAsync(cancellationToken);
     await db.SaveChangesAsync(cancellationToken);
+    await transaction.CommitAsync(cancellationToken);
     return Results.NoContent();
 });
 
@@ -1569,6 +1605,8 @@ app.MapGet("/api/shipments", async (string? status, string? customer, string? qu
 {
     var tasks = db.ShipmentTasks.AsNoTracking().AsQueryable();
     var currentUser = (AppUser)context.Items["CurrentUser"]!;
+    var grants = PagePermissions.Effective(currentUser);
+    var canReadTaskDetails = PagePermissions.Rank(grants["shipments"]) > 0 || PagePermissions.Rank(grants["inventory"]) > 0;
     if (currentUser.Role == "warehouse") tasks = tasks.Where(task => task.Status == "PendingShipment" || task.Status == "Completed");
     if (!string.IsNullOrWhiteSpace(status)) tasks = tasks.Where(task => task.Status == status);
     if (!string.IsNullOrWhiteSpace(customer)) tasks = tasks.Where(task => task.Customer == customer);
@@ -1578,9 +1616,11 @@ app.MapGet("/api/shipments", async (string? status, string? customer, string? qu
     {
         var term = query.Trim();
         tasks = tasks.Where(task => task.Customer.Contains(term) ||
-            (task.SoNumber != null && task.SoNumber.Contains(term)) || task.ItemsJson.Contains(term));
+            (task.SoNumber != null && task.SoNumber.Contains(term)) || (canReadTaskDetails && task.ItemsJson.Contains(term)));
     }
     var result = await tasks.OrderByDescending(task => task.CreatedAt).ThenByDescending(task => task.Id).ToListAsync(cancellationToken);
+    // The dashboard grant does not grant the task's cargo, documents or source mail.
+    if (!canReadTaskDetails) return Results.Ok(result.Select(ShipmentDashboardProjection.From));
     return Results.Ok(result.Select(task => ToShipmentResponse(task, db)));
 });
 

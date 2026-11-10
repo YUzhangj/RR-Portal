@@ -3,8 +3,10 @@ const vm = require('vm');
 const ts = require('typescript');
 const assert = require('assert/strict');
 const source = ts.transpileModule(fs.readFileSync('lib/backend-proxy.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
+const permissionContext={exports:{}};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync('lib/page-permissions.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText,permissionContext);
 let user;
-const context = {exports:{},process,Headers,fetch:async()=>({ok:true,json:async()=>user}),require:(name)=>name==='next/server'?({NextResponse:{json:(body,options)=>({body,status:options.status})}}):({hasPage:(grants,key,edit)=>grants[key]==='edit'||(!edit&&grants[key]==='view')})};
+const context = {exports:{},process,Headers,fetch:async()=>({ok:true,json:async()=>user}),require:(name)=>name==='next/server'?({NextResponse:{json:(body,options)=>({body,status:options.status})}}):permissionContext.exports};
 vm.runInNewContext(source,context);
 const request = (company,path="/api/auth/me",method="GET")=>({headers:new Headers(),cookies:{get:()=>({value:company})},nextUrl:{pathname:path},method});
 (async()=>{
@@ -22,5 +24,14 @@ const request = (company,path="/api/auth/me",method="GET")=>({headers:new Header
  assert.equal((await context.exports.requireRole(request('Huadeng','/api/inventory/local-files/writeback','POST'),['admin','warehouse'])).response?.status,403);
  assert.equal((await context.exports.requireRole(request('Huadeng','/api/inspection-mappings','GET'),['admin'])).response?.status||200,200);
  assert.equal((await context.exports.requireRole(request('Huadeng','/api/inspection-mappings','POST'),['admin'])).response?.status,403);
+ user={role:'shipping',companyAccess:'Xingxin',pagePermissions:{shipments:'view'}};
+ assert.equal((await context.exports.requireRole(request('Xingxin','/api/qc/results','POST'),['admin','shipping'])).response?.status||200,200);
+ user.pagePermissions={};
+ assert.equal((await context.exports.requireRole(request('Xingxin','/api/qc/results','POST'),['admin','shipping'])).response?.status,403);
+ user={role:'warehouse',companyAccess:'Xingxin',pagePermissions:{inventory:'view'}};
+ assert.equal((await context.exports.requireRole(request('Xingxin','/api/inventory/local-files/scan','POST'),['admin','warehouse'])).response?.status||200,200);
+ assert.equal((await context.exports.requireRole(request('Xingxin','/api/inventory/local-files/writeback','POST'),['admin','warehouse'])).response?.status,403);
+ user.pagePermissions={};
+ assert.equal((await context.exports.requireRole(request('Xingxin','/api/inventory/local-files/scan','POST'),['admin','warehouse'])).response?.status,403);
  console.log('Frontend role, company and page permission checks passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

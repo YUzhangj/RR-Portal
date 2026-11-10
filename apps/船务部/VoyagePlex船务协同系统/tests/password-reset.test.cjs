@@ -4,7 +4,9 @@ const fs=require('node:fs');
 const ts=require('typescript');
 const vm=require('node:vm');
 const source=ts.transpileModule(fs.readFileSync('lib/backend-proxy.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
-const context={exports:{},require,process,Headers,fetch};
+const permissions={exports:{}};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync('lib/page-permissions.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText,permissions);
+const context={exports:{},require:name=>name==='@/lib/page-permissions'?permissions.exports:require(name),process,Headers,fetch};
 vm.runInNewContext(source,context);
 const {proxyResponse}=context.exports;
 test('无内容成功响应保持204，其他禁止响应体的状态同样不报错',async()=>{

@@ -8,12 +8,15 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
   const auth=await requireRole(request,["admin"]); if(auth.response)return auth.response;
   const id=Number((await context.params).id); const rows=await readMappings(); const index=rows.findIndex(row => row.id===id);
   if (index<0) return NextResponse.json({error:"记录不存在"},{status:404});
-  rows[index]={...(await request.json() as MappingRecord),id}; await writeMappings(rows);
+  rows[index]={...(await request.json() as MappingRecord),id};
+  const currentAuth=await requireRole(request,["admin"]); if(currentAuth.response)return currentAuth.response;
+  await writeMappings(rows);
   return NextResponse.json(rows[index]);
 }
 export async function DELETE(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const auth=await requireRole(request,["admin"]); if(auth.response)return auth.response;
   const id=Number((await context.params).id); const rows=await readMappings(); const filtered=rows.filter(row => row.id!==id);
   if (filtered.length===rows.length) return NextResponse.json({error:"记录不存在"},{status:404});
+  const currentAuth=await requireRole(request,["admin"]); if(currentAuth.response)return currentAuth.response;
   await writeMappings(filtered); return new NextResponse(null,{status:204});
 }

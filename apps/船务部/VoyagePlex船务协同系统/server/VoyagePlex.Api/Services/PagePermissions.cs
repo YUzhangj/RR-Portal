@@ -14,6 +14,22 @@ public static class PagePermissions
         role == "admin" || (role == "supervisor" && page != "mail.recovery") ||
         (role == "shipping" && Shipping.Contains(page)) || (role == "warehouse" && Warehouse.Contains(page)) ? "edit" : "none");
     public static int Rank(string? value) => value switch { "view" => 1, "edit" => 2, _ => 0 };
+    // ASP.NET routes ignore case and accept a trailing slash. Authorization must
+    // interpret the same resource as the endpoint, including user mutations.
+    public static string NormalizePath(string path) => path.TrimEnd('/').ToLowerInvariant();
+    public static bool Within(AppUser target, AppUser actor)
+    {
+        var ceiling = Effective(actor);
+        return Effective(target).All(p => Rank(p.Value) <= Rank(ceiling[p.Key]));
+    }
+    public static bool CanManage(AppUser actor, AppUser? target, string company)
+    {
+        if (!actor.IsActive) return false;
+        if (actor.Role == "admin") return true;
+        return actor.Role == "supervisor" && actor.CompanyAccess == company &&
+            Rank(Effective(actor)["users"]) == 2 && (target is null ||
+            (target.CompanyAccess == company && (target.Role is "shipping" or "warehouse") && Within(target, actor)));
+    }
     public static Dictionary<string, string> Effective(AppUser user)
     {
         var limits = Defaults(user.Role);
@@ -38,6 +54,7 @@ public static class PagePermissions
     }
     public static bool Allows(AppUser user, string path, string method)
     {
+        path = NormalizePath(path);
         if (user.Role == "admin") return true;
         if (path is "/api/auth/me" or "/api/auth/logout") return true;
         var read = method is "GET" or "HEAD";
@@ -48,7 +65,8 @@ public static class PagePermissions
         else if (path.Contains("/mailbox/failed", StringComparison.Ordinal) || path.Contains("/mailbox/retry-failed", StringComparison.Ordinal) || path.Contains("/mailbox/backfill-missing", StringComparison.Ordinal)) pages = ["mail.recovery"];
         else if (path.StartsWith("/api/mail/accounts", StringComparison.Ordinal)) { pages = ["mail.workbench", "mail.contacts", "mail.settings", "mail.recovery"]; read = true; }
         else if (path.StartsWith("/api/mail", StringComparison.Ordinal) || path.StartsWith("/api/imports/email/mailbox", StringComparison.Ordinal)) pages = ["mail.workbench"];
-        else if (path.StartsWith("/api/imports/email", StringComparison.Ordinal)) { pages = ["imports"]; if (path.EndsWith("/split-preview", StringComparison.Ordinal)) read = true; }
+        else if (path == "/api/imports/email/split-preview") { pages = ["imports", "mail.workbench"]; read = true; }
+        else if (path.StartsWith("/api/imports/email", StringComparison.Ordinal)) pages = ["imports"];
         else if (path.StartsWith("/api/factory-mappings", StringComparison.Ordinal)) { pages = ["settings.factory"]; if (path.EndsWith("/parse", StringComparison.Ordinal)) read = true; }
         else if (path == "/api/export-templates/available") pages = ["shipments", "inventory"];
         else if (path.StartsWith("/api/export-templates", StringComparison.Ordinal)) pages = ["settings.templates"];
@@ -64,7 +82,8 @@ public static class PagePermissions
         }
         else if (path == "/api/modules") pages = ["home"];
         else return false;
-        if (path.Contains("/export", StringComparison.Ordinal)) read = false;
+        if (path.StartsWith("/api/shipments/", StringComparison.Ordinal) &&
+            (path.EndsWith("/export", StringComparison.Ordinal) || path.Contains("/export/", StringComparison.Ordinal) || path.EndsWith("/warehouse-export", StringComparison.Ordinal))) read = false;
         var effective = Effective(user); return pages.Any(page => Rank(effective[page]) >= (read ? 1 : 2));
     }
 }
