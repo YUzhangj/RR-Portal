@@ -24,29 +24,39 @@ export interface ExistingShipmentImportRow extends Omit<Partial<ShipmentImportIt
   material_snapshot?: Material; outbound_id?: number; material_id?: number
   _rowKey?: number; id?: number; seq?: number; purchase_charge_ratio?: number; invoice_price?: number
 }
-export function planShipmentImport(imported: ShipmentImportItem[], existing: ExistingShipmentImportRow[]) {
-  const targets = imported.map(item => {
-    const source = item.material_snapshot
-    const matches = existing.flatMap((row, index) => {
-      const m = row.material_snapshot
-      if (!m || !norm(source.name_zh) || norm(m.name_zh) !== norm(source.name_zh)) return []
-      // Catalog defaults cannot identify a historical outbound variant. When a
-      // file omits part of a linked identity, retain every compatible candidate
-      // so ambiguity is reviewed instead of silently choosing the master value.
-      const fileIdentity = !!row.outbound_id && item._fileMaterialFields
-      if ((!fileIdentity || fileIdentity.includes('product_code') || fileIdentity.includes('related_product_code'))
-        && norm(m.product_code || m.related_product_code) !== norm(source.product_code || source.related_product_code)) return []
-      if ((!fileIdentity || fileIdentity.includes('spec')) && norm(m.spec) !== norm(source.spec)) return []
-      if ((!fileIdentity || fileIdentity.includes('supplier') || item._fileFields?.includes('supplier'))
-        && norm(row.supplier || m.supplier) !== norm(item.supplier || source.supplier)) return []
-      if (!row.outbound_id && item.customs_company && norm(row.customs_company || m.customs_company) !== norm(item.customs_company)) return []
-      if (item.po_no && norm(row.po_no) !== norm(item.po_no)) return []
-      return [index]
-    })
+export function shipmentImportCandidates(item: ShipmentImportItem, existing: readonly ExistingShipmentImportRow[]) {
+  const source = item.material_snapshot
+  return existing.flatMap((row, index) => {
+    const m = row.material_snapshot
+    if (!m || !norm(source.name_zh) || norm(m.name_zh) !== norm(source.name_zh)) return []
+    // Catalog defaults cannot identify a historical outbound variant. When a
+    // file omits part of a linked identity, retain every compatible candidate
+    // so ambiguity is reviewed instead of silently choosing the master value.
+    const fileIdentity = !!row.outbound_id && item._fileMaterialFields
+    if ((!fileIdentity || fileIdentity.includes('product_code') || fileIdentity.includes('related_product_code'))
+      && norm(m.product_code || m.related_product_code) !== norm(source.product_code || source.related_product_code)) return []
+    if ((!fileIdentity || fileIdentity.includes('spec')) && norm(m.spec) !== norm(source.spec)) return []
+    if ((!fileIdentity || fileIdentity.includes('supplier') || item._fileFields?.includes('supplier'))
+      && norm(row.supplier || m.supplier) !== norm(item.supplier || source.supplier)) return []
+    if (!row.outbound_id && item.customs_company && norm(row.customs_company || m.customs_company) !== norm(item.customs_company)) return []
+    if (item.po_no && norm(row.po_no) !== norm(item.po_no)) return []
+    return [index]
+  })
+}
+export function planShipmentImport(imported: ShipmentImportItem[], existing: ExistingShipmentImportRow[],
+  reviewedTargets: readonly (number | undefined)[] = []) {
+  const targets = imported.map((item, index) => {
+    const matches = shipmentImportCandidates(item, existing)
+    const reviewed = reviewedTargets[index]
+    if (reviewed !== undefined) {
+      if (reviewed === -1) return matches.length === 0 ? -1 : -2
+      return matches.includes(reviewed) ? reviewed : -2
+    }
     return matches.length > 1 ? -2 : matches.length === 1 ? matches[0] : -1
   })
   return targets.map(target => target >= 0 && targets.filter(t => t === target).length > 1 ? -2 : target)
 }
+
 const text = (v: unknown) => String(v ?? '').trim()
 const norm = (v: unknown) => text(v).normalize('NFKC').replace(/\s+/g, '').toLowerCase()
 function captureFileFields(item: ShipmentImportItem, weighingQty?: number): ShipmentImportItem {

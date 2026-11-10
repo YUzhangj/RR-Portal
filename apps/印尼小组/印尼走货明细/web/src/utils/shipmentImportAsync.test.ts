@@ -2,8 +2,9 @@ import { expect, it, vi } from 'vitest'
 import ts from 'typescript'
 import { createContext, runInContext } from 'node:vm'
 import { readFileSync } from 'node:fs'
-import { planShipmentImport, type ShipmentImportItem, type ShipmentImportRow } from './shipmentImport'
+import { planShipmentImport, shipmentImportCandidates, type ShipmentImportItem, type ShipmentImportRow } from './shipmentImport'
 import { applyShipmentImport } from './shipmentImportApply'
+import { shipmentNetTotalKg } from './shipmentWeight'
 
 // Execute the entire production component with deterministic hook commits and
 // lightweight AntD element placeholders. Events come from its actual returned
@@ -21,7 +22,7 @@ function component(parsed: { rows: ShipmentImportRow[]; warnings: string[]; load
   const imageReview = { confirm: vi.fn() }
   const original = { id: 1, product_code: 'A', name_zh: '合成A', supplier: '合成供应商', image: 'original-local-image' }
   let props = { existing: [{ material_id: 1, material_snapshot: original, outbound_id: 22, qty: 7, kg: 3, price: 5, currency: 'US$', cartons: 1 }],
-    materials: new Map([[1, original]]), onImport: vi.fn(() => true) }
+    materials: new Map([[1, original]]), onImport: vi.fn<(rows: ShipmentImportItem[], targets: number[], reviewed?: readonly (number | undefined)[]) => boolean>(() => true) }
   const context = createContext({
     React: { Fragment: 'Fragment', createElement: (type: unknown, attributes: object, ...children: unknown[]) => ({ type, props: { ...attributes, children } }) },
     App: { useApp: () => ({ message, modal: imageReview }) },
@@ -43,8 +44,8 @@ function component(parsed: { rows: ShipmentImportRow[]; warnings: string[]; load
     matchShipmentMaterial: (material: object) => ({ material, matches: 0 }),
     toolImportDefaults: (material: object) => ({ material, warnings: [] }),
     createCartonGroupId: () => 'synthetic-carton',
-    planShipmentImport, applyShipmentImport,
-    shipmentGrossPerPc: () => 0, shipmentWeightQuantity: () => 0, isShipmentCountUnit: () => false,
+    planShipmentImport, shipmentImportCandidates, applyShipmentImport,
+    shipmentNetTotalKg, shipmentGrossPerPc: () => 0, shipmentWeightQuantity: () => 0, isShipmentCountUnit: () => false,
     ShipmentImportSource: 'ShipmentImportSource',
   })
   runInContext("const currencies=[];\n" + code, context)
@@ -152,4 +153,70 @@ it('cancelling persistent image review or changing targets while it is open cann
   expect(fixture.onImport).not.toHaveBeenCalled()
   expect(source.warnings).toEqual([])
   expect(fixture.message.warning).toHaveBeenCalledWith(expect.stringContaining('重新核对'))
+})
+
+
+function reviewChoice(view: ReturnType<ReturnType<typeof component>['render']>, source: ShipmentImportRow) {
+  const column = view.table.columns.find((column: { title: string }) => column.title === '导入方式')
+  const rendered = column.render(null, source)
+  return rendered.props.children.find((node: { type: string }) => node.type === 'Select').props
+}
+
+it('重复匹配可手动选择第二条出库明细，导入只更新所选行并保留其数量和采购来源', async () => {
+  const source = row('A')
+  source.item.cartons = 4
+  const fixture = component({ rows: [source], warnings: [] })
+  fixture.current().existing.push({ ...fixture.current().existing[0], outbound_id: 23, qty: 11, cartons: 3 })
+  const before = structuredClone(fixture.current().existing)
+  await fixture.render().upload.beforeUpload(new File([], 'duplicates.xlsx'))
+  let view = fixture.render()
+  await view.modal.onOk()
+  expect(fixture.onImport).not.toHaveBeenCalled()
+  expect(fixture.message.warning).toHaveBeenCalledWith(expect.stringContaining('重复匹配'))
+  const select = reviewChoice(view, source)
+  expect(select.options.map((option: { label: string }) => option.label)).toEqual([
+    expect.stringContaining('OUT-22'), expect.stringContaining('OUT-23'),
+  ])
+  select.onChange(1)
+  view = fixture.render()
+  await view.modal.onOk()
+  expect(fixture.onImport).toHaveBeenCalledOnce()
+  const [imported, targets] = fixture.onImport.mock.calls[0] as unknown as [ShipmentImportItem[], number[]]
+  expect(targets).toEqual([1])
+  const updated = applyShipmentImport(fixture.current().existing, fixture.current().materials, imported, targets, fixture.onImport.mock.calls[0][2])
+  expect(updated[0]).toEqual(before[0])
+  expect(updated[1]).toMatchObject({ outbound_id: 23, qty: 11, price: 5, currency: 'US$', cartons: 4 })
+  expect(fixture.current().existing).toEqual(before)
+})
+
+it('同一现有明细不能被两条导入行同时覆盖，改选不同目标后整次应用', async () => {
+  const sources = [row('A'), { ...row('A'), key: 'A2' }]
+  const fixture = component({ rows: sources, warnings: [] })
+  fixture.current().existing.push({ ...fixture.current().existing[0], outbound_id: 23 })
+  await fixture.render().upload.beforeUpload(new File([], 'duplicates.xlsx'))
+  let view = fixture.render()
+  reviewChoice(view, sources[0]).onChange(0)
+  view = fixture.render()
+  reviewChoice(view, sources[1]).onChange(0)
+  view = fixture.render()
+  await view.modal.onOk()
+  expect(fixture.onImport).not.toHaveBeenCalled()
+  reviewChoice(view, sources[1]).onChange(1)
+  view = fixture.render()
+  await view.modal.onOk()
+  expect(fixture.onImport.mock.calls[0][1]).toEqual([0, 1])
+})
+
+it('原明细或物料更新后手动核对选择失效，必须重新确认覆盖对象', async () => {
+  const source = row('A')
+  const fixture = component({ rows: [source], warnings: [] })
+  fixture.current().existing.push({ ...fixture.current().existing[0], outbound_id: 23 })
+  await fixture.render().upload.beforeUpload(new File([], 'duplicates.xlsx'))
+  reviewChoice(fixture.render(), source).onChange(1)
+  fixture.render()
+  fixture.changeContext()
+  const view = fixture.render()
+  expect(reviewChoice(view, source).value).toBeUndefined()
+  await view.modal.onOk()
+  expect(fixture.onImport).not.toHaveBeenCalled()
 })

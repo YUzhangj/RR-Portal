@@ -1,34 +1,43 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { Alert, App, Button, Descriptions, Image, InputNumber, Modal, Select, Space, Table, Upload } from 'antd'
 import { api, type Dictionaries, type Material } from '../api/client'
-import { importShipmentFile, matchShipmentMaterial, planShipmentImport, type ExistingShipmentImportRow, type ShipmentImportItem, type ShipmentImportRow } from '../utils/shipmentImport'
+import { importShipmentFile, matchShipmentMaterial, planShipmentImport, shipmentImportCandidates, type ExistingShipmentImportRow, type ShipmentImportItem, type ShipmentImportRow } from '../utils/shipmentImport'
 import { toolImportDefaults } from '../utils/toolImportDefaults'
 import { createCartonGroupId } from '../utils/cartonGroupId'
 import ShipmentImportSource from './ShipmentImportSource'
-import { shipmentGrossPerPc, shipmentWeightQuantity } from '../utils/shipmentWeight'
+import { shipmentGrossPerPc, shipmentNetTotalKg, shipmentWeightQuantity } from '../utils/shipmentWeight'
 import { isShipmentCountUnit } from '../utils/shipmentDeclaration'
 import { applyShipmentImport } from '../utils/shipmentImportApply'
 
 const currencies = ['¥', 'US$', 'HK$', 'IDR'].map(value => ({ value, label: value }))
 export default function ShipmentImport({ existing, materials, onImport }: {
   existing: ExistingShipmentImportRow[]; materials: ReadonlyMap<number, Material>
-  onImport: (rows: ShipmentImportItem[], targets: number[]) => void | boolean
+  onImport: (rows: ShipmentImportItem[], targets: number[], reviewedTargets?: readonly (number | undefined)[]) => void | boolean
 }) {
   const { message, modal } = App.useApp()
   const [busy, setBusy] = useState(false)
   const [rows, setRows] = useState<ShipmentImportRow[] | null>(null)
   const [warnings, setWarnings] = useState<string[]>([])
   const [fileName, setFileName] = useState('')
+  const [page, setPage] = useState(1)
+  const [targetReview, setTargetReview] = useState<{
+    existing: typeof existing; materials: typeof materials; choices: Record<string, number | undefined>
+  } | null>(null)
+  const reviewedChoices = targetReview?.existing === existing && targetReview.materials === materials ? targetReview.choices : {}
+
   const [loadImages, setLoadImages] = useState<Awaited<ReturnType<typeof importShipmentFile>>['loadImages']>()
   const importContext = useRef({ existing, materials, rows, active: true })
   useLayoutEffect(() => {
     const context = { existing, materials, rows, active: true }
     importContext.current = context
     return () => { context.active = false }
-  }, [existing, materials, rows])
+  }, [existing, materials, rows, targetReview])
   const selected = (rows || []).filter(row => row.selected)
   const matching = existing.map(row => ({ ...row, material_snapshot: materials.get(row.material_id!) || row.material_snapshot }))
-  const targets = planShipmentImport(selected.map(row => row.item), matching)
+  const candidatesByKey = new Map((rows || []).map(row => [row.key, shipmentImportCandidates(row.item, matching)]))
+  const reviewedTargets = selected.map(row => reviewedChoices[row.key])
+  const targets = planShipmentImport(selected.map(row => row.item), matching, reviewedTargets)
+  const pendingCount = targets.filter(target => target === -2).length
   const targetByKey = new Map(selected.map((row, index) => [row.key, targets[index]]))
   const linkedTarget = (row: ShipmentImportRow) => {
     const target = targetByKey.get(row.key)
@@ -37,7 +46,7 @@ export default function ShipmentImport({ existing, materials, onImport }: {
   const preview = (() => {
     if (!selected.length || targets.some(target => target < -1)) return {}
     try {
-      return { items: applyShipmentImport(existing, materials, selected.map(row => row.item), targets) }
+      return { items: applyShipmentImport(existing, materials, selected.map(row => row.item), targets, reviewedTargets) }
     } catch (error) { return { error: (error as Error).message } }
   })()
   const displayItem = (row: ShipmentImportRow): ShipmentImportItem => {
@@ -91,6 +100,7 @@ export default function ShipmentImport({ existing, materials, onImport }: {
       imported.forEach(r => { if (bad.has(r.item.carton_group)) { r.item.carton_group = undefined; r.warnings.push('合并箱数无有效数值，导入后请重新合并') } })
       if (!context.active) { message.warning('走货明细或导入预览已变化，请重新选择文件'); return false }
       setLoadImages(() => result.loadImages)
+      setTargetReview(null); setPage(1)
       setRows(imported); setWarnings(notices); setFileName(file.name)
     } catch (e) { message.error(e instanceof Error ? e.message : '读取失败') }
     finally { setBusy(false) }
@@ -98,7 +108,7 @@ export default function ShipmentImport({ existing, materials, onImport }: {
   }
   async function confirm() {
     if (busy || !selected.length) return
-    if (targets.some(t => t < -1)) { message.warning('请取消勾选待核对行：重复匹配无法确定覆盖对象，请核对原明细后重试'); return }
+    if (targets.some(t => t < -1)) { message.warning('请在待核对行选择要更新的现有明细，或取消勾选该导入行；重复匹配不能自动覆盖'); return }
     if (selected.some(r => !linkedTarget(r) && r.item.price != null && !r.item.currency)) { message.warning('请补充采购币种后导入'); return }
     const context = importContext.current
     const prepared = loadImages ? selected.map(row => ({
@@ -133,7 +143,7 @@ export default function ShipmentImport({ existing, materials, onImport }: {
       } finally { setBusy(false) }
       if (!context.active) { message.warning('走货明细已变化，请重新核对后导入'); return }
     }
-    if (onImport(prepared.map(r => r.item), targets) === false) return
+    if (onImport(prepared.map(r => r.item), targets, reviewedTargets) === false) return
     setLoadImages(undefined)
     setRows(null)
     message.success(`已更新 ${targets.filter(t => t >= 0).length} 行，新增 ${targets.filter(t => t === -1).length} 行，请点击走货单“保存”`)
@@ -147,11 +157,15 @@ export default function ShipmentImport({ existing, materials, onImport }: {
       onCancel={() => { if (!busy) { setRows(null); setLoadImages(undefined) } }}
       confirmLoading={busy} cancelButtonProps={{ disabled: busy }}
       onOk={confirm} okText="确认导入（相同更新，新增追加）" okButtonProps={{ disabled: !(rows || []).some(r => r.selected) }}>
-      <Alert type="info" showIcon message="支持新版清溪表：按列名识别，不依赖固定位置。主明细所有字段及公式缓存值保存在“原表资料”，合同、发票、汇总等配套表不重复导成物料。按货号、中文名、规格、供应商匹配当前明细；唯一匹配更新有值字段，空白保留原值，无匹配则追加。已关联出库行仅更新装箱和报关资料，原出库关联、数量重量、申报单位及采购来源/单价保持不变。重复匹配仍需核对。不改资料库或整柜设置，发票价格按系统规则重算。" />
+      <Alert type="info" showIcon message="支持新版清溪表：按列名识别，不依赖固定位置。主明细所有字段及公式缓存值保存在“原表资料”，合同、发票、汇总等配套表不重复导成物料。按货号、中文名、规格、供应商匹配当前明细；唯一匹配更新有值字段，空白保留原值，无匹配则追加。已关联出库行仅更新装箱和报关资料，原出库关联、数量重量、申报单位及采购来源/单价保持不变。重复匹配可在“导入方式”中选择要更新的现有明细，同一现有行不能被多条导入行覆盖。不改资料库或整柜设置，发票价格按系统规则重算。" />
       {warnings.length > 0 && <Alert type="warning" message={warnings.join('；')} />}
       {preview.error && <Alert type="warning" message={preview.error} />}
       <Space style={{ margin: '12px 0' }} wrap>
         <span>识别 {(rows || []).length} 行，已选 {(rows || []).filter(r => r.selected).length} 行</span>
+        {pendingCount > 0 && <Button size="small" onClick={() => {
+          const index = (rows || []).findIndex(row => targetByKey.get(row.key) === -2)
+          setPage(Math.floor(index / 15) + 1)
+        }}>定位待核对行（{pendingCount}）</Button>}
         <Select mode="multiple" style={{ minWidth: 320 }} placeholder="选择工作表"
           value={[...new Set((rows || []).filter(r => r.selected).map(r => r.sheet))]}
           options={[...new Set((rows || []).map(r => r.sheet))].map(value => ({ value, label: value }))}
@@ -159,7 +173,7 @@ export default function ShipmentImport({ existing, materials, onImport }: {
         <Select placeholder="空白币种统一设置" style={{ width: 190 }} value={null} options={currencies}
           onChange={currency => setRows(current => current!.map(r => ({ ...r, item: { ...r.item, currency: r.item.currency || currency || undefined } })))} />
       </Space>
-      <Table<ShipmentImportRow> rowKey="key" dataSource={rows || []} size="small" pagination={{ pageSize: 15 }} scroll={{ x: 1700, y: 430 }}
+      <Table<ShipmentImportRow> rowKey="key" dataSource={rows || []} size="small" pagination={{ pageSize: 15, current: page, onChange: setPage }} scroll={{ x: 1700, y: 430 }}
         rowSelection={{ selectedRowKeys: (rows || []).filter(r => r.selected).map(r => r.key), onChange: keys => setRows(current => current!.map(r => ({ ...r, selected: keys.includes(r.key) }))) }}
         expandable={{ expandedRowRender: r => <><Descriptions size="small" column={3} items={[
           { key: 'spec', label: '规格', children: displayItem(r).material_snapshot.spec || '—' },
@@ -170,7 +184,7 @@ export default function ShipmentImport({ existing, materials, onImport }: {
           { key: 'dim', label: '长 / 宽 / 高 cm', children: [displayItem(r).material_snapshot.length, displayItem(r).material_snapshot.width, displayItem(r).material_snapshot.height].map(v => v ?? '—').join(' / ') },
           { key: 'weights', label: '毛重 / 净重 kg', children: [
             shipmentGrossPerPc(displayItem(r).material_snapshot.weight_per_carton, displayItem(r).weighing_qty) * shipmentWeightQuantity(displayItem(r).material_snapshot.name_zh, displayItem(r).qty),
-            Number(displayItem(r).material_snapshot.net_per_pc || 0) * shipmentWeightQuantity(displayItem(r).material_snapshot.name_zh, displayItem(r).qty),
+            shipmentNetTotalKg(displayItem(r), displayItem(r).material_snapshot),
           ].map(v => v.toFixed(2)).join(' / ') },
           { key: 'department', label: '使用部门', children: displayItem(r).material_snapshot.department || '—' },
           { key: 'source', label: '完整源字段', children: <ShipmentImportSource source={displayItem(r).material_snapshot.import_source} /> },
@@ -179,10 +193,21 @@ export default function ShipmentImport({ existing, materials, onImport }: {
           { key: 'invoice', label: '发票 / 日期', children: `${displayItem(r).invoice_no || '—'} / ${displayItem(r).invoice_date || '—'}` },
         ]} />{r.warnings.map((w, i) => <div key={i}>{w}</div>)}</> }}
         columns={[
-          { title: '导入方式', width: 150, render: (_, r) => {
+          { title: '导入方式', width: 260, render: (_, r) => {
             const target = targetByKey.get(r.key)
             if (target == null) return '未勾选'
-            return target === -1 ? '新增' : target === -2 ? '待核对：重复匹配' : `更新已有第 ${target + 1} 行${linkedTarget(r) ? '（保留出库）' : ''}`
+            const candidates = candidatesByKey.get(r.key) || []
+            if (candidates.length > 1 || target === -2) return <Space direction="vertical" size={4} style={{ width: '100%' }}>
+              <span>{target === -2 ? '待核对：重复匹配' : `更新已有第 ${target + 1} 行${linkedTarget(r) ? '（保留出库）' : ''}`}</span>
+              <Select style={{ width: '100%' }} placeholder="选择要更新的现有明细" allowClear
+                value={reviewedChoices[r.key]}
+                options={candidates.map(index => {
+                  const row = existing[index]
+                  return { value: index, label: `第 ${index + 1} 行 · ${row.outbound_id ? 'OUT-' + row.outbound_id : '未关联'} · ${row.po_no || '无 PO'} · 数量 ${row.qty ?? '—'} · ${row.cartons ?? 0} 箱 · ${row.carton_no || row.pallet || '无箱号/卡板'}` }
+                })}
+                onChange={value => setTargetReview({ existing, materials, choices: { ...reviewedChoices, [r.key]: value } })} />
+            </Space>
+            return target === -1 ? '新增' : `更新已有第 ${target + 1} 行${linkedTarget(r) ? '（保留出库）' : ''}`
           } },
           { title: '来源', render: (_, r) => `${r.sheet} 第${r.row}行`, width: 180 },
           { title: '图片', width: 60, render: (_, r) => displayItem(r).material_snapshot.image ? <Image width={40} src={displayItem(r).material_snapshot.image} /> : '—' },

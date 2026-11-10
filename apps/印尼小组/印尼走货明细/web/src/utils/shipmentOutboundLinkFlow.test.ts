@@ -6,7 +6,7 @@ import { linkShipmentOutboundBatches } from './shipmentOutboundBatchLink'
 import { consolidateShipmentItems } from './shipmentConsolidation'
 import { parseShipmentPacking } from './shipmentWeight'
 import { cartonLayout } from './shipmentOrder'
-import { shipmentGrossPerPc, shipmentWeightQuantity } from './shipmentWeight'
+import { shipmentGrossPerPc, shipmentNetTotalKg, shipmentWeightQuantity } from './shipmentWeight'
 import { shipmentPurchaseAmount } from './shipmentPurchase'
 import type { Material } from '../api/client'
 
@@ -146,7 +146,7 @@ it('counts physical CBM once for the new multi-batch link while preserving disti
   const totals = (items: typeof linked) => {
     const matMap = new Map(items.map(item => [item.material_id, item.material_snapshot!]))
     const context = createContext({ items, matMap, consolidatedItems: consolidateShipmentItems(items, matMap),
-      cartonRows: cartonLayout(items, matMap), shipmentGrossPerPc, shipmentWeightQuantity, shipmentPurchaseAmount,
+      cartonRows: cartonLayout(items, matMap), shipmentNetTotalKg, shipmentGrossPerPc, shipmentWeightQuantity, shipmentPurchaseAmount,
       effectiveWeighingQty: () => 0 })
     return runInContext(ts.transpileModule(`(${totalHandler})()`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context)
   }
