@@ -117,6 +117,7 @@ test('clear acknowledgement followed by new entry uses a fresh id above tombston
   const state = { records: [record(500)], nextId: 501 };
   const context = { state, window: {}, recs: () => state.records, _backupConfirm: options => options.onConfirm(),
     persist: () => core.replaceRecords(db, state.records), showToast() {}, _backupLog() {}, _backupRefreshAll() {} };
+  for (const name of ['_recordWritesPaused', '_stageRecordChange']) context[name] = appFunction(name, context);
   appFunction('backupClearAll', context)();
   assert.equal(state.records.length, 0); assert.equal(state.nextId, 501);
   assert.equal(core.upsertRecords(db, [record(state.nextId++)]).accepted, 1);

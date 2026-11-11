@@ -1676,7 +1676,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
+// 未指定 host 时 Node 优先启用 IPv6 双栈，无 IPv6 支持时回退 IPv4；localhost 的两种地址均可连接。
+server.listen(PORT, undefined, () => {
   console.log('════════════════════════════════════════════');
   console.log('  兴信 QMS 后端已启动（多厂区模式）');
   console.log('  本机:   http://localhost:' + server.address().port + '/index.html');

@@ -3490,8 +3490,37 @@ function parseBatchPreview() {
   wrapEl.style.display = '';
 }
 
+/* 断线后的确认窗口仍可查看；所有确认写入必须先检查保护状态。
+   persist() 被登录、维护或存储错误拒绝时，不能把未接受的改动留在内存待下次同步。 */
+function _recordWritesPaused() {
+  const guard = window.__QC_MAINTENANCE;
+  if (!guard || !guard.blocked) return false;
+  showToast(guard.message || '系统修复中，暂时无法操作', 'error');
+  return true;
+}
+function _stageRecordChange(records, nextId, replace) {
+  if (_recordWritesPaused()) return false;
+  const previousRecords = state.records, previousNextId = state.nextId;
+  const hadReplacement = Object.prototype.hasOwnProperty.call(window, '__QC_FORCE_REPLACE');
+  const previousReplacement = window.__QC_FORCE_REPLACE;
+  try {
+    state.records = records;
+    state.nextId = nextId;
+    if (replace) window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;
+    if (persist() === false) throw new Error('保存未成功，原资料和待确认内容已保留，请检查连接、登录或浏览器存储后重试');
+    return true;
+  } catch (error) {
+    state.records = previousRecords; state.nextId = previousNextId;
+    if (hadReplacement) window.__QC_FORCE_REPLACE = previousReplacement;
+    else delete window.__QC_FORCE_REPLACE;
+    showToast(error.message || '保存失败，原资料和待确认内容已保留', 'error');
+    return false;
+  }
+}
+
 /* ── 确认批量导入 ── */
 function confirmBatchImport() {
+  if (_recordWritesPaused()) return false;
   if (!_batchRows.length) { showToast('请先解析预览', 'error'); return; }
 
   let additions;
@@ -3499,8 +3528,7 @@ function confirmBatchImport() {
     const used = new Set(state.records.map(r => Number(r.id)));
     additions = _batchRows.map(r => ({ ...r, id: _newRecordId(used) }));
   } catch (error) { showToast(error.message, 'error'); return; }
-  state.records.push(...additions);
-  persist();
+  if (!_stageRecordChange(state.records.concat(additions), state.nextId, false)) return false;
 
   const n = _batchRows.length;
   _batchRows = [];
@@ -4971,6 +4999,9 @@ function _syncFormResult() {
 }
 
 function saveRecord(options = {}) {
+  if (window.__QC_MAINTENANCE && window.__QC_MAINTENANCE.blocked) {
+    showToast(window.__QC_MAINTENANCE.message || '系统修复中，暂时无法操作', 'error'); return false;
+  }
   const ocrSaveContext = window.__qcOcrFormContext || window.__qcQueue?.context;
   if (typeof window.__QC_OCR_CAN_SAVE === 'function' && !window.__QC_OCR_CAN_SAVE(ocrSaveContext)) return false;
   const editingRecord = editingId !== null ? state.records.find(r => r.id === editingId) : null;
@@ -5923,8 +5954,8 @@ function _backupConfirm(options) {
 
   document.getElementById('bkCancelBtn').onclick  = close;
   document.getElementById('bkConfirmBtn').onclick = () => {
+    if (typeof options.onConfirm === 'function' && options.onConfirm() === false) return;
     close();
-    if (typeof options.onConfirm === 'function') options.onConfirm();
   };
   ov.addEventListener('click', e => { if (e.target === ov) close(); });
 }
@@ -6057,7 +6088,7 @@ function _backupImportFile(file) {
         confirmClass:  'btn-primary',
         onConfirm:    () => {
           const mode = source.isDraft ? 'append' : document.querySelector('input[name="bkMode"]:checked')?.value || 'append';
-          _backupDoImport(parsed, mode);
+          return _backupDoImport(parsed, mode);
         },
       });
 
@@ -6271,10 +6302,7 @@ function backupClearAll() {
     confirmClass: 'btn-secondary',   /* 不用 btn-primary，减少误操作 */
     onConfirm:   () => {
       const count = recs().length;
-      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 整库清空走 /api/records/replace */
-      state.records = [];
-      state.nextId  = Math.max(1, state.nextId || 1);
-      persist();
+      if (!_stageRecordChange([], Math.max(1, state.nextId || 1), true)) return false;
       showToast(`清空 ${count} 条记录的操作已在本地暂存，等待服务器同步`, 'info');
       _backupLog(`清空数据 ${count} 条记录`, 'warn');
       _backupRefreshAll();
@@ -6296,10 +6324,8 @@ function backupRestoreSeed() {
     confirmLabel: '确认恢复',
     confirmClass: 'btn-primary',
     onConfirm:   () => {
-      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 整库覆盖走 /api/records/replace */
-      state.records = SEED_RECORDS.map(r => Object.assign({}, r));
-      state.nextId  = Math.max(state.nextId || 1, SEED_RECORDS.length + 1);
-      persist();
+      if (!_stageRecordChange(SEED_RECORDS.map(r => Object.assign({}, r)),
+          Math.max(state.nextId || 1, SEED_RECORDS.length + 1), true)) return false;
       showToast(`${SEED_RECORDS.length} 条示例数据已在本地暂存，等待服务器同步`, 'info');
       _backupLog(`恢复示例数据 ${SEED_RECORDS.length} 条`, 'ok');
       _backupRefreshAll();
@@ -7142,6 +7168,7 @@ function confirmImport() {
 }
 
 function executeImportConfirm() {
+  if (_recordWritesPaused()) return false;
   const plan = _pendingImportPlan;
   const btn = document.getElementById('importExecuteBtn');
   if (!plan || !plan.records || plan.records.length === 0) {
@@ -7159,15 +7186,13 @@ function executeImportConfirm() {
       }
       used.add(row.id);
     }
-    if (plan.mode === 'replace') {
-      window.__QC_FORCE_REPLACE = (window.__QC_FORCE_REPLACE || 0) + 1;   /* 替换模式导入走 /api/records/replace */
-      state.records = plan.records;
-      state.nextId  = Math.max(state.nextId || 1, plan.records.length + 1);
-    } else {
-      state.records.push(...plan.records);
-      state.nextId = plan.nextId;
+    const replace = plan.mode === 'replace';
+    const next = replace ? plan.records : state.records.concat(plan.records);
+    const nextId = replace ? Math.max(state.nextId || 1, plan.records.length + 1) : plan.nextId;
+    if (!_stageRecordChange(next, nextId, replace)) {
+      if (btn) { btn.disabled = false; btn.textContent = '确认导入 ' + plan.records.length + ' 条'; }
+      return false;
     }
-    persist();
 
     const modeLabel = plan.mode === 'replace' ? '替换' : '追加';
     showToast(plan.records.length + ' 条记录已在本地暂存，等待服务器同步', 'info');

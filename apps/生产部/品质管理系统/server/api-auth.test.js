@@ -94,7 +94,7 @@ test.before(async () => {
   const serverDir = path.join(directory, 'server'); fs.mkdirSync(serverDir);
   for (const filename of ['server.js', 'auth.js']) {
     const contents = fs.readFileSync(path.join(__dirname, filename), 'utf8');
-    fs.writeFileSync(path.join(serverDir, filename), filename === 'server.js' ? contents.replace("server.listen(PORT, '0.0.0.0'", "server.listen(PORT, '127.0.0.1'") : contents);
+    fs.writeFileSync(path.join(serverDir, filename), filename === 'server.js' ? contents.replace("server.listen(PORT, undefined", "server.listen(PORT, '127.0.0.1'") : contents);
   }
   fs.writeFileSync(path.join(serverDir, 'seed.json'), JSON.stringify({ records: [], defectLib: [], users: [{ username: 'jc', password: Auth.legacyHash(password) }] }));
   fs.writeFileSync(path.join(serverDir, 'ai-config.json'), JSON.stringify({ enabled: false, apiKey: '', baseURL: 'http://127.0.0.1:1/disabled-test-only' }));
