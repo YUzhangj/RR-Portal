@@ -5,9 +5,11 @@ import { apiFetch } from "@/lib/apiFetch";
 import { invalidateClientCache } from "@/lib/clientCache";
 import { changed, draftOf, fields, pasteDrafts, shiftDraft, valuesOf, type Draft, type Field, type PlanValues, type WorkbenchLine, type WorkbenchRow } from "@/lib/planWorkbench";
 
+import AddPlanDialog, { type PlanOption } from "./AddPlanDialog";
+
 type Data = { rows: WorkbenchRow[]; lines: WorkbenchLine[] };
 type Transfer = { sourcePlanId: number; sourceDate: string; targetPlanId: number; targetDate: string; quantity: number; orderNo: string; partName: string; stepNo: number };
-type Preview = { adjustedPlans: number; allocationToken?: string; transfers?: Transfer[]; warnings: string[]; changes: { id: number; automatic?: boolean; removed?: boolean; before: PlanValues; after: PlanValues }[] };
+type Preview = { adjustedPlans: number; allocationToken?: string; transfers?: Transfer[]; warnings: string[]; changes: { id: number; created?: boolean; orderNo?: string; partName?: string; automatic?: boolean; removed?: boolean; before: PlanValues; after: PlanValues }[] };
 const labels: Record<Field, string> = { planDate: "日期", lineId: "拉别", machineNos: "机台", plannedQty: "计划数", workerCount: "人数", workHours: "工时", remark: "备注" };
 const control = "rounded-md border border-app-border px-2 py-1.5 text-sm bg-white disabled:opacity-50";
 const button = "rounded-btn border border-mint-400 bg-mint-50 text-mint-700 px-3 py-2 text-sm disabled:opacity-40";
@@ -18,6 +20,11 @@ export default function PlanWorkbench({ orderId }: { orderId?: number }) {
   const [from, setFrom] = useState(today), [to, setTo] = useState(weekEnd);
   const [data, setData] = useState<Data>({ rows: [], lines: [] });
   const [drafts, setDrafts] = useState<Record<number, Draft>>({});
+  const [addOpen, setAddOpen] = useState(false);
+  const [additions, setAdditions] = useState<Record<number, PlanOption>>({});
+  const nextId = useRef(-1);
+  const footer = useRef<HTMLDivElement>(null);
+  const [footerHeight, setFooterHeight] = useState(150);
   const [selected, setSelected] = useState<number[]>([]);
   const [lineFilter, setLineFilter] = useState("");
   const [operation, setOperation] = useState("shift"), [bulk, setBulk] = useState("1");
@@ -26,7 +33,7 @@ export default function PlanWorkbench({ orderId }: { orderId?: number }) {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const table = useRef<HTMLTableElement>(null);
-  const dirty = data.rows.filter(row => changed(row, drafts[row.id]));
+  const dirty = data.rows.filter(row => row.id < 0 || changed(row, drafts[row.id]));
   const visible = data.rows.filter(row => !lineFilter || String(row.values.lineId) === lineFilter);
   const dirtyRef = useRef(false); dirtyRef.current = dirty.length > 0;
   const busyRef = useRef(false); busyRef.current = busy;
@@ -35,7 +42,7 @@ export default function PlanWorkbench({ orderId }: { orderId?: number }) {
     const response = await apiFetch(`/api/plans/workbench?from=${start}&to=${end}${orderId ? `&orderId=${orderId}` : ""}`, { cache: "no-store" });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || "排期读取失败");
-    setData(body); setDrafts({}); setSelected([]); setPreview(null);
+    setData(body); setDrafts({}); setAdditions({}); setSelected([]); setPreview(null);
   }, [orderId]);
   useEffect(() => {
     let active = true; setBusy(true);
@@ -52,6 +59,29 @@ export default function PlanWorkbench({ orderId }: { orderId?: number }) {
     window.addEventListener("beforeunload", unload); document.addEventListener("click", navigate, true);
     return () => { window.removeEventListener("beforeunload", unload); document.removeEventListener("click", navigate, true); };
   }, []);
+  useEffect(() => {
+    if (!footer.current) return;
+    const observer = new ResizeObserver(entries => setFooterHeight(entries[0].contentRect.height));
+    observer.observe(footer.current); return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    const last = Object.keys(additions).map(Number).sort((a, b) => a - b)[0];
+    if (last != null) table.current?.querySelector<HTMLElement>(`[data-row="${last}"][data-field="plannedQty"]`)?.focus();
+  }, [additions]);
+  function add(option: PlanOption, values: PlanValues) {
+    const id = nextId.current--;
+    setData(current => ({ ...current, rows: [...current.rows, { id, token: "", orderNo: option.orderNo, productNo: option.productNo,
+      partName: option.partName, stepNo: option.stepNo, craft: option.craft, demand: option.demand, goodQty: null, inboundQty: null, lockedReason: null,
+      values: { ...values, plannedQty: 0 } }] }));
+    setDrafts(current => ({ ...current, [id]: draftOf(values) })); setAdditions(current => ({ ...current, [id]: option }));
+    setAddOpen(false); setLineFilter(""); edited();
+  }
+  function removeNew(id: number) {
+    setData(current => ({ ...current, rows: current.rows.filter(r => r.id !== id) }));
+    setAdditions(current => { const next = { ...current }; delete next[id]; return next; });
+    setDrafts(current => { const next = { ...current }; delete next[id]; return next; });
+    setSelected(current => current.filter(selectedId => selectedId !== id)); edited();
+  }
   function edited() { setPreview(null); setError(""); setNotice(""); }
   function edit(row: WorkbenchRow, field: Field, value: string) {
     edited(); setDrafts(previous => ({ ...previous, [row.id]: { ...(previous[row.id] ?? draftOf(row.values)), [field]: value,
@@ -97,16 +127,19 @@ export default function PlanWorkbench({ orderId }: { orderId?: number }) {
     setBusy(true); setError(""); setNotice("");
     let committed = false;
     try {
-      const changes = dirty.map(row => {
+      const changes = dirty.filter(row => row.id > 0).map(row => {
         try { return { id: row.id, token: row.token, values: valuesOf(drafts[row.id]) }; }
         catch (e) { throw new Error(`计划 #${row.id}：${e instanceof Error ? e.message : "输入无效"}`); }
       });
-      const response = await apiFetch("/api/plans/workbench", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ changes, preview: checkOnly, reason, autoDeduct, allocationToken: checkOnly ? undefined : preview?.allocationToken }) });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "本批未保存，请稍后重试");
+      const newPlans = dirty.filter(row => row.id < 0).map(row => ({ clientId: row.id, orderPartQtyId: additions[row.id].orderPartQtyId,
+        stepNo: additions[row.id].stepNo, optionToken: additions[row.id].token, values: valuesOf(drafts[row.id]) }));
+      const response = await apiFetch(newPlans.length ? "/api/plans/workbench/batch" : "/api/plans/workbench", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ changes, additions: newPlans, preview: checkOnly, reason, autoDeduct, allocationToken: checkOnly ? undefined : preview?.allocationToken }) });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(newPlans.length && response.status === 404 ? "新增排期接口尚未就绪，请更新后端后重试；草稿已保留" : body.error || "本批未保存，请稍后重试");
+      if (checkOnly && newPlans.length && body.createdPlans !== newPlans.length) throw new Error("新增排期预览不完整，草稿已保留，请重新加载核对");
       if (checkOnly) { setPreview(body); return; }
-      committed = true; setDrafts({}); setPreview(null);
+      committed = true; setDrafts({}); setAdditions({}); setData(current => ({ ...current, rows: current.rows.filter(r => r.id > 0) })); setPreview(null);
       invalidateClientCache("/api/plans"); invalidateClientCache("/api/schedule"); invalidateClientCache("/api/orders"); invalidateClientCache("/api/dashboard");
       await load(from, to); setNotice(`已统一保存 ${body.adjustedPlans} 条计划，历史实绩和库存保持不变。`);
     } catch (e) { setError(`${committed ? "保存已成功，但页面刷新失败，请重新加载，勿重复提交。" : ""}${e instanceof Error ? e.message : "操作失败"}`); }
@@ -115,14 +148,15 @@ export default function PlanWorkbench({ orderId }: { orderId?: number }) {
   const displayValue = (v: PlanValues, field: Field) => field === "lineId" ? data.lines.find(l => l.id === v.lineId)?.name ?? v.lineId
     : Array.isArray(v[field]) ? (v[field] as string[]).join("、") : String(v[field]);
 
-  return <div className="mx-auto max-w-[1800px] p-5">
+  return <div className="mx-auto max-w-[1800px] p-5" style={{ paddingBottom: footerHeight + 50 }}>
     <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><h1 className="text-xl font-bold text-mint-700">表格排期工作台</h1><Link href="/schedule" className="text-sm text-mint-700 underline">返回排期总览</Link></div>
-    <p className="mb-3 text-sm text-text-secondary">直接修改已有计划，支持 Tab 连续编辑、回车向下、从 Excel 粘贴。先检查改动，再统一保存。已报工和已有入库申请的行只读，不修改订单需求或库存。</p>
+    <p className="mb-3 text-sm text-text-secondary">新增或修改排期，支持 Tab 连续编辑、回车向下、从 Excel 粘贴。先检查改动，再统一保存。已报工和已有入库申请的行只读，不修改订单需求或库存。</p>
     <fieldset disabled={busy} className="mb-3 flex flex-wrap items-end gap-3">
       <label className="text-sm">起始日期<input className={`${control} ml-2`} type="date" aria-label="表格起始日期" value={from} onChange={e => setFrom(e.target.value)} /></label>
       <label className="text-sm">结束日期<input className={`${control} ml-2`} type="date" aria-label="表格结束日期" value={to} onChange={e => setTo(e.target.value)} /></label>
       <button className={button} onClick={reload}>加载排期</button>
       <label className="text-sm">筛选拉别<select className={`${control} ml-2`} value={lineFilter} onChange={e => { setLineFilter(e.target.value); setSelected([]); }}><option value="">全部拉别</option>{data.lines.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}</select></label>
+      <button type="button" className={button} onClick={() => setAddOpen(true)}>＋ 增加排期</button>
       {orderId && <span className="text-sm text-text-secondary">当前限订单 #{orderId}</span>}
     </fieldset>
     <fieldset disabled={busy} className="mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-mint-50 p-3">
@@ -133,7 +167,7 @@ export default function PlanWorkbench({ orderId }: { orderId?: number }) {
       {operation === "lineId" ? <select aria-label="批量值" className={control} value={bulk} onChange={e => setBulk(e.target.value)}><option value="">选择拉别</option>{data.lines.filter(l => l.isActive).map(l => <option key={l.id} value={l.id}>{l.name}</option>)}</select>
         : <input aria-label="批量值" className={control} type={operation === "planDate" ? "date" : "text"} value={bulk} onChange={e => setBulk(e.target.value)} placeholder={operation === "shift" ? "负数提前，正数顺延" : "填写统一值"} />}
       <button className={button} onClick={applyBulk}>应用到草稿</button>
-      <button className={button} disabled={!dirty.length} onClick={() => { if (window.confirm("放弃全部未保存修改？")) { setDrafts({}); edited(); } }}>放弃全部修改</button>
+      <button className={button} disabled={!dirty.length} onClick={() => { if (window.confirm("放弃全部未保存修改？")) { setDrafts({}); setAdditions({}); setData(current => ({ ...current, rows: current.rows.filter(r => r.id > 0) })); setSelected([]); edited(); } }}>放弃全部修改</button>
     </fieldset>
     <label className="mb-3 flex items-center gap-2 text-sm text-mint-700"><input type="checkbox" disabled={busy} checked={autoDeduct}
       onChange={e => { setAutoDeduct(e.target.checked); edited(); }} />增加计划数时，自动从后续未报工计划扣减（同订单、部位、工序，保持总量）</label>
@@ -150,13 +184,13 @@ export default function PlanWorkbench({ orderId }: { orderId?: number }) {
           <th className="p-2">需求</th><th className="p-2">已生产 / 入库</th><th className="p-2">状态</th>
         </tr></thead>
         <tbody>{visible.map((row, index) => {
-          const value = drafts[row.id] ?? draftOf(row.values); const modified = changed(row, drafts[row.id]);
+          const value = drafts[row.id] ?? draftOf(row.values); const modified = row.id < 0 || changed(row, drafts[row.id]);
           return <tr key={row.id} className={`border-t border-app-border ${row.lockedReason ? "bg-gray-50 text-text-tertiary" : modified ? "bg-amber-50" : ""}`}>
             <td className="p-2"><input type="checkbox" aria-label={`选择计划 #${row.id}`} disabled={busy || !!row.lockedReason} checked={selected.includes(row.id)} onChange={e => setSelected(s => e.target.checked ? [...s, row.id] : s.filter(id => id !== row.id))} /></td>
-            <td className="min-w-[190px] p-2"><div className="font-semibold">{row.orderNo}</div><div>{row.productNo} · {row.partName}</div><small>计划 #{row.id}</small></td>
+            <td className="min-w-[190px] p-2"><div className="font-semibold">{row.orderNo}</div><div>{row.productNo} · {row.partName}</div><small>{row.id < 0 ? `新增排期 ${-row.id}` : `计划 #${row.id}`}</small></td>
             <td className="p-2 whitespace-nowrap">第{row.stepNo}道<br />{row.craft}</td>
             {fields.map(field => {
-              const common = { "aria-label": `计划 #${row.id} ${labels[field]}`, "data-row": row.id, "data-field": field,
+              const common = { "aria-label": `${row.id < 0 ? `新增排期 ${-row.id}` : `计划 #${row.id}`} ${labels[field]}`, "data-row": row.id, "data-field": field,
                 disabled: busy || !!row.lockedReason, value: value[field], onChange: (e: { target: { value: string } }) => edit(row, field, e.target.value),
                 onPaste: (e: ClipboardEvent<HTMLElement>) => paste(e, index, field), onKeyDown: (e: KeyboardEvent<HTMLElement>) => move(e, index, field) };
               return <td key={field} className="p-1 align-top">{field === "lineId" ? <select {...common} className={`${control} w-[140px]`}>
@@ -175,15 +209,11 @@ export default function PlanWorkbench({ orderId }: { orderId?: number }) {
               </td>;
             })}
             <td className="p-2">{row.demand.toLocaleString()}</td><td className="p-2 whitespace-nowrap">{row.goodQty?.toLocaleString() ?? "—"} / {row.inboundQty?.toLocaleString() ?? "—"}</td>
-            <td className="min-w-[100px] p-2 text-xs">{row.lockedReason ?? (modified ? "待保存" : "未报工")}{modified && <button className="mt-1 block underline text-mint-700" disabled={busy} onClick={() => { setDrafts(s => { const next = { ...s }; delete next[row.id]; return next; }); edited(); }}>还原本行</button>}</td>
+            <td className="min-w-[100px] p-2 text-xs">{row.lockedReason ?? (row.id < 0 ? "新增待保存" : modified ? "待保存" : "未报工")}{modified && <button className="mt-1 block underline text-mint-700" disabled={busy} onClick={() => { if (row.id < 0) { removeNew(row.id); return; } setDrafts(s => { const next = { ...s }; delete next[row.id]; return next; }); edited(); }}>{row.id < 0 ? "移除新增" : "还原本行"}</button>}</td>
           </tr>;
         })}</tbody>
       </table>
       {!visible.length && !busy && <p className="p-8 text-center text-text-tertiary">此范围没有排期，请调整日期或拉别筛选。</p>}
-    </div>
-    <div className="mt-3 flex flex-wrap items-center gap-3"><span className="text-sm">共 {data.rows.length} 行，待保存 {dirty.length} 行（含筛选隐藏行）</span>
-      <label className="text-sm">调整原因<input aria-label="调整原因" disabled={busy} className={`${control} ml-2 w-[300px]`} maxLength={500} placeholder="如来料推迟、临时调机" value={reason} onChange={e => { setReason(e.target.value); setPreview(null); }} /></label>
-      <button className={button} disabled={busy || !dirty.length} onClick={() => submit(true)}>检查改动（{dirty.length}）</button>
     </div>
     {preview && <section aria-label="统一保存预览" className="mt-4 rounded-lg border border-mint-400 bg-white p-4">
       <h2 className="mb-2 font-bold text-mint-700">统一保存预览 · {preview.adjustedPlans} 行</h2>
@@ -192,9 +222,19 @@ export default function PlanWorkbench({ orderId }: { orderId?: number }) {
         {preview.transfers.map((transfer, index) => <p key={index}>{transfer.orderNo} / {transfer.partName} 第{transfer.stepNo}道：{transfer.sourceDate} 计划 #{transfer.sourcePlanId} 扣减 {transfer.quantity.toLocaleString()} 件 → {transfer.targetDate} 计划 #{transfer.targetPlanId}</p>)}
       </div>}
       {preview.warnings.map((warning, index) => <p key={index} className="mb-1 text-sm text-amber-800">⚠ {warning}</p>)}
-      <ul className="my-3 max-h-48 overflow-auto text-sm">{preview.changes.map(change => <li key={change.id} className="border-b border-app-border py-2">计划 #{change.id}{change.automatic ? "（自动扣减）" : ""}{change.removed ? "（扣至 0，撤销未报工计划）" : ""}：{fields.filter(f => JSON.stringify(change.before[f]) !== JSON.stringify(change.after[f])).map(f => `${labels[f]} ${displayValue(change.before, f) || "空"} → ${displayValue(change.after, f) || "空"}`).join("；")}</li>)}</ul>
+      <ul className="my-3 max-h-48 overflow-auto text-sm">{preview.changes.map(change => <li key={change.id} className="border-b border-app-border py-2">{change.created ? `新增排期 ${-change.id} · ${change.orderNo ?? ""} / ${change.partName ?? ""} · ${change.after.planDate}` : `计划 #${change.id}`}{change.automatic ? "（自动扣减）" : ""}{change.removed ? "（扣至 0，撤销未报工计划）" : ""}：{change.created ? fields.map(f => `${labels[f]} ${displayValue(change.after, f) || "空"}`).join("；") : fields.filter(f => JSON.stringify(change.before[f]) !== JSON.stringify(change.after[f])).map(f => `${labels[f]} ${displayValue(change.before, f) || "空"} → ${displayValue(change.after, f) || "空"}`).join("；")}</li>)}</ul>
       <p className="mb-3 text-xs text-text-secondary">确认后整批保存；已登记来料的部位如有生产计划变动，将暂停该部位自动重排，避免覆盖人工安排，再次保存来料可恢复。</p>
-      <button className="rounded-btn bg-mint-700 px-4 py-2 text-sm text-white disabled:opacity-40" disabled={busy || preview.adjustedPlans === 0} onClick={() => submit(false)}>确认统一保存（{preview.adjustedPlans}）</button>
+
     </section>}
+    <div ref={footer} role="region" aria-label="排期保存操作" className="fixed inset-x-0 bottom-0 z-40 border-t border-mint-400 bg-white px-5 py-3 shadow-[0_-3px_12px_rgba(0,0,0,0.08)]">
+      <div className="mx-auto flex max-w-[1760px] flex-wrap items-center gap-3">
+        <span className="text-sm">共 {data.rows.length} 行，待保存 {dirty.length} 行（新增 {Object.keys(additions).length} 行，含筛选隐藏行）</span>
+        <label className="text-sm">调整原因<input aria-label="调整原因" disabled={busy} className={`${control} ml-2 w-[220px]`} maxLength={500} placeholder="如临时加单、来料推迟" value={reason} onChange={e => { setReason(e.target.value); setPreview(null); }} /></label>
+        <button type="button" className={button} disabled={busy || !dirty.length} onClick={() => submit(true)}>检查改动（{dirty.length}）</button>
+        <button type="button" className="rounded-btn bg-mint-700 px-4 py-2 text-sm text-white disabled:opacity-40" disabled={busy || !preview?.adjustedPlans} onClick={() => submit(false)}>确认统一保存（{preview?.adjustedPlans ?? 0}）</button>
+        <span className="text-xs text-text-secondary">{preview ? "请核对上方预览后确认保存" : "先检查改动，再确认统一保存"}</span>
+      </div>
+    </div>
+    {addOpen && <AddPlanDialog date={from} lines={data.lines} orderId={orderId} onClose={() => setAddOpen(false)} onAdd={add} />}
   </div>;
 }

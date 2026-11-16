@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { createServer, type Server } from "node:http";
 import { SignJWT } from "jose";
-let api: Server, failSave = false, failRead = false, writes = 0, previews = 0, autoCase = false;
+let api: Server, failSave = false, failRead = false, writes = 0, previews = 0, autoCase = false, missingAddEndpoint = false;
 let submitted: { autoDeduct: boolean; allocationToken?: string }[] = [];
 const today = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" }).format(new Date());
 const initial = () => [1, 2, 3].map(id => ({ id, token: `token-${id}`, orderNo: `ORDER-${id}`, productNo: "77711", partName: ["果汁瓶盖", "热蜂蜜瓶身", "已报工水瓶"][id - 1], stepNo: 1, craft: "手喷", demand: 50000, goodQty: id === 3 ? 500 : null, inboundQty: id === 3 ? 450 : null, lockedReason: id === 3 ? "已录实绩" : null,
@@ -13,10 +13,15 @@ test.beforeAll(async () => {
     response.setHeader("Content-Type", "application/json");
     const url = new URL(request.url!, "http://127.0.0.1:15081");
     if (url.pathname === "/api/auth/session") return response.end("{}");
-    if (url.pathname === "/api/plans/workbench" && request.method === "POST") {
+    if (url.pathname === "/api/plans/workbench/options") return response.end(JSON.stringify([
+      { orderId: 9, orderPartQtyId: 91, sourcePartId: 901, orderNo: "TEMP-ORDER", productNo: "NEW-900", partName: "临时产品", stepNo: 1, craft: "手喷", demand: 1000, remaining: 1000, token: "option-token" },
+    ]));
+    if (url.pathname === "/api/plans/workbench/batch" && missingAddEndpoint) { response.statusCode = 404; return response.end(""); }
+    if (["/api/plans/workbench", "/api/plans/workbench/batch"].includes(url.pathname) && request.method === "POST") {
       const body = JSON.parse(text);
       if (!body.preview && failSave) { response.statusCode = 409; return response.end(JSON.stringify({ error: "计划已被修改或正在报工，本批未保存；请刷新核对" })); }
       const changes = body.changes.map((c: { id: number; values: typeof rows[0]["values"] }) => ({ id: c.id, before: rows.find(r => r.id === c.id)!.values, after: c.values }));
+      for (const addition of body.additions ?? []) changes.push({ id: addition.clientId, created: true, orderNo: "TEMP-ORDER", partName: "临时产品", before: { ...addition.values, plannedQty: 0 }, after: addition.values });
       const transfers = [];
       if (autoCase && body.autoDeduct) {
         const target = changes.find((c: { id: number }) => c.id === 1);
@@ -29,8 +34,10 @@ test.beforeAll(async () => {
       }
       submitted.push({ autoDeduct: body.autoDeduct, allocationToken: body.allocationToken });
       if (body.preview) previews++;
-      else { writes++; rows = rows.map(row => { const change = changes.find((c: { id: number }) => c.id === row.id); return change ? { ...row, token: row.token + "v", values: change.after } : row; }); }
-      return response.end(JSON.stringify({ adjustedPlans: changes.length, preview: body.preview, changes, transfers, allocationToken: "snapshot-1", warnings: ["部分订单仍需补排，请核对剩余需求"] }));
+      else { writes++; rows = rows.map(row => { const change = changes.find((c: { id: number }) => c.id === row.id); return change ? { ...row, token: row.token + "v", values: change.after } : row; });
+        for (const addition of body.additions ?? []) rows.push({ ...initial()[0], id: 100 + rows.length, token: "created", orderNo: "TEMP-ORDER", productNo: "NEW-900", partName: "临时产品", values: addition.values });
+      }
+      return response.end(JSON.stringify({ adjustedPlans: changes.length, createdPlans: (body.additions ?? []).length, preview: body.preview, changes, transfers, allocationToken: "snapshot-1", warnings: ["部分订单仍需补排，请核对剩余需求"] }));
     }
     if (url.pathname === "/api/plans/workbench") {
       if (failRead && writes) { response.statusCode = 500; return response.end(JSON.stringify({ error: "模拟读取失败" })); }
@@ -46,7 +53,7 @@ test.beforeAll(async () => {
 });
 test.afterAll(async () => { await new Promise<void>(resolve => api.close(() => resolve())); });
 test.beforeEach(async ({ context }) => {
-  rows = initial(); failSave = false; failRead = false; writes = 0; previews = 0; autoCase = false; submitted = [];
+  rows = initial(); failSave = false; failRead = false; writes = 0; previews = 0; autoCase = false; missingAddEndpoint = false; submitted = [];
   const token = await new SignJWT({ userId: "1", username: "clerk", factoryId: "XINGXIN", "http://schemas.microsoft.com/ws/2008/06/identity/claims/role": "clerk" })
     .setProtectedHeader({ alg: "HS256" }).setIssuer("order-parts-test").setExpirationTime("1h")
     .sign(new TextEncoder().encode("order-parts-test-only-key-32-characters-long"));
@@ -140,4 +147,62 @@ test("机台选择使用启用机台的完整登记名称，可多选而不重�
   await cell.getByRole("button", { name: "1 号机 (世通)", exact: true }).click();
   await expect(page.getByLabel("计划 #1 机台", { exact: true })).toHaveValue("1 号机 (世通)、2 号机 (世通)");
   expect(writes).toBe(0);
+});
+
+
+test("筛选栏增加临时产品排期，与原有修改统一预览和保存，保存栏始终固定", async ({ page }, testInfo) => {
+  await page.goto("/schedule/table");
+  await expect(page.getByRole("button", { name: "确认统一保存（0）" })).toBeDisabled();
+  await page.getByLabel("计划 #1 计划数").fill("8000");
+  await page.getByRole("button", { name: "增加排期", exact: false }).click();
+  const dialog = page.getByRole("dialog", { name: "增加排期", exact: true });
+  await dialog.getByLabel("搜索订单 / 货号 / 部位").fill("NEW-900");
+  await dialog.getByLabel("订单产品与工序").selectOption("91:1");
+  await dialog.getByLabel("新增计划数量").fill("100");
+  await dialog.getByRole("button", { name: "加入排期草稿" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByLabel("新增排期 1 计划数")).toHaveValue("100");
+  expect(writes).toBe(0);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const footer = page.getByRole("region", { name: "排期保存操作", exact: true });
+  const viewport = page.viewportSize()!;
+  const before = await footer.boundingBox(); expect(before!.y + before!.height).toBeLessThanOrEqual(viewport.height + 1);
+  await expect(footer.getByRole("button", { name: "检查改动（2）" })).toBeVisible();
+  await footer.getByRole("button", { name: "检查改动（2）" }).click();
+  await expect(page.getByRole("region", { name: "统一保存预览" })).toContainText("临时产品");
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  const after = await footer.boundingBox(); expect(Math.abs(after!.y - before!.y)).toBeLessThan(1);
+  await page.screenshot({ path: testInfo.outputPath("add-plan-fixed-footer.png"), fullPage: true });
+  await footer.getByRole("button", { name: "确认统一保存（2）" }).click();
+  await expect(page.getByRole("status")).toContainText("已统一保存 2 条计划");
+  expect(writes).toBe(1); expect(rows.some(r => r.productNo === "NEW-900")).toBe(true);
+});
+
+test("新增草稿可以移除，校验冲突后保留新增及已有输入", async ({ page }) => {
+  await page.goto("/schedule/table"); await page.getByRole("button", { name: "增加排期" }).click();
+  const dialog = page.getByRole("dialog", { name: "增加排期", exact: true });
+  await dialog.getByLabel("订单产品与工序").selectOption("91:1");
+  await dialog.getByLabel("新增计划数量").fill("0"); await dialog.getByRole("button", { name: "加入排期草稿" }).click();
+  await expect(dialog.getByRole("alert", { name: "增加排期错误" })).toBeVisible();
+  await dialog.getByLabel("新增计划数量").fill("50"); await dialog.getByRole("button", { name: "加入排期草稿" }).click();
+  await page.getByRole("button", { name: "检查改动（1）" }).click(); failSave = true;
+  await page.getByRole("button", { name: "确认统一保存（1）" }).click();
+  await expect(page.getByRole("alert", { name: "排期工作台错误" })).toContainText("本批未保存");
+  await expect(page.getByLabel("新增排期 1 计划数")).toHaveValue("50");
+  await page.getByRole("button", { name: "移除新增", exact: true }).click();
+  await expect(page.getByLabel("新增排期 1 计划数")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "检查改动（0）" })).toBeDisabled(); expect(writes).toBe(0);
+});
+
+
+test("新增接口尚未部署时保留草稿，不能仅保存原有修改而遗漏新增", async ({ page }) => {
+  await page.goto("/schedule/table"); await page.getByLabel("计划 #1 计划数").fill("8000");
+  await page.getByRole("button", { name: "增加排期" }).click();
+  const dialog = page.getByRole("dialog", { name: "增加排期", exact: true });
+  await dialog.getByLabel("订单产品与工序").selectOption("91:1"); await dialog.getByLabel("新增计划数量").fill("50");
+  await dialog.getByRole("button", { name: "加入排期草稿" }).click(); missingAddEndpoint = true;
+  await page.getByRole("button", { name: "检查改动（2）" }).click();
+  await expect(page.getByRole("alert", { name: "排期工作台错误" })).toContainText("新增排期接口尚未就绪");
+  await expect(page.getByLabel("新增排期 1 计划数")).toHaveValue("50"); await expect(page.getByLabel("计划 #1 计划数")).toHaveValue("8000");
+  await expect(page.getByRole("button", { name: "确认统一保存（0）" })).toBeDisabled(); expect(writes).toBe(0);
 });

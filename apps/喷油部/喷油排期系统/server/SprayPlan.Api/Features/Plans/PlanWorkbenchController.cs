@@ -16,7 +16,7 @@ namespace SprayPlan.Api.Features.Plans;
 public record WorkbenchValues(string PlanDate, int LineId, double PlannedQty, int WorkerCount,
     double WorkHours, List<string> MachineNos, string Remark);
 public record WorkbenchChange(int Id, string Token, WorkbenchValues Values);
-public record WorkbenchRequest(List<WorkbenchChange>? Changes, bool Preview = true, string? Reason = null, bool AutoDeduct = false, string? AllocationToken = null);
+public record WorkbenchRequest(List<WorkbenchChange>? Changes, bool Preview = true, string? Reason = null, bool AutoDeduct = false, string? AllocationToken = null, List<WorkbenchAddition>? Additions = null);
 public record WorkbenchTransfer(int SourcePlanId, string SourceDate, int TargetPlanId, string TargetDate,
     long Quantity, string OrderNo, string PartName, int StepNo);
 public record WorkbenchRow(int Id, string Token, string OrderNo, string ProductNo, string PartName,
@@ -68,15 +68,22 @@ public class PlanWorkbenchController(AppDbContext db) : ControllerBase
         });
     }
 
+    [HttpGet("options")]
+    public async Task<IActionResult> Options(int? orderId) => Ok(await WorkbenchOptions.Load(db, orderId));
+
     [HttpPost]
+    [HttpPost("batch")]
     public async Task<IActionResult> Save(WorkbenchRequest request)
     {
-        var changes = request.Changes;
-        if (changes is null || changes.Count == 0 || changes.Count > 1000 || changes.Any(c => c is null || c.Values is null)
-            || changes.Select(c => c.Id).Distinct().Count() != changes.Count)
+        var changes = request.Changes ?? [];
+        var additions = request.Additions ?? [];
+        if (changes.Count + additions.Count == 0 || changes.Count + additions.Count > 1000 || changes.Any(c => c is null || c.Values is null || c.Id <= 0)
+            || changes.Select(c => c.Id).Distinct().Count() != changes.Count
+            || additions.Any(a => a is null || a.Values is null || a.ClientId >= 0 || a.OrderPartQtyId <= 0 || a.StepNo <= 0)
+            || additions.Select(a => a.ClientId).Distinct().Count() != additions.Count)
             return BadRequest(new { error = "每批请选择 1 至 1000 条不同的计划" });
         if ((request.Reason?.Length ?? 0) > 500) return BadRequest(new { error = "调整原因最多 500 字" });
-        foreach (var change in changes)
+        foreach (var change in changes.Concat(additions.Select(a => new WorkbenchChange(a.ClientId, "", a.Values))))
         {
             var v = change.Values;
             if (!Day(v.PlanDate, out _) || !double.IsFinite(v.PlannedQty) || v.PlannedQty != Math.Truncate(v.PlannedQty)
@@ -97,7 +104,8 @@ public class PlanWorkbenchController(AppDbContext db) : ControllerBase
     async Task<IActionResult> Apply(WorkbenchRequest request)
     {
         await using var transaction = await db.Database.BeginTransactionAsync();
-        var changes = request.Changes!;
+        var changes = request.Changes ?? [];
+        var additions = request.Additions ?? [];
         var ids = changes.Select(c => c.Id).ToHashSet();
         // 在同一事务读取全厂未撤销排期，校验跨日期、跨工序及未选中订单占用。
         var all = await db.ProductionPlans.Include(p => p.Order!).ThenInclude(o => o.PartQtys)
@@ -115,11 +123,29 @@ public class PlanWorkbenchController(AppDbContext db) : ControllerBase
         var warnings = new List<string>();
         var before = all.ToDictionary(p => p.Id, Values);
         var oldGroups = all.ToDictionary(p => p.Id, p => p.GroupNo);
-        var sourceKeys = chosen.Select(PartKey).ToHashSet();
+        var options = await WorkbenchOptions.Load(db, qtyIds: additions.Select(a => a.OrderPartQtyId).ToList());
+        var newRows = new List<ProductionPlan>();
+        foreach (var addition in additions)
+        {
+            var option = options.SingleOrDefault(o => o.OrderPartQtyId == addition.OrderPartQtyId && o.StepNo == addition.StepNo);
+            if (option == null || option.Token != addition.OptionToken)
+                return Conflict(new { error = "新增排期的订单、部位工艺或剩余需求已变化，请重新选择；本批未保存" });
+            if (!lines.TryGetValue(addition.Values.LineId, out var targetLine) || targetLine.CraftType != option.Craft)
+                return BadRequest(new { error = "新增排期的拉别必须与所选工序工艺一致" });
+            Day(addition.Values.PlanDate, out var newDate);
+            if (!calendar.IsWorkday(newDate)) return BadRequest(new { error = "新增排期日期是休息日，请选择工作日" });
+            var owner = await db.Orders.Include(o => o.PartQtys).SingleAsync(o => o.Id == option.OrderId);
+            var row = new ProductionPlan { Id = addition.ClientId, FactoryId = db.CurrentFactoryId, Order = owner, OrderId = owner.Id,
+                PartName = option.PartName, SourcePartId = option.SourcePartId, StepNo = option.StepNo, Craft = option.Craft,
+                LineId = addition.Values.LineId, PlanDate = newDate, PlannedQty = 0 };
+            newRows.Add(row);
+            before[row.Id] = Values(row); oldGroups[row.Id] = null;
+        }
+        var sourceKeys = chosen.Concat(newRows).Select(PartKey).ToHashSet();
         var materials = await db.OrderMaterials.ToListAsync();
         // 确认时必须与预览使用同一批来源；未来计划新建、报工、撤销或数量变化都要求重新预览。
         var allocationToken = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new {
-            changes = request.Changes,
+            changes = request.Changes, additions = request.Additions, options,
             plans = all.Where(p => sourceKeys.Contains(PartKey(p))).OrderBy(p => p.Id).Select(p => new { p.Id, version = Token(p), inbound = inbound.Contains(p.Id) }),
             materials = materials.Where(m => sourceKeys.Contains($"{m.OrderId}|{m.PartName}")).OrderBy(m => m.Id)
                 .Select(m => new { m.Id, m.Version, m.ArrivedQty, m.ExpectedDate, m.AutoScheduleEnabled })
@@ -128,9 +154,10 @@ public class PlanWorkbenchController(AppDbContext db) : ControllerBase
             return Conflict(new { error = "后续排期或来料与预览不一致，请重新检查改动；本批未保存" });
         var oldQty = all.ToDictionary(p => p.Id, CommittedQty);
         var oldDates = all.ToDictionary(p => p.Id, p => p.PlanDate);
+        foreach (var p in newRows) { all.Add(p); chosen.Add(p); oldQty[p.Id] = 0; oldDates[p.Id] = p.PlanDate; }
         foreach (var p in chosen)
         {
-            var v = byId[p.Id].Values;
+            var v = p.Id < 0 ? additions.Single(a => a.ClientId == p.Id).Values : byId[p.Id].Values;
             Day(v.PlanDate, out var date);
             if (date != p.PlanDate && !calendar.IsWorkday(date)) return BadRequest(new { error = $"计划 #{p.Id}：{v.PlanDate} 是休息日" });
             if (!lines.TryGetValue(v.LineId, out var line) || !line.IsActive) return BadRequest(new { error = $"计划 #{p.Id}：目标拉别不存在或未启用" });
@@ -156,13 +183,18 @@ public class PlanWorkbenchController(AppDbContext db) : ControllerBase
             foreach (var group in chosen.GroupBy(p => (p.OrderId, p.PartName, p.StepNo)))
             {
                 // 本批已经手工减少的数量先抵消增加，避免二次扣减。
-                var remaining = Math.Max(0, group.Sum(p => (long)p.PlannedQty - (long)before[p.Id].PlannedQty));
+                var netExisting = group.Where(p => p.Id > 0).Sum(p => (long)p.PlannedQty - (long)before[p.Id].PlannedQty);
+                var newQty = group.Where(p => p.Id < 0).Sum(p => (long)p.PlannedQty);
+                var sample = group.First();
+                var demand = sample.Order!.PartQtys.Where(q => q.PartName == sample.PartName).Sum(q => (long)q.Qty);
+                var previousTotal = all.Where(p => p.OrderId == sample.OrderId && p.PartName == sample.PartName && p.StepNo == sample.StepNo).Sum(p => oldQty[p.Id]);
+                var remaining = Math.Max(0, netExisting) + Math.Max(0, newQty + Math.Min(0, netExisting) - Math.Max(0, demand - previousTotal));
                 foreach (var target in group.Where(p => p.PlannedQty > before[p.Id].PlannedQty).OrderBy(p => p.PlanDate).ThenBy(p => p.Id))
                 {
                     var need = Math.Min(remaining, target.PlannedQty - (long)before[target.Id].PlannedQty);
                     if (need == 0) continue;
                     var donors = all.Where(p => p.OrderId == target.OrderId && p.PartName == target.PartName && p.StepNo == target.StepNo
-                        && p.PlanDate > target.PlanDate && !ids.Contains(p.Id) && p.DeletedAt == null && Locked(p, inbound) == null)
+                        && p.Id > 0 && p.PlanDate > target.PlanDate && !ids.Contains(p.Id) && p.DeletedAt == null && Locked(p, inbound) == null)
                         .OrderBy(p => p.PlanDate).ThenBy(p => p.Id).ToList();
                     var available = donors.Sum(p => (long)p.PlannedQty);
                     if (available < need) return BadRequest(new { error = $"{target.Order!.ExternalOrderNo} / {target.PartName} 第{target.StepNo}道增加 {need:N0} 件，后续可扣减的未报工计划仅 {available:N0} 件；请减少增加量，或关闭自动扣减后按订单剩余需求排期。本批未保存" });
@@ -199,7 +231,7 @@ public class PlanWorkbenchController(AppDbContext db) : ControllerBase
             foreach (var step in steps.Where(n => n > 1))
             {
                 var upstream = part.Where(p => p.StepNo == step - 1).ToList();
-                if (upstream.Count == 0) { warnings.Add($"{part.First().Order!.ExternalOrderNo} / {part.First().PartName} 第{step}道缺少前道计划，请核对工序"); continue; }
+                if (upstream.Count == 0) { if (newRows.Any(p => p.OrderId == part.First().OrderId && p.PartName == part.First().PartName && p.StepNo == step)) return BadRequest(new { error = "新增后道工序前，请先安排前一道工序" }); warnings.Add($"{part.First().Order!.ExternalOrderNo} / {part.First().PartName} 第{step}道缺少前道计划，请核对工序"); continue; }
                 foreach (var day in part.Where(p => p.StepNo == step).Select(p => p.PlanDate).Distinct())
                 {
                     var next = part.Where(p => p.StepNo == step && p.PlanDate <= day).Sum(CommittedQty) - upstream.Where(p => p.PlanDate <= day).Sum(CommittedQty);
@@ -237,16 +269,32 @@ public class PlanWorkbenchController(AppDbContext db) : ControllerBase
                 .GroupBy(x => x.No).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
             if (sharedMachines.Count > 0) warnings.Add($"{ScheduleCalc.Ymd(date)} {line.Name} 机台 {string.Join("、", sharedMachines)} 有多条计划，请核对分时安排");
         }
-        var result = new { adjustedPlans = changed.Count, preview = request.Preview, allocationToken, transfers, warnings = warnings.Distinct().ToList(),
-            changes = changed.Select(p => new { p.Id, automatic = automatic.Contains(p.Id), removed = p.DeletedAt != null,
+        var createdPlanIds = new List<object>();
+        var result = new { adjustedPlans = changed.Count, createdPlans = newRows.Count, createdPlanIds, preview = request.Preview, allocationToken, transfers, warnings = warnings.Distinct().ToList(),
+            changes = changed.Select(p => new { p.Id, created = newRows.Contains(p), automatic = automatic.Contains(p.Id), removed = p.DeletedAt != null,
                 orderNo = p.Order!.ExternalOrderNo, p.PartName, p.StepNo,
                 before = before[p.Id], after = p.DeletedAt != null ? Values(p) with { PlannedQty = 0 } : Values(p) }).ToList() };
         if (request.Preview) return Ok(result); // 事务释放时回滚，预览不触碰实绩、库存或来料状态。
         var now = DateTime.UtcNow; var by = User.FindFirst("username")?.Value ?? "unknown";
+        if (newRows.Count > 0)
+        {
+            var pending = newRows.Select(p => (Row: p, ClientId: p.Id)).ToList();
+            foreach (var p in newRows) { p.Id = 0; p.CreatedBy = by; p.CreatedAt = now; db.ProductionPlans.Add(p); }
+            await db.SaveChangesAsync(); // 同一事务中取得新 ID；后续失败则包含现有行修改在内整批回滚。
+            var mapping = pending.ToDictionary(p => p.ClientId, p => p.Row.Id);
+            foreach (var (row, clientId) in pending)
+            {
+                before[row.Id] = before[clientId]; oldGroups[row.Id] = null;
+                createdPlanIds.Add(new { clientId, planId = row.Id });
+            }
+            for (var index = 0; index < transfers.Count; index++)
+                transfers[index] = transfers[index] with { TargetPlanId = mapping.GetValueOrDefault(transfers[index].TargetPlanId, transfers[index].TargetPlanId) };
+        }
         foreach (var p in changed)
         {
+            if (newRows.Contains(p) && p.Order!.Status is "draft" or "received") p.Order.Status = "scheduled";
             var history = JsonSerializer.Deserialize<List<JsonElement>>(p.ModificationHistory) ?? [];
-            history.Add(JsonSerializer.SerializeToElement(new { action = automatic.Contains(p.Id) ? "table_auto_deduct" : "table_plan_edit", before = before[p.Id], after = p.DeletedAt != null ? Values(p) with { PlannedQty = 0 } : Values(p), removed = p.DeletedAt != null, quantityTransfers = transfers.Where(t => t.SourcePlanId == p.Id || t.TargetPlanId == p.Id).ToList(), oldGroupNo = oldGroups[p.Id], newGroupNo = p.GroupNo, reason = request.Reason?.Trim(), by, at = now }));
+            history.Add(JsonSerializer.SerializeToElement(new { action = newRows.Contains(p) ? "table_plan_create" : automatic.Contains(p.Id) ? "table_auto_deduct" : "table_plan_edit", before = before[p.Id], after = p.DeletedAt != null ? Values(p) with { PlannedQty = 0 } : Values(p), removed = p.DeletedAt != null, quantityTransfers = transfers.Where(t => t.SourcePlanId == p.Id || t.TargetPlanId == p.Id).ToList(), oldGroupNo = oldGroups[p.Id], newGroupNo = p.GroupNo, reason = request.Reason?.Trim(), by, at = now }));
             p.ModificationHistory = JsonSerializer.Serialize(history); p.LastModifiedAt = now; p.LastModifiedBy = by;
             if (p.DeletedAt != null) p.DeletedBy = by;
             p.Order!.UpdatedAt = now; p.Order.LastUpdatedBy = by;
