@@ -197,6 +197,128 @@ public class PlanWorkbenchTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task AutoDeductPreviewsAcrossDates_PartialAndFullDonors_SaveConservesTotalAndHistory()
+    {
+        var near = await AddFuture(80, 1); var far = await AddFuture(90, 2);
+        await factory.WithDbAsync(async db => { (await db.OrderPartQtys.SingleAsync(q => q.PartName == "脚")).Qty = 270; await db.SaveChangesAsync(); });
+        var row = (await Rows()).Single(r => r.PartName == "脚" && r.Values.PlanDate == "2030-01-07");
+        var snapshot = await ProtectedSnapshot();
+        var (preview, commit) = await AutoPreview([Change(row, v => v with { PlannedQty = 220 })]);
+        Assert.Equal(3, preview.GetProperty("adjustedPlans").GetInt32());
+        Assert.Equal(2, preview.GetProperty("transfers").GetArrayLength());
+        Assert.Equal(near, preview.GetProperty("transfers")[0].GetProperty("sourcePlanId").GetInt32());
+        Assert.Equal(80, preview.GetProperty("transfers")[0].GetProperty("quantity").GetInt32());
+        Assert.True(preview.GetProperty("changes").EnumerateArray().Single(c => c.GetProperty("id").GetInt32() == near).GetProperty("removed").GetBoolean());
+        Assert.Equal(snapshot, await ProtectedSnapshot());
+        Assert.Equal(80, (await Rows()).Single(r => r.Id == near).Values.PlannedQty);
+        (await client.PostAsJsonAsync("/api/plans/workbench", commit)).EnsureSuccessStatusCode();
+        Assert.Equal(snapshot, await ProtectedSnapshot());
+        await factory.WithDbAsync(async db => {
+            var plans = await db.ProductionPlans.Where(p => p.PartName == "脚").ToListAsync();
+            Assert.Equal(270, plans.Where(p => p.DeletedAt == null).Sum(p => p.PlannedQty));
+            Assert.NotNull(plans.Single(p => p.Id == near).DeletedAt);
+            Assert.Equal(80, plans.Single(p => p.Id == near).PlannedQty); // 撤销保留原始计划数
+            Assert.Equal(50, plans.Single(p => p.Id == far).PlannedQty);
+            Assert.Contains("table_auto_deduct", plans.Single(p => p.Id == near).ModificationHistory);
+            var trace = JsonSerializer.Deserialize<JsonElement>(plans.Single(p => p.Id == near).ModificationHistory)[0].GetProperty("quantityTransfers")[0];
+            Assert.Equal(row.Id, trace.GetProperty("TargetPlanId").GetInt32());
+            Assert.Equal(near, trace.GetProperty("SourcePlanId").GetInt32());
+        });
+    }
+
+    [Fact]
+    public async Task AutoDeductExcludesActualsInboundOtherPartsAndOtherSteps_InsufficientIsAtomic()
+    {
+        await AddFuture(100, 1, recorded: true);
+        var inbound = await AddFuture(100, 2);
+        await AddFuture(100, 3, step: 2);
+        await AddFuture(100, 4, part: "头");
+        await factory.WithDbAsync(async db => { db.InboundApplications.Add(new InboundApplication { ApplicationNo = "FUTURE-IN", SourcePlanId = inbound, Quantity = 1 }); await db.SaveChangesAsync(); });
+        var row = (await Rows()).Single(r => r.PartName == "脚" && r.Values.PlanDate == "2030-01-07");
+        var snapshot = await ProtectedSnapshot();
+        var response = await client.PostAsJsonAsync("/api/plans/workbench", new WorkbenchRequest([Change(row, v => v with { PlannedQty = 150 })], AutoDeduct: true));
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("仅 0 件", await response.Content.ReadAsStringAsync());
+        Assert.Equal(snapshot, await ProtectedSnapshot());
+        Assert.Equal(100, (await Rows()).Single(r => r.Id == row.Id).Values.PlannedQty);
+    }
+
+    [Theory]
+    [InlineData("record")]
+    [InlineData("inbound")]
+    [InlineData("quantity")]
+    [InlineData("new-plan")]
+    [InlineData("cancel")]
+    public async Task AutoDeductMustRepreviewWhenDonorPoolChanges(string kind)
+    {
+        var donor = await AddFuture(100, 1);
+        var row = (await Rows()).Single(r => r.PartName == "脚" && r.Values.PlanDate == "2030-01-07");
+        var (_, commit) = await AutoPreview([Change(row, v => v with { PlannedQty = 150 })]);
+        await factory.WithDbAsync(async db => {
+            var plan = await db.ProductionPlans.FindAsync(donor);
+            if (kind == "record") plan!.GoodQty = 0;
+            if (kind == "inbound") db.InboundApplications.Add(new InboundApplication { ApplicationNo = "LATE-IN", SourcePlanId = donor, Quantity = 1 });
+            if (kind == "quantity") plan!.PlannedQty = 90;
+            if (kind == "cancel") plan!.DeletedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+        });
+        if (kind == "new-plan") await AddFuture(100, 2);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/plans/workbench", commit)).StatusCode);
+        Assert.Equal(100, (await Rows()).Single(r => r.Id == row.Id).Values.PlannedQty);
+    }
+
+    [Fact]
+    public async Task ManualReductionsOffsetIncreases_AndEditedRowsAreNeverAutomaticDonors()
+    {
+        var edited = await AddFuture(100, 1); var donor = await AddFuture(100, 2);
+        var rows = await Rows(); var target = rows.Single(r => r.PartName == "脚" && r.Values.PlanDate == "2030-01-07");
+        var changes = new[] { Change(target, v => v with { PlannedQty = 160 }), Change(rows.Single(r => r.Id == edited), v => v with { PlannedQty = 60 }) };
+        var (preview, commit) = await AutoPreview(changes.ToList());
+        var transfer = Assert.Single(preview.GetProperty("transfers").EnumerateArray());
+        Assert.Equal(donor, transfer.GetProperty("sourcePlanId").GetInt32()); Assert.Equal(20, transfer.GetProperty("quantity").GetInt32());
+        (await client.PostAsJsonAsync("/api/plans/workbench", commit)).EnsureSuccessStatusCode();
+        Assert.Equal(60, (await Rows()).Single(r => r.Id == edited).Values.PlannedQty);
+    }
+
+    [Fact]
+    public async Task PreviewTokenIsRequired_AndCannotBeReusedForDifferentQuantities()
+    {
+        await AddFuture(100, 1);
+        var row = (await Rows()).Single(r => r.PartName == "脚" && r.Values.PlanDate == "2030-01-07");
+        var (_, commit) = await AutoPreview([Change(row, v => v with { PlannedQty = 150 })]);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/plans/workbench", commit with { AllocationToken = null })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/plans/workbench", commit with { Changes = [Change(row, v => v with { PlannedQty = 160 })] })).StatusCode);
+    }
+
+    [Fact]
+    public async Task AutoDeductStillEnforcesMaterialAvailability()
+    {
+        await AddFuture(100, 1);
+        await factory.WithDbAsync(async db => { db.OrderMaterials.Add(new OrderMaterial { OrderId = 1, PartName = "脚", ArrivedQty = 100, ExpectedDate = Day.AddDays(1) }); await db.SaveChangesAsync(); });
+        var row = (await Rows()).Single(r => r.PartName == "脚" && r.Values.PlanDate == "2030-01-07");
+        var response = await client.PostAsJsonAsync("/api/plans/workbench", new WorkbenchRequest([Change(row, v => v with { PlannedQty = 150 })], AutoDeduct: true));
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("来料", await response.Content.ReadAsStringAsync());
+    }
+
+    async Task<int> AddFuture(int qty, int days, bool recorded = false, int step = 1, string part = "脚")
+    {
+        int id = 0;
+        await factory.WithDbAsync(async db => {
+            var p = new ProductionPlan { OrderId = 1, LineId = 1, PartName = part, StepNo = step, Craft = "移印", PlanDate = Day.AddDays(days), PlannedQty = qty, GoodQty = recorded ? 0 : null };
+            db.ProductionPlans.Add(p); await db.SaveChangesAsync(); id = p.Id;
+        });
+        return id;
+    }
+    async Task<(JsonElement Preview, WorkbenchRequest Commit)> AutoPreview(List<WorkbenchChange> changes)
+    {
+        var request = new WorkbenchRequest(changes, AutoDeduct: true);
+        var response = await client.PostAsJsonAsync("/api/plans/workbench", request); response.EnsureSuccessStatusCode();
+        var preview = await response.Content.ReadFromJsonAsync<JsonElement>();
+        return (preview, request with { Preview = false, AllocationToken = preview.GetProperty("allocationToken").GetString() });
+    }
+
+    [Fact]
     public async Task FactoryScopeAndPermissionsCannotBeBypassed()
     {
         await factory.WithDbAsync(async db => {
