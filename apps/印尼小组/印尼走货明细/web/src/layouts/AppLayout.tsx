@@ -57,7 +57,8 @@ export default function AppLayout() {
 
     const checkAlerts = async () => {
       try {
-        const resp = await api.get('/material-alerts/stats')
+        // Also suppress the global interceptor toast for this background request.
+        const resp = await api.get('/material-alerts/stats', { skipErrorToast: true } as any)
         const stats: AlertStats = resp.data
         setAlertStats(stats)
 
