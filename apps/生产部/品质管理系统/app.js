@@ -1402,17 +1402,17 @@ function dashboardPieLabelOptions() {
     avoidLabelOverlap: true,
     minShowLabelAngle: 0,
     label: {
-      show: true, position: 'outside', alignTo: 'labelLine',
+      show: true, position: 'outside', alignTo: 'none',
       distanceToLabelLine: 4, bleedMargin: 8,
       fontSize: 11, fontWeight: 600, lineHeight: 14,
       color: colors.textHi, overflow: 'break',
       formatter: p => `${p.name}\n${p.percent.toFixed(0)}%`,
     },
     labelLine: {
-      show: true, length: 10, length2: 10, smooth: false,
+      show: true, length: 14, length2: 10, smooth: false, minTurnAngle: 0, maxSurfaceAngle: 180,
       lineStyle: { color: colors.labelLine, width: 1.2 },
     },
-    labelLayout: { moveOverlap: 'shiftY', hideOverlap: false },
+    labelLayout: { hideOverlap: false },
   };
 }
 
