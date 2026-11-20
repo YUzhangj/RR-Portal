@@ -1,12 +1,10 @@
-const mergeableNames = new Set(['螺丝', '螺母', '五金配件', '塑胶件', '搪胶件', '毛绒裁片'])
-
-// Called within one customs-company group. Missing HS/unit cannot prove compatibility.
-export function invoiceDetailGroups(rows: Array<{ index: number; name: string; hs: string; unit: string }>): number[][] {
+// Invoice summaries use the displayed product name and declaration unit within one customs company.
+// Source HS values remain unchanged in the main table; the summary code comes from 商品汇总表.
+export function invoiceDetailGroups(rows: Array<{ index: number; name: string; hs?: string; unit: string }>): number[][] {
   const groups = new Map<string, number[]>()
   for (const row of rows) {
-    const name = row.name.trim(), hs = row.hs.trim(), unit = row.unit.trim().toUpperCase()
-    const key = mergeableNames.has(name) && hs && unit
-      ? JSON.stringify([name, hs, unit]) : `single:${row.index}`
+    const name = row.name, unit = row.unit.trim().toUpperCase()
+    const key = name.trim() && unit ? JSON.stringify([name.toLowerCase(), unit]) : `single:${row.index}`
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key)!.push(row.index)
   }

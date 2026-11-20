@@ -1653,6 +1653,7 @@ async function buildCustomsWorkbookBatch(input: CustomsExportInput, selectedGrou
   if (!input.mainOnly && !selectedGroups) {
     await stackShipmentDocumentSheets(outZip, newName)
     await addPackingGrandTotal(outZip, newName, mainTotalRow)
+    await sharePackingShipmentFields(outZip, form)
   }
   await showFullDocumentUnitPrices(outZip, newName)
   const mainPath = (await workbookSheetParts(outZip)).get(newName)
@@ -2129,6 +2130,53 @@ async function formatHengxinchangInvoiceFooters(zip: JSZip) {
   }
 }
 
+async function prepareInvoiceUnits(zip: JSZip, sheet?: XLSX.WorkSheet) {
+  const values = new Map<string, string>(), sourceRows = new Map<string, number>()
+  for (const address of Object.keys(sheet || {})) {
+    if (!/^A\d+$/.test(address) || address === 'A1') continue
+    const code = String(sheet![address]?.v ?? '').trim().toUpperCase()
+    if (!code || values.has(code)) continue
+    values.set(code, String(sheet![`B${address.slice(1)}`]?.v ?? '')); sourceRows.set(code, Number(address.slice(1)))
+  }
+  const path = (await workbookSheetParts(zip)).get('单位对照')
+  if (!path || !sourceRows.size) return values
+  const parser = new DOMParser(), serializer = new XMLSerializer()
+  const doc = parser.parseFromString((await zip.file(path)!.async('string')).replace(/^\uFEFF/, ''), 'application/xml')
+  const data = directChild(doc.documentElement as XmlElement, 'sheetData')!
+  let next = Math.max(...directChildren(data, 'row').map(rowNumber)) + 1
+  const prototype = directChildren(data, 'row').find(row => rowNumber(row) === Math.max(...sourceRows.values()))!
+  const aliases: Array<[string, string[]]> = [
+    ['KGM', ['KG', 'KGS', '公斤', '千克']], ['TNE', ['TON', 'TONS', '吨']],
+    ['ROL', ['ROLL', 'ROLLS', '卷']], ['PCE', ['PCS', 'PC', '个']],
+    ['SET', ['SETS', '套']], ['MTR', ['M', '米']],
+  ]
+  for (const [canonical, codes] of aliases) for (const code of codes) {
+    const sourceRow = sourceRows.get(canonical)
+    if (!sourceRow || values.has(code)) continue
+    const row = prototype.cloneNode(true) as XmlElement
+    row.setAttribute('r', String(next))
+    for (const cell of directChildren(row, 'c')) {
+      const col = cellColumn(cell.getAttribute('r') || '')
+      cell.setAttribute('r', col + next); clearXmlCell(cell); cell.removeAttribute('cm')
+    }
+    const key = ensureXmlCell(doc, row, 'A'), value = ensureXmlCell(doc, row, 'B')
+    key.setAttribute('t', 'inlineStr')
+    const inline = doc.createElementNS(SPREADSHEET_NS, 'is'), text = doc.createElementNS(SPREADSHEET_NS, 't')
+    text.textContent = code; inline.appendChild(text); key.appendChild(inline)
+    value.setAttribute('t', 'str')
+    const formula = doc.createElementNS(SPREADSHEET_NS, 'f'), cached = doc.createElementNS(SPREADSHEET_NS, 'v')
+    formula.textContent = `IF($B$${sourceRow}="","",$B$${sourceRow})`; cached.textContent = values.get(canonical)!
+    value.appendChild(formula); value.appendChild(cached); data.appendChild(row)
+    values.set(code, values.get(canonical)!); next++
+  }
+  const dimension = directChild(doc.documentElement as XmlElement, 'dimension')
+  const range = XLSX.utils.decode_range(dimension?.getAttribute('ref') || 'A1:B1')
+  range.e.r = Math.max(range.e.r, next - 2); range.e.c = Math.max(range.e.c, 1)
+  dimension?.setAttribute('ref', XLSX.utils.encode_range(range))
+  zip.file(path, serializer.serializeToString(doc))
+  return values
+}
+
 // 仅重排通用“发票”，不改变主明细及其他单据的顺序。
 async function groupGenericInvoice(zip: JSZip, mainName: string, companies: string[], main: XLSX.WorkSheet, catalogue?: XLSX.WorkSheet, unitSheet?: XLSX.WorkSheet) {
   const parts = await workbookSheetParts(zip)
@@ -2244,25 +2292,8 @@ async function groupGenericInvoice(zip: JSZip, mainName: string, companies: stri
     index, name: String(sourceValue('E', index)), hs: String(sourceValue('B', index)), unit: String(sourceValue('J', index)),
   })))]))
   const mainRef = (column: string) => formulaRef(mainName, `${column}:${column}`).replace(/^=/, '')
-  const units: Array<[string[], string]> = [
-    [['KGM', 'KG', 'KGS', '公斤', '千克'], '千克'],
-    [['TNE', 'TON', 'TONS', '吨'], '吨'],
-    [['ROLL', 'ROLLS', '卷'], '卷'],
-    [['PCE', 'PCS', 'PC', '个'], '个'],
-    [['SET', 'SETS', '套'], '套'],
-    [['M', 'MTR', '米'], '米'],
-  ]
-  const unitValues = new Map(units.flatMap(([codes, label]) => codes.map(code => [code, label] as const)))
-  for (const address of Object.keys(unitSheet || {})) {
-    if (!/^A\d+$/.test(address) || address === 'A1') continue
-    const code = String(unitSheet![address]?.v ?? '').trim().toUpperCase()
-    if (code) unitValues.set(code, String(unitSheet![`B${address.slice(1)}`]?.v ?? ''))
-  }
-  const unitFormula = (ref: string) => {
-    const fallback = units.reduceRight((otherwise, [codes, label]) =>
-      `IF(OR(${codes.map(code => `UPPER(TRIM(${ref}))="${code}"`).join(',')}),"${label}",${otherwise})`, ref)
-    return `_xlfn.XLOOKUP(UPPER(TRIM(${ref})),'单位对照'!$A:$A,'单位对照'!$B:$B,${fallback})`
-  }
+  const unitValues = await prepareInvoiceUnits(zip, unitSheet)
+  const unitFormula = (ref: string) => `_xlfn.XLOOKUP(UPPER(TRIM(${ref})),'单位对照'!$A:$A,'单位对照'!$B:$B,${ref})`
   // SUMIFS treats wildcards as patterns; these criteria represent literal names.
   const criterion = (ref: string, value: string) => /[~*?]/.test(value)
     ? `SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(${ref},"~","~~"),"*","~*"),"?","~?")` : ref
@@ -2274,11 +2305,11 @@ async function groupGenericInvoice(zip: JSZip, mainName: string, companies: stri
     const sourceNames = [...new Map(indices.map(index => {
       const name = String(sourceValue('E', index)); return [name.toLowerCase(), name] as const
     })).values()]
-    // UNIQUE must produce exactly these rows; incompatible HS/units and other repeated names stay separate.
-    const uniqueNames = names.every(name => name.trim()) && names.length === sourceNames.length
+    const canAggregate = names.every(name => name.trim()) && indices.every(index => String(sourceValue('J', index)).trim())
+      && ![...groups.keys()].some(other => other !== company && other.toLowerCase() === company.toLowerCase())
+    const uniqueNames = canAggregate && names.length === sourceNames.length
       && names.every((name, index) => name.toLowerCase() === sourceNames[index].toLowerCase())
       && new Set(names.map(name => name.toLowerCase())).size === names.length
-      && ![...groups.keys()].some(other => other !== company && other.toLowerCase() === company.toLowerCase())
     for (const members of companyDetails) {
       const index = members[0]
       const row = makeRow(detail, next)
@@ -2298,37 +2329,47 @@ async function groupGenericInvoice(zip: JSZip, mainName: string, companies: stri
         if (col === 'D') {
           const cell = directChildren(row, 'c').find(cell => cell.getAttribute('r') === `D${next - 1}`)!
           cell.removeAttribute('cm')
-          const formula = uniqueNames ? undefined : `IFERROR(LOOKUP(1,0/((${mainRef('AR')}=$D$${totalRow})*(${mainRef('A')}=B${next - 1})),${mainRef('E')}),"")`
+          const formula = canAggregate ? undefined : `IFERROR(LOOKUP(1,0/((${mainRef('AR')}=$D$${totalRow})*(${mainRef('A')}=B${next - 1})),${mainRef('E')}),"")`
           // Spill children carry cached values, as in the native template, not inline text.
-          put(row, col, sourceValue('E', index), formula, uniqueNames)
+          put(row, col, sourceValue('E', index), formula, canAggregate)
           continue
         }
         if (['F', 'I', 'J', 'K', 'L'].includes(col)) {
           const value = members.reduce((sum, member) => sum + (Number(sourceValue(source, member)) || 0), 0)
-          if (uniqueNames || members.length > 1) {
+          if (canAggregate || members.length > 1) {
             const criteria = [mainRef('$E'), criterion(`$D${next - 1}`, String(sourceValue('E', index))),
               mainRef('$AR'), criterion(`$D$${totalRow}`, company)]
-            // Same-name rows with different HS/unit must not be counted in both summaries.
-            if (!uniqueNames && companyDetails.some(other => other !== members
-              && String(sourceValue('E', other[0])).toLowerCase() === String(sourceValue('E', index)).toLowerCase())) {
-              criteria.push(mainRef('$B'), criterion(formulaRef(mainName, `$B$${index + 4}`).replace(/^=/, ''), String(sourceValue('B', index))),
-                mainRef('$J'), criterion(formulaRef(mainName, `$J$${index + 4}`).replace(/^=/, ''), String(sourceValue('J', index))))
+            // Keep different declaration units separate even when the displayed names match.
+            const splitUnits = !uniqueNames && companyDetails.some(other => other !== members
+              && String(sourceValue('E', other[0])).toLowerCase() === String(sourceValue('E', index)).toLowerCase())
+            const paddedUnits = splitUnits && indices.some(member => {
+              const unit = String(sourceValue('J', member))
+              return unit !== unit.trim()
+            })
+            if (paddedUnits) {
+              // Match the normalized grouping key without changing the source unit cells.
+              // Bound array calculations to exported data rows, excluding headers and totals.
+              const range = (column: string) => formulaRef(mainName, `$${column}$4:$${column}$${companies.length + 3}`).replace(/^=/, '')
+              const unit = formulaRef(mainName, `$J$${index + 4}`).replace(/^=/, '')
+              put(row, col, value, `SUMPRODUCT(--(${range('E')}=$D${next - 1}),--(${range('AR')}=$D$${totalRow}),--(UPPER(TRIM(${range('J')}))=UPPER(TRIM(${unit}))),${range(source)})`)
+            } else {
+              if (splitUnits) criteria.push(mainRef('$J'), criterion(formulaRef(mainName, `$J$${index + 4}`).replace(/^=/, ''), String(sourceValue('J', index))))
+              put(row, col, value, `SUMIFS(${mainRef('$' + source)},${criteria.join(',')})`)
             }
-            put(row, col, value, `SUMIFS(${mainRef('$' + source)},${criteria.join(',')})`)
           } else put(row, col, value, undefined, true)
           continue
         }
         if (col === 'H') {
           const quantity = members.reduce((sum, member) => sum + (Number(sourceValue('K', member)) || 0), 0)
           const amount = members.reduce((sum, member) => sum + (Number(sourceValue('AA', member)) || 0), 0)
-          const aggregate = uniqueNames || members.length > 1
+          const aggregate = canAggregate || members.length > 1
           put(row, col, aggregate ? (quantity ? amount / quantity : 0) : sourceValue('Z', index),
             aggregate ? `IFERROR(I${next - 1}/F${next - 1},0)` : undefined)
           continue
         }
         if (col === 'G') {
           const unit = String(sourceValue('J', index)).trim()
-          const aggregate = uniqueNames || members.length > 1
+          const aggregate = canAggregate || members.length > 1
           const lookup = uniqueNames
             ? `_xlfn.XLOOKUP(1,(${mainRef('$E')}=$D${next - 1})*(${mainRef('$AR')}=$D$${totalRow}),${mainRef('$J')},"")`
             : `_xlfn.XLOOKUP($B${next - 1},${mainRef('$A')},${mainRef('$J')},"")`
@@ -2339,7 +2380,7 @@ async function groupGenericInvoice(zip: JSZip, mainName: string, companies: stri
         const address = `${source}${index + 4}`
         put(row, col, sourceValue(source, index), formulaRef(mainName, address).replace(/^=/, ''))
       }
-      if (!uniqueNames && members.length === 1) {
+      if (!canAggregate && members.length === 1) {
         const r = next - 1
         const lookup = (source: string) => `_xlfn.XLOOKUP(1,_xlpm.match,${mainRef('$' + source)},"")`
         const formula = `_xlfn.LET(_xlpm.match,(${mainRef('$A')}=$B${r})*(${mainRef('$E')}=$D${r})*(${mainRef('$AR')}=$D$${totalRow}),_xlpm.unit,${lookup('J')},_xlfn.HSTACK(${[lookup('K'), unitFormula('_xlpm.unit'), ...['Z', 'AA', 'P', 'Q', 'AT'].map(lookup)].join(',')}))`
@@ -2351,9 +2392,12 @@ async function groupGenericInvoice(zip: JSZip, mainName: string, companies: stri
       put(row, 'M', '箱')
       if (members.length > 1) markMerged(row)
     }
-    if (uniqueNames) {
+    if (canAggregate) {
       const firstRow = directChildren(data, 'row').find(row => rowNumber(row) === start)!
-      put(firstRow, 'D', names[0], `_xlfn.UNIQUE(_xlfn._xlws.FILTER(${mainRef('E')},${mainRef('AR')}=$D$${totalRow},""))`)
+      const spillFormula = uniqueNames
+        ? `_xlfn.UNIQUE(_xlfn._xlws.FILTER(${mainRef('E')},${mainRef('AR')}=$D$${totalRow},""))`
+        : `_xlfn.LET(_xlpm.names,_xlfn._xlws.FILTER(${mainRef('E')},${mainRef('AR')}=$D$${totalRow},""),_xlpm.units,_xlfn._xlws.FILTER(${mainRef('J')},${mainRef('AR')}=$D$${totalRow},""),INDEX(_xlfn.UNIQUE(_xlfn.HSTACK(_xlpm.names,UPPER(TRIM(_xlpm.units)))),0,1))`
+      put(firstRow, 'D', names[0], spillFormula)
       const cell = directChildren(firstRow, 'c').find(cell => cell.getAttribute('r') === `D${start}`)!
       const formula = directChild(cell, 'f')!
       // Approved templates retain XLDAPR cell metadata #1 for native spill formulas.
@@ -3500,6 +3544,98 @@ async function applyGeneratedMainFormats(templateZip: JSZip, generatedZip: JSZip
   templateXfs.setAttribute('count', String(directChildren(templateXfs, 'xf').length))
   templateZip.file('xl/styles.xml', new XMLSerializer().serializeToString(templateStylesDoc))
   templateZip.file('xl/worksheets/sheet2.xml', new XMLSerializer().serializeToString(templateSheetDoc))
+}
+
+/** Run after continuation stacking: every packing list reads one pair of editable, local inputs. */
+async function sharePackingShipmentFields(zip: JSZip, form: CustomsExportInput['form']) {
+  const path = (await workbookSheetParts(zip)).get('装箱单')
+  if (!path) return
+  const parser = new DOMParser(), serializer = new XMLSerializer()
+  const doc = parser.parseFromString(await zip.file(path)!.async('string'), 'application/xml')
+  const styles = parser.parseFromString(await zip.file('xl/styles.xml')!.async('string'), 'application/xml')
+  const xfs = styleCollection(styles.documentElement as XmlElement, 'cellXfs')!
+  const fills = styleCollection(styles.documentElement as XmlElement, 'fills')!
+  const sharedFile = zip.file('xl/sharedStrings.xml')
+  const shared = sharedFile ? Array.from(parser.parseFromString(await sharedFile.async('string'), 'application/xml')
+    .getElementsByTagNameNS(SPREADSHEET_NS, 'si')).map(node => node.textContent || '') : []
+  const text = (cell?: XmlElement) => cell?.getAttribute('t') === 's' ? shared[Number(directChild(cell, 'v')?.textContent)]
+    : cell ? directChild(cell, 'is')?.textContent || directChild(cell, 'v')?.textContent || '' : ''
+  const data = directChild(doc.documentElement as XmlElement, 'sheetData')!
+  const rows = directChildren(data, 'row')
+  const rowAt = (number: number) => {
+    let row = rows.find(row => rowNumber(row) === number)
+    if (!row) {
+      row = doc.createElementNS(SPREADSHEET_NS, 'row'); row.setAttribute('r', String(number))
+      data.insertBefore(row, rows.find(row => rowNumber(row) > number) || null); rows.push(row)
+    }
+    return row
+  }
+  const sections = rows.filter(row => /\bContainer\b/i.test(text(directChildren(row, 'c').find(cell => cellColumn(cell.getAttribute('r') || '') === 'D')) || '')
+    && /Seal\s*(?:Number|No\.?)/i.test(text(directChildren(row, 'c').find(cell => cellColumn(cell.getAttribute('r') || '') === 'H')) || ''))
+  const active = sections.filter((section, index) => rows.some(row => {
+    const r = rowNumber(row)
+    if (r <= rowNumber(section) + 5 || r >= (sections[index + 1] ? rowNumber(sections[index + 1]) : Infinity)) return false
+    const cells = directChildren(row, 'c')
+    const serial = cells.find(cell => cellColumn(cell.getAttribute('r') || '') === 'A')
+    const item = cells.find(cell => cellColumn(cell.getAttribute('r') || '') === 'B')
+    return Number(text(serial)) > 0 && Boolean(item && (directChild(item, 'f') || text(item)))
+  }))
+  if (!active.length) return
+  const firstLabel = directChildren(active[0], 'c').find(cell => cellColumn(cell.getAttribute('r') || '') === 'D')!
+  const firstValue = ensureXmlCell(doc, rowAt(rowNumber(active[0]) + 1), 'D')
+  const fillId = String(directChildren(fills, 'fill').length)
+  const fill = styles.createElementNS(SPREADSHEET_NS, 'fill')
+  const pattern = styles.createElementNS(SPREADSHEET_NS, 'patternFill')
+  pattern.setAttribute('patternType', 'solid')
+  const color = styles.createElementNS(SPREADSHEET_NS, 'fgColor')
+  color.setAttribute('rgb', 'FFFFF2CC'); pattern.appendChild(color); fill.appendChild(pattern); fills.appendChild(fill)
+  const topStyle = (base: XmlElement, input: boolean) => {
+    const xf = directChildren(xfs, 'xf')[Number(base.getAttribute('s') || 0)].cloneNode(true) as XmlElement
+    const valueFont = directChildren(xfs, 'xf')[Number(firstValue.getAttribute('s') || 0)].getAttribute('fontId')
+    if (valueFont) { xf.setAttribute('fontId', valueFont); xf.setAttribute('applyFont', '1') }
+    let alignment = directChild(xf, 'alignment')
+    if (!alignment) { alignment = styles.createElementNS(SPREADSHEET_NS, 'alignment'); xf.insertBefore(alignment, directChild(xf, 'protection') || directChild(xf, 'extLst') || null) }
+    alignment.setAttribute('horizontal', 'left'); alignment.setAttribute('vertical', 'center'); alignment.setAttribute('wrapText', '0')
+    xf.setAttribute('applyAlignment', '1')
+    if (input) { xf.setAttribute('fillId', fillId); xf.setAttribute('applyFill', '1'); xf.setAttribute('numFmtId', '49'); xf.setAttribute('applyNumberFormat', '1') }
+    const id = String(directChildren(xfs, 'xf').length); xfs.appendChild(xf); return id
+  }
+  const labelStyle = topStyle(firstLabel, false), inputStyle = topStyle(firstValue, true)
+  const container = String(form.containerNo ?? '').trim(), seal = String(form.blNo ?? '').trim()
+  const top = rowAt(4)
+  top.setAttribute('ht', '26'); top.setAttribute('customHeight', '1')
+  for (const [columns, value, style] of [
+    [['A', 'B'], '柜号 / Container', labelStyle], [['C', 'D', 'E'], container, inputStyle],
+    [['F', 'G'], '封号 / Seal No.', labelStyle], [['H', 'I', 'J', 'K'], seal, inputStyle],
+  ] as Array<[string[], string, string]>) {
+    columns.forEach((column, index) => {
+      const cell = ensureXmlCell(doc, top, column)
+      clearXmlCell(cell); cell.removeAttribute('cm'); cell.setAttribute('s', style)
+      if (index) return
+      cell.setAttribute('t', 'inlineStr')
+      const inline = doc.createElementNS(SPREADSHEET_NS, 'is'), valueNode = doc.createElementNS(SPREADSHEET_NS, 't')
+      valueNode.textContent = value; inline.appendChild(valueNode); cell.appendChild(inline)
+    })
+  }
+  const merges = directChild(doc.documentElement as XmlElement, 'mergeCells')!
+  for (const ref of ['A4:B4', 'C4:E4', 'F4:G4', 'H4:K4']) {
+    if (directChildren(merges, 'mergeCell').some(merge => merge.getAttribute('ref') === ref)) continue
+    const merge = doc.createElementNS(SPREADSHEET_NS, 'mergeCell'); merge.setAttribute('ref', ref); merges.appendChild(merge)
+  }
+  merges.setAttribute('count', String(directChildren(merges, 'mergeCell').length))
+  for (const section of active) for (const [column, source, value] of [['D', '$C$4', container], ['H', '$H$4', seal]]) {
+    const cell = ensureXmlCell(doc, rowAt(rowNumber(section) + 1), column)
+    clearXmlCell(cell); cell.removeAttribute('cm'); cell.setAttribute('t', 'str')
+    const formula = doc.createElementNS(SPREADSHEET_NS, 'f'), cached = doc.createElementNS(SPREADSHEET_NS, 'v')
+    formula.textContent = `IF(${source}="","",${source})`; cached.textContent = value
+    cell.appendChild(formula); cell.appendChild(cached)
+  }
+  // New cells follow existing row/column order for Excel and WPS.
+  for (const row of directChildren(directChild(doc.documentElement as XmlElement, 'sheetData')!, 'row')) {
+    directChildren(row, 'c').sort((a, b) => XLSX.utils.decode_cell(a.getAttribute('r')!).c - XLSX.utils.decode_cell(b.getAttribute('r')!).c).forEach(cell => row.appendChild(cell))
+  }
+  fills.setAttribute('count', String(directChildren(fills, 'fill').length)); xfs.setAttribute('count', String(directChildren(xfs, 'xf').length))
+  zip.file(path, serializer.serializeToString(doc)); zip.file('xl/styles.xml', serializer.serializeToString(styles))
 }
 
 /** Bind after table/formula restoration, so template header formulas cannot replace these links. */
