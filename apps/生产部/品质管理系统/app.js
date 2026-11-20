@@ -1427,14 +1427,16 @@ function chartResultPie(data) {
 
   c.setOption({
     backgroundColor:'transparent',
-    tooltip:{ trigger:'item', ...(_cc().tt),
+    tooltip:{ trigger:'item', ...(_cc().tt), confine:true, padding:10,
       formatter: p => {
         const label = p.name === 'PASS' ? '纯 PASS 占比' :
                       p.name === 'REJ'  ? 'REJ 占比'     :
                       p.name + ' 占比';
-        return `<b>${p.name}：${p.value}批</b><br/>`
-          + `${label}：${p.percent.toFixed(2)}%<br/>`
-          + `<span style="color:#8899aa;font-size:10px">注：总体通过率含非REJ批次，PASS占比仅统计纯PASS</span>`;
+        const width = Math.max(40,Math.min(260,c.getWidth()-24));
+        return `<div class="qms-result-tooltip-content" style="max-width:${width}px;white-space:normal;overflow-wrap:anywhere">`
+          + `<b>${p.name}：${p.value}批</b><br/>`
+          + `${label}：${p.percent.toFixed(2)}%`
+          + `<div style="color:${_cc().text};font-size:11px;line-height:1.45;margin-top:4px">注：总体通过率含非REJ批次，PASS占比仅统计纯PASS</div></div>`;
       }
     },
     legend:{ bottom:4, textStyle:{ color:_cc().text, fontSize:10 }, itemWidth:10, itemHeight:10 },
