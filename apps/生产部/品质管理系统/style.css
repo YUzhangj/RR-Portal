@@ -3293,22 +3293,13 @@ body.theme-light #loginPassword {
 #qaReload[hidden] { display: none; }
 .qa-application-modal .modal-footer { flex-wrap: wrap; }
 
-/* 合并 QA 保持单页：给描述增加空间，测试项与评论留白适当收紧。 */
-.qa-paper.qa-combined-paper .qa-description-label { height: 219px !important; }
-.qa-paper.qa-combined-paper .qa-description-body,
-.qa-paper.qa-combined-paper .qa-description-content { height: 198px !important; }
-.qa-paper.qa-combined-paper .qa-tests tbody tr { height: 18px !important; }
-.qa-paper.qa-combined-paper .qa-comments,
-.qa-paper.qa-combined-paper .qa-comment-lines { height: 56px !important; }
-.qa-paper.qa-combined-paper .qa-comment-lines span { height: 14px !important; }
-
 /* 描述文字和横线共用行盒，混排中英文时也不会逐行累积错位。 */
 .qa-paper .qa-description-rows { white-space: normal !important; }
 .qa-paper .qa-description-rows .qa-description-line {
   min-height: var(--qa-description-line-height, 22px) !important;
   line-height: calc(var(--qa-description-line-height, 22px) - 1px) !important;
-  margin: 0 !important; padding: 0 !important;
+  margin: 0 -4px !important; padding: 0 4px !important;
   border-bottom: 1px solid #555 !important;
   white-space: pre-wrap !important; break-inside: avoid;
 }
-.qa-paper.qa-combined-paper .qa-ruled-lines[hidden] { display: none !important; }
+.qa-paper .qa-ruled-lines[hidden] { display: none !important; }

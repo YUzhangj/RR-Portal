@@ -13,10 +13,10 @@ function harness(){
  const window={__QC_AUTH:auth,addEventListener(){},__QC_REQUEST:async(_url,options)=>new Promise(resolve=>requests.push({body:JSON.parse(options.body),resolve}))};
  const c=vm.createContext({window,URL,AbortController,location:{href:'http://127.0.0.1/'},document:{currentScript:null,getElementById:el,querySelectorAll:()=>[]},localStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},todayStr:()=>day,getCompany:()=>auth.company,canView:()=>true,effPerms:()=>({records:{e:1}}),QC_COMPANIES:[{id:auth.company}],setTimeout:fn=>{timers.set(++seq,fn);return seq},clearTimeout:id=>timers.delete(id),console});
  let src=fs.readFileSync(path.join(__dirname,'../qa-application.js'),'utf8');
- src=src.replace(/\}\)\(\);\s*$/, 'window.fixture={set:c=>session=c,changedApplication,saveApplication,flushApplication,closingWrites,draftKey,applyValues,formValues,syncGenerationDate,sameEditableValues,applicationSelection,fitDescription,singleNameInDescription};})();');vm.runInContext(src,c);
+ src=src.replace(/\}\)\(\);\s*$/, 'window.fixture={set:c=>session=c,changedApplication,saveApplication,flushApplication,closingWrites,draftKey,applyValues,formValues,syncGenerationDate,sameEditableValues,applicationSelection,fitDescription,singleNameInDescription,fillDescriptionRows};})();');vm.runInContext(src,c);
  const context={auth,user:auth.user,username:'fixture',company:auth.company,csrfToken:'synthetic',editable:true,loaded:true,loading:false,version:1,record:{id:1},generationDate:day,savedJSON:JSON.stringify(data)};
  window.fixture.set(context);
- return {context,storage,timers,requests,window,el,setDay:v=>day=v,fixture:window.fixture,change:v=>{el('qa_sampleQty').value=v;window.fixture.changedApplication()},ack:async(i=0)=>{const q=requests[i];q.resolve({ok:true,json:async()=>({ok:true,application:{recordId:1,version:i+2,data:q.body.data,updatedAt:'2026-11-18T00:00:00Z',updatedBy:'fixture'}})});await new Promise(resolve=>setImmediate(resolve))}};
+ return {context,storage,timers,requests,window,document:c.document,el,setDay:v=>day=v,fixture:window.fixture,change:v=>{el('qa_sampleQty').value=v;window.fixture.changedApplication()},ack:async(i=0)=>{const q=requests[i];q.resolve({ok:true,json:async()=>({ok:true,application:{recordId:1,version:i+2,data:q.body.data,updatedAt:'2026-11-18T00:00:00Z',updatedBy:'fixture'}})});await new Promise(resolve=>setImmediate(resolve))}};
 }
 test('reverting unsaved edits removes their draft and cancels autosave',()=>{
  const h=harness();h.change('5');assert.equal(h.storage.size,1);h.change('3');
@@ -89,7 +89,7 @@ test('combined drafts and requests are isolated from the first individual record
 
 test('single-page fitting rejects overflow without removing or changing numbered descriptions',()=>{
  const h=harness(),text='1. 第一款😀\n2. '+ '完整保留的款式描述'.repeat(100);
- const description={textContent:text,clientHeight:198,clientWidth:500,scrollHeight:5000,scrollWidth:2000,
+ const description={textContent:text,clientHeight:132,clientWidth:500,scrollHeight:5000,scrollWidth:2000,querySelectorAll:()=>[],
   style:{setProperty(key,value){this[key]=value}}};
  const rules={innerHTML:''};
  const paper={classList:{contains:()=>true},querySelector:selector=>selector==='.qa-description-content'?description:rules};
@@ -128,4 +128,19 @@ test('legacy descriptions at the server limit remain saveable without losing the
  const moved=h.fixture.singleNameInDescription(boundary);
  assert.equal(moved.description.length,2000);assert.equal(moved.productName,'');
  assert.equal(moved.description,'1. 兔子公仔\n'+boundary.description);
+});
+
+test('blank description rows fill the original six-line area without changing data or accumulating on refit',()=>{
+ const h=harness(),rows=[{text:'1. 第一款'},{text:'2. 第二款'}];
+ const description={clientHeight:132,clientWidth:500,style:{setProperty(key,value){this[key]=value}},
+  get scrollHeight(){return Math.max(132,rows.length*22)},get scrollWidth(){return 500},
+  querySelectorAll:()=>rows.filter(row=>row.className?.includes('qa-description-empty')),
+  appendChild(row){row.remove=()=>rows.splice(rows.indexOf(row),1);rows.push(row)}};
+ h.document.createElement=()=>({setAttribute(){}});
+ const paper={classList:{contains:()=>true},querySelector:selector=>selector==='.qa-description-content'?description:{hidden:false}};
+ for(let i=0;i<2;i++) {
+  assert.equal(h.fixture.fitDescription(paper),true);assert.equal(rows.length,6);assert.equal(description.scrollHeight,132);
+  assert.deepEqual(rows.slice(0,2),[{text:'1. 第一款'},{text:'2. 第二款'}]);
+  assert.equal(rows.filter(row=>row.className==='qa-description-line qa-description-empty').length,4);
+ }
 });

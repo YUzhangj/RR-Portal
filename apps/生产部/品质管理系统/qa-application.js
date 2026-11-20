@@ -446,8 +446,22 @@
     } catch (error) { showToast(error.message, 'error'); }
   }
 
+  function descriptionFits(description) {
+    return description.scrollHeight <= description.clientHeight+1 && description.scrollWidth <= description.clientWidth+1;
+  }
+  function fillDescriptionRows(description, lineHeight, columns) {
+    const maxRows = Math.floor(description.clientHeight/lineHeight) * columns;
+    for (let index=0; index<maxRows; index++) {
+      const row = document.createElement('div');
+      row.className = 'qa-description-line qa-description-empty';
+      row.setAttribute('aria-hidden','true');
+      description.appendChild(row);
+      if (!descriptionFits(description)) { row.remove(); break; }
+    }
+  }
   function fitDescription(paper) {
     const description = paper.querySelector('.qa-description-content');
+    description.querySelectorAll('.qa-description-empty').forEach(row => row.remove());
     const combined = paper.classList.contains('qa-combined-paper');
     const layouts = combined
       ? [[11,22,1],[11,18,1],[10,15,1],[10,14,2],[9,13,2],[9,12,3]]
@@ -458,8 +472,11 @@
       description.style.setProperty('line-height',lineHeight+'px','important');
       description.style.setProperty('--qa-description-line-height',lineHeight+'px');
       const rules = paper.querySelector('.qa-ruled-lines');
-      if (combined && rules) rules.hidden = true;
-      if (description.scrollHeight <= description.clientHeight+1 && description.scrollWidth <= description.clientWidth+1) return true;
+      if (rules) rules.hidden = true;
+      if (descriptionFits(description)) {
+        fillDescriptionRows(description,lineHeight,columns);
+        return true;
+      }
     }
     return false;
   }
@@ -508,7 +525,7 @@
         <tr class="qa-data-row"><th>${label('Request Department','申请部门')}</th><td>${e('department')}</td><th>${label('Requester','申请人')}</th><td>${e('requester')}</td><th>${label('Age Grade','年龄')}</th><td>${e('ageGrade')}</td></tr>
         <tr class="qa-data-row"><th>${label('Sample Source','样板来源')}</th><td>${e('source')}</td><th>${label('Sample Received Date','到板日期')}</th><td>${e('receivedDate')}</td><th>${label('Sample Quantity','样板数量')}</th><td>${e('sampleQty')}</td></tr>
         <tr class="qa-stage-row"><th>Test Stage 测试阶段</th><td colspan="5">${['ES/EP','FEP','PP','PS','Others'].map(stage => `<span class="qa-choice">${box(model.stage===stage)}${esc(stage==='Others'?'Others 其它':stage)}</span>`).join('')}</td></tr>
-        <tr><th class="qa-description-label">Sample Description<br>样板描述</th><td colspan="5" class="qa-description-cell"><div class="qa-description-heading">Product Status or Improvement 产品状态或改进方法/Packing Method 包装方法:</div><div class="qa-description-body"><div class="qa-ruled-lines" aria-hidden="true">${Array.from({length:6},()=>'<span></span>').join('')}</div><div class="qa-description-content${context.recordIds ? ' qa-description-rows' : ''}">${context.recordIds ? String(model.description || '').split('\n').map(line => `<div class="qa-description-line">${esc(line)}</div>`).join('\n') : e('description')}</div></div></td></tr>
+        <tr><th class="qa-description-label">Sample Description<br>样板描述</th><td colspan="5" class="qa-description-cell"><div class="qa-description-heading">Product Status or Improvement 产品状态或改进方法/Packing Method 包装方法:</div><div class="qa-description-body"><div class="qa-ruled-lines" aria-hidden="true">${Array.from({length:6},()=>'<span></span>').join('')}</div><div class="qa-description-content qa-description-rows">${String(model.description || '').split('\n').map(line => `<div class="qa-description-line">${esc(line)}</div>`).join('\n')}</div></div></td></tr>
         <tr class="qa-purpose-row"><th>${label('Test Purpose','测试目的')}</th><td colspan="5">${e('purpose')}</td></tr>
         <tr class="qa-standard-row"><th>${label('Test Standard','测试标准')}</th><td colspan="5">${['ASTM F963','EN71','EN62115','Customer Requirement 客户要求'].map((standard,i) => `<span class="qa-choice">${box(model.standards.includes(String(i)))}${esc(standard)}</span>`).join('')}</td></tr>
         <tr><td colspan="6" class="qa-tests-cell"><div class="qa-test-columns">${tests(reliability,'L')}${tests(rightTests,'R')}</div></td></tr>
