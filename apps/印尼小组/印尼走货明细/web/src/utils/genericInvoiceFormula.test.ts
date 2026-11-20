@@ -152,3 +152,21 @@ it('整家公司同名同单位全部合并、不同单位分开，单位公式�
   expect(units['B' + alias.slice(1)].f).toBe('IF($B$13="","",$B$13)')
   expect(book.Sheets['COMPANY-GROUPS'].B4.v).toBe('001'); expect(book.Sheets['COMPANY-GROUPS'].B5.v).toBe('002')
 }, 60000)
+
+
+it('同名不同单位汇总对单位空格规范化，重算不遗漏金额和数量', async () => {
+  const units = ['KGM', ' KGM ', 'PCE']
+  const output = await buildCustomsWorkbook({
+    templateBuffer: new Uint8Array(readFileSync(new URL('../../public/template-customs-rrm.xlsx', import.meta.url))).buffer,
+    items: units.map((_, i) => ({ material_id: i + 1, outbound_id: i + 1, qty: i + 2, kg: i + 2,
+      price: 10, currency: 'US$', cartons: 1, customs_company: '甲公司' })),
+    materials: new Map(units.map((unit, i) => [i + 1, { id: i + 1, name_zh: '合成同名商品', unit_kg: unit, net_per_pc: 1 }])),
+    images: new Map(), productHs: new Map(), form: { customer: 'RRM', containerNo: 'UNIT-SPACE' },
+  })
+  const book = XLSX.read(await output.arrayBuffer(), { type: 'array' }), invoice = book.Sheets['发票']
+  expect([invoice.F9.v, invoice.F10.v, invoice.I9.v, invoice.I10.v]).toEqual([5, 4, 50, 40])
+  expect(book.Sheets['UNIT-SPACE'].J5.v).toBe(' KGM ')
+  for (const row of [9, 10]) for (const [column, source] of Object.entries({ F: 'K', I: 'AA', J: 'P', K: 'Q', L: 'AT' })) {
+    expect(invoice[`${column}${row}`].f).toBe(`SUMPRODUCT(--('UNIT-SPACE'!$E$4:$E$6=$D${row}),--('UNIT-SPACE'!$AR$4:$AR$6=$D$11),--(UPPER(TRIM('UNIT-SPACE'!$J$4:$J$6))=UPPER(TRIM('UNIT-SPACE'!$J$${row === 9 ? 4 : 6}))),'UNIT-SPACE'!$${source}$4:$${source}$6)`)
+  }
+}, 60000)

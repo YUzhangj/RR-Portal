@@ -2340,11 +2340,22 @@ async function groupGenericInvoice(zip: JSZip, mainName: string, companies: stri
             const criteria = [mainRef('$E'), criterion(`$D${next - 1}`, String(sourceValue('E', index))),
               mainRef('$AR'), criterion(`$D$${totalRow}`, company)]
             // Keep different declaration units separate even when the displayed names match.
-            if (!uniqueNames && companyDetails.some(other => other !== members
-              && String(sourceValue('E', other[0])).toLowerCase() === String(sourceValue('E', index)).toLowerCase())) {
-              criteria.push(mainRef('$J'), criterion(formulaRef(mainName, `$J$${index + 4}`).replace(/^=/, ''), String(sourceValue('J', index))))
+            const splitUnits = !uniqueNames && companyDetails.some(other => other !== members
+              && String(sourceValue('E', other[0])).toLowerCase() === String(sourceValue('E', index)).toLowerCase())
+            const paddedUnits = splitUnits && indices.some(member => {
+              const unit = String(sourceValue('J', member))
+              return unit !== unit.trim()
+            })
+            if (paddedUnits) {
+              // Match the normalized grouping key without changing the source unit cells.
+              // Bound array calculations to exported data rows, excluding headers and totals.
+              const range = (column: string) => formulaRef(mainName, `$${column}$4:$${column}$${companies.length + 3}`).replace(/^=/, '')
+              const unit = formulaRef(mainName, `$J$${index + 4}`).replace(/^=/, '')
+              put(row, col, value, `SUMPRODUCT(--(${range('E')}=$D${next - 1}),--(${range('AR')}=$D$${totalRow}),--(UPPER(TRIM(${range('J')}))=UPPER(TRIM(${unit}))),${range(source)})`)
+            } else {
+              if (splitUnits) criteria.push(mainRef('$J'), criterion(formulaRef(mainName, `$J$${index + 4}`).replace(/^=/, ''), String(sourceValue('J', index))))
+              put(row, col, value, `SUMIFS(${mainRef('$' + source)},${criteria.join(',')})`)
             }
-            put(row, col, value, `SUMIFS(${mainRef('$' + source)},${criteria.join(',')})`)
           } else put(row, col, value, undefined, true)
           continue
         }
