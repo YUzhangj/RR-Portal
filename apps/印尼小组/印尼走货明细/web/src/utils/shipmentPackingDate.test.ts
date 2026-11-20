@@ -29,6 +29,8 @@ it.each(['rri', 'rrm', 'legacy'].flatMap(template => [true, false].map(loaded =>
     expect(dates.length).toBeGreaterThanOrEqual(2)
     expect(dates.filter(date => date.active).map(date => date.value)).toEqual([expected, expected])
     expect(dates.every(date => date.value === (date.active ? expected : ''))).toBe(true)
+    expect(sheet.C4.v).toBe("SYN-PACKING'DATE")
+    expect(sheet.H4.v || '').toBe(loaded ? 'SEAL-001' : '')
     const main = book.Sheets["SYN-PACKING'DATE"]
     expect(main.P1.v).toBe('装柜日期')
     expect(main.Q1.v).toBe(expected)
@@ -40,7 +42,8 @@ it.each(['rri', 'rrm', 'legacy'].flatMap(template => [true, false].map(loaded =>
         [address, `X${sourceRow}`], [`D${first + 2}`, 'Q1'], [`D${first + 4}`, `V${sourceRow}`],
         [`D${first + 8}`, `AC${sourceRow}`], [`H${first + 8}`, `AE${sourceRow}`],
       ]) {
-        const reference = `'SYN-PACKING''DATE'!$${source.replace(/\d+$/, row => '$' + row)}`
+        const reference = source.startsWith('AC') ? '$C$4' : source.startsWith('AE') ? '$H$4'
+          : `'SYN-PACKING''DATE'!$${source.replace(/\d+$/, row => '$' + row)}`
         expect(sheet[target]?.f, target).toBe(`IF(${reference}="","",${reference})`)
         expect(sheet[target]?.v, target).toBe(main[source]?.v ?? '')
       }
