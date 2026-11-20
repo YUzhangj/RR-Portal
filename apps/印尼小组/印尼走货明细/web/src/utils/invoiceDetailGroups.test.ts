@@ -1,10 +1,10 @@
 import { expect, it } from 'vitest'
 import { invoiceDetailGroups, invoiceDetailSumFormula } from './invoiceDetailGroups'
 
-it.each(['螺丝', '螺母', '五金配件', '塑胶件', '搪胶件', '毛绒裁片'])('merges %s with matching HS/unit', name => {
+it.each(['螺丝', '螺母', '五金配件', '塑胶件', '搪胶件', '毛绒裁片', '成份商标', '白色弹力棉带'])('merges %s with matching names/units', name => {
   expect(invoiceDetailGroups([0, 1].map(index => ({ index, name, hs: '001', unit: 'KGM' })))).toEqual([[0, 1]])
 })
-it('keeps different HS, units, names, missing keys and unlisted names separate', () => {
+it('groups all same-name/unit rows while preserving different units, names and missing units', () => {
   const rows = [
     { name: '螺丝', hs: '001', unit: 'KGM' },
     { name: '螺丝', hs: '002', unit: 'KGM' },
@@ -14,7 +14,7 @@ it('keeps different HS, units, names, missing keys and unlisted names separate',
     ...Array(2).fill({ name: '螺丝', hs: '', unit: 'KGM' }),
     ...Array(2).fill({ name: '螺丝', hs: '001', unit: '' }),
   ].map((row, index) => ({ ...row, index }))
-  expect(invoiceDetailGroups(rows)).toEqual(rows.map(row => [row.index]))
+  expect(invoiceDetailGroups(rows)).toEqual([[0, 1, 6, 7], [2], [3], [4, 5], [8], [9]])
 })
 it('preserves first-appearance order and non-contiguous source indices', () => {
   const rows = ['螺丝', '螺母', '螺丝'].map((name, index) => ({ index, name, hs: '001', unit: 'KGM' }))
@@ -44,7 +44,7 @@ it('keeps all 256 sparse members and limits every nested SUM to 255 arguments', 
       argumentsCount++
       if (tokens[position] !== ',') break
       position++
-    } while (true)
+    } while (position < tokens.length)
     expect(tokens[position++]).toBe(')')
     expect(argumentsCount).toBeLessThanOrEqual(255)
     return leaves

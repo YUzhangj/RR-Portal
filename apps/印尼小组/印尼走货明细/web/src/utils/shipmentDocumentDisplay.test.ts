@@ -54,7 +54,8 @@ it.each(['rri', 'rrm', 'legacy'])('金额完整显示、合同和发票保留有
   for (const [serial, label] of [[3, '吨'], [4, '卷']] as const) {
     const row = Object.keys(generic).find(address => /^B\d+$/.test(address) && generic[address].v === serial)!.slice(1)
     expect(generic['G' + row].v).toBe(label)
-    expect(generic['G' + row].f).toContain(`"${label}"`)
+    expect(generic['G' + row].f).toContain("'单位对照'!$A:$A,'单位对照'!$B:$B")
+    expect(generic['G' + row].f).not.toContain(`"${label}"`)
     expect(generic['G' + row].f).toContain('UPPER(TRIM(')
   }
   expect(main.J6.v).toBe('TNE'); expect(main.J7.v).toBe('ROLL')
