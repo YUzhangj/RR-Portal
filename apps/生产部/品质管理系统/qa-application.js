@@ -484,10 +484,8 @@
   function fitDescription(paper) {
     const description = paper.querySelector('.qa-description-content');
     description.querySelectorAll('.qa-description-empty').forEach(row => row.remove());
-    const combined = paper.classList.contains('qa-combined-paper');
-    const layouts = combined
-      ? [[11,22,1],[11,18,1],[10,15,1],[10,14,2],[9,13,2],[9,12,3]]
-      : [[11,22,1],[10,22,1],[9,22,1]];
+    // 单条和合并申请统一使用两栏，资料始终补位到右栏底部。
+    const layouts = [[10,14,2],[9,13,2],[9,12,2]];
     for (const [size,lineHeight,columns] of layouts) {
       Object.assign(description.style,{ fontSize:size+'px',
         columnCount:String(columns),columnGap:'12px',columnFill:'auto' });

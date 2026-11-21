@@ -130,18 +130,19 @@ test('legacy descriptions at the server limit remain saveable without losing the
  assert.equal(moved.description,'1. 兔子公仔\n'+boundary.description);
 });
 
-test('blank description rows fill the original six-line area without changing data or accumulating on refit',()=>{
+test('single and combined applications fill the same two-column area without changing data or accumulating on refit',()=>{
  const h=harness(),rows=[{text:'1. 第一款'},{text:'2. 第二款'}];
  const description={clientHeight:132,clientWidth:500,style:{setProperty(key,value){this[key]=value}},
-  querySelector:()=>null,get scrollHeight(){return Math.max(132,rows.length*22)},get scrollWidth(){return 500},
+  querySelector:()=>null,get scrollHeight(){return Math.max(132,Math.ceil(rows.length/2)*14)},get scrollWidth(){return 500},
   querySelectorAll:()=>rows.filter(row=>row.className?.includes('qa-description-empty')),
   appendChild(row){row.remove=()=>rows.splice(rows.indexOf(row),1);rows.push(row)}};
  h.document.createElement=()=>({setAttribute(){}});
- const paper={classList:{contains:()=>true},querySelector:selector=>selector==='.qa-description-content'?description:{hidden:false}};
+ const paper={classList:{contains:()=>false},querySelector:selector=>selector==='.qa-description-content'?description:{hidden:false}};
  for(let i=0;i<2;i++) {
-  assert.equal(h.fixture.fitDescription(paper),true);assert.equal(rows.length,6);assert.equal(description.scrollHeight,132);
+  paper.classList.contains=()=>i===1;
+  assert.equal(h.fixture.fitDescription(paper),true);assert.equal(rows.length,18);assert.equal(description.scrollHeight,132);assert.equal(description.style.columnCount,'2');
   assert.deepEqual(rows.slice(0,2),[{text:'1. 第一款'},{text:'2. 第二款'}]);
-  assert.equal(rows.filter(row=>row.className==='qa-description-line qa-description-empty').length,4);
+  assert.equal(rows.filter(row=>row.className==='qa-description-line qa-description-empty').length,16);
  }
 });
 
