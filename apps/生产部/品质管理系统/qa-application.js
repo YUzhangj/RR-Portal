@@ -297,7 +297,7 @@
             ${field('department','申请部门', 'text', 'maxlength="80"')}${field('requester','申请人（实际姓名）', 'text', 'maxlength="80" placeholder="请填写实际申请人姓名"')}${field('ageGrade','年龄（选填）', 'text', 'maxlength="40"')}
             ${field('source','样板来源', 'text', 'maxlength="80"')}${field('receivedDate','到板日期（生成当天）', 'date', 'readonly')}${field('sampleQty','样板数量', 'text', 'maxlength="60" placeholder="填写实际送样数量，如 3 PCS"')}
             <label class="form-group qa-form-wide"><span>样板描述</span><textarea class="form-input" id="qa_description" rows="5" maxlength="2000" placeholder="填写样板状态、测试要求或需要说明的内容"></textarea></label>
-            <div class="qa-form-wide qa-source-fields">${field('supplier','供应商（描述右下角）','text','maxlength="2000"')}${field('deliveryNo','送货单号（描述右下角）','text','maxlength="4000"')}</div>
+            <div class="qa-form-wide qa-source-fields">${field('supplier','供应商（描述栏底部）','text','maxlength="2000"')}${field('deliveryNo','送货单号（描述栏底部）','text','maxlength="4000"')}</div>
             ${field('reportNo','报告编号（可修改）', 'text', 'maxlength="100"')}
             <label class="form-group"><span>报告语言</span><select class="form-input" id="qa_language"><option value="zh">中文报告</option><option value="en">ENG.REP</option></select></label>
             <label class="form-group"><span>测试阶段（选填）</span><select class="form-input" id="qa_stage"><option value="">未选择</option>${['ES/EP','FEP','PP','PS','Others'].map(v => `<option>${v}</option>`).join('')}</select></label>
@@ -493,7 +493,6 @@
         columnCount:String(columns),columnGap:'12px',columnFill:'auto' });
       description.style.setProperty('line-height',lineHeight+'px','important');
       description.style.setProperty('--qa-description-line-height',lineHeight+'px');
-      description.style.setProperty('--qa-source-left-padding',columns === 1 ? '50%' : '4px');
       const rules = paper.querySelector('.qa-ruled-lines');
       if (rules) rules.hidden = true;
       if (descriptionFits(description)) {
