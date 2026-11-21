@@ -1897,9 +1897,10 @@ function sessionResponse(session, companyId) {
 const QA_FIELD_LIMITS = { customer:120, productName:180, productNo:100, department:80, requester:80,
   ageGrade:40, source:80, receivedDate:10, sampleQty:60, description:2000, reportNo:100,
   stage:10, purpose:180, language:2 };
-function validatedQAData(input, combined = false) {
+const QA_SOURCE_LIMITS = { supplier:2000, deliveryNo:4000 };
+function validatedQAData(input, combined = false, fallback = null) {
   if (!input || typeof input !== 'object' || Array.isArray(input) ||
-      Object.keys(input).some(key => !Object.hasOwn(QA_FIELD_LIMITS, key) && !['standards','tests'].includes(key))) Auth.fail(400, 'QA申请数据格式不正确');
+      Object.keys(input).some(key => !Object.hasOwn(QA_FIELD_LIMITS, key) && !Object.hasOwn(QA_SOURCE_LIMITS,key) && !['standards','tests'].includes(key))) Auth.fail(400, 'QA申请数据格式不正确');
   const data = {};
   for (const [key,fieldLimit] of Object.entries(QA_FIELD_LIMITS)) {
     const limit = combined && key === 'description' ? 24000 : fieldLimit;
@@ -1914,7 +1915,20 @@ function validatedQAData(input, combined = false) {
     if (!Array.isArray(input[key]) || input[key].length > allowed.length || input[key].some(v => typeof v !== 'string' || !allowed.includes(v))) Auth.fail(400, 'QA测试项目无效');
     data[key] = [...new Set(input[key])].sort();
   }
+  for (const [key,limit] of Object.entries(QA_SOURCE_LIMITS)) {
+    const value = Object.hasOwn(input,key) ? input[key] : fallback?.[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || value.length > limit || value.includes('\0')) Auth.fail(400, 'QA字段格式或长度不正确：' + key);
+    data[key] = value;
+  }
   return data;
+}
+// Older open tabs do not serialize the new fields; keep their response shape stable.
+function qaApplicationResponse(application, sourceFields) {
+  if (!application || sourceFields) return application;
+  const data = { ...application.data };
+  for (const key of Object.keys(QA_SOURCE_LIMITS)) delete data[key];
+  return { ...application,data };
 }
 function readQAApplication(db, recordId, combined = false) {
   const table = combined ? 'qa_application_groups' : 'qa_applications';
@@ -1925,14 +1939,14 @@ function saveQAApplication(db, recordId, body, username, recordIds = null) {
   if (!body || !Number.isSafeInteger(body.baseVersion) || body.baseVersion < 0) Auth.fail(400, '请先读取QA申请的最新版本');
   const combined = Array.isArray(recordIds);
   const table = combined ? 'qa_application_groups' : 'qa_applications';
-  const data = validatedQAData(body.data, combined);
-  const json = JSON.stringify(data);
   db.exec('BEGIN IMMEDIATE');
   try {
     for (const id of recordIds || [recordId]) {
       if (!db.prepare('SELECT id FROM records WHERE id=?').get(id)) Auth.fail(404, '验货记录已不存在，QA申请未保存');
     }
     const current = readQAApplication(db, recordId, combined);
+    const data = validatedQAData(body.data,combined,current?.data);
+    const json = JSON.stringify(data);
     if ((current?.version || 0) !== body.baseVersion) {
       if (current && current.version > body.baseVersion && JSON.stringify(current.data) === json) { db.exec('COMMIT'); return current; }
       Auth.fail(409, 'QA申请已被其他窗口或账号修改，本次未覆盖；当前填写内容已在本机保留，请核对已保存版本');
@@ -2222,10 +2236,11 @@ const server = http.createServer(async (req, res) => {
       for (const id of recordIds || [recordId]) {
         if (!db.prepare('SELECT id FROM records WHERE id=?').get(id)) Auth.fail(404, '所选验货记录已不存在，请刷新后重新选择');
       }
-      if (req.method === 'GET') return sendJson(res, 200, { ok:true, application:readQAApplication(db,recordId,!!recordIds) });
+      const sourceFields = url.searchParams.get('sourceFields') === '1';
+      if (req.method === 'GET') return sendJson(res, 200, { ok:true, application:qaApplicationResponse(readQAApplication(db,recordId,!!recordIds),sourceFields) });
       Auth.requirePermission(user, 'records', 'e');
       const body = await readBody(req);
-      return sendJson(res, 200, { ok:true, application:saveQAApplication(db,recordId,body,user.username,recordIds) });
+      return sendJson(res, 200, { ok:true, application:qaApplicationResponse(saveQAApplication(db,recordId,body,user.username,recordIds),sourceFields) });
     }
     if (p === '/api/bootstrap' && req.method === 'GET') {
       const data = getBootstrap(db);

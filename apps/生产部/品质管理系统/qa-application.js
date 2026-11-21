@@ -70,7 +70,10 @@
     return { ...data, productName:'', description:numbered };
   }
   function sameEditableValues(left, right) {
-    return JSON.stringify({ ...singleNameInDescription(left), receivedDate:'' }) === JSON.stringify({ ...singleNameInDescription(right), receivedDate:'' });
+    const normalize = data => ({ ...singleNameInDescription(data), receivedDate:'',
+      supplier:typeof data?.supplier === 'string' ? data.supplier : session?.defaults?.supplier || '',
+      deliveryNo:typeof data?.deliveryNo === 'string' ? data.deliveryNo : session?.defaults?.deliveryNo || '' });
+    return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
   }
   function formValues() {
     const result = {};
@@ -78,6 +81,8 @@
       'sampleQty','description','reportNo','stage','purpose','language'].forEach(key => { result[key] = value(key); });
     result.standards = checked('standard').sort();
     result.tests = checked('test').sort();
+    result.supplier = value('supplier');
+    result.deliveryNo = value('deliveryNo');
     return result;
   }
   function draftKey(context) {
@@ -108,7 +113,7 @@
   }
   function applyValues(data) {
     data = singleNameInDescription(data);
-    for (const key of ['customer','productName','productNo','department','requester','ageGrade','source','receivedDate','sampleQty','description','reportNo','stage','purpose','language']) {
+    for (const key of ['customer','productName','productNo','department','requester','ageGrade','source','receivedDate','sampleQty','description','reportNo','stage','purpose','language','supplier','deliveryNo']) {
       if (key !== 'receivedDate' && typeof data[key] === 'string') document.getElementById('qa_' + key).value = data[key];
     }
     document.getElementById('qa_receivedDate').value = session?.generationDate || generationDate();
@@ -146,7 +151,7 @@
     const timeout = setTimeout(() => controller.abort(),12000);
     try {
       const query = context.recordIds ? 'recordIds=' + encodeURIComponent(context.recordIds.join(',')) : 'recordId=' + encodeURIComponent(context.record.id);
-      const response = await window.__QC_REQUEST('/api/qa-application?' + query,
+      const response = await window.__QC_REQUEST('/api/qa-application?' + query + '&sourceFields=1',
         { method,signal:controller.signal,...(body ? { headers:{'Content-Type':'application/json'},body:JSON.stringify(body) } : {}) });
       const result = await response.json();
       checkActor(context);
@@ -292,6 +297,7 @@
             ${field('department','申请部门', 'text', 'maxlength="80"')}${field('requester','申请人（实际姓名）', 'text', 'maxlength="80" placeholder="请填写实际申请人姓名"')}${field('ageGrade','年龄（选填）', 'text', 'maxlength="40"')}
             ${field('source','样板来源', 'text', 'maxlength="80"')}${field('receivedDate','到板日期（生成当天）', 'date', 'readonly')}${field('sampleQty','样板数量', 'text', 'maxlength="60" placeholder="填写实际送样数量，如 3 PCS"')}
             <label class="form-group qa-form-wide"><span>样板描述</span><textarea class="form-input" id="qa_description" rows="5" maxlength="2000" placeholder="填写样板状态、测试要求或需要说明的内容"></textarea></label>
+            <div class="qa-form-wide qa-source-fields">${field('supplier','供应商（描述右下角）','text','maxlength="2000"')}${field('deliveryNo','送货单号（描述右下角）','text','maxlength="4000"')}</div>
             ${field('reportNo','报告编号（可修改）', 'text', 'maxlength="100"')}
             <label class="form-group"><span>报告语言</span><select class="form-input" id="qa_language"><option value="zh">中文报告</option><option value="en">ENG.REP</option></select></label>
             <label class="form-group"><span>测试阶段（选填）</span><select class="form-input" id="qa_stage"><option value="">未选择</option>${['ES/EP','FEP','PP','PS','Others'].map(v => `<option>${v}</option>`).join('')}</select></label>
@@ -341,6 +347,20 @@
     return overlay;
   }
 
+  function sourceDefaults(records) {
+    const groups = new Map();
+    for (const record of records) {
+      const supplier = String(record.supplier ?? '').trim();
+      if (!groups.has(supplier)) groups.set(supplier,new Set());
+      groups.get(supplier).add(String(record.deliveryNo ?? '').trim());
+    }
+    const supplier = [...groups.keys()].map(name => name || (groups.size > 1 ? '未填写供应商' : '')).join('、');
+    const deliveries = values => [...values].map(value => value || (values.size > 1 ? '未填写' : '')).join('、');
+    const deliveryNo = groups.size === 1 ? deliveries([...groups.values()][0])
+      : [...groups].map(([name,values]) => (name || '未填写供应商') + '：' + (deliveries(values) || '未填写')).join('；');
+    if (supplier.length > 2000 || deliveryNo.length > 4000) throw new Error('所选来源资料过多，请减少记录后再生成申请');
+    return { supplier,deliveryNo };
+  }
   function applicationSelection(recordId, data, today) {
     const combined = Array.isArray(recordId);
     const ids = combined ? recordId : [recordId];
@@ -363,7 +383,7 @@
       description:records.map((item,index) => (index+1) + '. ' + (item.productName || '未填写款式名称') +
         (productNos.length > 1 ? '（货号：' + (item.productNo || '未填写') + '）' : '')).join('\n'),
       reportNo:'QA-' + today.replace(/-/g,'') + '-' + (combined ? 'M' + Date.now() : record.id),
-      language:'zh', stage:'', purpose:'',
+      language:'zh', stage:'', purpose:'', ...sourceDefaults(records),
     };
     return { record,recordIds,records,defaults };
   }
@@ -451,11 +471,13 @@
   }
   function fillDescriptionRows(description, lineHeight, columns) {
     const maxRows = Math.floor(description.clientHeight/lineHeight) * columns;
+    const source = description.querySelector('.qa-description-source');
     for (let index=0; index<maxRows; index++) {
       const row = document.createElement('div');
       row.className = 'qa-description-line qa-description-empty';
       row.setAttribute('aria-hidden','true');
-      description.appendChild(row);
+      if (source) description.insertBefore(row,source);
+      else description.appendChild(row);
       if (!descriptionFits(description)) { row.remove(); break; }
     }
   }
@@ -471,6 +493,7 @@
         columnCount:String(columns),columnGap:'12px',columnFill:'auto' });
       description.style.setProperty('line-height',lineHeight+'px','important');
       description.style.setProperty('--qa-description-line-height',lineHeight+'px');
+      description.style.setProperty('--qa-source-left-padding',columns === 1 ? '50%' : '4px');
       const rules = paper.querySelector('.qa-ruled-lines');
       if (rules) rules.hidden = true;
       if (descriptionFits(description)) {
@@ -525,7 +548,7 @@
         <tr class="qa-data-row"><th>${label('Request Department','申请部门')}</th><td>${e('department')}</td><th>${label('Requester','申请人')}</th><td>${e('requester')}</td><th>${label('Age Grade','年龄')}</th><td>${e('ageGrade')}</td></tr>
         <tr class="qa-data-row"><th>${label('Sample Source','样板来源')}</th><td>${e('source')}</td><th>${label('Sample Received Date','到板日期')}</th><td>${e('receivedDate')}</td><th>${label('Sample Quantity','样板数量')}</th><td>${e('sampleQty')}</td></tr>
         <tr class="qa-stage-row"><th>Test Stage 测试阶段</th><td colspan="5">${['ES/EP','FEP','PP','PS','Others'].map(stage => `<span class="qa-choice">${box(model.stage===stage)}${esc(stage==='Others'?'Others 其它':stage)}</span>`).join('')}</td></tr>
-        <tr><th class="qa-description-label">Sample Description<br>样板描述</th><td colspan="5" class="qa-description-cell"><div class="qa-description-heading">Product Status or Improvement 产品状态或改进方法/Packing Method 包装方法:</div><div class="qa-description-body"><div class="qa-ruled-lines" aria-hidden="true">${Array.from({length:6},()=>'<span></span>').join('')}</div><div class="qa-description-content qa-description-rows">${String(model.description || '').split('\n').map(line => `<div class="qa-description-line">${esc(line)}</div>`).join('\n')}</div></div></td></tr>
+        <tr><th class="qa-description-label">Sample Description<br>样板描述</th><td colspan="5" class="qa-description-cell"><div class="qa-description-heading">Product Status or Improvement 产品状态或改进方法/Packing Method 包装方法:</div><div class="qa-description-body"><div class="qa-ruled-lines" aria-hidden="true">${Array.from({length:6},()=>'<span></span>').join('')}</div><div class="qa-description-content qa-description-rows">${String(model.description || '').split('\n').map(line => `<div class="qa-description-line">${esc(line)}</div>`).join('\n')}<div class="qa-description-source"><div class="qa-description-source-line">供应商：${e('supplier')}</div><div class="qa-description-source-line">送货单号：${e('deliveryNo')}</div></div></div></div></td></tr>
         <tr class="qa-purpose-row"><th>${label('Test Purpose','测试目的')}</th><td colspan="5">${e('purpose')}</td></tr>
         <tr class="qa-standard-row"><th>${label('Test Standard','测试标准')}</th><td colspan="5">${['ASTM F963','EN71','EN62115','Customer Requirement 客户要求'].map((standard,i) => `<span class="qa-choice">${box(model.standards.includes(String(i)))}${esc(standard)}</span>`).join('')}</td></tr>
         <tr><td colspan="6" class="qa-tests-cell"><div class="qa-test-columns">${tests(reliability,'L')}${tests(rightTests,'R')}</div></td></tr>

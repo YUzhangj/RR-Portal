@@ -130,3 +130,31 @@ test('combined QA enforces permissions, company boundaries, valid selection and 
  assert.equal((await request(route,{session:admin,method:'POST',body:{baseVersion:2,data:model({description:'x'.repeat(24001)})}})).status,400);
  assert.deepEqual((await request(route,{session:admin})).json.application,before);
 });
+
+test('source fields persist, preserve old-client response shape and survive older saves without metadata loss',async()=>{
+ const route=endpoint(103),full=route+'&sourceFields=1';
+ const fields=model({supplier:'华登B',deliveryNo:'000107-A'});
+ const created=await request(full,{session:admin,method:'POST',body:{baseVersion:0,data:fields}});
+ assert.equal(created.status,200);assert.equal(created.json.application.data.supplier,'华登B');assert.equal(created.json.application.data.deliveryNo,'000107-A');
+ const legacy=(await request(route,{session:reader})).json.application;
+ assert.equal(Object.hasOwn(legacy.data,'supplier'),false);assert.equal(Object.hasOwn(legacy.data,'deliveryNo'),false);
+ const olderEdit=model({sampleQty:'8 PCS'});
+ const updated=await request(route,{session:admin,method:'POST',body:{baseVersion:1,data:olderEdit}});
+ assert.equal(updated.status,200);assert.deepEqual(updated.json.application.data,olderEdit);
+ const stored=(await request(full,{session:reader})).json.application;
+ assert.equal(stored.data.supplier,'华登B');assert.equal(stored.data.deliveryNo,'000107-A');assert.equal(stored.data.sampleQty,'8 PCS');
+ const retry=await request(route,{session:admin,method:'POST',body:{baseVersion:1,data:olderEdit}});
+ assert.equal(retry.status,200);assert.equal(retry.json.application.version,stored.version);
+ await stop();await start();assert.equal((await request(full,{session:admin})).json.application.data.deliveryNo,'000107-A');
+ const cleared=await request(full,{session:admin,method:'POST',body:{baseVersion:stored.version,data:{...stored.data,supplier:'',deliveryNo:''}}});
+ assert.equal(cleared.status,200);assert.equal(cleared.json.application.data.supplier,'');assert.equal(cleared.json.application.data.deliveryNo,'');
+});
+test('source fields use existing permission and conflict checks and reject invalid values atomically',async()=>{
+ const route=endpoint(103)+'&sourceFields=1',before=(await request(route,{session:admin})).json.application;
+ assert.equal((await request(route,{session:reader,method:'POST',body:{baseVersion:before.version,data:model({supplier:'A',deliveryNo:'1'})}})).status,403);
+ for(const extra of [{supplier:'A'.repeat(2001)},{deliveryNo:'1'.repeat(4001)},{supplier:null},{deliveryNo:123},{deliveryNo:'A\0B'}]) {
+  assert.equal((await request(route,{session:admin,method:'POST',body:{baseVersion:before.version,data:model(extra)}})).status,400);
+ }
+ assert.equal((await request(route,{session:admin,method:'POST',body:{baseVersion:0,data:model({supplier:'另一家',deliveryNo:'2'})}})).status,409);
+ assert.deepEqual((await request(route,{session:admin})).json.application,before);
+});
