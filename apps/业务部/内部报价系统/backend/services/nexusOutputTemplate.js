@@ -1480,6 +1480,11 @@ async function buildOutputWorkbook(args) {
   buildReferenceBlock(detail, molding, payloads.sales || {}, payloads.assembly || {}, payloads.engineering || {});
   const totalRow = buildQuotationDetail(detail, args.quote || {}, molding);
   buildReferenceLowerSections(detail, args.quote || {}, args.sections || [], payloads, totalRow, legacy, costs);
+  // “报价明细”是最终交付给用户的主表，工作表标签必须排在最前面。
+  // ExcelJS 通过 orderNo 决定标签顺序；保留其他部门工作表的相对顺序。
+  const remainingSheets = workbook.worksheets.filter(sheet => sheet.id !== detail.id);
+  detail.orderNo = 0;
+  remainingSheets.forEach((sheet, index) => { sheet.orderNo = index + 1; });
   const detailTabIndex = workbook.worksheets.findIndex(sheet => sheet.id === detail.id);
   workbook.views = [{
     activeTab: Math.max(detailTabIndex, 0),

@@ -62,6 +62,8 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
   const sheet = workbook.getWorksheet('报价明细');
   assert.ok(sheet);
   const detailTabIndex = workbook.worksheets.findIndex(candidate => candidate.id === sheet.id);
+  assert.equal(detailTabIndex, 0);
+  assert.equal(workbook.worksheets[0].name, '报价明细');
   assert.equal(workbook.views[0].activeTab, detailTabIndex);
   assert.equal(workbook.views[0].firstSheet, detailTabIndex);
   const exportedBuffer = await workbook.xlsx.writeBuffer();
@@ -69,6 +71,8 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
   await reopenedWorkbook.xlsx.load(exportedBuffer);
   assert.equal(reopenedWorkbook.getWorksheet('系统报价汇总').state, 'veryHidden');
   const reopenedDetailIndex = reopenedWorkbook.worksheets.findIndex(candidate => candidate.name === '报价明细');
+  assert.equal(reopenedDetailIndex, 0);
+  assert.equal(reopenedWorkbook.worksheets[0].name, '报价明细');
   assert.equal(reopenedWorkbook.views[0].activeTab, reopenedDetailIndex);
   assert.equal(reopenedWorkbook.views[0].firstSheet, reopenedDetailIndex);
   assert.equal(sheet.getCell('B1').value, '料型');

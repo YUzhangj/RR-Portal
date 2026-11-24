@@ -66,7 +66,7 @@ router.get('/:id/output-layout', async (req, res) => {
       editableCells,
       overriddenCells: workbook.outputEditState.overridden,
     });
-    const preferredOrder = new Map([['系统报价汇总', 0], ['报价明细', 1]]);
+    const preferredOrder = new Map([['报价明细', 0], ['系统报价汇总', 1]]);
     sheets.sort((left, right) => (preferredOrder.get(left.name) ?? 99) - (preferredOrder.get(right.name) ?? 99));
     res.json({
       quote: {
