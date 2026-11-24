@@ -237,11 +237,7 @@ function buildQuotationDetail(ws, quote, molding) {
   for (let index = 0; index < slots; index += 1) {
     const source = rows[index];
     const row = start + index;
-    const materialReferenceCandidate = materialReferenceColumn(molding, source);
-    const savedMaterialPrice = source?.material_unit_price;
-    const materialReference = materialReferenceCandidate && (savedMaterialPrice == null || savedMaterialPrice === ''
-      || Math.abs(Number(savedMaterialPrice) - Number((number(materialReferenceCandidate.reference.price) / 454).toFixed(4))) < 1e-10)
-      ? materialReferenceCandidate : null;
+    const materialReference = materialReferenceColumn(molding, source);
     const machineReference = machineReferenceColumn(molding, source);
     const weight = source ? number(source.weight_g) : 0;
     const materialPrice = source ? (materialReference
