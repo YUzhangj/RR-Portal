@@ -118,3 +118,20 @@ test('ToyMonster functions retain truncation, text-aware averages and lazy error
   assert.throws(()=>run('IFERROR(1/0,2/0)'),/DIV/);
   close(E.createEvaluator({cells:{...cells,'S!B1':{f:'AVERAGEA(A1:A5)'}}},{'S!A1':{v:8}}).value('S!B1'),2.25);
 });
+
+
+test('MAX recalculates freight guards and handles numeric references without treating text as zero', () => {
+  const model = { cells: {
+    'S!A1': { v: 1.25 }, 'S!A2': { v: 12 },
+    'S!B1': { f: 'MAX(ROUND(1980/MAX(A1,0.01),0),1)' },
+    'S!B2': { f: '7200/B1/MAX(A2,1)' },
+    'S!C1': { v: -4 }, 'S!C2': { v: 'ignored' }, 'S!C3': { v: -2 },
+    'S!D1': { f: 'MAX(C1:C3)' }, 'S!D2': { f: 'MAX("5",TRUE,3)' },
+    'S!D3': { f: 'MAX(C2)' }, 'S!D4': { f: 'MAX(1/0,2)' },
+  } };
+  const ev = E.createEvaluator(model, { 'S!A1': {v: 20*12*10/1728}, 'S!A2': {v:10} });
+  assert.equal(ev.value('S!B1'), 1426);
+  close(ev.value('S!B2'), 7200/1426/10);
+  assert.equal(ev.value('S!D1'), -2); assert.equal(ev.value('S!D2'), 5);
+  assert.equal(ev.value('S!D3'), 0); assert.throws(() => ev.value('S!D4'), /DIV/);
+});
