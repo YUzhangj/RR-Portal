@@ -1387,16 +1387,18 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
   ['I', 'K', 'M'].forEach(column => { ws.getCell(`${column}${thirdValueRow}`).numFmt = '0.00%'; });
 
   const taxHeaders = ['含税13%类成本', '纸箱类', '含税1%', '搪胶类3%', '车发类13%', '车衣类13%', '吸塑类6%', '运费类9%', '含税13%类', '合计减税'];
+  // 减税基数只引用上方三块黄色汇总，不再越过汇总区直连成本明细。
+  const yellowTax13Formula = `SUM(F${firstValueRow},K${firstValueRow},M${firstValueRow},O${firstValueRow},D${secondValueRow},G${secondValueRow},H${secondValueRow},J${secondValueRow},K${secondValueRow},F${thirdValueRow})`;
   const taxBases = [
-    linkedComponent(tax13Keys, tax13Total),
-    linkedComponent(['carton'], components.carton),
-    linkedComponent(['plating'], components.plating),
-    linkedComponent(['slush'], components.slush),
-    { formula: (componentCells.get('sewing_hair') || []).length ? `${componentCells.get('sewing_hair')[0]}*${number(sewingTaxShares.sewing_hair)}` : '0', result: sewingHairTaxable },
-    { formula: (componentCells.get('sewing_cloth') || []).length ? `${componentCells.get('sewing_cloth')[0]}*${number(sewingTaxShares.sewing_cloth)}` : '0', result: sewingClothTaxable },
-    linkedComponent(['suction'], components.suction),
-    linkedComponent(['freight'], components.freight),
-    linkedComponent(tax13Keys, tax13Total),
+    { formula: yellowTax13Formula, result: tax13Total },
+    { formula: `L${secondValueRow}`, result: number(components.carton) },
+    { formula: `I${secondValueRow}`, result: number(components.plating) },
+    { formula: `H${firstValueRow}`, result: number(components.slush) },
+    { formula: `I${firstValueRow}*${number(sewingTaxShares.sewing_hair)}`, result: sewingHairTaxable },
+    { formula: `J${firstValueRow}*${number(sewingTaxShares.sewing_cloth)}`, result: sewingClothTaxable },
+    { formula: `N${firstValueRow}`, result: number(components.suction) },
+    { formula: `M${secondValueRow}`, result: number(components.freight) },
+    { formula: yellowTax13Formula, result: tax13Total },
   ];
   const taxRates = [null, 0.115, 0.0099, 0.03, 0.115, 0.115, 0.06, 0.0826, 0.115];
 

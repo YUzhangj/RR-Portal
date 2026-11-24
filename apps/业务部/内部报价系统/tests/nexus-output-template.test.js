@@ -291,6 +291,16 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
   assert.equal(sheet.getCell(`C${fourthSummaryRow}`).value, '减税基数');
   assert.equal(sheet.getCell(`C${fourthRateRow}`).value, '减税率');
   assert.equal(sheet.getCell(`C${fourthDeductionRow}`).value, '减税值');
+  const yellowTax13Formula = `SUM(F${firstSummaryRow},K${firstSummaryRow},M${firstSummaryRow},O${firstSummaryRow},D${secondSummaryRow},G${secondSummaryRow},H${secondSummaryRow},J${secondSummaryRow},K${secondSummaryRow},F${thirdSummaryRow})`;
+  assert.equal(sheet.getCell(`D${fourthSummaryRow}`).formula, yellowTax13Formula);
+  assert.equal(sheet.getCell(`E${fourthSummaryRow}`).formula, `L${secondSummaryRow}`);
+  assert.equal(sheet.getCell(`F${fourthSummaryRow}`).formula, `I${secondSummaryRow}`);
+  assert.equal(sheet.getCell(`G${fourthSummaryRow}`).formula, `H${firstSummaryRow}`);
+  assert.match(sheet.getCell(`H${fourthSummaryRow}`).formula, new RegExp(`^I${firstSummaryRow}\\*`));
+  assert.match(sheet.getCell(`I${fourthSummaryRow}`).formula, new RegExp(`^J${firstSummaryRow}\\*`));
+  assert.equal(sheet.getCell(`J${fourthSummaryRow}`).formula, `N${firstSummaryRow}`);
+  assert.equal(sheet.getCell(`K${fourthSummaryRow}`).formula, `M${secondSummaryRow}`);
+  assert.equal(sheet.getCell(`L${fourthSummaryRow}`).formula, yellowTax13Formula);
   assert.equal(sheet.getCell(`D${fourthRateRow}`).value, '—');
   assert.equal(sheet.getCell(`E${fourthRateRow}`).value, 0.115);
   assert.equal(sheet.getCell(`F${fourthRateRow}`).value, 0.0099);
