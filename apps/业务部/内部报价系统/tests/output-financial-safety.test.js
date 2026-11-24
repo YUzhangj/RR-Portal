@@ -6,10 +6,27 @@ const args=(rows,scenarios)=>({quote:{quote_no:'PR1144-ONLY',product_name:'Synth
  {dept:'molding',payload_json:JSON.stringify({injection:rows,material_prices:[{name:'ABS',model:'750SW',price:6.5}]})},
  {dept:'sales',payload_json:JSON.stringify({shipping:{scenarios}})},
 ]});
-test('output preserves saved manual material unit price',async()=>{
+test('output material unit price links to the matching upper reference when saved price agrees',async()=>{
+ const matched=row('partA',10);
+ matched.material_unit_price=Number((6.5/454).toFixed(4));
+ const wb=await buildOutputWorkbook(args([matched]));
+ const c=wb.getWorksheet('报价明细').getCell('G11');
+ assert.equal(c.formula,'C4');
+ assert.equal(c.result,Number((6.5/454).toFixed(4)));
+});
+test('output preserves a different saved manual price even when an upper reference matches',async()=>{
  const wb=await buildOutputWorkbook(args([row('partA',10)]));
  const c=wb.getWorksheet('报价明细').getCell('G11');
- assert.equal(c.result??c.value,0.02);
+ assert.equal(c.formula,undefined);
+ assert.equal(c.value,0.02);
+});
+test('output preserves saved manual material unit price when no upper reference matches',async()=>{
+ const unmatched=row('partA',10);
+ unmatched.material_grade='CUSTOM';
+ const wb=await buildOutputWorkbook(args([unmatched]));
+ const c=wb.getWorksheet('报价明细').getCell('G11');
+ assert.equal(c.formula,undefined);
+ assert.equal(c.value,0.02);
 });
 test('saved output corrections must not move to a different part after inserting a row',async()=>{
  const old=args([row('partA',10)]);

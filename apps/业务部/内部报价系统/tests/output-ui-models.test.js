@@ -10,13 +10,17 @@ test('carton source editor follows actual rows and correct carton instead of fix
  const context=vm.createContext({URLSearchParams,location:{search:'?id=1',pathname:'/quote-output.html'},console});
  vm.runInContext(source+';globalThis.model=(data,cell)=>{state.data=data;state.activeSheet=data.sheets.findIndex(s=>s.name===\'报价明细\');return cartonCalculationModel(cell);};',context);
  const detail=sheets.find(s=>s.name==='报价明细');
- const targets=detail.cells.filter(c=>c.column===14 && c.value==='箱价/件');
+ const targets=detail.cells.filter(c=>c.value==='箱价/件');
  assert.equal(targets.length,2);
+ assert.ok(targets.every(c=>c.column===10));
  for(const [index,label] of targets.entries()){
-  const target=detail.cells.find(c=>c.row===label.row&&c.column===15);
+  const target=detail.cells.find(c=>c.row===label.row&&c.column===label.column+1);
   const model=context.model({sheets},target);
   assert.ok(model);assert.equal(model.initial.length,index===0?18:6);
   assert.equal(model.initial.quantity,index===0?12:3);
   assert.equal(model.targetAddress,target.address);
+  assert.ok(model.fields.every(f=>f.cell.editable));
+  assert.equal(model.fields.find(f=>f.label==='纸箱长 L').cell.column,11);
+  assert.equal(model.fields.find(f=>f.label==='装箱数量').cell.column,14);
  }
 });

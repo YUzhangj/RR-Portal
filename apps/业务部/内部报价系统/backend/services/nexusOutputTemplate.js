@@ -690,6 +690,12 @@ function buildCartonPanel(ws, engineering, startRow, unitPriceCells = [], metric
     : (carton.cl || carton.cw || carton.ch ? [carton] : []);
   const paperRates = cartonPaperRates(engineering);
   let row = startRow;
+  // 成本明细占 A:D；纸箱计算放在 J:N，中间保留 E:I 五列空白，兼顾距离与可见性。
+  const panelStartColumn = 10;
+  const lengthColumn = ws.getColumn(panelStartColumn + 1).letter;
+  const widthColumn = ws.getColumn(panelStartColumn + 2).letter;
+  const heightColumn = ws.getColumn(panelStartColumn + 3).letter;
+  const quantityColumn = ws.getColumn(panelStartColumn + 4).letter;
   cartons.forEach((box, index) => {
     const sourceName = text(box.name || box.label || box.ka_label) || `纸箱${index + 1}`;
     const blockName = /内箱/.test(sourceName)
@@ -707,7 +713,7 @@ function buildCartonPanel(ws, engineering, startRow, unitPriceCells = [], metric
     const paperRate = number(box.paper_rate, isInner ? paperRates.inner : paperRates.main);
     const boxPrice = (cartonL + cartonW + 2) * (cartonW + cartonH + 1) * 2 * paperRate / 1000;
 
-    [blockName, 'L', 'W', 'H', ''].forEach((value, offset) => writeDetailCell(ws, row, 14 + offset, value, {
+    [blockName, 'L', 'W', 'H', ''].forEach((value, offset) => writeDetailCell(ws, row, panelStartColumn + offset, value, {
       bold: true,
       color: TEMPLATE_BLUE,
       fill: 'FFF2F6FC',
@@ -716,14 +722,14 @@ function buildCartonPanel(ws, engineering, startRow, unitPriceCells = [], metric
     }));
     row += 1;
 
-    ['产品尺寸inch:', productL, productW, productH, ''].forEach((value, offset) => writeDetailCell(ws, row, 14 + offset, value, {
+    ['产品尺寸inch:', productL, productW, productH, ''].forEach((value, offset) => writeDetailCell(ws, row, panelStartColumn + offset, value, {
       horizontal: offset === 0 ? 'left' : 'center',
       numFmt: offset === 0 || offset === 4 ? undefined : '0.000',
     }));
     row += 1;
 
     const cartonDimensionRow = row;
-    ['纸箱尺寸inch:', cartonL, cartonW, cartonH, ''].forEach((value, offset) => writeDetailCell(ws, row, 14 + offset, value, {
+    ['纸箱尺寸inch:', cartonL, cartonW, cartonH, ''].forEach((value, offset) => writeDetailCell(ws, row, panelStartColumn + offset, value, {
       horizontal: offset === 0 ? 'left' : 'center',
       numFmt: offset === 0 || offset === 4 ? undefined : '0.000',
     }));
@@ -734,16 +740,16 @@ function buildCartonPanel(ws, engineering, startRow, unitPriceCells = [], metric
     [
       'CU.FT:',
       {
-        formula: `O${cartonDimensionRow}*P${cartonDimensionRow}*Q${cartonDimensionRow}/1728`,
+        formula: `${lengthColumn}${cartonDimensionRow}*${widthColumn}${cartonDimensionRow}*${heightColumn}${cartonDimensionRow}/1728`,
         result: Number(cuft.toFixed(2)),
       },
       '箱价',
       {
-        formula: `(O${cartonDimensionRow}+P${cartonDimensionRow}+2)*(P${cartonDimensionRow}+Q${cartonDimensionRow}+1)*2*${paperRateCell}/1000`,
+        formula: `(${lengthColumn}${cartonDimensionRow}+${widthColumn}${cartonDimensionRow}+2)*(${widthColumn}${cartonDimensionRow}+${heightColumn}${cartonDimensionRow}+1)*2*${paperRateCell}/1000`,
         result: Number(boxPrice.toFixed(4)),
       },
       cartonQty,
-    ].forEach((value, offset) => writeDetailCell(ws, row, 14 + offset, value, {
+    ].forEach((value, offset) => writeDetailCell(ws, row, panelStartColumn + offset, value, {
       bold: offset === 0 || offset === 2 || offset === 4,
       color: offset === 0 || offset === 2 || offset === 4 ? TEMPLATE_BLUE : TEMPLATE_BLACK,
       horizontal: 'center',
@@ -751,12 +757,12 @@ function buildCartonPanel(ws, engineering, startRow, unitPriceCells = [], metric
         : offset === 3 ? '0.0000'
           : offset === 4 ? '"数量: "0.###' : undefined,
     }));
-    ['纸箱长 L','纸箱宽 W','纸箱高 H'].forEach((label,i)=>{ws.getCell(cartonDimensionRow,15+i).outputLabel=sourceName+' · '+label;});
-    ws.getCell(cartonSummaryRow,18).outputLabel=sourceName+' · 装箱数量';
-    ws.getCell(cartonSummaryRow,17).outputLabel=sourceName+' · 箱价';
+    ['纸箱长 L','纸箱宽 W','纸箱高 H'].forEach((label,i)=>{ws.getCell(cartonDimensionRow,panelStartColumn+1+i).outputLabel=sourceName+' · '+label;});
+    ws.getCell(cartonSummaryRow,panelStartColumn+4).outputLabel=sourceName+' · 装箱数量';
+    ws.getCell(cartonSummaryRow,panelStartColumn+3).outputLabel=sourceName+' · 箱价';
     if (!metrics.cuftCell && !isInner) {
-      metrics.cuftCell = `O${cartonSummaryRow}`;
-      metrics.quantityCell = `R${cartonSummaryRow}`;
+      metrics.cuftCell = `${lengthColumn}${cartonSummaryRow}`;
+      metrics.quantityCell = `${quantityColumn}${cartonSummaryRow}`;
       metrics.cuft = cuft;
       metrics.quantity = Math.max(cartonQty, 1);
     }
@@ -777,53 +783,53 @@ function buildCartonPanel(ws, engineering, startRow, unitPriceCells = [], metric
         flatL,
         flatW,
         {
-          formula: `(O${row}+1)*(P${row}+1)*2/1000*R${row}`,
+          formula: `(${lengthColumn}${row}+1)*(${widthColumn}${row}+1)*2/1000*${quantityColumn}${row}`,
           result: flatPrice,
         },
         flatQty,
       ]
-        .forEach((value, offset) => writeDetailCell(ws, row, 14 + offset, value, {
+        .forEach((value, offset) => writeDetailCell(ws, row, panelStartColumn + offset, value, {
           color: offset >= 3 ? TEMPLATE_BLUE : TEMPLATE_BLACK,
           horizontal: offset === 0 ? 'left' : 'center',
           numFmt: [1, 2].includes(offset) ? '0.000'
             : offset === 3 ? '0.0000'
               : offset === 4 ? '"用量: "0.###' : undefined,
         }));
-      ['平卡长 L','平卡宽 W','平卡费用','平卡用量'].forEach((label,i)=>{ws.getCell(row,15+i).outputLabel=(text(card.name)||`平卡${flatIndex+1}`)+' · '+label;});
+      ['平卡长 L','平卡宽 W','平卡费用','平卡用量'].forEach((label,i)=>{ws.getCell(row,panelStartColumn+1+i).outputLabel=(text(card.name)||`平卡${flatIndex+1}`)+' · '+label;});
       row += 1;
     }
 
     const unitCartonPrice = (boxPrice + flatPriceTotal) / Math.max(cartonQty, 1);
     const flatPriceFormula = flatPriceRows.length
-      ? `+SUM(Q${flatPriceRows[0]}:Q${flatPriceRows[flatPriceRows.length - 1]})`
+      ? `+SUM(${heightColumn}${flatPriceRows[0]}:${heightColumn}${flatPriceRows[flatPriceRows.length - 1]})`
       : '';
     [
       '箱价/件',
       {
-        formula: `(Q${cartonSummaryRow}${flatPriceFormula})/R${cartonSummaryRow}`,
+        formula: `(${heightColumn}${cartonSummaryRow}${flatPriceFormula})/${quantityColumn}${cartonSummaryRow}`,
         result: Number(unitCartonPrice.toFixed(4)),
       },
       '',
       '（箱价+平卡）÷数量',
       '',
     ].forEach((value, offset) => (
-      writeDetailCell(ws, row, 14 + offset, value, {
+      writeDetailCell(ws, row, panelStartColumn + offset, value, {
         bold: offset === 0 || offset === 1,
         color: offset <= 1 ? TEMPLATE_BLUE : TEMPLATE_BLACK,
         horizontal: offset === 3 ? 'left' : 'center',
         numFmt: offset === 1 ? '0.0000' : undefined,
       })
     ));
-    unitPriceCells.push(`O${row}`);
+    unitPriceCells.push(`${lengthColumn}${row}`);
     row += 1;
     row += 1;
   });
   if (!cartons.length) {
-    ['纸箱', 'L', 'W', 'H', ''].forEach((value, offset) => writeDetailCell(ws, row, 14 + offset, value, {
+    ['纸箱', 'L', 'W', 'H', ''].forEach((value, offset) => writeDetailCell(ws, row, panelStartColumn + offset, value, {
       bold: true, color: TEMPLATE_BLUE, fill: 'FFF2F6FC',
     }));
     row += 1;
-    ['待填写', '', '', '', ''].forEach((value, offset) => writeDetailCell(ws, row, 14 + offset, value, {
+    ['待填写', '', '', '', ''].forEach((value, offset) => writeDetailCell(ws, row, panelStartColumn + offset, value, {
       color: 'FF7A869A', horizontal: offset === 0 ? 'left' : 'center',
     }));
     row += 2;
@@ -1278,7 +1284,7 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
     ws, payloads.engineering || {}, startRow + 1, cartonUnitPriceCells, cartonMetrics
   );
   for (let r = startRow + 1; r <= cartonEnd; r++) {
-    for (let c = 14; c <= 20; c++) ws.getCell(r, c).outputDepartment = 'engineering';
+    for (let c = 10; c <= 14; c++) ws.getCell(r, c).outputDepartment = 'engineering';
   }
   const cartonComponentAddress = (componentCells.get('carton') || [])[0];
   if (cartonComponentAddress && cartonUnitPriceCells.length) {
@@ -1320,7 +1326,9 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
   const thirdValueRow = thirdStart + 1;
   const fourthStart = thirdValueRow + 2;
   const fourthValueRow = fourthStart + 1;
-  const fifthStart = fourthValueRow + 2;
+  const fourthRateRow = fourthValueRow + 1;
+  const fourthDeductionRow = fourthRateRow + 1;
+  const fifthStart = fourthDeductionRow + 2;
   const fifthValueRow = fifthStart + 1;
   const afterCost = total - taxSavings;
   const afterGross = quotedPrice - nonLabor + taxSavings;
@@ -1378,25 +1386,62 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
     ], { numFmt: '0.0000' });
   ['I', 'K', 'M'].forEach(column => { ws.getCell(`${column}${thirdValueRow}`).numFmt = '0.00%'; });
 
-  writeCompactSummaryBand(ws, fourthStart, '四、减税明细',
-    ['含税13%类成本', '纸箱类', '含税1%', '搪胶类3%', '车发类13%', '车衣类13%', '吸塑类6%', '运费类9%', '含税13%类', '合计减税'],
-    [
-      linkedComponent(tax13Keys, tax13Total),
-      linkedComponent(['carton'], components.carton),
-      linkedComponent(['plating'], components.plating),
-      linkedComponent(['slush'], components.slush),
-      { formula: (componentCells.get('sewing_hair') || []).length ? `${componentCells.get('sewing_hair')[0]}*${number(sewingTaxShares.sewing_hair)}` : '0', result: sewingHairTaxable },
-      { formula: (componentCells.get('sewing_cloth') || []).length ? `${componentCells.get('sewing_cloth')[0]}*${number(sewingTaxShares.sewing_cloth)}` : '0', result: sewingClothTaxable },
-      linkedComponent(['suction'], components.suction),
-      linkedComponent(['freight'], components.freight),
-      linkedComponent(tax13Keys, tax13Total),
-      { formula: `F${fourthValueRow}*0.99%+G${fourthValueRow}*3%+H${fourthValueRow}*11.5%+I${fourthValueRow}*11.5%+J${fourthValueRow}*6%+K${fourthValueRow}*8.26%+L${fourthValueRow}*11.5%+E${fourthValueRow}/1.1*11.5%`, result: taxSavings },
-    ], { headerFill: 'FFDCE6F1', numFmt: '0.0000' });
+  const taxHeaders = ['含税13%类成本', '纸箱类', '含税1%', '搪胶类3%', '车发类13%', '车衣类13%', '吸塑类6%', '运费类9%', '含税13%类', '合计减税'];
+  // 减税基数只引用上方三块黄色汇总，不再越过汇总区直连成本明细。
+  const yellowTax13Formula = `SUM(F${firstValueRow},K${firstValueRow},M${firstValueRow},O${firstValueRow},D${secondValueRow},G${secondValueRow},H${secondValueRow},J${secondValueRow},K${secondValueRow},F${thirdValueRow})`;
+  const taxBases = [
+    { formula: yellowTax13Formula, result: tax13Total },
+    { formula: `L${secondValueRow}`, result: number(components.carton) },
+    { formula: `I${secondValueRow}`, result: number(components.plating) },
+    { formula: `H${firstValueRow}`, result: number(components.slush) },
+    { formula: `I${firstValueRow}*${number(sewingTaxShares.sewing_hair)}`, result: sewingHairTaxable },
+    { formula: `J${firstValueRow}*${number(sewingTaxShares.sewing_cloth)}`, result: sewingClothTaxable },
+    { formula: `N${firstValueRow}`, result: number(components.suction) },
+    { formula: `M${secondValueRow}`, result: number(components.freight) },
+    { formula: yellowTax13Formula, result: tax13Total },
+  ];
+  const taxRates = [null, 0.115, 0.0099, 0.03, 0.115, 0.115, 0.06, 0.0826, 0.115];
+
+  writeDetailCell(ws, fourthStart, 3, '四、减税明细', {
+    bold: true, fill: 'FFFFC000', wrap: false,
+  });
+  taxHeaders.forEach((header, index) => writeDetailCell(ws, fourthStart, 4 + index, header, {
+    color: TEMPLATE_BLACK, fill: 'FFDCE6F1', bold: true, wrap: false,
+  }));
+  writeDetailCell(ws, fourthValueRow, 3, '减税基数', { wrap: false });
+  taxBases.forEach((value, index) => writeDetailCell(ws, fourthValueRow, 4 + index, value, {
+    color: TEMPLATE_BLUE, numFmt: '0.0000', wrap: false,
+  }));
+  writeDetailCell(ws, fourthValueRow, 13, '', { wrap: false });
+
+  writeDetailCell(ws, fourthRateRow, 3, '减税率', { wrap: false });
+  taxRates.forEach((rate, index) => writeDetailCell(ws, fourthRateRow, 4 + index, rate === null ? '—' : rate, {
+    color: TEMPLATE_BLUE, numFmt: rate === null ? undefined : '0.00%', wrap: false,
+  }));
+  writeDetailCell(ws, fourthRateRow, 13, '', { wrap: false });
+
+  writeDetailCell(ws, fourthDeductionRow, 3, '减税值', { wrap: false });
+  writeDetailCell(ws, fourthDeductionRow, 4, '—', { wrap: false });
+  for (let column = 5; column <= 12; column += 1) {
+    const letter = ws.getColumn(column).letter;
+    const divisor = column === 5 ? '/1.1' : '';
+    const baseResult = number(ws.getCell(fourthValueRow, column).result
+      ?? ws.getCell(fourthValueRow, column).value?.result
+      ?? ws.getCell(fourthValueRow, column).value);
+    const rate = taxRates[column - 4];
+    writeDetailCell(ws, fourthDeductionRow, column, {
+      formula: `${letter}${fourthValueRow}${divisor}*${letter}${fourthRateRow}`,
+      result: baseResult / (column === 5 ? 1.1 : 1) * rate,
+    }, { color: TEMPLATE_BLUE, numFmt: '0.0000', wrap: false });
+  }
+  writeDetailCell(ws, fourthDeductionRow, 13, {
+    formula: `SUM(E${fourthDeductionRow}:L${fourthDeductionRow})`, result: taxSavings,
+  }, { color: TEMPLATE_BLUE, bold: true, numFmt: '0.0000', wrap: false });
 
   writeCompactSummaryBand(ws, fifthStart, '减税后结果',
     ['合计减税', '减税后成本', '减税后毛利', '减税后毛利率', '减税后利润', '减税后利润率'],
     [
-      { formula: `M${fourthValueRow}`, result: taxSavings },
+      { formula: `M${fourthDeductionRow}`, result: taxSavings },
       { formula: `N${thirdValueRow}-D${fifthValueRow}`, result: afterCost },
       { formula: `J${thirdValueRow}+D${fifthValueRow}`, result: afterGross },
       { formula: `IFERROR(F${fifthValueRow}/D${firstValueRow},0)`, result: quotedPrice ? afterGross / quotedPrice : 0 },
@@ -1480,6 +1525,11 @@ async function buildOutputWorkbook(args) {
   buildReferenceBlock(detail, molding, payloads.sales || {}, payloads.assembly || {}, payloads.engineering || {});
   const totalRow = buildQuotationDetail(detail, args.quote || {}, molding);
   buildReferenceLowerSections(detail, args.quote || {}, args.sections || [], payloads, totalRow, legacy, costs);
+  // “报价明细”是最终交付给用户的主表，工作表标签必须排在最前面。
+  // ExcelJS 通过 orderNo 决定标签顺序；保留其他部门工作表的相对顺序。
+  const remainingSheets = workbook.worksheets.filter(sheet => sheet.id !== detail.id);
+  detail.orderNo = 0;
+  remainingSheets.forEach((sheet, index) => { sheet.orderNo = index + 1; });
   const detailTabIndex = workbook.worksheets.findIndex(sheet => sheet.id === detail.id);
   workbook.views = [{
     activeTab: Math.max(detailTabIndex, 0),

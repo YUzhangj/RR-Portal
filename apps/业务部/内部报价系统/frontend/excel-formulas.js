@@ -55,7 +55,7 @@
         const name = tokens[i++].value;
         if (name === 'TRUE' || name === 'FALSE') node = { type: 'value', value: name === 'TRUE' };
         else {
-          if (!['SUM', 'AVERAGE', 'AVERAGEA', 'HLOOKUP', 'TRUNC', 'ROUND', 'IF', 'IFERROR'].includes(name)) throw new Error(`暂不支持函数 ${name}`);
+          if (!['SUM', 'AVERAGE', 'AVERAGEA', 'HLOOKUP', 'TRUNC', 'ROUND', 'MAX', 'IF', 'IFERROR'].includes(name)) throw new Error(`暂不支持函数 ${name}`);
           take('('); const args = [];
           if (!peek(')')) { do { if (peek(',')) i++; args.push(expression(0)); } while (peek(',')); }
           take(')'); node = { type: 'call', name, args };
@@ -133,6 +133,17 @@
         const factor = 10 ** Math.abs(digits);
         if (!Number.isFinite(factor)) return digits > 0 ? n : 0;
         return digits < 0 ? Math.round(n / factor) * factor : Math.round(n * factor) / factor;
+      }
+      if (node.name === 'MAX') {
+        const numbers = [];
+        args.forEach((arg, i) => {
+          const reference = ['ref', 'range'].includes(node.args[i].type);
+          for (const v of [arg].flat(Infinity)) {
+            if (reference && typeof v !== 'number') continue;
+            numbers.push(numeric(v));
+          }
+        });
+        return numbers.length ? numbers.reduce((maximum, n) => Math.max(maximum, n), -Infinity) : 0;
       }
       if (node.name === 'AVERAGEA') {
         const numbers = [];

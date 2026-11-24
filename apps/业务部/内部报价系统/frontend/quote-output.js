@@ -355,41 +355,42 @@ function updateUnitQuantityCalculationPreview() {
 function cartonCalculationModel(cell) {
   const position = parseCellAddress(cell?.address);
   const sheet = state.data?.sheets?.[state.activeSheet];
-  if (!position || sheet?.name !== '报价明细' || position.column !== 15) return null;
+  if (!position || sheet?.name !== '报价明细' || position.column < 2) return null;
+  const panelColumn = position.column - 1;
   const cells = new Map(sheet.cells.map(item => [item.address, item]));
   const at = (row, column) => cells.get(`${columnLetter(column)}${row}`);
   const label = (row, column) => String(at(row, column)?.value ?? '').trim();
-  if (label(position.row, 14) !== '箱价/件') return null;
+  if (label(position.row, panelColumn) !== '箱价/件') return null;
   const headerRow = sheet.cells
-    .filter(item => item.column === 14 && item.row < position.row && /(?:外箱|主纸箱|内箱|纸箱)/.test(String(item.value || '')) && !/尺寸/.test(String(item.value || '')))
+    .filter(item => item.column === panelColumn && item.row < position.row && /(?:外箱|主纸箱|内箱|纸箱)/.test(String(item.value || '')) && !/尺寸/.test(String(item.value || '')))
     .map(item => item.row)
     .sort((a, b) => b - a)[0];
   if (!headerRow) return null;
 
   const dimensionRow = headerRow + 2;
   const summaryRow = headerRow + 3;
-  const unitRow = sheet.cells.find(item => item.column === 14 && item.row > summaryRow && label(item.row, 14) === '箱价/件')?.row;
+  const unitRow = sheet.cells.find(item => item.column === panelColumn && item.row > summaryRow && label(item.row, panelColumn) === '箱价/件')?.row;
   if (!unitRow) return null;
 
-  const lengthCell = at(dimensionRow, 15);
-  const widthCell = at(dimensionRow, 16);
-  const heightCell = at(dimensionRow, 17);
+  const lengthCell = at(dimensionRow, panelColumn + 1);
+  const widthCell = at(dimensionRow, panelColumn + 2);
+  const heightCell = at(dimensionRow, panelColumn + 3);
   const length = numericCellValue(lengthCell);
   const width = numericCellValue(widthCell);
   const height = numericCellValue(heightCell);
-  const boxPriceCell = at(summaryRow, 17);
+  const boxPriceCell = at(summaryRow, panelColumn + 3);
   const boxPrice = numericCellValue(boxPriceCell);
-  const quantityCell = at(summaryRow, 18);
+  const quantityCell = at(summaryRow, panelColumn + 4);
   const quantity = numericCellValue(quantityCell) || 1;
   const flatRows = [];
   for (let row = summaryRow + 1; row < unitRow; row += 1) {
-    if (!label(row, 14)) continue;
-    const lengthCellForFlat = at(row, 15);
-    const widthCellForFlat = at(row, 16);
-    const usageCell = at(row, 18);
-    const priceCell = at(row, 17);
+    if (!label(row, panelColumn)) continue;
+    const lengthCellForFlat = at(row, panelColumn + 1);
+    const widthCellForFlat = at(row, panelColumn + 2);
+    const usageCell = at(row, panelColumn + 4);
+    const priceCell = at(row, panelColumn + 3);
     flatRows.push({
-      name: label(row, 14),
+      name: label(row, panelColumn),
       length: numericCellValue(lengthCellForFlat),
       width: numericCellValue(widthCellForFlat),
       usage: numericCellValue(usageCell),
@@ -403,7 +404,7 @@ function cartonCalculationModel(cell) {
     });
   }
   const flatTotal = flatRows.reduce((sum, row) => sum + row.price, 0);
-  const unitCell = at(unitRow, 15);
+  const unitCell = at(unitRow, panelColumn + 1);
   const unitPrice = numericCellValue(unitCell) || numericCellValue(cell);
   const paperRateMatch = String(boxPriceCell?.formula || '').match(/\$([A-Z]+)\$(\d+)/);
   const paperRateCell = paperRateMatch ? cells.get(`${paperRateMatch[1]}${paperRateMatch[2]}`) : null;

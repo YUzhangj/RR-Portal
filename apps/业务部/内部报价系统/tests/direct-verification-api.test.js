@@ -177,6 +177,8 @@ test('direct costing stays separate from quotation reports and preserves real wo
     assert.ok(exportedWorkbook.getWorksheet('报价明细'));
     assert.equal(exportedWorkbook.getWorksheet('系统报价汇总').state, 'veryHidden');
     const detailIndex = exportedWorkbook.worksheets.findIndex(sheet => sheet.name === '报价明细');
+    assert.equal(detailIndex, 0);
+    assert.equal(preview.body.sheets[0].name, '报价明细');
     assert.equal(exportedWorkbook.views[0].activeTab, detailIndex);
     assert.equal((await one("SELECT COUNT(*) AS n FROM audit_log WHERE quote_id=? AND action='verification_export'", [created.body.id])).n, pgUrl ? '1' : 1);
   });
