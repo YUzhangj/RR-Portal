@@ -56,6 +56,18 @@ CREATE TABLE IF NOT EXISTS quote_sections (
 CREATE INDEX IF NOT EXISTS idx_sections_quote ON quote_sections(quote_id);
 CREATE INDEX IF NOT EXISTS idx_sections_dept_status ON quote_sections(dept, status);
 
+-- “汇总与输出”页面的可编辑原始数值。公式格不允许覆盖；
+-- 每次生成预览和导出文件时套用这些数值并重算依赖公式。
+CREATE TABLE IF NOT EXISTS quote_output_overrides (
+  quote_id      INTEGER NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
+  sheet_name    TEXT NOT NULL,
+  cell_address  TEXT NOT NULL,
+  value_json    TEXT NOT NULL,
+  updated_by    TEXT,
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (quote_id, sheet_name, cell_address)
+);
+
 -- 客价确认与生产车间分派；一张报价单只保留一份最新确认结果。
 CREATE TABLE IF NOT EXISTS quote_customer_confirmations (
   quote_id         INTEGER PRIMARY KEY REFERENCES quotes(id) ON DELETE CASCADE,
@@ -212,3 +224,15 @@ CREATE TABLE IF NOT EXISTS quote_verification_sections (
 
 CREATE INDEX IF NOT EXISTS idx_verification_sections_version
   ON quote_verification_sections(version_id, dept, status);
+
+-- 核价版本明细表中的可编辑原始数值。修改只属于当前核价版本，
+-- 不回写或解锁原报价；预览和导出会套用同一份修改并重算公式。
+CREATE TABLE IF NOT EXISTS quote_verification_output_overrides (
+  version_id    INTEGER NOT NULL REFERENCES quote_verification_versions(id) ON DELETE CASCADE,
+  sheet_name    TEXT NOT NULL,
+  cell_address  TEXT NOT NULL,
+  value_json    TEXT NOT NULL,
+  updated_by    TEXT,
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (version_id, sheet_name, cell_address)
+);

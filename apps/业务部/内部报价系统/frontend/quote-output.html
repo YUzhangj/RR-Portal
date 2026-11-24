@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>汇总与输出</title>
+  <link rel="stylesheet" href="./quote-output.css?v=20261124-pr1144-review" />
+</head>
+<body>
+  <header class="output-topbar">
+    <a id="back-link" class="back-link" href="./index.html">← 返回报价单</a>
+    <div class="output-brand"><span class="brand-icon">▦</span> 内部报价台</div>
+    <div id="output-user" class="user-chip"></div>
+  </header>
+  <main class="output-page">
+    <section class="output-heading">
+      <div>
+        <div id="output-eyebrow" class="eyebrow">整单报价表</div>
+        <h1 id="output-title">汇总与输出</h1>
+        <p id="quote-meta">正在读取报价资料…</p>
+      </div>
+      <div id="completion-card" class="completion-card">正在计算完整性…</div>
+    </section>
+
+    <section class="workbook-card">
+      <div class="workbook-header">
+        <div>
+          <h2 id="workbook-title">报价表格</h2>
+          <p id="workbook-description">当前表格与最终导出 Excel 使用同一份数据和版式。</p>
+        </div>
+        <div class="header-actions">
+          <button id="clear-stale-output" type="button" class="secondary" hidden>清除失效修正</button>
+          <button id="reload-button" type="button" class="secondary">↻ 重新读取</button>
+          <a id="download-button" class="button disabled" aria-disabled="true">⇩ 下载 Excel</a>
+        </div>
+      </div>
+      <div id="output-notice" class="notice">报价表格只读；需要修改时，请返回对应部门填写并保存。</div>
+      <div class="workbook-tools">
+        <label class="search-box">⌕ <input id="sheet-search" type="search" placeholder="查找项目或金额" /></label>
+        <button id="search-prev" type="button" class="secondary compact">上一个</button>
+        <button id="search-next" type="button" class="secondary compact">下一个</button>
+        <label class="zoom-control">缩放
+          <select id="sheet-zoom">
+            <option value="70">70%</option>
+            <option value="85" selected>85%</option>
+            <option value="100">100%</option>
+            <option value="115">115%</option>
+          </select>
+        </label>
+      </div>
+      <div id="sheet-tabs" class="sheet-tabs" role="tablist"></div>
+      <div id="sheet-status" class="sheet-status"></div>
+      <div id="cell-inspector" class="cell-inspector" aria-live="polite">
+        <strong id="selected-address" class="selected-address">--</strong>
+        <span class="formula-symbol">fx</span>
+        <input id="selected-formula" class="selected-formula" value="点击表格中的单元格查看公式或值" readonly aria-label="单元格公式或数值" />
+        <button id="source-edit-cell" type="button" class="secondary compact" hidden>查看来源 / 修改</button>
+        <button id="save-cell" type="button" class="compact" hidden>保存并联动</button>
+        <button id="reset-cell" type="button" class="secondary compact" hidden>恢复原值</button>
+      </div>
+      <div id="cell-edit-status" class="cell-edit-status" role="status" hidden></div>
+      <div id="sheet-shell" class="sheet-shell">
+        <div id="sheet-loading" class="sheet-message">正在生成报价表格…</div>
+        <div id="sheet-canvas" class="sheet-canvas" hidden></div>
+      </div>
+    </section>
+  </main>
+  <dialog id="source-edit-dialog" class="source-edit-dialog">
+    <form method="dialog" class="source-edit-card">
+      <div class="source-edit-heading">
+        <div>
+          <div class="eyebrow">原填写来源</div>
+          <h3 id="source-edit-title">修改报价值</h3>
+        </div>
+        <button id="source-edit-close" type="button" class="dialog-close" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <div class="source-edit-body">
+        <div class="source-path-card">
+          <strong id="source-edit-dept"></strong>
+          <span id="source-edit-section"></span>
+        </div>
+        <section id="source-calculation" class="source-calculation" hidden>
+          <div class="source-calculation-title">这个值怎么来的</div>
+          <div id="source-calculation-steps" class="source-calculation-steps"></div>
+        </section>
+        <label id="source-value-label" class="source-value-label"><span id="source-value-title">对应数值</span>
+          <input id="source-edit-value" type="number" step="any" inputmode="decimal" />
+        </label>
+        <p id="source-edit-help" class="source-edit-help"></p>
+      </div>
+      <div class="source-edit-actions">
+        <div class="source-edit-final" aria-live="polite">
+          <span>最终金额</span>
+          <strong id="source-edit-final-value">—</strong>
+        </div>
+        <button id="source-reset-cell" type="button" class="secondary" hidden>恢复原值</button>
+        <button type="submit" class="secondary">取消</button>
+        <button id="source-save-cell" type="button">保存并联动</button>
+      </div>
+    </form>
+  </dialog>
+  <script>
+    (function () {
+      var base = location.pathname.replace(/\/[^/]*$/, '');
+      if (!base) return;
+      var origFetch = window.fetch.bind(window);
+      window.fetch = function (url, opts) {
+        if (typeof url === 'string' && url.indexOf('/api/') === 0) url = base + url;
+        return origFetch(url, opts);
+      };
+    })();
+  </script>
+  <script src="./quote-output.js?v=20261124-pr1144-review"></script>
+</body>
+</html>

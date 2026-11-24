@@ -671,6 +671,25 @@ h3 .upload-mold-sheet button:hover { background: #334155; }
 }
 .dept-tab.active .badge { background: rgba(255,255,255,.2); color: #fff; }
 
+#user-chip #btn-output { display: none; }
+.quote-output-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  margin-left: auto;
+  padding: 7px 14px;
+  border: 1px solid #bfdbfe;
+  border-radius: var(--radius-sm);
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.quote-output-link:hover { border-color: #60a5fa; background: #dbeafe; }
+@media (max-width: 800px) { .quote-output-link { width: 100%; justify-content: center; margin-left: 0; } }
+
 /* 紧凑成本汇总（小计/损耗/合计 纵向） */
 .loss-summary {
   display: inline-flex;
@@ -1095,6 +1114,8 @@ h3 .upload-mold-sheet button:hover { background: #334155; }
 .verification-preview .verification-version-category-editor,.verification-preview .verification-version-category-readonly{margin:10px 0}
 .verification-detail-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:18px;margin:4px 0 16px}
 .verification-detail-head h1{margin:2px 0 0;font-size:24px}.verification-detail-head p{margin:4px 0 0;color:#64748b}
+.verification-detail-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+.verification-detail-actions button{white-space:nowrap}
 .verification-version-toolbar{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:12px;padding:14px;border:1px solid #dbe3ee;border-radius:13px;background:#fff}
 .verification-version-tabs{display:flex;gap:7px;overflow-x:auto;padding-bottom:2px}
 .verification-version-tabs button{display:grid;gap:2px;min-width:90px;padding:8px 14px;border:1px solid #dbe3ee;background:#fff;color:#334155;box-shadow:none}
@@ -1110,12 +1131,15 @@ h3 .upload-mold-sheet button:hover { background: #334155; }
 .verification-workflow-intro strong,.verification-workflow-intro span{display:block}.verification-workflow-intro strong{color:#1e3a8a}.verification-workflow-intro>div span{margin-top:3px;color:#64748b;font-size:12px}
 .verification-progress{display:grid!important;grid-template-columns:auto auto;align-items:baseline;gap:7px;padding:8px 13px;border:1px solid #bfdbfe;border-radius:10px;background:#fff;box-shadow:0 1px 3px rgba(37,99,235,.08);white-space:nowrap}
 .verification-progress strong{color:#1d4ed8!important;font-size:18px;font-variant-numeric:tabular-nums}.verification-progress span{margin:0!important;color:#475569!important;font-size:11px!important;font-weight:700}
-.verification-dept-tabs{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:4px;padding:7px;border:1px solid #dbe3ee;border-top:0;background:#f8fafc}
+.verification-dept-tabs{display:grid;grid-template-columns:repeat(10,minmax(0,1fr));gap:4px;padding:7px;border:1px solid #dbe3ee;border-top:0;background:#f8fafc}
 .verification-dept-tabs button{display:grid;gap:2px;min-width:0;padding:8px 7px;border:0;background:transparent;color:#475569;box-shadow:none;white-space:normal}
 .verification-dept-tabs button small{font-size:10px}.verification-dept-tabs button.active{background:#fff;color:#1d4ed8;box-shadow:0 1px 4px rgba(15,23,42,.1)}
 .verification-dept-tabs .verification-summary-tab{border:1px solid #bfdbfe;background:#eff6ff;color:#1d4ed8}
 .verification-dept-tabs .verification-summary-tab.active{border-color:#2563eb;background:#2563eb;color:#fff}
 .verification-dept-tabs .verification-summary-tab.active small{color:#dbeafe}
+.verification-dept-tabs .verification-output-tab{border:1px solid #bbf7d0;background:#f0fdf4;color:#166534}
+.verification-dept-tabs .verification-output-tab.active{border-color:#16a34a;background:#16a34a;color:#fff}
+.verification-dept-tabs .verification-output-tab.active small{color:#dcfce7}
 .verification-department-card,.verification-version-summary,.verification-comparison-card{margin-top:0;border-top:0!important;border-radius:0 0 14px 14px!important}
 .verification-department-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:20px 24px;border-bottom:1px solid #e2e8f0}
 .verification-department-head h2{margin:0;font-size:20px}.verification-department-head p{margin:4px 0 0;color:#64748b}
@@ -1123,6 +1147,8 @@ h3 .upload-mold-sheet button:hover { background: #334155; }
 .verification-department-card>.verification-quote-reference{display:block;margin:16px 24px 0;padding:12px 14px;border-left:3px solid #2563eb;border-radius:7px;background:#eff6ff;color:#475569;font-size:12px}
 #verification-workbench-body,#verification-summary-workbench{box-sizing:border-box;width:100%;min-width:0;max-width:100%;overflow-x:auto;padding:18px 24px}
 #verification-workbench-body>.wb-table,#verification-summary-workbench>.wb-table{min-width:900px}
+.verification-output-preview{overflow:hidden;border-top:1px solid #dbe3ee;border-bottom:1px solid #dbe3ee;background:#f5f7fb}
+.verification-output-preview iframe{display:block;width:100%;height:clamp(760px,calc(100vh - 210px),1120px);border:0;background:#fff}
 .verification-workbench-actions{position:sticky;bottom:0;z-index:12;display:flex;align-items:center;justify-content:flex-end;gap:9px;padding:13px 24px;border-top:1px solid #dbe3ee;background:rgba(255,255,255,.96);box-shadow:0 -4px 14px rgba(15,23,42,.05)}
 .verification-review-comment{margin-right:auto;color:#991b1b;font-size:12px}
 .verification-complete-panel{display:flex;align-items:end;justify-content:flex-end;gap:12px;flex-wrap:wrap;padding:16px 24px;border-top:1px solid #e2e8f0;background:#f8fafc}

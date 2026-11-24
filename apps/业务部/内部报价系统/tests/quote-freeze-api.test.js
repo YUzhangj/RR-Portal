@@ -34,6 +34,15 @@ test('customer confirmation atomically freezes matching price, header and sectio
   assert.equal((await api(`/sections/${section.id}`,'PUT',{payload:{header:{fx_rmb_hkd:9}},base_filled_at:null})).status,409);
   assert.equal((await api(`/reviews/${section.id}`,'POST',{action:'reject'})).status,409);
   assert.equal((await api(`/reviews/${section.id}/reopen`,'POST',{})).status,409);
+  const outputBefore=await api(`/quotes/${id}/output-layout`);assert.equal(outputBefore.status,200);
+  assert.equal(outputBefore.body.can_edit_output,false);
+  const originalSectionPayload=(await readDb.prepare("SELECT payload_json FROM quote_sections WHERE quote_id=? AND dept='sales'").get(id)).payload_json;
+  for(const method of ['PUT','DELETE']) assert.equal((await api(`/quotes/${id}/output-cell`,method,{
+    sheet_name:'报价明细',cell_address:'C2',value:123,
+  })).status,409);
+  assert.equal((await readDb.prepare('SELECT status FROM quote_customer_confirmations WHERE quote_id=?').get(id)).status,'confirmed');
+  assert.equal((await readDb.prepare("SELECT payload_json FROM quote_sections WHERE quote_id=? AND dept='sales'").get(id)).payload_json,originalSectionPayload);
+  assert.equal(await readDb.prepare('SELECT value_json FROM quote_output_overrides WHERE quote_id=?').get(id),undefined);
   // Saving and confirmation may win in either order, but the successful
   // confirmation must freeze exactly the content present in the original.
   for(let i=0;i<3;i++){

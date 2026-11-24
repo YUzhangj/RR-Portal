@@ -37,6 +37,19 @@ test('Chinese cross-sheet references, absolute ranges, lookup and exchange depen
   assert.ok(evaluate.dependencies('产品!C47', true).includes('總表!Z3'));
 });
 
+test('quote output formulas support ROUND and lazy IF branches', () => {
+  const model = { cells: {
+    '报价明细!A1': { v: 1490 },
+    '报价明细!A2': { v: 3000 },
+    '报价明细!A3': { f: 'ROUND(A1/A2,4)' },
+    '报价明细!A4': { f: 'IF(A2=0,0,A1/A2)' },
+  } };
+  const evaluator = E.createEvaluator(model);
+  assert.equal(evaluator.value('报价明细!A3'), 0.4967);
+  close(evaluator.value('报价明细!A4'), 1490 / 3000);
+  assert.equal(E.createEvaluator(model, { '报价明细!A2': { v: 0 } }).value('报价明细!A4'), 0);
+});
+
 test('errors remain explicit and absent external tables are flagged cached inputs, not zero', () => {
   const model = { cells: {
     '产品!A1': { f: 'A2' }, '产品!A2': { f: 'A1' },

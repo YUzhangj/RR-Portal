@@ -55,7 +55,7 @@
         const name = tokens[i++].value;
         if (name === 'TRUE' || name === 'FALSE') node = { type: 'value', value: name === 'TRUE' };
         else {
-          if (!['SUM', 'AVERAGE', 'AVERAGEA', 'HLOOKUP', 'TRUNC', 'IFERROR'].includes(name)) throw new Error(`暂不支持函数 ${name}`);
+          if (!['SUM', 'AVERAGE', 'AVERAGEA', 'HLOOKUP', 'TRUNC', 'ROUND', 'IF', 'IFERROR'].includes(name)) throw new Error(`暂不支持函数 ${name}`);
           take('('); const args = [];
           if (!peek(')')) { do { if (peek(',')) i++; args.push(expression(0)); } while (peek(',')); }
           take(')'); node = { type: 'call', name, args };
@@ -115,6 +115,10 @@
         if (node.args.length !== 2) throw new Error('#VALUE! IFERROR 需要两个参数');
         try { return evaluate(node.args[0]); } catch { return evaluate(node.args[1]); }
       }
+      if (node.name === 'IF') {
+        if (node.args.length < 2 || node.args.length > 3) throw new Error('#VALUE! IF 参数数量错误');
+        return evaluate(node.args[0]) ? evaluate(node.args[1]) : evaluate(node.args[2] || { type: 'value', value: false });
+      }
       const args = node.args.map(evaluate);
       if (node.name === 'TRUNC') {
         if (args.length < 1 || args.length > 2) throw new Error('#VALUE! TRUNC 参数数量错误');
@@ -122,6 +126,13 @@
         const factor = 10 ** Math.abs(digits);
         if (!Number.isFinite(factor)) return digits > 0 ? n : 0;
         return digits < 0 ? Math.trunc(n / factor) * factor : Math.trunc(n * factor) / factor;
+      }
+      if (node.name === 'ROUND') {
+        if (args.length < 1 || args.length > 2) throw new Error('#VALUE! ROUND 参数数量错误');
+        const n = numeric(args[0]), digits = Math.trunc(numeric(args[1] ?? 0));
+        const factor = 10 ** Math.abs(digits);
+        if (!Number.isFinite(factor)) return digits > 0 ? n : 0;
+        return digits < 0 ? Math.round(n / factor) * factor : Math.round(n * factor) / factor;
       }
       if (node.name === 'AVERAGEA') {
         const numbers = [];

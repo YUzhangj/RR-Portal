@@ -961,12 +961,18 @@ function hasOriginalWorkbook() {
 function renderDetail() {
   const quote = taskState.quote;
   const version = taskState.selected_version;
+  const approvedCount = taskState.sections.filter(section => section.status === 'approved').length;
+  const totalCount = taskState.sections.length;
+  const canExportDetail = totalCount > 0 && approvedCount === totalCount;
   window.VerificationWorkbench?.cleanupMoldNumberObservers?.($('verification-detail'));
   $('verification-detail').innerHTML = `<header class="verification-detail-head">
       <button id="verification-back" class="mini">← 返回核价任务</button>
       <div><span class="eyebrow">核价明细</span><h1>${esc(quote.quote_no)} · ${esc(quote.product_name)}</h1>
         <p>${esc(quote.customer || '—')} · ${baselineTitle()}建立于 ${esc(formatDate(taskState.baseline.frozen_at))}</p></div>
-      <span class="verification-status status-${esc(version.status)}">${esc(versionTitle(version))} · ${VERSION_STATUS[version.status]}</span>
+      <div class="verification-detail-actions">
+        <span class="verification-status status-${esc(version.status)}">${esc(versionTitle(version))} · ${VERSION_STATUS[version.status]}</span>
+        <button id="verification-export-detail" class="mini" ${canExportDetail ? '' : 'disabled'}>导出核价明细 (${approvedCount}/${totalCount})</button>
+      </div>
     </header>
     <div class="verification-version-toolbar">
       <div class="verification-version-tabs">
@@ -996,6 +1002,31 @@ function renderDetail() {
     $('verification-list').classList.remove('hidden');
     await loadList();
   };
+  $('verification-export-detail').onclick = async () => {
+    if (sectionDirty) { alert('当前部门有未保存修改，请先保存后再导出。'); return; }
+    const button = $('verification-export-detail');
+    button.disabled = true;
+    try {
+      const response = await fetch(`/api/verifications/versions/${version.id}/export`, { credentials: 'include' });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || response.statusText);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${quote.quote_no || quote.id}_${version.label || `V${version.version_no}`}_核价明细.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      button.disabled = !canExportDetail;
+    }
+  };
   document.querySelectorAll('[data-version-id]').forEach(button => {
     button.onclick = () => switchVersion(button.dataset.versionId);
   });
@@ -1023,7 +1054,7 @@ function renderWorkflow() {
   const departments = taskState.sections;
   const approvedCount = departments.filter(section => section.status === 'approved').length;
   const totalCount = departments.length;
-  if (activeDepartment !== '__summary__'
+  if (!['__summary__', '__output__'].includes(activeDepartment)
     && !departments.some(section => section.dept === activeDepartment)) {
     activeDepartment = departments[0]?.dept;
   }
@@ -1037,7 +1068,8 @@ function renderWorkflow() {
       ${departments.map(section => `<button data-verification-dept="${esc(section.dept)}" class="${section.dept === activeDepartment ? 'active' : ''}">
         ${esc(section.dept_name)}<small class="status-${esc(section.status)}">${SECTION_STATUS[section.status]}</small>
       </button>`).join('')}
-      <button data-verification-dept="__summary__" class="verification-summary-tab ${activeDepartment === '__summary__' ? 'active' : ''}">汇总与减税<small>点击查看</small></button>
+      <button data-verification-dept="__summary__" class="verification-summary-tab ${activeDepartment === '__summary__' ? 'active' : ''}">汇总与减税<small>自动汇总</small></button>
+      <button data-verification-dept="__output__" class="verification-output-tab ${activeDepartment === '__output__' ? 'active' : ''}">核价明细表<small>表格预览</small></button>
     </div>`;
   host.innerHTML = '<div id="verification-department-workbench"></div>';
   document.querySelectorAll('[data-verification-dept]').forEach(button => {
@@ -1152,6 +1184,10 @@ function renderDepartmentWorkbench() {
   window.VerificationWorkbench?.cleanupMoldNumberObservers?.(host);
   if (activeDepartment === '__summary__') {
     renderVersionSummary(host);
+    return;
+  }
+  if (activeDepartment === '__output__') {
+    renderVersionOutput(host);
     return;
   }
   const section = taskState.sections.find(item => item.dept === activeDepartment);
@@ -1288,11 +1324,11 @@ async function reviewSection(section, action, comment = '') {
 function renderVersionSummary(host) {
   const version = taskState.selected_version;
   host.innerHTML = `<article class="card verification-version-summary">
-      <header class="verification-department-head"><div><span class="eyebrow">${esc(versionTitle(version))}</span><h2>核价汇总与减税</h2>
-        <p>汇总由各部门核价明细自动计算，不能直接填写最终价格</p></div>
+      <header class="verification-department-head"><div><span class="eyebrow">${esc(versionTitle(version))}</span><h2>汇总与减税</h2>
+        <p>按当前核价版本的部门数据自动汇总成本、出货价及减税结果。</p></div>
         <span class="verification-status status-${esc(version.status)}">${VERSION_STATUS[version.status]}</span>
       </header>
-      <div id="verification-summary-workbench"></div>
+      <div id="verification-summary-workbench" class="verification-summary-workbench"></div>
       <div class="verification-complete-panel">
         <label>版本说明 <textarea id="verification-version-note" placeholder="填写本版本主要调整原因">${esc(version.note || '')}</textarea></label>
         ${taskState.can_complete ? '<button id="verification-complete-version">完成并锁定当前版本</button>' : ''}
@@ -1303,7 +1339,12 @@ function renderVersionSummary(host) {
   const summaryHost = $('verification-summary-workbench');
   const sections = currentSectionsForWorkbench();
   window.__data = { quote: taskState.quote, sections, me };
-  window.VerificationWorkbench?.renderSummaryPane(summaryHost, sections, taskState.quote, { dept: 'verification_readonly', role: 'staff' });
+  try {
+    window.VerificationWorkbench?.renderSummaryPane?.(summaryHost, sections, taskState.quote, me);
+  } catch (error) {
+    console.error('[verification-summary]', error);
+    summaryHost.innerHTML = `<div class="summary-empty">汇总计算载入失败：${esc(error.message)}</div>`;
+  }
   if ($('verification-complete-version')) $('verification-complete-version').onclick = async () => {
     if (!confirm(`完成后 ${versionTitle(version)} 将永久锁定，确认继续？`)) return;
     try {
@@ -1318,6 +1359,20 @@ function renderVersionSummary(host) {
       alert(error.message);
     }
   };
+}
+
+function renderVersionOutput(host) {
+  const version = taskState.selected_version;
+  const previewUrl = `./quote-output.html?verification_version_id=${encodeURIComponent(version.id)}&embed=1&ui=20261123-output-edit-r3`;
+  host.innerHTML = `<article class="card verification-version-summary verification-output-card">
+      <header class="verification-department-head"><div><span class="eyebrow">${esc(versionTitle(version))}</span><h2>核价明细表</h2>
+        <p>这里单独展示当前核价版本生成的完整“报价明细”表格；蓝色角标单元格可修改，公式格可查看计算并修改所引用参数。</p></div>
+        <span class="verification-status status-${esc(version.status)}">${VERSION_STATUS[version.status]}</span>
+      </header>
+      <div class="verification-output-preview">
+        <iframe title="${esc(versionTitle(version))} 核价明细表" src="${previewUrl}" loading="eager"></iframe>
+      </div>
+    </article>`;
 }
 
 function comparisonOptions(selected) {

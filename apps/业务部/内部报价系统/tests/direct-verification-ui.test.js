@@ -1,5 +1,38 @@
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
 const source=fs.readFileSync(require.resolve('../frontend/verification.js'),'utf8');
+const outputSource=fs.readFileSync(require.resolve('../frontend/quote-output.js'),'utf8');
+const verificationRoutes=fs.readFileSync(require.resolve('../backend/routes/verifications.js'),'utf8');
+const quoteOutputRoutes=fs.readFileSync(require.resolve('../backend/routes/export.js'),'utf8');
+const sqliteSchema=fs.readFileSync(require.resolve('../backend/db/schema.sql'),'utf8');
+test('核价明细在全部部门审核后提供报价明细版导出',()=>{
+ assert.match(source,/导出核价明细 \(\$\{approvedCount\}\/\$\{totalCount\}\)/);
+ assert.match(source,/\/api\/verifications\/versions\/\$\{version\.id\}\/export/);
+ assert.match(source,/const canExportDetail = totalCount > 0 && approvedCount === totalCount/);
+});
+test('核价保留汇总与减税，并新增当前版本的报价明细表格预览',()=>{
+ assert.match(source,/quote-output\.html\?verification_version_id=\$\{encodeURIComponent\(version\.id\)\}&embed=1&ui=/);
+ assert.match(source,/汇总与减税<small>自动汇总<\/small>/);
+ assert.match(source,/核价明细表<small>表格预览<\/small>/);
+ assert.match(source.slice(source.indexOf('function renderVersionSummary'),source.indexOf('function renderVersionOutput')),/renderSummaryPane/);
+ assert.match(source,/activeDepartment === '__output__'/);
+ assert.match(outputSource,/\/verifications\/versions\/\$\{encodeURIComponent\(verificationVersionId\)\}\/output-layout/);
+ assert.match(outputSource,/output-embedded/);
+});
+test('未锁定核价版本可修改明细原始值并独立重算',()=>{
+ assert.match(outputSource,/function outputCellApiPath\(\)/);
+ assert.match(outputSource,/\/verifications\/versions\/\$\{encodeURIComponent\(verificationVersionId\)\}\/output-cell/);
+ assert.match(outputSource,/修改来源参数/);
+ assert.match(verificationRoutes,/router\.put\('\/versions\/:versionId\/output-cell'/);
+ assert.match(verificationRoutes,/router\.delete\('\/versions\/:versionId\/output-cell'/);
+ assert.match(verificationRoutes,/editableCells: editableCells|editableCells,/);
+ assert.match(verificationRoutes,/overrides,/);
+ assert.match(sqliteSchema,/CREATE TABLE IF NOT EXISTS quote_verification_output_overrides/);
+ assert.match(outputSource,/function unitQuantityCalculationModel\(cell\)/);
+ assert.match(outputSource,/用量 × 换算后单价/);
+ assert.match(outputSource,/calculation: \{ quantity, unit_price: unitPrice \}/);
+ assert.match(verificationRoutes,/outputCellUpdate\(req\.body/);
+ assert.match(quoteOutputRoutes,/outputCellUpdate\(req\.body/);
+});
 function fixture({failCreate=false,failReload=false}={}){
  let overlay,creates=0,load=0,opened=0;
  const nodes=new Map(),node=k=>{if(!nodes.has(k))nodes.set(k,{disabled:false,textContent:'',focus(){}});return nodes.get(k);};
