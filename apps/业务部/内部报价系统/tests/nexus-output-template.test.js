@@ -160,17 +160,18 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
   let cartonPriceCell;
   let unitCartonPriceCell;
   sheet.eachRow(row => row.eachCell(cell => {
-    if (cell.value && cell.value.formula && /^\(O\d+\+1\)/.test(cell.value.formula)) flatPriceCell = cell;
+    if (cell.value && cell.value.formula && /^\(F\d+\+1\)/.test(cell.value.formula)) flatPriceCell = cell;
     if (cell.numFmt === '"数量: "0.###') cartonQuantityCell = cell;
     if (cell.numFmt === '"用量: "0.###') flatUsageCell = cell;
     if (cell.value === 'CU.FT:') cuftCell = sheet.getCell(cell.row, cell.col + 1);
     if (cell.value === '箱价') cartonPriceCell = sheet.getCell(cell.row, cell.col + 1);
     if (cell.value === '箱价/件') unitCartonPriceCell = sheet.getCell(cell.row, cell.col + 1);
   }));
-  assert.match(cuftCell.value.formula, /^O\d+\*P\d+\*Q\d+\/1728$/);
-  assert.match(cartonPriceCell.value.formula, /^\(O\d+\+P\d+\+2\)\*\(P\d+\+Q\d+\+1\)\*2\*\$E\$7\/1000$/);
-  assert.match(flatPriceCell.value.formula, /^\(O\d+\+1\)\*\(P\d+\+1\)\*2\/1000\*R\d+$/);
-  assert.match(unitCartonPriceCell.value.formula, /^\(Q\d+\+SUM\(Q\d+:Q\d+\)\)\/R\d+$/);
+  assert.equal(cuftCell.col, 6, '纸箱计算应紧接成本明细表放在左侧 E:I 区域');
+  assert.match(cuftCell.value.formula, /^F\d+\*G\d+\*H\d+\/1728$/);
+  assert.match(cartonPriceCell.value.formula, /^\(F\d+\+G\d+\+2\)\*\(G\d+\+H\d+\+1\)\*2\*\$E\$7\/1000$/);
+  assert.match(flatPriceCell.value.formula, /^\(F\d+\+1\)\*\(G\d+\+1\)\*2\/1000\*I\d+$/);
+  assert.match(unitCartonPriceCell.value.formula, /^\(H\d+\+SUM\(H\d+:H\d+\)\)\/I\d+$/);
   assert.equal(cartonQuantityCell.value, 12);
   assert.equal(flatUsageCell.value, 1);
   assert.equal(cartonQuantityCell.alignment.horizontal, 'center');
@@ -259,12 +260,18 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
   let secondSummaryRow;
   let thirdSummaryRow;
   let fourthSummaryRow;
+  let fourthRateRow;
+  let fourthDeductionRow;
   let fifthSummaryRow;
   sheet.eachRow(row => {
     if (row.getCell(3).value === '一、出厂货价核') firstSummaryRow = row.number + 1;
     if (row.getCell(3).value === '二、包装 / 外购') secondSummaryRow = row.number + 1;
     if (row.getCell(3).value === '三、人工 & 成本汇总') thirdSummaryRow = row.number + 1;
-    if (row.getCell(3).value === '四、减税明细') fourthSummaryRow = row.number + 1;
+    if (row.getCell(3).value === '四、减税明细') {
+      fourthSummaryRow = row.number + 1;
+      fourthRateRow = row.number + 2;
+      fourthDeductionRow = row.number + 3;
+    }
     if (row.getCell(3).value === '减税后结果') fifthSummaryRow = row.number + 1;
   });
   let selectedQuoteRow;
@@ -281,15 +288,26 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
     `IFERROR(D${firstSummaryRow}/E${fifthSummaryRow},0)`);
   assert.equal(sheet.getCell(`I${thirdSummaryRow}`).formula,
     `IFERROR(SUM(D${thirdSummaryRow},E${thirdSummaryRow},G${thirdSummaryRow})/D${firstSummaryRow},0)`);
-  assert.equal(sheet.getCell(`M${fourthSummaryRow}`).formula,
-    `F${fourthSummaryRow}*0.99%+G${fourthSummaryRow}*3%+H${fourthSummaryRow}*11.5%+I${fourthSummaryRow}*11.5%+J${fourthSummaryRow}*6%+K${fourthSummaryRow}*8.26%+L${fourthSummaryRow}*11.5%+E${fourthSummaryRow}/1.1*11.5%`);
+  assert.equal(sheet.getCell(`C${fourthSummaryRow}`).value, '减税基数');
+  assert.equal(sheet.getCell(`C${fourthRateRow}`).value, '减税率');
+  assert.equal(sheet.getCell(`C${fourthDeductionRow}`).value, '减税值');
+  assert.equal(sheet.getCell(`D${fourthRateRow}`).value, '—');
+  assert.equal(sheet.getCell(`E${fourthRateRow}`).value, 0.115);
+  assert.equal(sheet.getCell(`F${fourthRateRow}`).value, 0.0099);
+  assert.equal(sheet.getCell(`K${fourthRateRow}`).value, 0.0826);
+  assert.equal(sheet.getCell(`E${fourthDeductionRow}`).formula,
+    `E${fourthSummaryRow}/1.1*E${fourthRateRow}`);
+  assert.equal(sheet.getCell(`F${fourthDeductionRow}`).formula,
+    `F${fourthSummaryRow}*F${fourthRateRow}`);
+  assert.equal(sheet.getCell(`M${fourthDeductionRow}`).formula,
+    `SUM(E${fourthDeductionRow}:L${fourthDeductionRow})`);
   const taxValue = column => Number(sheet.getCell(`${column}${fourthSummaryRow}`).result
     ?? sheet.getCell(`${column}${fourthSummaryRow}`).value ?? 0);
   const expectedTax = taxValue('F') * 0.0099 + taxValue('G') * 0.03
     + taxValue('H') * 0.115 + taxValue('I') * 0.115 + taxValue('J') * 0.06
     + taxValue('K') * 0.0826 + taxValue('L') * 0.115 + taxValue('E') / 1.1 * 0.115;
-  assert.ok(Math.abs(sheet.getCell(`M${fourthSummaryRow}`).result - expectedTax) < 1e-9);
-  assert.equal(sheet.getCell(`D${fifthSummaryRow}`).formula, `M${fourthSummaryRow}`);
+  assert.ok(Math.abs(sheet.getCell(`M${fourthDeductionRow}`).result - expectedTax) < 1e-9);
+  assert.equal(sheet.getCell(`D${fifthSummaryRow}`).formula, `M${fourthDeductionRow}`);
   assert.equal(sheet.getCell(`E${fifthSummaryRow}`).formula, `N${thirdSummaryRow}-D${fifthSummaryRow}`);
 
   let cartonCostCell;
@@ -329,7 +347,7 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
   assert.match(sheet.getCell(`L${firstSummaryRow}`).formula, new RegExp(`D${electronicRow}`));
   assert.match(sheet.getCell(`D${secondSummaryRow}`).formula, new RegExp(`D${colorBoxRow}`));
   assert.ok(cartonCostCell);
-  assert.match(cartonCostCell.formula, /^O\d+$/);
+  assert.match(cartonCostCell.formula, /^F\d+$/);
   assert.equal(workbook.outputEditState.editable.has(`报价明细!${cartonCostCell.address}`), false);
   assert.match(directCostTotalCell.formula, /^SUM\(D\d+:D\d+\)$/);
   assert.ok(indonesiaFreightRow);
@@ -368,7 +386,7 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
 
   let cartonLengthCell;
   sheet.eachRow(row => {
-    if (row.getCell(14).value === '纸箱尺寸inch:') cartonLengthCell = row.getCell(15);
+    if (row.getCell(5).value === '纸箱尺寸inch:') cartonLengthCell = row.getCell(6);
   });
   assert.ok(cartonLengthCell);
   assert.ok(workbook.outputEditState.editable.has(`报价明细!${cartonLengthCell.address}`));
