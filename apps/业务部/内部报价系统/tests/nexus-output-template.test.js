@@ -160,18 +160,18 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
   let cartonPriceCell;
   let unitCartonPriceCell;
   sheet.eachRow(row => row.eachCell(cell => {
-    if (cell.value && cell.value.formula && /^\(F\d+\+1\)/.test(cell.value.formula)) flatPriceCell = cell;
+    if (cell.value && cell.value.formula && /^\(K\d+\+1\)/.test(cell.value.formula)) flatPriceCell = cell;
     if (cell.numFmt === '"数量: "0.###') cartonQuantityCell = cell;
     if (cell.numFmt === '"用量: "0.###') flatUsageCell = cell;
     if (cell.value === 'CU.FT:') cuftCell = sheet.getCell(cell.row, cell.col + 1);
     if (cell.value === '箱价') cartonPriceCell = sheet.getCell(cell.row, cell.col + 1);
     if (cell.value === '箱价/件') unitCartonPriceCell = sheet.getCell(cell.row, cell.col + 1);
   }));
-  assert.equal(cuftCell.col, 6, '纸箱计算应紧接成本明细表放在左侧 E:I 区域');
-  assert.match(cuftCell.value.formula, /^F\d+\*G\d+\*H\d+\/1728$/);
-  assert.match(cartonPriceCell.value.formula, /^\(F\d+\+G\d+\+2\)\*\(G\d+\+H\d+\+1\)\*2\*\$E\$7\/1000$/);
-  assert.match(flatPriceCell.value.formula, /^\(F\d+\+1\)\*\(G\d+\+1\)\*2\/1000\*I\d+$/);
-  assert.match(unitCartonPriceCell.value.formula, /^\(H\d+\+SUM\(H\d+:H\d+\)\)\/I\d+$/);
+  assert.equal(cuftCell.col, 11, '纸箱计算应放在 J:N，并与成本明细间隔 E:I 五列');
+  assert.match(cuftCell.value.formula, /^K\d+\*L\d+\*M\d+\/1728$/);
+  assert.match(cartonPriceCell.value.formula, /^\(K\d+\+L\d+\+2\)\*\(L\d+\+M\d+\+1\)\*2\*\$E\$7\/1000$/);
+  assert.match(flatPriceCell.value.formula, /^\(K\d+\+1\)\*\(L\d+\+1\)\*2\/1000\*N\d+$/);
+  assert.match(unitCartonPriceCell.value.formula, /^\(M\d+\+SUM\(M\d+:M\d+\)\)\/N\d+$/);
   assert.equal(cartonQuantityCell.value, 12);
   assert.equal(flatUsageCell.value, 1);
   assert.equal(cartonQuantityCell.alignment.horizontal, 'center');
@@ -347,7 +347,7 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
   assert.match(sheet.getCell(`L${firstSummaryRow}`).formula, new RegExp(`D${electronicRow}`));
   assert.match(sheet.getCell(`D${secondSummaryRow}`).formula, new RegExp(`D${colorBoxRow}`));
   assert.ok(cartonCostCell);
-  assert.match(cartonCostCell.formula, /^F\d+$/);
+  assert.match(cartonCostCell.formula, /^K\d+$/);
   assert.equal(workbook.outputEditState.editable.has(`报价明细!${cartonCostCell.address}`), false);
   assert.match(directCostTotalCell.formula, /^SUM\(D\d+:D\d+\)$/);
   assert.ok(indonesiaFreightRow);
@@ -386,7 +386,7 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
 
   let cartonLengthCell;
   sheet.eachRow(row => {
-    if (row.getCell(5).value === '纸箱尺寸inch:') cartonLengthCell = row.getCell(6);
+    if (row.getCell(10).value === '纸箱尺寸inch:') cartonLengthCell = row.getCell(11);
   });
   assert.ok(cartonLengthCell);
   assert.ok(workbook.outputEditState.editable.has(`报价明细!${cartonLengthCell.address}`));

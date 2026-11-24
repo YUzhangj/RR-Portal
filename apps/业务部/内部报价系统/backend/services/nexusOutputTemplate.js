@@ -690,8 +690,8 @@ function buildCartonPanel(ws, engineering, startRow, unitPriceCells = [], metric
     : (carton.cl || carton.cw || carton.ch ? [carton] : []);
   const paperRates = cartonPaperRates(engineering);
   let row = startRow;
-  // 成本明细只占 A:D，纸箱计算紧接其右侧放在 E:I，避免横向滚动后才看得到。
-  const panelStartColumn = 5;
+  // 成本明细占 A:D；纸箱计算放在 J:N，中间保留 E:I 五列空白，兼顾距离与可见性。
+  const panelStartColumn = 10;
   const lengthColumn = ws.getColumn(panelStartColumn + 1).letter;
   const widthColumn = ws.getColumn(panelStartColumn + 2).letter;
   const heightColumn = ws.getColumn(panelStartColumn + 3).letter;
@@ -1284,7 +1284,7 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
     ws, payloads.engineering || {}, startRow + 1, cartonUnitPriceCells, cartonMetrics
   );
   for (let r = startRow + 1; r <= cartonEnd; r++) {
-    for (let c = 5; c <= 9; c++) ws.getCell(r, c).outputDepartment = 'engineering';
+    for (let c = 10; c <= 14; c++) ws.getCell(r, c).outputDepartment = 'engineering';
   }
   const cartonComponentAddress = (componentCells.get('carton') || [])[0];
   if (cartonComponentAddress && cartonUnitPriceCells.length) {
