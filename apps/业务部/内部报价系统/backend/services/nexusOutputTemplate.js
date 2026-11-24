@@ -143,7 +143,7 @@ function buildReferenceBlock(ws, molding, sales, assembly, engineering) {
     ws.getCell(3, column).numFmt = '0';
     const columnLetter = ws.getColumn(column).letter;
     ws.getCell(4, column).value = {
-      formula: `${columnLetter}2/${columnLetter}3`,
+      formula: `ROUND(${columnLetter}2/${columnLetter}3,4)`,
       result: Number((price / 454).toFixed(4)),
     };
     ws.getCell(4, column).numFmt = '0.0000';
@@ -179,6 +179,7 @@ function buildReferenceBlock(ws, molding, sales, assembly, engineering) {
     const valueColumn = labelColumn + 1;
     ws.getCell(7, labelColumn).value = label;
     ws.getCell(7, valueColumn).value = value;
+    ws.getCell(7, valueColumn).outputLabel = label;
     styleCell(ws.getCell(7, labelColumn), {
       color: TEMPLATE_BLACK, border: false, horizontal: 'left', wrap: false,
     });
@@ -236,7 +237,11 @@ function buildQuotationDetail(ws, quote, molding) {
   for (let index = 0; index < slots; index += 1) {
     const source = rows[index];
     const row = start + index;
-    const materialReference = materialReferenceColumn(molding, source);
+    const materialReferenceCandidate = materialReferenceColumn(molding, source);
+    const savedMaterialPrice = source?.material_unit_price;
+    const materialReference = materialReferenceCandidate && (savedMaterialPrice == null || savedMaterialPrice === ''
+      || Math.abs(Number(savedMaterialPrice) - Number((number(materialReferenceCandidate.reference.price) / 454).toFixed(4))) < 1e-10)
+      ? materialReferenceCandidate : null;
     const machineReference = machineReferenceColumn(molding, source);
     const weight = source ? number(source.weight_g) : 0;
     const materialPrice = source ? (materialReference
@@ -274,12 +279,15 @@ function buildQuotationDetail(ws, quote, molding) {
         };
       } else if (source && offset + 1 === 11 && machineReference &&
           number(source.target) > 0 && number(source.sets, 1) > 0 &&
-          !InjectionPricing.isAdditionalPart(source)) {
+          !InjectionPricing.isAdditionalPart(source) &&
+          Math.abs(labor - Number((number(machineReference.reference.price) / number(source.target) / number(source.sets, 1)).toFixed(4))) < 1e-10) {
         const referenceLetter = ws.getColumn(machineReference.column).letter;
         cell.value = {
           formula: `ROUND(${referenceLetter}6/J${row}/I${row},4)`,
           result: labor,
         };
+      } else if (source && offset + 1 === 13) {
+        cell.value = { formula: `K${row}*1.15`, result: labor * 1.15 };
       } else if (source && offset + 1 === 12) {
         cell.value = {
           formula: `F${row}*G${row}`,
@@ -288,6 +296,7 @@ function buildQuotationDetail(ws, quote, molding) {
       } else {
         cell.value = value;
       }
+      if (source) cell.outputSourceIdentity = ['molding', 'injection', index, source];
       styleCell(cell, {
         horizontal: [2, 3, 4].includes(offset + 1) ? 'left' : 'center',
         wrap: false,
@@ -321,7 +330,7 @@ function buildQuotationDetail(ws, quote, molding) {
     11: rows.reduce((sum, row) => sum + number(InjectionPricing.laborPrice(row)), 0),
     12: rows.reduce((sum, row) => {
       const reference = materialReferenceColumn(molding, row);
-      const price = reference
+      const price = row.material_unit_price != null && row.material_unit_price !== '' ? number(row.material_unit_price) : reference
         ? Number((number(reference.reference.price) / 454).toFixed(4))
         : number(row.material_unit_price);
       return sum + number(row.weight_g) * lossMultiplier * price;
@@ -742,6 +751,9 @@ function buildCartonPanel(ws, engineering, startRow, unitPriceCells = [], metric
         : offset === 3 ? '0.0000'
           : offset === 4 ? '"数量: "0.###' : undefined,
     }));
+    ['纸箱长 L','纸箱宽 W','纸箱高 H'].forEach((label,i)=>{ws.getCell(cartonDimensionRow,15+i).outputLabel=sourceName+' · '+label;});
+    ws.getCell(cartonSummaryRow,18).outputLabel=sourceName+' · 装箱数量';
+    ws.getCell(cartonSummaryRow,17).outputLabel=sourceName+' · 箱价';
     if (!metrics.cuftCell && !isInner) {
       metrics.cuftCell = `O${cartonSummaryRow}`;
       metrics.quantityCell = `R${cartonSummaryRow}`;
@@ -777,6 +789,7 @@ function buildCartonPanel(ws, engineering, startRow, unitPriceCells = [], metric
             : offset === 3 ? '0.0000'
               : offset === 4 ? '"用量: "0.###' : undefined,
         }));
+      ['平卡长 L','平卡宽 W','平卡费用','平卡用量'].forEach((label,i)=>{ws.getCell(row,15+i).outputLabel=(text(card.name)||`平卡${flatIndex+1}`)+' · '+label;});
       row += 1;
     }
 
@@ -861,8 +874,8 @@ function writeSummaryBand(ws, startRow, title, entries) {
 }
 
 const REFERENCE_FREIGHT_SCENARIOS = [
-  { name: 'HK 40柜', key: 'hk40', capKey: 'cap_40' },
-  { name: 'HK 20柜', key: 'hk20', capKey: 'cap_20' },
+  { name: '盐田40柜', key: 'yt40', capKey: 'cap_40' },
+  { name: '盐田5吨车', key: 'yt5t', capKey: 'cap_5t' },
 ];
 
 const DEFAULT_REFERENCE_FREIGHT_CALC = {
@@ -950,17 +963,17 @@ function buildReferenceShippingPricing(ws, sales, engineering, startRow, costTot
   const shipping = sales.shipping || {};
   const freightCalc = referenceFreightCalc(sales);
   const supplied = Array.isArray(shipping.scenarios)
-    ? shipping.scenarios.filter(item => !item.is_factory).slice(0, 3) : [];
+    ? shipping.scenarios.filter(item => !item.is_factory) : [];
   const basis = cartonShippingBasis(engineering);
   const freightPct = number(shipping.freight_pct, 48) / 100;
   const liftingPct = number(shipping.lifting_pct, 52) / 100;
-  const markup = number(shipping.markup_x, 1.2) || 1.2;
+  const markup = number(shipping.markup_x, 1.2);
   const divisor = number(shipping.divisor, 0.98) || 0.98;
   const fx = number(sales.header && sales.header.fx_hkd_usd, 7.8) || 7.8;
   const moldCosts = engineering.mold_costs || {};
   const testingFee = number(moldCosts.testing_fee_usd ?? moldCosts.testing_fee_rmb);
   const hasTestingFee = testingFee > 0;
-  const visibleScenarios = supplied.length ? supplied : REFERENCE_FREIGHT_SCENARIOS;
+  const visibleScenarios = Array.isArray(shipping.scenarios) ? supplied : REFERENCE_FREIGHT_SCENARIOS;
   const definitions = visibleScenarios.map(scenario => {
     const key = freightScenarioKey(scenario.name) || scenario.key;
     const type = /40$/.test(key) ? '40' : /20$/.test(key) ? '20' : /10t$/.test(key) ? '10t' : '5t';
@@ -968,7 +981,7 @@ function buildReferenceShippingPricing(ws, sales, engineering, startRow, costTot
     const cartons = Math.max(Math.round(capacity / Math.max(basis.cuft, 0.0001)), 1);
     const configuredWholeFee = number(freightCalc[key]);
     const scenarioUnitFee = number(scenario._freight_rate ?? scenario.freight_hkd ?? scenario.freight);
-    const wholeFee = configuredWholeFee || scenarioUnitFee * cartons * basis.quantity;
+    const wholeFee = Object.hasOwn(freightCalc, key) ? configuredWholeFee : scenarioUnitFee * cartons * basis.quantity;
     const wholeFreight = wholeFee * freightPct;
     const wholeLifting = wholeFee * liftingPct;
     return {
@@ -1005,7 +1018,7 @@ function buildReferenceShippingPricing(ws, sales, engineering, startRow, costTot
   const baseRow = startRow + 3;
   const baseResults = scenarios.map(item => total + item.freight + item.lifting);
   writeLeftRow(baseRow, '报价基数', scenarios.map((item, index) => ({
-    formula: index === 0 ? `D${costTotalRow}` : `$D$${costTotalRow}+${String.fromCharCode(68 + index)}${freightRow}+${String.fromCharCode(68 + index)}${liftingRow}`,
+    formula: index === 0 ? `D${costTotalRow}` : `$D$${costTotalRow}+${ws.getColumn(4 + index).letter}${freightRow}+${ws.getColumn(4 + index).letter}${liftingRow}`,
     result: baseResults[index],
   })), { bold: true, numFmt: '0.0000' });
 
@@ -1024,18 +1037,18 @@ function buildReferenceShippingPricing(ws, sales, engineering, startRow, costTot
     writeLeftRow(divisorRow, '÷ 找数', scenarios.map(() => divisor), { numFmt: '0.0000' });
     const quotedResults = baseResults.map(value => value * markup / divisor);
     writeLeftRow(quoteRow, `报价（MOQ${moq / 1000}K）`, scenarios.map((_, index) => {
-      const column = String.fromCharCode(68 + index);
+      const column = ws.getColumn(4 + index).letter;
       return { formula: `${column}${baseRow}*${column}${multiplierRow}/${column}${divisorRow}`, result: quotedResults[index] };
     }), { bold: true, numFmt: '0.00' });
     const usdResults = quotedResults.map(value => value / fx);
     writeLeftRow(usdRow, '报价（USD）', scenarios.map((_, index) => {
-      const column = String.fromCharCode(68 + index);
+      const column = ws.getColumn(4 + index).letter;
       return { formula: `${column}${quoteRow}/${fx}`, result: usdResults[index] };
     }), { bold: true, numFmt: '0.00' });
     if (hasTestingFee) {
       const testingShare = testingFee / moq;
       writeLeftRow(includedRow, '包含测试费用（USD）', scenarios.map((_, index) => {
-        const column = String.fromCharCode(68 + index);
+        const column = ws.getColumn(4 + index).letter;
         return { formula: `${column}${usdRow}+$O$${startRow + 1 + groupIndex}`, result: usdResults[index] + testingShare };
       }), { bold: true, numFmt: '0.00' });
       includedRows.push(includedRow);
@@ -1134,7 +1147,7 @@ function buildReferenceFreightCalculationPanel(ws, sales, engineering, startRow,
     row += 1;
 
     definitions.forEach((definition, index) => {
-      const column = String.fromCharCode(66 + index);
+      const column = ws.getColumn(2 + index).letter;
       const fee = number(freightCalc[definition.key]);
       const cartons = Math.max(Math.round(number(freightCalc[definition.capKey]) / cuft), 1);
       const result = fee / cartons / quantity;
@@ -1206,6 +1219,15 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
   for (const key of ['imp_mat', 'dom_mat', 'injection_labor']) {
     components[key] = upperCostLinks.get(key).result;
   }
+  const componentDepartments = {
+    imp_mat: 'molding', dom_mat: 'molding', injection_labor: 'molding', blow: 'molding',
+    painting_labor: 'painting', paint_material: 'painting', assembly_labor: 'assembly',
+    semi_finished: 'assembly', slush: 'slush', sewing_hair: 'sewing', sewing_cloth: 'sewing',
+    electronic: 'electronic', hardware: 'engineering', motor: 'engineering', suction: 'engineering',
+    glue_bag: 'engineering', color_box: 'engineering', battery: 'engineering', libao: 'engineering',
+    plating: 'engineering', flocking: 'engineering', other_buy: 'engineering', carton: 'engineering',
+    indo_freight: 'molding', surtax: 'sales',
+  };
   rendered.forEach(values => {
     const keys = values[4] || [];
     const renderedValues = values.slice(0, 4);
@@ -1216,6 +1238,8 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
       horizontal: index === 2 ? 'left' : 'center',
       numFmt: index === 3 ? '0.0000' : undefined,
     }));
+    ws.getCell(row, 4).outputDepartment = componentDepartments[keys[0]] || null;
+    ws.getCell(row, 4).outputSourceIdentity = values;
     if (values[5]?.calculation) {
       Object.defineProperty(ws.getCell(row, 4), 'outputCalculation', {
         value: { ...values[5].calculation }, writable: true, configurable: true,
@@ -1253,6 +1277,9 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
   const cartonEnd = buildCartonPanel(
     ws, payloads.engineering || {}, startRow + 1, cartonUnitPriceCells, cartonMetrics
   );
+  for (let r = startRow + 1; r <= cartonEnd; r++) {
+    for (let c = 14; c <= 20; c++) ws.getCell(r, c).outputDepartment = 'engineering';
+  }
   const cartonComponentAddress = (componentCells.get('carton') || [])[0];
   if (cartonComponentAddress && cartonUnitPriceCells.length) {
     ws.getCell(cartonComponentAddress).value = {
@@ -1265,6 +1292,7 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
   const pricing = buildReferenceShippingPricing(
     ws, salesPayload, payloads.engineering || {}, lowerStart, costTotalRow, total
   );
+  for (let r = lowerStart; r <= pricing.endRow; r++) ws.getRow(r).eachCell(c => { c.outputDepartment = 'sales'; });
   const selectedQuoteRow = pricing.quoteRows[pricing.quoteRows.length - 1];
   const firstPriceCell = ws.getCell(selectedQuoteRow, 4);
   const quotedPrice = number(
@@ -1381,9 +1409,11 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
     ws, salesPayload, payloads.engineering || {}, fifthValueRow + 2, cartonMetrics
   );
 
+  for (let r = fifthValueRow + 2; r <= freightPanel.endRow; r++) ws.getRow(r).eachCell(c => { c.outputDepartment = 'sales'; });
+
   pricing.scenarioKeys.forEach((key, index) => {
     if (!key || !freightPanel.rateCells[key]) return;
-    const column = String.fromCharCode(68 + index);
+    const column = ws.getColumn(4 + index).letter;
     const results = pricing.scenarioResults[index];
     ws.getCell(`${column}${pricing.freightRow}`).value = {
       formula: `${freightPanel.rateCells[key]}*${freightPct * 100}%`,
@@ -1397,6 +1427,9 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
 
   const directRateCell = freightPanel.rateCells[selectedFreightKey];
   if (directRateCell) {
+    ws.getCell(`M${secondValueRow}`).value = {formula:`${directRateCell}*${freightPct * 100}%`,result:components.freight};
+    ws.getCell(`N${secondValueRow}`).value = {formula:`${directRateCell}*${liftingPct * 100}%`,result:components.cabinet};
+    ws.getCell(`K${fourthValueRow}`).value = {formula:`M${secondValueRow}`,result:components.freight};
     const freightAddress = (componentCells.get('freight') || [])[0];
     const cabinetAddress = (componentCells.get('cabinet') || [])[0];
     if (freightAddress) ws.getCell(freightAddress).value = {
@@ -1420,6 +1453,20 @@ function configureSheet(ws) {
 
 async function buildOutputWorkbook(args) {
   const workbook = await buildLegacyWorkbook(args);
+  const payloads = parseSections(args.sections);
+  if (payloads.sales?.mixed_quote?.enabled || payloads.sales?.legacy_import?.excel_model
+      || require('./productMix').injectionProductGroups(payloads.molding || {}).length) {
+    // These formats already have their own source-preserving calculation model.
+    // Do not flatten mixed product costs or imported formulas into the single
+    // product detail layout, which would discard their calculation inputs.
+    workbook.outputNotice = '此报价保留原有混装、分组或历史原表计算版式；请在对应部门修改资料。';
+    Object.defineProperty(workbook, 'outputEditState', {value:{
+      editable:new Set(), overridden:new Set(), signatures:new Map(),
+      conflicts:(args.overrides || []).map(row => ({sheet_name:row.sheet_name,cell_address:row.cell_address,
+        source_department:(()=>{try{return JSON.parse(row.value_json)?.source_department || null;}catch(_){return null;}})()})),
+    }});
+    return workbook;
+  }
   const legacy = workbook.getWorksheet('报价明细');
   if (legacy) {
     legacy.name = '系统报价汇总';
@@ -1428,7 +1475,6 @@ async function buildOutputWorkbook(args) {
   }
   const detail = workbook.addWorksheet('报价明细');
   configureSheet(detail);
-  const payloads = parseSections(args.sections);
   const costs = calculateQuoteCosts(args.quote || {}, args.sections || []);
   const molding = payloads.molding || {};
   buildReferenceBlock(detail, molding, payloads.sales || {}, payloads.assembly || {}, payloads.engineering || {});
@@ -1441,6 +1487,7 @@ async function buildOutputWorkbook(args) {
     visibility: 'visible',
   }];
   workbook.calcProperties = { fullCalcOnLoad: true };
+  workbook.outputEditableSheets = new Set(['报价明细']);
   const outputEditState = applyWorkbookOverrides(workbook, args.overrides || []);
   Object.defineProperty(workbook, 'outputEditState', {
     value: outputEditState,

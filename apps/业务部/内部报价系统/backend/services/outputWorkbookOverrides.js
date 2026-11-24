@@ -1,5 +1,6 @@
 'use strict';
 
+const { createHash } = require('node:crypto');
 const ExcelFormulas = require('../../frontend/excel-formulas');
 
 function cellKey(sheet, address) {
@@ -57,7 +58,7 @@ function editableCellKeys(workbook) {
   return new Set([...explicit, ...[...referenced].filter(id => {
     const cell = model.cells[id];
     return cell && !cell.f && typeof cell.v === 'number';
-  })]);
+  })].filter(id => !workbook.outputEditableSheets || workbook.outputEditableSheets.has(ExcelFormulas.split(id)[0])));
 }
 
 function normalizeOverrides(rows) {
@@ -76,13 +77,48 @@ function overrideNumericValue(value) {
   return typeof candidate === 'number' && Number.isFinite(candidate) ? candidate : null;
 }
 
+// Bind an output correction to the generated source row and table layout.
+// A changed/reordered source must be explicitly reconciled, never silently
+// applied to whichever business item now occupies the old Excel address.
+function sourceSignatures(workbook) {
+  const signatures = new Map();
+  for (const ws of workbook.worksheets) {
+    const labels = [];
+    ws.eachRow(row => row.eachCell(cell => {
+      if (!cell.formula && typeof plainValue(cell) === 'string') labels.push([cell.address, plainValue(cell)]);
+    }));
+    const structure = JSON.stringify(labels);
+    ws.eachRow(row => {
+      const values = [];
+      row.eachCell(cell => values.push([cell.address, cell.formula || plainValue(cell), cell.outputSourceIdentity || null]));
+      const signature = createHash('sha256').update(structure + JSON.stringify(values)).digest('hex');
+      row.eachCell(cell => signatures.set(cellKey(ws.name, cell.address), signature));
+    });
+  }
+  return signatures;
+}
+
+function boundOverride(workbook, sheetName, address, storedValue, department) {
+  return {
+    ...(typeof storedValue === 'object' ? storedValue : { value: storedValue }),
+    source_signature: workbook.outputEditState.signatures.get(cellKey(sheetName, address)),
+    source_department: department,
+  };
+}
+
 function applyWorkbookOverrides(workbook, rows) {
   const allowed = editableCellKeys(workbook);
+  const signatures = sourceSignatures(workbook);
+  const conflicts = [];
   const overrides = normalizeOverrides(rows);
   const applied = new Set();
   for (const [id, value] of overrides) {
     const numericValue = overrideNumericValue(value);
-    if (!allowed.has(id) || numericValue === null) continue;
+    if (!allowed.has(id) || numericValue === null || !value?.source_signature || value.source_signature !== signatures.get(id)) {
+      const [sheet_name, cell_address] = ExcelFormulas.split(id);
+      conflicts.push({ sheet_name, cell_address, source_department: value?.source_department || null });
+      continue;
+    }
     const [sheetName, address] = ExcelFormulas.split(id);
     const worksheet = workbook.getWorksheet(sheetName);
     if (!worksheet) continue;
@@ -94,7 +130,7 @@ function applyWorkbookOverrides(workbook, rows) {
     applied.add(id);
   }
 
-  if (!applied.size) return { editable: allowed, overridden: applied };
+  if (!applied.size) return { editable: allowed, overridden: applied, signatures, conflicts };
 
   const model = workbookModel(workbook);
   // Legacy department sheets contain a few Excel functions that the local
@@ -128,13 +164,16 @@ function applyWorkbookOverrides(workbook, rows) {
         const [sheetName, address] = ExcelFormulas.split(id);
         workbook.getWorksheet(sheetName).getCell(address).value = { formula: cell.f, result };
       }
-    } catch (_) {
+    } catch (error) {
+      if (ExcelFormulas.split(id)[0] === '报价明细') {
+        throw Object.assign(new Error(`修改导致 ${id} 无法计算，请检查目标数、套数及除数`), {status:400});
+      }
       // Keep the generated cached result for unsupported legacy formulas.
       // Excel will still perform a full recalculation when the file is opened.
     }
   }
   workbook.calcProperties = { fullCalcOnLoad: true };
-  return { editable: allowed, overridden: applied };
+  return { editable: allowed, overridden: applied, signatures, conflicts };
 }
 
 module.exports = {
@@ -143,4 +182,6 @@ module.exports = {
   normalizeOverrides,
   overrideNumericValue,
   workbookModel,
+  sourceSignatures,
+  boundOverride,
 };

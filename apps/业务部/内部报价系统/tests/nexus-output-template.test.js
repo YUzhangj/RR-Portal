@@ -18,7 +18,7 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
         machine_prices: [{ model: '14A-16A', normal: '150T', price: 1490 }],
         injection: [{
           mold_no: '01M', name: '车底', material: 'ABS', material_grade: '750SW',
-          weight_g: 32.96, material_unit_price: 0.0159, machine_model: '14A-16A',
+          weight_g: 32.96, material_unit_price: 0.0143, machine_model: '14A-16A',
           sets: 2, target: 3000, shot_price: 0.2483,
         }],
         }),
@@ -75,7 +75,7 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
   assert.equal(sheet.getCell('C1').value, '750SW ABS');
   assert.equal(sheet.getCell('C2').value, 6.5);
   assert.equal(sheet.getCell('C3').value, 454);
-  assert.equal(sheet.getCell('C4').formula, 'C2/C3');
+  assert.equal(sheet.getCell('C4').formula, 'ROUND(C2/C3,4)');
   assert.equal(sheet.getCell('C4').result, 0.0143);
   assert.equal(sheet.getCell('B5').value, '机型');
   assert.equal(sheet.getCell('C5').value, '14A-16A');
@@ -105,7 +105,7 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
   assert.equal(sheet.getCell('K11').formula, 'ROUND(C6/J11/I11,4)');
   assert.equal(sheet.getCell('K11').result, 0.2483);
   assert.equal(sheet.getCell('L11').formula, 'F11*G11');
-  assert.equal(sheet.getCell('M11').value, 0.2483 * 1.15);
+  assert.equal(sheet.getCell('M11').result, 0.2483 * 1.15);
   assert.equal(sheet.getCell('A17').value, '模具合计');
   assert.equal(sheet.getCell('C4').font.color.argb, 'FFFF00FF');
   assert.equal(sheet.getCell('A8').font.color.argb, 'FF0000FF');
@@ -373,7 +373,7 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
     overrides: [{
       sheet_name: '报价明细',
       cell_address: cartonLengthCell.address,
-      value_json: JSON.stringify(Number(cartonLengthCell.value) + 1),
+      value_json: JSON.stringify(require('../backend/services/outputWorkbookOverrides').boundOverride(workbook, '报价明细', cartonLengthCell.address, Number(cartonLengthCell.value) + 1, 'engineering')),
     }],
   });
   const changedSheet = overriddenWorkbook.getWorksheet('报价明细');

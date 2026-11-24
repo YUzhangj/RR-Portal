@@ -247,6 +247,7 @@ router.put('/:id/confirmation', quoteWriteRoute(db, req => Number(req.params.id)
         dept: section.dept, dept_name: section.dept_name, status: section.status,
         payload: parseJson(section.payload_json, {}),
       })),
+      output_overrides: await db.prepare('SELECT sheet_name,cell_address,value_json,updated_by,updated_at FROM quote_output_overrides WHERE quote_id=?').all(id),
       frozen_at: new Date().toISOString(),
     };
     await db.prepare(`INSERT INTO quote_verifications

@@ -1,5 +1,7 @@
 'use strict';
 
+const validInput = value => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) && Number.isFinite(Number(value));
+
 function calculatedValue(calculation) {
   const quantity = Number(calculation.quantity);
   const unitPrice = Number(calculation.unitPrice);
@@ -19,6 +21,7 @@ function calculatedValue(calculation) {
 function outputCellUpdate(body, cell) {
   const original = cell?.outputCalculation;
   if (body?.calculation && original?.kind === 'unit-quantity') {
+    if (!validInput(body.calculation.quantity) || !validInput(body.calculation.unit_price ?? body.calculation.unitPrice)) return null;
     const calculation = {
       ...original,
       quantity: Number(body.calculation.quantity),
@@ -35,8 +38,9 @@ function outputCellUpdate(body, cell) {
       calculation,
     };
   }
-  const value = Number(body?.value);
-  return Number.isFinite(value) ? { value, storedValue: value, calculation: null } : null;
+  if (!validInput(body?.value)) return null;
+  const value = Number(body.value);
+  return Number.isFinite(value) && value >= 0 ? { value, storedValue: value, calculation: null } : null;
 }
 
 module.exports = { calculatedValue, outputCellUpdate };

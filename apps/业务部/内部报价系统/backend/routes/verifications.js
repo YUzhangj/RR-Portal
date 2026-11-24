@@ -14,6 +14,8 @@ const {reviewState,prepareWorkbookReview}=require('../services/workbookReview');
 const {buildOutputWorkbook}=require('../services/nexusOutputTemplate');
 const {calculateMixedQuote}=require('../services/mixedQuotation');
 const {serializeWorkbook}=require('../services/workbookPreview');
+const {outputRevision,assertOutputRevision,runOutputBatch}=require('../services/outputSave');
+const {boundOverride}=require('../services/outputWorkbookOverrides');
 const {outputCellUpdate}=require('../services/outputCellCalculation');
 const {inferOutputSourceDepartment}=require('../services/outputSourceDepartment');
 const router = express.Router();
@@ -109,6 +111,13 @@ async function createVersion(quoteId, source, user, versionNo, label, costingBas
     const payload = section.payload;
     await insertSection.run(versionId, section.dept, JSON.stringify(payload), source.sectionStatus || 'empty');
   }
+  const inheritedOverrides = source.parentVersionId
+    ? await loadVerificationOutputOverrides(source.parentVersionId) : (source.outputOverrides || []);
+  for (const row of inheritedOverrides) {
+    await db.prepare(`INSERT INTO quote_verification_output_overrides
+      (version_id,sheet_name,cell_address,value_json,updated_by,updated_at) VALUES (?,?,?,?,?,?)`)
+      .run(versionId,row.sheet_name,row.cell_address,row.value_json,row.updated_by,row.updated_at);
+  }
   return versionId;
 }
 
@@ -132,6 +141,7 @@ async function ensureCaseAndFirstVersion(quote, user) {
           status: section.status,
           payload: parseJson(section.payload_json, {}),
         })),
+        output_overrides: await db.prepare('SELECT sheet_name,cell_address,value_json,updated_by,updated_at FROM quote_output_overrides WHERE quote_id=?').all(quote.id),
         frozen_at: new Date().toISOString(),
       };
       await db.prepare(`INSERT INTO quote_verifications
@@ -156,6 +166,7 @@ async function ensureCaseAndFirstVersion(quote, user) {
       }));
       const versionId = await createVersion(quote.id, {
         type: 'quote',
+        outputOverrides: baseline.output_overrides || [],
         sections: sourceSections,
         sectionStatus: legacyCompleted ? 'approved' : 'empty',
       }, user, 1, 'V1', legacyCompleted ? null : await loadCostingBasis(quote.factory_code));
@@ -356,6 +367,7 @@ router.post('/:quoteId/versions', async (req, res) => {
     const baseline = parseJson(verification.baseline_json, { sections: [] });
     source = {
       type: 'quote',
+      outputOverrides: baseline.output_overrides || [],
       sections: (baseline.sections || []).map(section => ({ dept: section.dept, payload_json: JSON.stringify(section.payload || {}) })),
     };
   } else {
@@ -495,6 +507,7 @@ router.get('/versions/:versionId/export', async (req, res) => {
       sections,
       overrides,
     });
+    if (workbook.outputEditState?.conflicts.length) return res.status(409).json({ error: '来源资料已改变，请先处理失效修正值' });
     const buffer = await workbook.xlsx.writeBuffer();
     await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
       VALUES (?, ?, ?, 'verification_export', ?)`).run(
@@ -559,9 +572,15 @@ router.get('/versions/:versionId/output-layout', async (req, res) => {
       },
       approved_count: approvedCount,
       total_departments: sections.length,
-      can_export: sections.length > 0 && approvedCount === sections.length,
+      can_export: sections.length > 0 && approvedCount === sections.length && !workbook.outputEditState.conflicts.length,
+      output_conflicts: workbook.outputEditState.conflicts,
+      can_reset_conflicts: !['completed', 'cancelled'].includes(version.status) && workbook.outputEditState.conflicts.every(c =>
+        canOperateDepartment(req.user, c.source_department) && canEditDepartment(req.user, c.source_department)
+        && sections.some(s => s.dept === c.source_department && s.status !== 'approved')),
       can_edit_output: editableCells.size > 0,
+      revision: outputRevision(sections, overrides, version.status),
       verification_version_id: versionId,
+      output_notice: workbook.outputNotice || null,
       generated_at: new Date().toISOString(),
       sheets,
     });
@@ -571,7 +590,7 @@ router.get('/versions/:versionId/output-layout', async (req, res) => {
   }
 });
 
-async function mutateVerificationOutputCell(req, res, remove = false) {
+async function mutateVerificationOutputCell(req, res, remove = false, heldVersion = null) {
   const versionId = Number(req.params.versionId);
   const version = await db.prepare('SELECT * FROM quote_verification_versions WHERE id=?').get(versionId);
   if (!version) return res.status(404).json({ error: '核价版本不存在' });
@@ -586,13 +605,16 @@ async function mutateVerificationOutputCell(req, res, remove = false) {
   }
 
   try {
-    const result = await withVerificationVersion(db, versionId, async lockedVersion => {
+    const locked = heldVersion ? callback => callback(heldVersion) : callback => withVerificationVersion(db, versionId, callback);
+    const result = await locked(async lockedVersion => {
       if (['completed', 'cancelled'].includes(lockedVersion.status)) {
         throw Object.assign(new Error('该核价版本已锁定'), { status: 409 });
       }
       const sections = await db.prepare(`SELECT s.*, d.name_cn FROM quote_verification_sections s
         JOIN departments d ON d.code=s.dept WHERE s.version_id=? ORDER BY d.sort_order`).all(versionId);
       const overrides = await loadVerificationOutputOverrides(versionId);
+      const conflict = assertOutputRevision(req, sections, overrides, lockedVersion.status);
+      if (conflict) throw Object.assign(new Error(conflict), {status:409});
       const quote = await db.prepare('SELECT * FROM quotes WHERE id=? AND deleted_at IS NULL').get(version.quote_id);
       if (!quote) throw Object.assign(new Error('核价任务不存在'), { status: 404 });
       const workbook = await buildOutputWorkbook({
@@ -601,16 +623,16 @@ async function mutateVerificationOutputCell(req, res, remove = false) {
         overrides,
       });
       const key = `${sheetName}!${address}`;
-      if (!workbook.outputEditState.editable.has(key)) {
+      const previousRow = overrides.find(row => row.sheet_name === sheetName && row.cell_address === address);
+      const previousValue = parseJson(previousRow?.value_json, null);
+      if (!workbook.outputEditState.editable.has(key) && !(remove && previousRow)) {
         throw Object.assign(new Error('该单元格是标题或公式结果，请修改它所引用的原始参数'), { status: 400 });
       }
       const update = remove ? null : outputCellUpdate(req.body, workbook.getWorksheet(sheetName)?.getCell(address));
       if (!remove && !update) {
         throw Object.assign(new Error('请输入有效的非负用量和单价'), { status: 400 });
       }
-      const department = inferOutputSourceDepartment(
-        workbook, sheetName, address, String(req.body?.source_dept || '')
-      );
+      const department = (remove && previousValue?.source_department) || inferOutputSourceDepartment(workbook, sheetName, address);
       const section = sections.find(item => item.dept === department);
       if (!section || section.status === 'approved'
         || !canOperateDepartment(req.user, department) || !canEditDepartment(req.user, department)) {
@@ -626,11 +648,12 @@ async function mutateVerificationOutputCell(req, res, remove = false) {
           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
           ON CONFLICT(version_id, sheet_name, cell_address) DO UPDATE SET
             value_json=excluded.value_json, updated_by=excluded.updated_by, updated_at=CURRENT_TIMESTAMP`)
-          .run(versionId, sheetName, address, JSON.stringify(update.storedValue), actorName(req.user));
+          .run(versionId, sheetName, address, JSON.stringify(boundOverride(workbook, sheetName, address, update.storedValue, department)), actorName(req.user));
       }
+      if (!remove) await buildOutputWorkbook({quote:{...quote,version:version.label || quote.version},sections,overrides:await loadVerificationOutputOverrides(versionId)});
       await db.prepare(`UPDATE quote_verification_sections SET status='filled', filled_by=?,
-        filled_at=datetime('now'), reviewed_by=NULL, reviewed_at=NULL, review_comment=NULL WHERE id=?`)
-        .run(actorName(req.user), section.id);
+        filled_at=?, reviewed_by=NULL, reviewed_at=NULL, review_comment=NULL WHERE id=?`)
+        .run(actorName(req.user), nextSectionTime(section), section.id);
       const status = await recalculateVersionStatus(versionId);
       await db.prepare(`UPDATE quote_verifications SET status='in_progress', updated_by=?,
         updated_at=datetime('now') WHERE quote_id=?`).run(actorName(req.user), version.quote_id);
@@ -646,9 +669,11 @@ async function mutateVerificationOutputCell(req, res, remove = false) {
             } } : {}),
           }) }),
       );
-      return { department, status };
+      lockedVersion.status = status;
+      const savedSections = await db.prepare('SELECT * FROM quote_verification_sections WHERE version_id=?').all(versionId);
+      return { department, status, revision: outputRevision(savedSections, await loadVerificationOutputOverrides(versionId), status) };
     });
-    res.json({ ok: true, source_dept: result.department, status: result.status });
+    res.json({ ok: true, source_dept: result.department, status: result.status, revision: result.revision });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });
     console.error('[verification-output-cell]', error);
@@ -656,8 +681,20 @@ async function mutateVerificationOutputCell(req, res, remove = false) {
   }
 }
 
-router.put('/versions/:versionId/output-cell', (req, res) => mutateVerificationOutputCell(req, res));
-router.delete('/versions/:versionId/output-cell', (req, res) => mutateVerificationOutputCell(req, res, true));
+function verificationOutputRoute(remove) {
+  return async (req, res) => {
+    try {
+      const result = await withVerificationVersion(db, Number(req.params.versionId), version =>
+        runOutputBatch(req, (part, pending) => mutateVerificationOutputCell(part, pending, remove, version)));
+      res.json(result);
+    } catch (error) {
+      if (error.status) return res.status(error.status).json({error:error.message});
+      throw error;
+    }
+  };
+}
+router.put('/versions/:versionId/output-cell', verificationOutputRoute(false));
+router.delete('/versions/:versionId/output-cell', verificationOutputRoute(true));
 
 router.put('/versions/:versionId/workbook', async (req, res) => {
   const versionId = Number(req.params.versionId);

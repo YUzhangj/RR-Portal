@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { outputCellUpdate } = require('../backend/services/outputCellCalculation');
-const { applyWorkbookOverrides } = require('../backend/services/outputWorkbookOverrides');
+const { applyWorkbookOverrides, sourceSignatures } = require('../backend/services/outputWorkbookOverrides');
 const ExcelJS = require('exceljs');
 
 test('物料明细按用量和原币单价计算最终 HKD 金额', () => {
@@ -28,7 +28,7 @@ test('结构化覆盖值恢复金额与用量单价元数据', () => {
   sheet.getCell('A2').value = { formula: 'A1*2', result: 2 };
   const state = applyWorkbookOverrides(workbook, [{
     sheet_name: '报价明细', cell_address: 'A1',
-    value_json: JSON.stringify({ value: 6, calculation: { quantity: 2, unitPrice: 3 } }),
+    value_json: JSON.stringify({ source_signature: sourceSignatures(workbook).get('报价明细!A1'), value: 6, calculation: { quantity: 2, unitPrice: 3 } }),
   }]);
   assert.equal(sheet.getCell('A1').value, 6);
   assert.equal(sheet.getCell('A1').outputCalculation.quantity, 2);

@@ -17,6 +17,9 @@ const element = id => document.getElementById(id);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]));
 
 async function api(path, options = {}) {
+  if (path.endsWith('/output-cell') && options.body) {
+    options = {...options, body: JSON.stringify({...JSON.parse(options.body), base_revision: state.data?.revision})};
+  }
   const response = await fetch(`/api${path}`, {
     credentials: 'include', cache: 'no-store',
     ...options,
@@ -26,7 +29,9 @@ async function api(path, options = {}) {
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload.error || response.statusText);
   }
-  return response.json();
+  const result = await response.json();
+  if (result.revision && state.data && path.endsWith('/output-cell')) state.data.revision = result.revision;
+  return result;
 }
 
 function outputCellApiPath() {
@@ -90,6 +95,7 @@ function sourceForCell(cell) {
   const sheet = state.data?.sheets?.[state.activeSheet];
   const position = parseCellAddress(cell?.address);
   if (!position || sheet?.name !== '报价明细') return null;
+  if (cell.sourceDepartment) return {dept:cell.sourceDepartment,section:cell.sourceLabel || '报价来源参数'};
   const { row, column } = position;
   if (row >= 1 && row <= 4 && column >= 3) return { dept: 'molding', section: '料价参考表' };
   if ((row === 5 || row === 6) && column >= 3) return { dept: 'molding', section: '机型价表' };
@@ -98,7 +104,7 @@ function sourceForCell(cell) {
     if ([5, 7, 9].includes(column)) return { dept: 'engineering', section: '纸箱计算 · 纸箱/平卡系数' };
     if (column === 11) return { dept: 'molding', section: '统一零件报价 · 料重损耗' };
     if (column === 13) return { dept: 'assembly', section: '人工参数' };
-    if (column === 15) return { dept: 'sales', section: '印尼运费参数' };
+    if (column === 15) return { dept: 'molding', section: '印尼运费参数' };
   }
   if (row >= 11 && row <= 23) return { dept: 'molding', section: '统一零件报价' };
   const rowContent = sheet.cells
@@ -169,6 +175,7 @@ function sourceHeaderName(position, cells) {
 }
 
 function formulaInputLabel(cell, cells, sheetName = '') {
+  if (cell.sourceLabel) return cell.sourceLabel;
   const position = parseCellAddress(cell.address);
   if (!position) return cell.address;
   const at = (row, column) => cells.get(`${columnLetter(column)}${row}`);
@@ -190,6 +197,7 @@ function formulaInputLabel(cell, cells, sheetName = '') {
 }
 
 function formulaInputGroup(cell, cells, sheetName) {
+  if (cell.sourceDepartment) return `${SOURCE_DEPARTMENTS[cell.sourceDepartment] || sheetName} · 报价参数`;
   const position = parseCellAddress(cell.address);
   if (!position) return `${sheetName} · 原始参数`;
   const rowName = sourceRowName(position, cells);
@@ -197,6 +205,7 @@ function formulaInputGroup(cell, cells, sheetName) {
 }
 
 function formulaFieldLabel(cell, cells, sheetName) {
+  if (cell.sourceLabel) return cell.sourceLabel;
   const position = parseCellAddress(cell.address);
   if (!position) return cell.address;
   if (sheetName === '喷油明细') {
@@ -346,14 +355,15 @@ function updateUnitQuantityCalculationPreview() {
 function cartonCalculationModel(cell) {
   const position = parseCellAddress(cell?.address);
   const sheet = state.data?.sheets?.[state.activeSheet];
-  if (!position || sheet?.name !== '报价明细' || position.row !== 35) return null;
+  if (!position || sheet?.name !== '报价明细' || position.column !== 15) return null;
   const cells = new Map(sheet.cells.map(item => [item.address, item]));
   const at = (row, column) => cells.get(`${columnLetter(column)}${row}`);
   const label = (row, column) => String(at(row, column)?.value ?? '').trim();
+  if (label(position.row, 14) !== '箱价/件') return null;
   const headerRow = sheet.cells
-    .filter(item => item.column === 14 && /(?:外箱|主纸箱)/.test(String(item.value || '')))
+    .filter(item => item.column === 14 && item.row < position.row && /(?:外箱|主纸箱|内箱|纸箱)/.test(String(item.value || '')) && !/尺寸/.test(String(item.value || '')))
     .map(item => item.row)
-    .sort((a, b) => a - b)[0];
+    .sort((a, b) => b - a)[0];
   if (!headerRow) return null;
 
   const dimensionRow = headerRow + 2;
@@ -623,13 +633,16 @@ function openSourceEditor() {
     ? '当前核价明细为只读预览；这里展示该数值的来源、公式和代入结果。需要修改时请返回对应核价部门。'
     : state.unitQuantityEditor
       ? '修改用量或单价后，系统会按上方公式重算该项金额、小计、直接成本和利润。'
-      : state.formulaEditor
+      : state.formulaEditor || state.cartonEditor
       ? '修改上方原始参数并保存后，系统会按计算链重新计算当前结果、小计、直接成本和利润。'
       : '“对应数值”是当前报价采用的结果。修改保存后，会重新计算小计、直接成本和利润。';
-  document.querySelectorAll('.formula-source-input,.carton-source-input,#unit-quantity-value,#unit-price-value').forEach(input => { input.disabled = readOnlyOutput; });
   const sourceFields = state.cartonEditor?.fields || state.formulaEditor?.fields || [];
+  document.querySelectorAll('.formula-source-input,.carton-source-input,#unit-quantity-value,#unit-price-value').forEach(input => {
+    const field = sourceFields.find(f => f.cell.address === input.dataset.address);
+    input.disabled = readOnlyOutput || (field ? !field.cell.editable : !cell.editable);
+  });
   element('source-reset-cell').hidden = readOnlyOutput || (!cell.overridden && !sourceFields.some(field => field.cell.overridden));
-  element('source-save-cell').hidden = readOnlyOutput;
+  element('source-save-cell').hidden = readOnlyOutput || (calculatedEditor && !state.unitQuantityEditor && !sourceFields.some(f=>f.cell.editable));
   const dialog = element('source-edit-dialog');
   dialog.classList.toggle('source-edit-dialog-expanded', Boolean(calculatedEditor));
   dialog.showModal();
@@ -696,11 +709,11 @@ function showCellInspector(target, cell) {
   const source = sourceForCell(cell);
   element('source-edit-cell').hidden = !canOpenSource;
   element('source-edit-cell').textContent = cell.formula
-    ? (state.data.can_edit_output ? '查看计算 / 修改参数' : '查看计算')
+    ? (state.data.can_edit_output ? '计算与参数' : '查看计算')
     : hasStructuredCalculation
-      ? `修改用量与单价 · ${SOURCE_DEPARTMENTS[source?.dept] || source?.dept || '报价明细'}`
+      ? '用量与单价'
     : canEdit
-      ? `修改来源参数 · ${SOURCE_DEPARTMENTS[source?.dept] || source?.dept || '报价明细'}`
+      ? '修改来源参数'
       : source ? `来源：${SOURCE_DEPARTMENTS[source.dept] || source.dept}` : '查看来源';
   const status = element('cell-edit-status');
   status.hidden = !canEdit && !hasStructuredCalculation;
@@ -940,7 +953,7 @@ async function saveSourceEditor() {
   const activeEditor = editor || formulaEditor;
   const activeSheetName = state.data.sheets[state.activeSheet].name;
   const sourceDepartment = sourceDepartmentForCell(activeEditor.targetCell || state.selectedCell);
-  const updates = activeEditor.fields.map(field => ({
+  const updates = activeEditor.fields.filter(field=>field.cell.editable).map(field => ({
     sheetName: field.sheetName || activeSheetName,
     address: field.cell.address,
     value: values.get(editor ? field.cell.address : `${field.sheetName}!${field.cell.address}`),
@@ -962,17 +975,12 @@ async function saveSourceEditor() {
   element('source-edit-help').classList.remove('error');
   element('source-edit-help').textContent = '正在保存纸箱参数并重新计算相关成本与利润…';
   try {
-    for (const update of updates) {
-      await api(outputCellApiPath(), {
-        method: 'PUT',
-        body: JSON.stringify({
-          sheet_name: update.sheetName,
-          cell_address: update.address,
-          value: update.value,
-          source_dept: sourceDepartment,
-        }),
-      });
-    }
+    await api(outputCellApiPath(), {
+      method: 'PUT',
+      body: JSON.stringify({ updates: updates.map(update => ({
+        sheet_name: update.sheetName, cell_address: update.address, value: update.value,
+      })) }),
+    });
     state.pendingAddress = activeEditor.targetAddress;
     element('source-edit-dialog').close();
     await loadOutput();
@@ -1012,16 +1020,10 @@ async function resetSourceEditor() {
   element('source-edit-help').classList.remove('error');
   element('source-edit-help').textContent = unitEditor ? '正在恢复原始用量和单价并重新计算…' : '正在恢复原始参数并重新计算…';
   try {
-    for (const target of uniqueTargets) {
-      await api(outputCellApiPath(), {
-        method: 'DELETE',
-        body: JSON.stringify({
-          sheet_name: target.sheetName,
-          cell_address: target.address,
-          source_dept: sourceDepartment,
-        }),
-      });
-    }
+    await api(outputCellApiPath(), {
+      method: 'DELETE',
+      body: JSON.stringify({updates: uniqueTargets.map(target => ({sheet_name:target.sheetName,cell_address:target.address}))}),
+    });
     state.pendingAddress = activeEditor.targetAddress;
     element('source-edit-dialog').close();
     await loadOutput();
@@ -1083,6 +1085,13 @@ async function loadOutput() {
       : data.can_export
         ? '当前表格只读；需要修改时，请返回对应部门填写。下载文件保留全部工作表。'
         : '部分部门尚未审核；当前可预览，全部审核后才可下载最终 Excel。';
+    if (data.output_notice) element('output-notice').textContent = data.output_notice;
+    const stale = data.output_conflicts || [];
+    element('clear-stale-output').hidden = !stale.length || !data.can_reset_conflicts;
+    if (stale.length) {
+      element('output-notice').className = 'notice error';
+      element('output-notice').textContent = `来源资料已改变，${stale.length} 项旧修正未套用。请记录并清除失效修正后重新核对；处理前不可导出。`;
+    }
     const visibleSheets = data.sheets
       .map((sheet, index) => ({ sheet, index }))
       .filter(({ sheet }) => !HIDDEN_PREVIEW_SHEETS.has(sheet.name));
@@ -1099,6 +1108,19 @@ async function loadOutput() {
     element('retry-inline')?.addEventListener('click', loadOutput);
   }
 }
+
+element('clear-stale-output').onclick = async () => {
+  if (state.saving || !state.data?.can_reset_conflicts) return;
+  if (!window.confirm('清除失效的输出修正并使用当前部门资料？原部门资料会保留。')) return;
+  state.saving = true;
+  element('clear-stale-output').disabled = true;
+  try {
+    await api(outputCellApiPath(), {method:'DELETE',body:JSON.stringify({updates:state.data.output_conflicts})});
+    await loadOutput();
+    showEditStatus('失效修正已清除，请按当前资料重新核对。');
+  } catch (error) { showEditStatus(error.message, true); }
+  finally { state.saving = false; element('clear-stale-output').disabled = false; }
+};
 
 element('reload-button').onclick = loadOutput;
 element('save-cell').onclick = saveSelectedCell;

@@ -25,9 +25,9 @@ function rowText(worksheet, row) {
 function detailDepartment(worksheet, cell) {
   const { row, col } = cell;
   if (row === 7) {
-    if (col === 3 || col === 15) return 'sales';
+    if (col === 3) return 'sales';
     if ([5, 7, 9].includes(col)) return 'engineering';
-    if (col === 11) return 'molding';
+    if (col === 11 || col === 15) return 'molding';
     if (col === 13) return 'assembly';
   }
 
@@ -50,18 +50,13 @@ function detailDepartment(worksheet, cell) {
   return null;
 }
 
-function inferOutputSourceDepartment(workbook, sheetName, address, requestedDepartment = '') {
-  if (SHEET_DEPARTMENTS.has(sheetName)) return SHEET_DEPARTMENTS.get(sheetName);
+function inferOutputSourceDepartment(workbook, sheetName, address) {
   const worksheet = workbook.getWorksheet(sheetName);
-  if (!worksheet || !/^[A-Z]{1,3}[1-9]\d*$/.test(address)) {
-    return DEPARTMENTS.has(requestedDepartment) ? requestedDepartment : 'sales';
-  }
-  if (sheetName === '报价明细') {
-    return detailDepartment(worksheet, worksheet.getCell(address))
-      || (DEPARTMENTS.has(requestedDepartment) ? requestedDepartment : 'sales');
-  }
-  if (DEPARTMENTS.has(requestedDepartment)) return requestedDepartment;
-  return 'sales';
+  if (!worksheet || !/^[A-Z]{1,3}[1-9]\d*$/.test(address)) return null;
+  const cell = worksheet.getCell(address);
+  if (DEPARTMENTS.has(cell.outputDepartment)) return cell.outputDepartment;
+  if (SHEET_DEPARTMENTS.has(sheetName)) return SHEET_DEPARTMENTS.get(sheetName);
+  return sheetName === '报价明细' ? detailDepartment(worksheet, cell) : null;
 }
 
 module.exports = { inferOutputSourceDepartment };

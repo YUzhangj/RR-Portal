@@ -38,7 +38,7 @@ test('输出修改按对应来源部门撤销审核', () => {
   assert.equal(inferOutputSourceDepartment(workbook, '报价明细', 'D50'), 'engineering');
   assert.equal(inferOutputSourceDepartment(workbook, '电子明细', 'C4'), 'electronic');
   assert.equal(inferOutputSourceDepartment(workbook, '报价明细', 'D35', 'assembly'), 'engineering');
-  assert.equal(inferOutputSourceDepartment(workbook, '系统报价汇总', 'C10', 'assembly'), 'assembly');
+  assert.equal(inferOutputSourceDepartment(workbook, '系统报价汇总', 'C10', 'assembly'), null);
   assert.deepEqual(sourceFieldForOutputCell(workbook, '报价明细', 'D60'), {
     dept: 'sales', path: ['shipping', 'markup_x'],
   });

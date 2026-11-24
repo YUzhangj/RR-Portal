@@ -1,10 +1,11 @@
 const express = require('express');
 const db = require('../db');
-const { requireAuth, quoteAccess, hasMenuPermission } = require('../middleware/auth');
-const { quoteFrozen, quoteWriteRoute } = require('../services/quoteFreeze');
+const { requireAuth, quoteAccess, hasMenuPermission, canEditDepartment } = require('../middleware/auth');
+const { quoteFrozen, withQuoteLifecycle } = require('../services/quoteFreeze');
 const { buildWorkbook } = require('../services/exportInternal');
 const { buildOutputWorkbook } = require('../services/nexusOutputTemplate');
-const { overrideNumericValue } = require('../services/outputWorkbookOverrides');
+const { outputRevision, assertOutputRevision, runOutputBatch } = require('../services/outputSave');
+const { boundOverride } = require('../services/outputWorkbookOverrides');
 const { outputCellUpdate } = require('../services/outputCellCalculation');
 const { inferOutputSourceDepartment } = require('../services/outputSourceDepartment');
 const { syncOutputValueToSource } = require('../services/outputSourceSync');
@@ -28,6 +29,11 @@ const loadOutputSections = quoteId => db.prepare(
    WHERE s.quote_id = ? ORDER BY d.sort_order`
 ).all(quoteId);
 
+function canEditOutputDepartment(user, dept) {
+  return Boolean(dept && canEditDepartment(user, dept)
+    && (user.dept === dept || ['sales', 'engineering'].includes(user.dept)));
+}
+
 // GET /api/quotes/:id/output-layout — 使用最终导出工作簿生成同版预览。
 // 预览不要求全部部门已审，方便在填写过程中检查；真正下载仍沿用受控导出规则。
 router.get('/:id/output-layout', async (req, res) => {
@@ -40,52 +46,24 @@ router.get('/:id/output-layout', async (req, res) => {
     return res.status(acc.status).json({ error: acc.status === 404 ? '不存在' : '无权查看该客户的报价单' });
   }
 
-  let sections = await loadOutputSections(id);
-  let overrides = await loadOutputOverrides(id);
+  const sections = await loadOutputSections(id);
+  const overrides = await loadOutputOverrides(id);
   const totalDepts = Number((await db.prepare('SELECT COUNT(*) AS n FROM departments').get()).n);
   const isFrozen = await quoteFrozen(db, id);
 
   try {
-    let workbook = await buildOutputWorkbook({ quote, sections, overrides });
-    let synchronizedSource = false;
-    if (!isFrozen) {
-      for (const override of overrides) {
-        let value;
-        try { value = JSON.parse(override.value_json); }
-        catch (_) { continue; }
-        const numericValue = overrideNumericValue(value);
-        if (numericValue === null) continue;
-        const synchronized = await syncOutputValueToSource(
-          db, id, workbook, override.sheet_name, String(override.cell_address || '').toUpperCase(), numericValue
-        );
-        synchronizedSource ||= Boolean(synchronized);
-      }
-    }
-    if (synchronizedSource) {
-      sections = await loadOutputSections(id);
-      overrides = await loadOutputOverrides(id);
-      workbook = await buildOutputWorkbook({ quote, sections, overrides });
-    }
-    if (!isFrozen) {
-      const affectedDepartments = [...new Set(overrides.map(row => inferOutputSourceDepartment(
-        workbook, row.sheet_name, String(row.cell_address || '').toUpperCase()
-      )))];
-      for (const department of affectedDepartments) {
-        await db.prepare(`UPDATE quote_sections SET
-          status = CASE WHEN status = 'approved' THEN 'filled' ELSE status END,
-          reviewed_by = NULL,
-          reviewed_at = NULL
-          WHERE quote_id = ? AND dept = ?`).run(id, department);
-      }
-      if (affectedDepartments.length) {
-        await db.prepare("UPDATE quotes SET status = 'drafting' WHERE id = ? AND status IN ('fully_approved', 'exported')").run(id);
-      }
-    }
+    const workbook = await buildOutputWorkbook({ quote, sections, overrides });
+    const editableCells = new Set([...workbook.outputEditState.editable].filter(key => {
+      const bang = key.lastIndexOf('!');
+      const dept = inferOutputSourceDepartment(workbook, key.slice(0, bang), key.slice(bang + 1));
+      return !isFrozen && canEditOutputDepartment(req.user, dept)
+        && sections.some(section => section.dept === dept && section.status !== 'approved');
+    }));
     const approvedCount = Number((await db.prepare(
       "SELECT COUNT(*) AS n FROM quote_sections WHERE quote_id = ? AND status = 'approved'"
     ).get(id)).n);
     const sheets = serializeWorkbook(workbook, {
-      editableCells: workbook.outputEditState.editable,
+      editableCells,
       overriddenCells: workbook.outputEditState.overridden,
     });
     const preferredOrder = new Map([['系统报价汇总', 0], ['报价明细', 1]]);
@@ -98,12 +76,15 @@ router.get('/:id/output-layout', async (req, res) => {
         customer: quote.customer,
         version: quote.version,
       },
+      revision: outputRevision(sections, overrides, isFrozen),
       approved_count: approvedCount,
       total_departments: totalDepts,
-      can_export: approvedCount >= totalDepts,
-      // 已进入核价的报价仍可在“报价明细”内保存独立修正值；
-      // 原部门填写、审核状态和核价版本都不会被这些修正值反向覆盖。
-      can_edit_output: hasMenuPermission(req.user, '报价单详情', 'edit'),
+      can_export: approvedCount >= totalDepts && !workbook.outputEditState.conflicts.length,
+      output_conflicts: workbook.outputEditState.conflicts,
+      can_reset_conflicts: !isFrozen && workbook.outputEditState.conflicts.every(c => canEditOutputDepartment(req.user, c.source_department)
+        && sections.some(s => s.dept === c.source_department && s.status !== 'approved')),
+      can_edit_output: editableCells.size > 0,
+      output_notice: workbook.outputNotice || null,
       generated_at: new Date().toISOString(),
       sheets,
     });
@@ -115,7 +96,7 @@ router.get('/:id/output-layout', async (req, res) => {
 
 // PUT /api/quotes/:id/output-cell — 修改最终报价表的原始数值格。
 // 只允许修改被公式引用的非公式数值，避免直接覆盖计算结果。
-router.put('/:id/output-cell', quoteWriteRoute(db, req => Number(req.params.id), async (req, res) => {
+const saveQuoteOutputCell = async (req, res) => {
   const id = Number(req.params.id);
   const quote = await db.prepare('SELECT * FROM quotes WHERE id = ? AND deleted_at IS NULL').get(id);
   if (!quote) return res.status(404).json({ error: '不存在' });
@@ -123,6 +104,7 @@ router.put('/:id/output-cell', quoteWriteRoute(db, req => Number(req.params.id),
   if (acc.status !== 200) return res.status(acc.status).json({ error: acc.status === 404 ? '不存在' : '无权修改该报价单' });
   if (!hasMenuPermission(req.user, '报价单详情', 'edit')) return res.status(403).json({ error: '没有报价单编辑权限' });
   const isFrozen = await quoteFrozen(db, id);
+  if (isFrozen) return res.status(409).json({ error: '客价已确认，原报价已锁定；请到核价中心填写核价' });
 
   const sheetName = String(req.body?.sheet_name || '');
   const address = String(req.body?.cell_address || '').toUpperCase();
@@ -131,10 +113,17 @@ router.put('/:id/output-cell', quoteWriteRoute(db, req => Number(req.params.id),
   }
 
   const sections = await loadOutputSections(id);
-  const workbook = await buildOutputWorkbook({ quote, sections });
+  const overrides = await loadOutputOverrides(id);
+  const conflict = assertOutputRevision(req, sections, overrides, isFrozen);
+  if (conflict) return res.status(409).json({ error: conflict });
+  const workbook = await buildOutputWorkbook({ quote, sections, overrides });
   if (!workbook.outputEditState.editable.has(`${sheetName}!${address}`)) {
     return res.status(400).json({ error: '该单元格是标题或公式结果，不能直接修改' });
   }
+  const sourceDepartment = inferOutputSourceDepartment(workbook, sheetName, address);
+  if (!canEditOutputDepartment(req.user, sourceDepartment)) return res.status(403).json({ error: '没有该来源部门的编辑权限' });
+  const section = sections.find(row => row.dept === sourceDepartment);
+  if (!section || section.status === 'approved') return res.status(409).json({ error: '该部门已审核，请先退回后再修改' });
   const targetCell = workbook.getWorksheet(sheetName)?.getCell(address);
   const update = outputCellUpdate(req.body, targetCell);
   if (!update) return res.status(400).json({ error: '请输入有效的非负用量和单价' });
@@ -145,13 +134,9 @@ router.put('/:id/output-cell', quoteWriteRoute(db, req => Number(req.params.id),
     VALUES (?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(quote_id, sheet_name, cell_address) DO UPDATE SET
       value_json = excluded.value_json, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
-    .run(id, sheetName, address, JSON.stringify(storedValue), req.user.name);
-  const synchronized = isFrozen
-    ? null
-    : await syncOutputValueToSource(db, id, workbook, sheetName, address, value);
-  const sourceDepartment = synchronized?.dept || inferOutputSourceDepartment(
-    workbook, sheetName, address, String(req.body?.source_dept || '')
-  );
+    .run(id, sheetName, address, JSON.stringify(boundOverride(workbook, sheetName, address, storedValue, sourceDepartment)), req.user.name);
+  await buildOutputWorkbook({quote, sections, overrides: await loadOutputOverrides(id)});
+  await syncOutputValueToSource(db, id, workbook, sheetName, address, value, req.user.name);
   if (!isFrozen) {
     await db.prepare(`UPDATE quote_sections SET
       status = CASE WHEN status = 'approved' THEN 'filled' ELSE status END,
@@ -169,37 +154,77 @@ router.put('/:id/output-cell', quoteWriteRoute(db, req => Number(req.params.id),
       } } : {}),
       output_only: isFrozen,
     }));
-  res.json({ ok: true, source_dept: sourceDepartment });
-}));
+  res.json({ ok: true, source_dept: sourceDepartment, revision: outputRevision(await loadOutputSections(id), await loadOutputOverrides(id), false) });
+};
 
-router.delete('/:id/output-cell', quoteWriteRoute(db, req => Number(req.params.id), async (req, res) => {
+const resetQuoteOutputCell = async (req, res) => {
   const id = Number(req.params.id);
+  const quote = await db.prepare('SELECT * FROM quotes WHERE id = ? AND deleted_at IS NULL').get(id);
+  if (!quote) return res.status(404).json({ error: '不存在' });
   const acc = await quoteAccess(req.user, id);
   if (acc.status !== 200) return res.status(acc.status).json({ error: '无权修改该报价单' });
-  if (!hasMenuPermission(req.user, '报价单详情', 'edit')) return res.status(403).json({ error: '没有报价单编辑权限' });
-  const isFrozen = await quoteFrozen(db, id);
+  if (await quoteFrozen(db, id)) return res.status(409).json({ error: '原报价已锁定，请到核价中心填写核价' });
   const sheetName = String(req.body?.sheet_name || '');
   const address = String(req.body?.cell_address || '').toUpperCase();
-  const quote = await db.prepare('SELECT * FROM quotes WHERE id = ? AND deleted_at IS NULL').get(id);
-  const sections = await loadOutputSections(id);
-  const workbook = quote ? await buildOutputWorkbook({ quote, sections }) : null;
-  const sourceDepartment = workbook
-    ? inferOutputSourceDepartment(workbook, sheetName, address, String(req.body?.source_dept || ''))
-    : 'sales';
-  await db.prepare('DELETE FROM quote_output_overrides WHERE quote_id = ? AND sheet_name = ? AND cell_address = ?')
-    .run(id, sheetName, address);
-  if (!isFrozen) {
-    await db.prepare(`UPDATE quote_sections SET
-      status = CASE WHEN status = 'approved' THEN 'filled' ELSE status END,
-      reviewed_by = NULL,
-      reviewed_at = NULL
-      WHERE quote_id = ? AND dept = ?`).run(id, sourceDepartment);
+  if (!sheetName || sheetName.length > 31 || !/^[A-Z]{1,3}[1-9]\d*$/.test(address)) {
+    return res.status(400).json({ error: '请提供有效的可编辑数值单元格' });
   }
-  res.json({ ok: true, source_dept: sourceDepartment });
-}));
+  const sections = await loadOutputSections(id);
+  const overrides = await loadOutputOverrides(id);
+  const conflict = assertOutputRevision(req, sections, overrides, false);
+  if (conflict) return res.status(409).json({ error: conflict });
+  const workbook = await buildOutputWorkbook({ quote, sections });
+  const stored = await db.prepare('SELECT value_json FROM quote_output_overrides WHERE quote_id=? AND sheet_name=? AND cell_address=?').get(id, sheetName, address);
+  let previous; try { previous = JSON.parse(stored?.value_json || 'null'); } catch (_) {}
+  if (!stored) return res.json({ ok: true });
+  const sourceDepartment = previous?.source_department || inferOutputSourceDepartment(workbook, sheetName, address);
+  if (!canEditOutputDepartment(req.user, sourceDepartment)) return res.status(403).json({ error: '没有该来源部门的编辑权限' });
+  const section = sections.find(row => row.dept === sourceDepartment);
+  if (!section || section.status === 'approved') return res.status(409).json({ error: '该部门已审核，请先退回后再修改' });
+  const removed = await db.prepare('DELETE FROM quote_output_overrides WHERE quote_id = ? AND sheet_name = ? AND cell_address = ?')
+    .run(id, sheetName, address);
+  if (removed.changes) {
+    await db.prepare("UPDATE quotes SET status = 'drafting' WHERE id = ? AND status IN ('fully_approved', 'exported')").run(id);
+    await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail) VALUES (?, ?, ?, 'output_reset', ?)`)
+      .run(id, sourceDepartment, req.user.name, JSON.stringify({ sheet_name: sheetName, cell_address: address }));
+  }
+  res.json({ ok: true, source_dept: sourceDepartment, revision: outputRevision(await loadOutputSections(id), await loadOutputOverrides(id), false) });
+};
+
+function quoteOutputRoute(handler) {
+  return async (req, res) => {
+    try {
+      const result = await withQuoteLifecycle(db, Number(req.params.id), () => runOutputBatch(req, handler));
+      res.json(result);
+    } catch (error) {
+      if (error.status) return res.status(error.status).json({ error: error.message });
+      throw error;
+    }
+  };
+}
+router.put('/:id/output-cell', quoteOutputRoute(saveQuoteOutputCell));
+router.delete('/:id/output-cell', quoteOutputRoute(resetQuoteOutputCell));
+
+// Buffer the response until the quote lifecycle transaction has committed.
+// Approval checks and the exported source must describe the same revision.
+function exportSnapshotRoute(handler) {
+  return async (req, res) => {
+    const result = await withQuoteLifecycle(db, Number(req.params.id), async () => {
+      const result = {status:200, headers:{}};
+      const pending = {status(n){result.status=n;return pending;},
+        setHeader(k,v){result.headers[k]=v;},
+        json(v){result.json=v;return pending;},send(v){result.buffer=v;return pending;}};
+      await handler(req,pending);
+      return result;
+    });
+    res.status(result.status);
+    for (const [key,value] of Object.entries(result.headers)) res.setHeader(key,value);
+    if (result.buffer) res.send(result.buffer); else res.json(result.json);
+  };
+}
 
 // GET /api/quotes/:id/output-export — 下载与“报价明细”页面完全同版的工作簿。
-router.get('/:id/output-export', async (req, res) => {
+router.get('/:id/output-export', exportSnapshotRoute(async (req, res) => {
   const id = Number(req.params.id);
   const quote = await db.prepare('SELECT * FROM quotes WHERE id = ? AND deleted_at IS NULL').get(id);
   if (!quote) return res.status(404).json({ error: '不存在' });
@@ -218,7 +243,9 @@ router.get('/:id/output-export', async (req, res) => {
   const overrides = await loadOutputOverrides(id);
   try {
     const workbook = await buildOutputWorkbook({ quote, sections, overrides });
+    if (workbook.outputEditState.conflicts.length) return res.status(409).json({ error: '来源资料已改变，请先在汇总与输出中处理失效修正值' });
     const buffer = await workbook.xlsx.writeBuffer();
+    await db.prepare("INSERT INTO audit_log (quote_id,actor,action,detail) VALUES (?,?,'output_export',?)").run(id,req.user.name,'报价明细 Excel');
     const filename = encodeURIComponent(`${quote.quote_no || quote.id}_报价明细.xlsx`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${filename}`);
@@ -227,10 +254,10 @@ router.get('/:id/output-export', async (req, res) => {
     console.error('[output-export]', error);
     res.status(500).json({ error: '导出失败: ' + error.message });
   }
-});
+}));
 
 // GET /api/quotes/:id/export — 全部审核通过后，导出与“报价明细”页面同版的 xlsx。
-router.get('/:id/export', async (req, res) => {
+router.get('/:id/export', exportSnapshotRoute(async (req, res) => {
   const id = Number(req.params.id);
   const quote = await db.prepare('SELECT * FROM quotes WHERE id = ? AND deleted_at IS NULL').get(id);
   if (!quote) return res.status(404).json({ error: '不存在' });
@@ -258,6 +285,7 @@ router.get('/:id/export', async (req, res) => {
 
   try {
     const wb = await buildOutputWorkbook({ quote, sections, overrides });
+    if (wb.outputEditState.conflicts.length) return res.status(409).json({ error: '来源资料已改变，请先在汇总与输出中处理失效修正值' });
     const buf = await wb.xlsx.writeBuffer();
     const filename = encodeURIComponent(`${quote.quote_no || quote.id}_报价明细.xlsx`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -267,7 +295,7 @@ router.get('/:id/export', async (req, res) => {
     console.error('[export]', e);
     res.status(500).json({ error: '导出失败: ' + e.message });
   }
-});
+}));
 
 const DEPARTMENT_SHEETS = {
   electronic: '电子明细',

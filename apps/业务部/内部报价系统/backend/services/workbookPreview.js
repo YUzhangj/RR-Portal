@@ -187,6 +187,8 @@ function serializeWorksheet(worksheet, limits = DEFAULT_LIMITS) {
         value,
         rawValue: rawValue(cell),
         formula: cell.formula || '',
+        sourceDepartment: cell.outputDepartment || null,
+        sourceLabel: cell.outputLabel || null,
         calculation: cell.outputCalculation ? { ...cell.outputCalculation } : null,
         editable: Boolean(limits.editableCells && limits.editableCells.has(workbookKey)),
         overridden: Boolean(limits.overriddenCells && limits.overriddenCells.has(workbookKey)),

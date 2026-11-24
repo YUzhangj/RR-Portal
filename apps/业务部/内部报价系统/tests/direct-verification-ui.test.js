@@ -33,13 +33,6 @@ test('未锁定核价版本可修改明细原始值并独立重算',()=>{
  assert.match(verificationRoutes,/outputCellUpdate\(req\.body/);
  assert.match(quoteOutputRoutes,/outputCellUpdate\(req\.body/);
 });
-test('已进入核价的报价仍可修改报价明细，但不会反向改写原部门审核数据',()=>{
- assert.match(quoteOutputRoutes,/can_edit_output: hasMenuPermission\(req\.user, '报价单详情', 'edit'\)/);
- assert.doesNotMatch(quoteOutputRoutes,/can_edit_output:[^\n]*quoteFrozen/);
- assert.doesNotMatch(quoteOutputRoutes,/if \(await quoteFrozen\(db, id\)\) return res\.status\(409\)/);
- assert.match(quoteOutputRoutes,/const synchronized = isFrozen\s*\? null\s*: await syncOutputValueToSource/);
- assert.match(quoteOutputRoutes,/output_only: isFrozen/);
-});
 function fixture({failCreate=false,failReload=false}={}){
  let overlay,creates=0,load=0,opened=0;
  const nodes=new Map(),node=k=>{if(!nodes.has(k))nodes.set(k,{disabled:false,textContent:'',focus(){}});return nodes.get(k);};
