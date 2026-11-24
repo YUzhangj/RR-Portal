@@ -116,6 +116,10 @@ test('direct costing stays separate from quotation reports and preserves real wo
     }
     detail = (await api(`/verifications/${id}`)).body;
     assert.equal(detail.selected_version.status, 'ready');
+    const incompleteMixedExport = await api(`/verifications/versions/${versionId}/export`);
+    assert.equal(incompleteMixedExport.status, 409);
+    assert.match(incompleteMixedExport.body.error, /混装核价资料尚未完整/);
+    assert.equal((await one("SELECT COUNT(*) AS n FROM audit_log WHERE quote_id=? AND action='verification_export'", [id])).n, pgUrl ? '0' : 0);
     const reopened = await api(`/verifications/versions/${versionId}/sections/${sales.id}/reopen`, 'POST', {reason: 'synthetic review correction'});
     assert.equal(reopened.status, 200, JSON.stringify(reopened.body));
     assert.equal((await one('SELECT status FROM quote_verification_sections WHERE id=?', [sales.id])).status, 'filled');
@@ -129,6 +133,52 @@ test('direct costing stays separate from quotation reports and preserves real wo
     assert.equal((await one('SELECT baseline_json FROM quote_verifications WHERE quote_id=?', [id])).baseline_json, before);
     assert.equal((await rows('SELECT * FROM quote_customer_confirmations WHERE quote_id=?', [id])).length, 0);
     assert.equal((await api(`/quotes/${id}/header`, 'PUT', {product_name: 'must stay frozen'})).status, 409);
+  });
+
+  await t.test('approved single-product verification exports the quotation-detail workbook', async () => {
+    const created = await api('/verifications', 'POST', {
+      ...input,
+      quote_no: 'DIRECT-API-EXPORT',
+      product_name: 'Direct export',
+      quote_type: 'single',
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const exportVersionId = created.body.version_id;
+    let detail = (await api(`/verifications/${created.body.id}`)).body;
+    for (const section of detail.sections) {
+      const payload = JSON.parse(section.payload_json);
+      if (section.dept === 'molding') {
+        payload.material_prices = [{ name: 'ABS', model: 'NUCLEAR-V1', price: 12.34 }];
+      }
+      const submitted = await api(`/verifications/versions/${exportVersionId}/sections/${section.id}`, 'PUT', {
+        payload,
+        base_revision: section.revision,
+        submit: true,
+      });
+      assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
+      const refreshed = (await api(`/verifications/${created.body.id}`)).body.sections.find(row => row.id === section.id);
+      const reviewed = await api(`/verifications/versions/${exportVersionId}/sections/${section.id}/review`, 'POST', {
+        action: 'approve',
+        base_revision: refreshed.revision,
+      });
+      assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body));
+    }
+    const preview = await api(`/verifications/versions/${exportVersionId}/output-layout`);
+    assert.equal(preview.status, 200, JSON.stringify(preview.body));
+    assert.equal(preview.body.can_edit_output, false);
+    assert.equal(preview.body.can_export, true);
+    const previewDetail = preview.body.sheets.find(sheet => sheet.name === '报价明细');
+    assert.ok(previewDetail);
+    assert.equal(Number(previewDetail.cells.find(cell => cell.address === 'C2').value), 12.34);
+    const exported = await api(`/verifications/versions/${exportVersionId}/export`);
+    assert.equal(exported.status, 200, JSON.stringify(exported.body));
+    const exportedWorkbook = new (require('exceljs').Workbook)();
+    await exportedWorkbook.xlsx.load(exported.body);
+    assert.ok(exportedWorkbook.getWorksheet('报价明细'));
+    assert.equal(exportedWorkbook.getWorksheet('系统报价汇总').state, 'veryHidden');
+    const detailIndex = exportedWorkbook.worksheets.findIndex(sheet => sheet.name === '报价明细');
+    assert.equal(exportedWorkbook.views[0].activeTab, detailIndex);
+    assert.equal((await one("SELECT COUNT(*) AS n FROM audit_log WHERE quote_id=? AND action='verification_export'", [created.body.id])).n, pgUrl ? '1' : 1);
   });
 
   await t.test('duplicate, invalid, unauthorized and anonymous requests create no partial records', async () => {

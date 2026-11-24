@@ -4,7 +4,8 @@ function setup(){
  const start=source.indexOf('function renderShipping('),end=source.indexOf('\nfunction renderSales(',start);
  const nodes=new Map(),host={innerHTML:'',querySelector(key){if(!nodes.has(key))nodes.set(key,{style:{},value:'',textContent:''});return nodes.get(key);},querySelectorAll(){return [];}};
  const context={num:value=>Number(value)||0,sum:(rows,get)=>rows.reduce((total,row)=>total+get(row),0),escapeHtml:value=>String(value??''),parseFormulaInput:Number,
- FREIGHT_TYPES:[{key:'yt40',label:'盐田40柜'}],matchFreightByName:name=>name==='盐田40柜'?'yt40':null,document:{activeElement:null}};
+ FREIGHT_TYPES:[{key:'yt40',label:'盐田40柜'},{key:'yt5t',label:'盐田5吨车'}],
+ matchFreightByName:name=>name==='盐田40柜'?'yt40':(name==='盐田5吨车'?'yt5t':null),document:{activeElement:null}};
  vm.createContext(context);vm.runInContext(source.slice(start,end),context);
  let changes=0;
  return {host,render(payload,edit=false){return context.renderShipping(host,payload,{fx_rmb_hkd:.84,fx_hkd_usd:7.8},edit,()=>changes++,{yt40:10},5,null,{},{});},changes:()=>changes};
@@ -14,17 +15,27 @@ test('部分保存的运费参数缺少scenarios时可完整渲染，保留原�
  const s=setup(),payload={shipping:{markup_x:1.15,divisor:.97}};
  const result=s.render(payload,edit);
  assert.equal(payload.shipping.markup_x,1.15);assert.equal(payload.shipping.divisor,.97);
- assert.equal(payload.shipping.scenarios.length,1);assert.equal(payload.shipping.scenarios[0].is_factory,true);
- assert.equal(result.rows.length,1);assert.ok(Number.isFinite(result.customerUSD));
- assert.match(s.host.innerHTML,/出厂价/);assert.match(s.host.innerHTML,/TOTAL \(USD\)/);assert.equal(s.changes(),0);
+ assert.equal(payload.shipping.scenarios.length,3);assert.equal(payload.shipping.scenarios[0].is_factory,true);
+ assert.equal(payload.shipping.scenarios.slice(1).map(item=>item.name).join('|'),'盐田40柜|盐田5吨车');
+ assert.equal(result.rows.length,3);assert.ok(Number.isFinite(result.customerUSD));
+ assert.match(s.host.innerHTML,/出厂价/);assert.match(s.host.innerHTML,/盐田40柜/);assert.match(s.host.innerHTML,/盐田5吨车/);
+ assert.match(s.host.innerHTML,/TOTAL \(USD\)/);assert.equal(s.changes(),0);
  }
 });
-test('空运费对象和非数组场景使用缺省值，多次渲染只保留一个出厂价',()=>{
+test('空运费对象和非数组场景使用缺省方案，多次渲染不重复追加',()=>{
  for(const shipping of [undefined,{}, {scenarios:null},{scenarios:{}}]){
  const s=setup(),payload={shipping};s.render(payload);const result=s.render(payload);
- assert.equal(payload.shipping.scenarios.length,1);assert.equal(payload.shipping.markup_x,1.2);assert.equal(payload.shipping.divisor,.98);
+ assert.equal(payload.shipping.scenarios.length,3);assert.equal(payload.shipping.scenarios.filter(item=>item.is_factory).length,1);
+ assert.equal(payload.shipping.scenarios.slice(1).map(item=>item.name).join('|'),'盐田40柜|盐田5吨车');
+ assert.equal(payload.shipping.markup_x,1.2);assert.equal(payload.shipping.divisor,.98);
  assert.ok(Number.isFinite(result.customerUSD));assert.equal(s.changes(),0);
  }
+});
+test('明确保存为只显示出厂价时不补默认方案',()=>{
+ const s=setup(),factory={name:'出厂价',base_rmb:0,mold_share_rmb:0,is_factory:true};
+ const payload={shipping:{scenarios:[factory]}};const result=s.render(payload);
+ assert.equal(payload.shipping.scenarios.length,1);assert.equal(payload.shipping.scenarios[0],factory);
+ assert.equal(result.rows.length,1);assert.doesNotMatch(s.host.innerHTML,/盐田40柜|盐田5吨车/);assert.equal(s.changes(),0);
 });
 test('已有运费场景和明确的零值保留，正常报价计算结果不变',()=>{
  const s=setup(),scenario={name:'盐田40柜',base_rmb:3,mold_share_rmb:2,custom:'keep'};

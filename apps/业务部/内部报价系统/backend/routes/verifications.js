@@ -11,6 +11,11 @@ const {DEFAULT_COSTING_BASIS,normalizeCostingBasis,applyCostingBasisPayload}=req
 const {upgradeLegacySectionsForCalculation}=require('../services/legacyFormula');
 const {prepareWorkbookChanges,prepareNativeSectionPayload}=require('../services/excelWorkbookEdit');
 const {reviewState,prepareWorkbookReview}=require('../services/workbookReview');
+const {buildOutputWorkbook}=require('../services/nexusOutputTemplate');
+const {calculateMixedQuote}=require('../services/mixedQuotation');
+const {serializeWorkbook}=require('../services/workbookPreview');
+const {outputCellUpdate}=require('../services/outputCellCalculation');
+const {inferOutputSourceDepartment}=require('../services/outputSourceDepartment');
 const router = express.Router();
 router.use(requireAuth);
 
@@ -19,6 +24,27 @@ const activeQuotePredicate = 'AND q.deleted_at IS NULL';
 const parseJson = (value, fallback) => {
   try { return JSON.parse(value); } catch { return fallback; }
 };
+
+const loadVerificationOutputOverrides = versionId => db.prepare(`SELECT sheet_name, cell_address,
+  value_json, updated_by, updated_at FROM quote_verification_output_overrides
+  WHERE version_id=? ORDER BY sheet_name, cell_address`).all(versionId);
+
+function splitOutputCellKey(key) {
+  const bang = String(key || '').lastIndexOf('!');
+  return bang > 0 ? [key.slice(0, bang), key.slice(bang + 1)] : ['', ''];
+}
+
+function editableVerificationOutputCells(user, version, sections, workbook) {
+  if (['completed', 'cancelled'].includes(version.status)) return new Set();
+  const byDepartment = new Map(sections.map(section => [section.dept, section]));
+  return new Set([...workbook.outputEditState.editable].filter(key => {
+    const [sheetName, address] = splitOutputCellKey(key);
+    const department = inferOutputSourceDepartment(workbook, sheetName, address);
+    const section = byDepartment.get(department);
+    return section && section.status !== 'approved'
+      && canOperateDepartment(user, department) && canEditDepartment(user, department);
+  }));
+}
 
 const actorName = user => user.name || user.display_name || user.username;
 const isAdmin = user => user.role === 'admin' || Boolean(user.perms?.['账号管理']?.can_admin);
@@ -438,6 +464,200 @@ router.get('/:quoteId', async (req, res) => {
     can_complete: canManageVersions(req.user) && selectedVersion.status === 'ready',
   });
 });
+
+// 下载当前核价版本；版式与报价板块的“报价明细”完全一致，数据取自该核价版本。
+router.get('/versions/:versionId/export', async (req, res) => {
+  const versionId = Number(req.params.versionId);
+  const version = await db.prepare('SELECT * FROM quote_verification_versions WHERE id=?').get(versionId);
+  if (!version) return res.status(404).json({ error: '核价版本不存在' });
+  const access = await quoteAccess(req.user, version.quote_id);
+  if (access.status !== 200) return res.status(access.status).json({ error: '无权导出该核价版本' });
+  const quote = await db.prepare(`SELECT q.*, k.origin AS verification_origin
+    FROM quotes q LEFT JOIN quote_verifications k ON k.quote_id=q.id
+    WHERE q.id=? AND q.deleted_at IS NULL`).get(version.quote_id);
+  if (!quote) return res.status(404).json({ error: '核价任务不存在' });
+  const sections = await db.prepare(`SELECT s.dept, d.name_cn, s.payload_json, s.status,
+    s.reviewed_by, s.reviewed_at
+    FROM quote_verification_sections s JOIN departments d ON d.code=s.dept
+    WHERE s.version_id=? ORDER BY d.sort_order`).all(versionId);
+  const approvedCount = sections.filter(section => section.status === 'approved').length;
+  if (!sections.length || approvedCount !== sections.length) {
+    return res.status(409).json({ error: `尚有 ${sections.length - approvedCount} 个部门未审核通过` });
+  }
+  const mixedQuote = calculateMixedQuote(quote, sections);
+  if (mixedQuote?.enabled && !mixedQuote.valid) {
+    return res.status(409).json({ error: `混装核价资料尚未完整：${mixedQuote.errors.join('；')}` });
+  }
+  try {
+    const overrides = await loadVerificationOutputOverrides(versionId);
+    const workbook = await buildOutputWorkbook({
+      quote: { ...quote, version: version.label || quote.version },
+      sections,
+      overrides,
+    });
+    const buffer = await workbook.xlsx.writeBuffer();
+    await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
+      VALUES (?, ?, ?, 'verification_export', ?)`).run(
+      version.quote_id,
+      req.user.dept,
+      actorName(req.user),
+      `导出 ${version.label} 核价明细`,
+    );
+    const filename = encodeURIComponent(`${quote.quote_no || quote.id}_${version.label || `V${version.version_no}`}_核价明细.xlsx`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${filename}`);
+    res.send(Buffer.from(buffer));
+  } catch (error) {
+    console.error('[verification-export]', error);
+    res.status(500).json({ error: '核价明细导出失败: ' + error.message });
+  }
+});
+
+// 核价明细使用与“报价明细”相同的工作簿预览。
+// 未锁定版本可在用户拥有对应部门权限时修改原始数值，修改独立存在核价版本中。
+router.get('/versions/:versionId/output-layout', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  const versionId = Number(req.params.versionId);
+  const version = await db.prepare('SELECT * FROM quote_verification_versions WHERE id=?').get(versionId);
+  if (!version) return res.status(404).json({ error: '核价版本不存在' });
+  const access = await quoteAccess(req.user, version.quote_id);
+  if (access.status !== 200) return res.status(access.status).json({ error: '无权查看该核价版本' });
+  const quote = await db.prepare(`SELECT q.*, k.origin AS verification_origin
+    FROM quotes q LEFT JOIN quote_verifications k ON k.quote_id=q.id
+    WHERE q.id=? AND q.deleted_at IS NULL`).get(version.quote_id);
+  if (!quote) return res.status(404).json({ error: '核价任务不存在' });
+  const sections = await db.prepare(`SELECT s.dept, d.name_cn, s.payload_json, s.status,
+    s.reviewed_by, s.reviewed_at
+    FROM quote_verification_sections s JOIN departments d ON d.code=s.dept
+    WHERE s.version_id=? ORDER BY d.sort_order`).all(versionId);
+  const approvedCount = sections.filter(section => section.status === 'approved').length;
+  try {
+    const overrides = await loadVerificationOutputOverrides(versionId);
+    const mixedQuote = calculateMixedQuote(quote, sections);
+    if (mixedQuote?.enabled && !mixedQuote.valid) {
+      return res.status(409).json({ error: `混装核价资料尚未完整：${mixedQuote.errors.join('；')}` });
+    }
+    const workbook = await buildOutputWorkbook({
+      quote: { ...quote, version: version.label || quote.version },
+      sections,
+      overrides,
+    });
+    const editableCells = editableVerificationOutputCells(req.user, version, sections, workbook);
+    const sheets = serializeWorkbook(workbook, {
+      editableCells,
+      overriddenCells: workbook.outputEditState.overridden,
+    });
+    const preferredOrder = new Map([['系统报价汇总', 0], ['报价明细', 1]]);
+    sheets.sort((left, right) => (preferredOrder.get(left.name) ?? 99) - (preferredOrder.get(right.name) ?? 99));
+    res.json({
+      quote: {
+        id: quote.id,
+        quote_no: quote.quote_no,
+        product_name: quote.product_name,
+        customer: quote.customer,
+        version: version.label || quote.version,
+      },
+      approved_count: approvedCount,
+      total_departments: sections.length,
+      can_export: sections.length > 0 && approvedCount === sections.length,
+      can_edit_output: editableCells.size > 0,
+      verification_version_id: versionId,
+      generated_at: new Date().toISOString(),
+      sheets,
+    });
+  } catch (error) {
+    console.error('[verification-output-layout]', error);
+    res.status(500).json({ error: '核价明细表格生成失败: ' + error.message });
+  }
+});
+
+async function mutateVerificationOutputCell(req, res, remove = false) {
+  const versionId = Number(req.params.versionId);
+  const version = await db.prepare('SELECT * FROM quote_verification_versions WHERE id=?').get(versionId);
+  if (!version) return res.status(404).json({ error: '核价版本不存在' });
+  const access = await quoteAccess(req.user, version.quote_id);
+  if (access.status !== 200) return res.status(access.status).json({ error: '无权修改该核价版本' });
+
+  const sheetName = String(req.body?.sheet_name || '');
+  const address = String(req.body?.cell_address || '').toUpperCase();
+  if (!sheetName || sheetName.length > 31 || !/^[A-Z]{1,3}[1-9]\d*$/.test(address)
+    ) {
+    return res.status(400).json({ error: '请提供有效的可编辑数值单元格' });
+  }
+
+  try {
+    const result = await withVerificationVersion(db, versionId, async lockedVersion => {
+      if (['completed', 'cancelled'].includes(lockedVersion.status)) {
+        throw Object.assign(new Error('该核价版本已锁定'), { status: 409 });
+      }
+      const sections = await db.prepare(`SELECT s.*, d.name_cn FROM quote_verification_sections s
+        JOIN departments d ON d.code=s.dept WHERE s.version_id=? ORDER BY d.sort_order`).all(versionId);
+      const overrides = await loadVerificationOutputOverrides(versionId);
+      const quote = await db.prepare('SELECT * FROM quotes WHERE id=? AND deleted_at IS NULL').get(version.quote_id);
+      if (!quote) throw Object.assign(new Error('核价任务不存在'), { status: 404 });
+      const workbook = await buildOutputWorkbook({
+        quote: { ...quote, version: version.label || quote.version },
+        sections,
+        overrides,
+      });
+      const key = `${sheetName}!${address}`;
+      if (!workbook.outputEditState.editable.has(key)) {
+        throw Object.assign(new Error('该单元格是标题或公式结果，请修改它所引用的原始参数'), { status: 400 });
+      }
+      const update = remove ? null : outputCellUpdate(req.body, workbook.getWorksheet(sheetName)?.getCell(address));
+      if (!remove && !update) {
+        throw Object.assign(new Error('请输入有效的非负用量和单价'), { status: 400 });
+      }
+      const department = inferOutputSourceDepartment(
+        workbook, sheetName, address, String(req.body?.source_dept || '')
+      );
+      const section = sections.find(item => item.dept === department);
+      if (!section || section.status === 'approved'
+        || !canOperateDepartment(req.user, department) || !canEditDepartment(req.user, department)) {
+        throw Object.assign(new Error('没有修改该部分的权限，或该部分已审核锁定'), { status: 403 });
+      }
+
+      if (remove) {
+        await db.prepare(`DELETE FROM quote_verification_output_overrides
+          WHERE version_id=? AND sheet_name=? AND cell_address=?`).run(versionId, sheetName, address);
+      } else {
+        await db.prepare(`INSERT INTO quote_verification_output_overrides
+          (version_id, sheet_name, cell_address, value_json, updated_by, updated_at)
+          VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(version_id, sheet_name, cell_address) DO UPDATE SET
+            value_json=excluded.value_json, updated_by=excluded.updated_by, updated_at=CURRENT_TIMESTAMP`)
+          .run(versionId, sheetName, address, JSON.stringify(update.storedValue), actorName(req.user));
+      }
+      await db.prepare(`UPDATE quote_verification_sections SET status='filled', filled_by=?,
+        filled_at=datetime('now'), reviewed_by=NULL, reviewed_at=NULL, review_comment=NULL WHERE id=?`)
+        .run(actorName(req.user), section.id);
+      const status = await recalculateVersionStatus(versionId);
+      await db.prepare(`UPDATE quote_verifications SET status='in_progress', updated_by=?,
+        updated_at=datetime('now') WHERE quote_id=?`).run(actorName(req.user), version.quote_id);
+      await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail)
+        VALUES (?, ?, ?, ?, ?)`).run(
+        version.quote_id, department, actorName(req.user),
+        remove ? 'verification_output_reset' : 'verification_output_edit',
+        JSON.stringify({ version_id: versionId, sheet_name: sheetName, cell_address: address,
+          ...(remove ? {} : {
+            value: update.value,
+            ...(update.calculation ? { calculation: {
+              quantity: update.calculation.quantity, unit_price: update.calculation.unitPrice,
+            } } : {}),
+          }) }),
+      );
+      return { department, status };
+    });
+    res.json({ ok: true, source_dept: result.department, status: result.status });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    console.error('[verification-output-cell]', error);
+    res.status(500).json({ error: '核价明细修改失败：' + error.message });
+  }
+}
+
+router.put('/versions/:versionId/output-cell', (req, res) => mutateVerificationOutputCell(req, res));
+router.delete('/versions/:versionId/output-cell', (req, res) => mutateVerificationOutputCell(req, res, true));
 
 router.put('/versions/:versionId/workbook', async (req, res) => {
   const versionId = Number(req.params.versionId);

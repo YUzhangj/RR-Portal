@@ -46,6 +46,16 @@ CREATE TABLE IF NOT EXISTS quote_sections (
 CREATE INDEX IF NOT EXISTS idx_sections_quote ON quote_sections(quote_id);
 CREATE INDEX IF NOT EXISTS idx_sections_dept_status ON quote_sections(dept, status);
 
+CREATE TABLE IF NOT EXISTS quote_output_overrides (
+  quote_id      BIGINT NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
+  sheet_name    TEXT NOT NULL,
+  cell_address  TEXT NOT NULL,
+  value_json    TEXT NOT NULL,
+  updated_by    TEXT,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (quote_id, sheet_name, cell_address)
+);
+
 CREATE TABLE IF NOT EXISTS quote_customer_confirmations (
   quote_id INTEGER PRIMARY KEY REFERENCES quotes(id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'pending',
@@ -197,3 +207,13 @@ CREATE TABLE IF NOT EXISTS quote_verification_sections (
 );
 CREATE INDEX IF NOT EXISTS idx_verification_sections_version
   ON quote_verification_sections(version_id, dept, status);
+
+CREATE TABLE IF NOT EXISTS quote_verification_output_overrides (
+  version_id    BIGINT NOT NULL REFERENCES quote_verification_versions(id) ON DELETE CASCADE,
+  sheet_name    TEXT NOT NULL,
+  cell_address  TEXT NOT NULL,
+  value_json    TEXT NOT NULL,
+  updated_by    TEXT,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (version_id, sheet_name, cell_address)
+);

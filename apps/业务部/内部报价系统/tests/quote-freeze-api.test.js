@@ -34,6 +34,23 @@ test('customer confirmation atomically freezes matching price, header and sectio
   assert.equal((await api(`/sections/${section.id}`,'PUT',{payload:{header:{fx_rmb_hkd:9}},base_filled_at:null})).status,409);
   assert.equal((await api(`/reviews/${section.id}`,'POST',{action:'reject'})).status,409);
   assert.equal((await api(`/reviews/${section.id}/reopen`,'POST',{})).status,409);
+  // 冻结只保护部门原填写与审核流程；报价明细中的修正值独立保存，
+  // 以便报价和核价两个版本都能各自调整而不互相覆盖。
+  const outputBefore=await api(`/quotes/${id}/output-layout`);assert.equal(outputBefore.status,200);
+  assert.equal(outputBefore.body.can_edit_output,true);
+  const editableCell=outputBefore.body.sheets.flatMap(sheet=>sheet.cells.map(cell=>({...cell,sheet_name:sheet.name})))
+    .find(cell=>cell.editable&&!cell.formula&&Number.isFinite(Number(cell.rawValue)));
+  assert.ok(editableCell,'output workbook should expose at least one editable numeric source cell');
+  const originalSectionPayload=(await readDb.prepare("SELECT payload_json FROM quote_sections WHERE quote_id=? AND dept='sales'").get(id)).payload_json;
+  const changedValue=Number(editableCell.rawValue)+0.001;
+  const outputEdit=await api(`/quotes/${id}/output-cell`,'PUT',{
+    sheet_name:editableCell.sheet_name,cell_address:editableCell.address,value:changedValue,
+  });
+  assert.equal(outputEdit.status,200,JSON.stringify(outputEdit.body));
+  assert.equal((await readDb.prepare('SELECT status FROM quote_customer_confirmations WHERE quote_id=?').get(id)).status,'confirmed');
+  assert.equal((await readDb.prepare("SELECT payload_json FROM quote_sections WHERE quote_id=? AND dept='sales'").get(id)).payload_json,originalSectionPayload);
+  assert.equal(JSON.parse((await readDb.prepare('SELECT value_json FROM quote_output_overrides WHERE quote_id=? AND sheet_name=? AND cell_address=?')
+    .get(id,editableCell.sheet_name,editableCell.address)).value_json),changedValue);
   // Saving and confirmation may win in either order, but the successful
   // confirmation must freeze exactly the content present in the original.
   for(let i=0;i<3;i++){

@@ -344,6 +344,7 @@ html[data-verification-ui="precision"] .verification-detail-head {
 html[data-verification-ui="precision"] .verification-detail-head h1 { margin: 1px 0 0; color: var(--precision-ink); font-size: 20px; }
 html[data-verification-ui="precision"] .verification-detail-head p { margin-top: 3px; color: var(--precision-muted); font-size: 11px; }
 html[data-verification-ui="precision"] .verification-detail-head .eyebrow { color: var(--precision-primary-dark); font-size: 9px; letter-spacing: .06em; text-transform: uppercase; }
+html[data-verification-ui="precision"] .verification-detail-actions { gap: 6px; }
 html[data-verification-ui="precision"] .verification-version-toolbar {
   margin-bottom: 0;
   padding: 8px 11px;

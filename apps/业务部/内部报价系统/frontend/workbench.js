@@ -6673,8 +6673,14 @@ function matchFreightByName(name) {
 function renderShipping(host, payload, header, canEdit, onChange, freightMap, priceHkdPerPcs, surtaxHkdPerPcs, amortSharesUsd, sideItemsHkd) {
   freightMap = freightMap || {};
   // 旧草稿或部分导入可能只保存码点/除数，没有场景数组。
+  // 这种情况恢复系统原有的两个默认出货方案；显式保存过的场景（包括只保留出厂价）不覆盖。
   if (!payload.shipping || typeof payload.shipping !== 'object' || Array.isArray(payload.shipping)) payload.shipping = {};
-  if (!Array.isArray(payload.shipping.scenarios)) payload.shipping.scenarios = [];
+  if (!Array.isArray(payload.shipping.scenarios)) {
+    payload.shipping.scenarios = [
+      { name: '盐田40柜', base_rmb: 0, mold_share_rmb: 0 },
+      { name: '盐田5吨车', base_rmb: 0, mold_share_rmb: 0 },
+    ];
+  }
   for (const [key, value] of Object.entries({freight_pct:48, lifting_pct:52, markup_x:1.2, divisor:.98, target_usd:0})) {
     if (payload.shipping[key] == null) payload.shipping[key] = value;
   }
@@ -7178,6 +7184,7 @@ function computeTotals(sections, p) {
 async function renderQuotePage() {
   const id = new URLSearchParams(location.search).get('id');
   $('qid').textContent = id;
+  if ($('btn-output')) $('btn-output').href = `./quote-output.html?id=${encodeURIComponent(id)}`;
   const me = await api('/auth/me');
   if ($('who-chip')) {
     const roleZh = { admin: '管理员', supervisor: '主管', staff: '员工' }[me.role] || me.role;
@@ -7321,13 +7328,19 @@ async function renderQuotePage() {
       tabBar.appendChild(tab);
     });
     if (canSeeSummary) {
-      // 汇总 tab
+      // 部门自动汇总 tab
       const sumTab = document.createElement('div'); sumTab.className = 'dept-tab';
       if (savedTab === '__summary__') sumTab.classList.add('active');
       sumTab.dataset.dept = '__summary__';
       sumTab.innerHTML = '📊 汇总';
       sumTab.onclick = () => switchTab('__summary__');
       tabBar.appendChild(sumTab);
+    }
+    // “汇总与输出”从顶部深蓝导航移到部门导航右侧。
+    const outputLink = $('btn-output');
+    if (outputLink) {
+      outputLink.classList.add('quote-output-link');
+      tabBar.appendChild(outputLink);
     }
     host.appendChild(tabBar);
 
@@ -7581,7 +7594,7 @@ async function renderQuotePage() {
   const exp = document.createElement('div'); exp.className = 'card';
   const approved = sections.filter(s => s.status === 'approved').length;
   const totalDepts = sections.length;
-  exp.innerHTML = `<button id="btn-export" ${approved < totalDepts ? 'disabled' : ''}>导出内部明细表 (${approved}/${totalDepts})</button>
+  exp.innerHTML = `<button id="btn-export" ${approved < totalDepts ? 'disabled' : ''}>导出报价明细 (${approved}/${totalDepts})</button>
     <pre id="export-result" style="margin-top:10px;max-height:300px;overflow:auto"></pre>`;
   host.appendChild(exp);
 
@@ -7621,7 +7634,7 @@ async function renderQuotePage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${data.quote.quote_no || id}_内部报价明细.xlsx`;
+      a.download = `${data.quote.quote_no || id}_报价明细.xlsx`;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
     } catch (e) { alert(e.message); }

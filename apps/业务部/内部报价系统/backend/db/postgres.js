@@ -96,11 +96,11 @@ function transaction(fn) {
 const db = { prepare, exec, transaction, close: () => pool.end(), pool };
 
 const migrationTables = [
-  'factories', 'departments', 'users', 'quotes', 'quote_sections', 'audit_log',
+  'factories', 'departments', 'users', 'quotes', 'quote_sections', 'quote_output_overrides', 'audit_log',
   'ref_tables', 'app_migrations', 'factory_ref_tables', 'user_factories',
   'user_customers', 'user_perms', 'factory_material_price_control', 'factory_material_price_managers',
   'quote_customer_confirmations', 'quote_verifications', 'quote_verification_versions',
-  'quote_verification_sections',
+  'quote_verification_sections', 'quote_verification_output_overrides',
 ];
 
 async function migrateLegacySqlite() {
