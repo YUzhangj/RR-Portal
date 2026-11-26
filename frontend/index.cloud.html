@@ -483,6 +483,12 @@
             </div>
             <div class="plugin-item">
               <div class="plugin-info">
+                <div class="plugin-dot gray" id="skySchedulingDot"></div>
+                <span class="plugin-name">SKY 排期系统</span>
+              </div>
+            </div>
+            <div class="plugin-item">
+              <div class="plugin-info">
                 <div class="plugin-dot gray" id="hyScheduleDot"></div>
                 <span class="plugin-name">河源排期入单</span>
               </div>
@@ -1008,6 +1014,20 @@
 
     <div class="detail-plugin-card">
       <div class="detail-plugin-left">
+        <div class="detail-plugin-icon" style="background:#186e7a;">&#128197;</div>
+        <div>
+          <div class="detail-plugin-name">SKY 排期系统</div>
+          <div class="detail-plugin-desc">上传排期 Excel 和 PO PDF，核对识别结果后导出更新的排期表</div>
+        </div>
+      </div>
+      <div class="detail-plugin-right">
+        <div class="detail-plugin-status"><div class="plugin-dot gray" id="skySchedulingDetailDot"></div> 检查中...</div>
+        <a href="/sky-po-scheduling/" target="_blank" rel="noopener" class="btn btn-primary">打开系统</a>
+      </div>
+    </div>
+
+    <div class="detail-plugin-card">
+      <div class="detail-plugin-left">
         <div class="detail-plugin-icon" style="background:linear-gradient(135deg,#10b981,#059669);">&#128203;</div>
         <div>
           <div class="detail-plugin-name">河源排期入单</div>
@@ -1500,6 +1520,7 @@ async function checkHealth() {
       { name: 'baojia', url: '/baojia/health', dot: 'baojiaDot', detailDot: 'baojiaDetailDot' },
       { name: 'internalQuote', url: '/internal-quote/health', dot: 'internalQuoteDot', detailDot: 'internalQuoteDetailDot' },
       { name: 'tomy', url: '/tomy-paiqi/health', dot: 'tomyDot', detailDot: 'tomyDetailDot' },
+      { name: 'skyScheduling', url: '/sky-po-scheduling/health', dot: 'skySchedulingDot', detailDot: 'skySchedulingDetailDot' },
       { name: 'xingxinInvoice', url: '/xingxin-invoice/health', dot: 'xingxinInvoiceDot', detailDot: 'xingxinInvoiceDetailDot' },
       { name: 'zuruMaster', url: '/zuru-master/health', dot: 'zuruMasterDot', detailDot: 'zuruMasterDetailDot' },
       { name: 'hySchedule', url: '/hy-schedule/health', dot: 'hyScheduleDot', detailDot: 'hyScheduleDetailDot' },

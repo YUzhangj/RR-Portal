@@ -365,6 +365,7 @@ jobs:
               /factory-review/health \
               /indo-shipping/health \
               /tomy-paiqi/health \
+              /sky-po-scheduling/health \
               /zuru-order-system/health \
               /zuru-master/health \
               /voyageplex/api/health \
