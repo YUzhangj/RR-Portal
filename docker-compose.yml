@@ -257,7 +257,7 @@ services:
       DATA_PATH: /app/data
       NODE_ENV: production
     volumes:
-      - ./apps/业务部/SKY排期系统/data:/app/data
+      - sky-po-data:/app/data
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3200/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
@@ -545,3 +545,6 @@ services:
 networks:
   platform-net:
     driver: bridge
+
+volumes:
+  sky-po-data:

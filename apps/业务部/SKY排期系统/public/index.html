@@ -146,7 +146,7 @@
         <div class="icon">&#128203;</div>
         <h3>拖拽排期Excel到这里，或点击选择</h3>
         <p>支持 Sky Castle / TOMY东莞 / TOMY印尼 / JAZ塑胶 / JAZ戏服 排期</p>
-        <input type="file" id="excelInput" accept=".xlsx,.xls">
+        <input type="file" id="excelInput" accept=".xlsx">
       </div>
       <div id="templateInfo" style="display:none; padding:12px 24px; background:#e8f5e9; border-radius:0 0 8px 8px;">
         <span id="templateName" style="font-weight:600"></span>
@@ -233,7 +233,7 @@
     excelZone.addEventListener('drop', e => {
       e.preventDefault();
       excelZone.classList.remove('dragover');
-      const file = Array.from(e.dataTransfer.files).find(f => f.name.match(/\.xlsx?$/i));
+      const file = Array.from(e.dataTransfer.files).find(f => f.name.match(/\.xlsx$/i));
       if (file) uploadTemplate(file);
       else showToast('请上传Excel文件', 'error');
     });
@@ -514,17 +514,18 @@
       saveSession();
     }
 
-    async function saveSession() {
-      if (!currentSession) return;
-      try {
-        await fetch(`./api/po/session/${currentSession}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ results: currentResults }),
+    let pendingSave = Promise.resolve();
+    function saveSession() {
+      const id = currentSession;
+      const body = JSON.stringify({ results: currentResults });
+      pendingSave = pendingSave.catch(() => {}).then(async () => {
+        const response = await fetch(`./api/po/session/${id}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body,
         });
-      } catch (err) {
-        console.error('Save failed:', err);
-      }
+        if (!response.ok) throw new Error('修改未保存，请重试');
+      });
+      pendingSave.catch(err => showToast(err.message, 'error'));
+      return pendingSave;
     }
 
     // ============================================================
@@ -538,6 +539,7 @@
       showLoading('正在写入排期Excel...');
 
       try {
+        await saveSession();
         const resp = await fetch(`./api/po/write/${currentSession}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

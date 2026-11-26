@@ -508,17 +508,17 @@ async function writeToExcel(excelPath, poResults, options = {}) {
   if (type === 'skycastle') {
     pasteWriteSkyCastle(wb, raw, poResults, lookup);
     buildDivertSheet(wb, poResults);
-    return { wb, engine: 'exceljs' };
+    return { wb, type };
 
   } else if (type === 'tomy') {
     pasteWriteTomy(wb, raw, poResults, lookup, options.factory);
     buildDivertSheet(wb, poResults);
-    return { wb, engine: 'exceljs' };
+    return { wb, type };
 
   } else if (type === 'jaz_plastic' || type === 'jaz_costume') {
     pasteWriteJaz(wb, raw, poResults, lookup, type);
     buildDivertSheet(wb, poResults);
-    return { wb, engine: 'exceljs' };
+    return { wb, type };
 
   } else {
     throw new Error('无法识别排期Excel类型');

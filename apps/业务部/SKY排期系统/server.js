@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const pdfParse = require('pdf-parse');
+const { PDFParse } = require('pdf-parse');
 const { v4: uuidv4 } = require('uuid');
 const { autoParse } = require('./parsers');
 const { writeToExcel, detectType } = require('./excel-writer');
@@ -87,7 +87,9 @@ app.post('/api/po/upload', uploadPDF.array('files', 50), async (req, res) => {
     for (const file of req.files) {
       try {
         const buffer = fs.readFileSync(file.path);
-        const pdf = await pdfParse(buffer);
+        const parser = new PDFParse({ data: buffer });
+        let pdf;
+        try { pdf = await parser.getText(); } finally { await parser.destroy(); }
         const parsed = autoParse(pdf.text, file.originalname);
         parsed.fileId = path.basename(file.path, '.pdf');
         results.push(parsed);
@@ -172,6 +174,10 @@ app.post('/api/po/template', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: '请上传排期Excel文件' });
 
+    if (path.extname(req.file.originalname).toLowerCase() !== '.xlsx') {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: '请先将原排期另存为 .xlsx 再上传，以保留完整工作簿' });
+    }
     const templateId = path.basename(req.file.path, path.extname(req.file.path));
     const { type, sheets } = await detectType(req.file.path);
 
@@ -201,10 +207,10 @@ app.post('/api/po/write/:sessionId', async (req, res) => {
     const templatePath = path.join(uploadsDir, templateFiles[0]);
 
     // 用 exceljs 写入，保留原文件所有格式
-    const { wb } = await writeToExcel(templatePath, session.results, { factory });
+    const { wb, type } = await writeToExcel(templatePath, session.results, { factory });
 
-    const exportFile = path.join(exportsDir, `排期_${Date.now()}.xlsx`);
-    await wb.xlsx.writeFile(exportFile);
+    const exportFile = path.join(exportsDir, `排期_${uuidv4()}.xlsx`);
+    await require('./full-workbook').writeFullWorkbook(templatePath, exportFile, wb, type, session.results);
 
     res.download(exportFile, `排期_已入录_${new Date().toLocaleDateString('zh-CN')}.xlsx`, () => {
       try { fs.unlinkSync(exportFile); } catch (e) { /* ignore */ }
@@ -237,7 +243,7 @@ app.post('/api/po/export/:id', async (req, res) => {
       });
     });
 
-    const exportFile = path.join(exportsDir, `PO导出_${Date.now()}.xlsx`);
+    const exportFile = path.join(exportsDir, `PO导出_${uuidv4()}.xlsx`);
     await wb.xlsx.writeFile(exportFile);
 
     res.download(exportFile, `PO排期导出_${new Date().toLocaleDateString('zh-CN')}.xlsx`, () => {
