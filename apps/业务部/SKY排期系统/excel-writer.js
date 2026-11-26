@@ -400,7 +400,7 @@ function detectChanges(existing, item, po) {
   const changes = new Set();
   if (!existing) return changes;
 
-  const newDate = normDate(po.shippingDate || item.dueDate);
+  const newDate = normDate(item.dueDate || po.shippingDate);
   const oldDate = normDate(existing.dueDate);
   if (newDate && oldDate && newDate !== oldDate) changes.add('date');
 
@@ -625,7 +625,7 @@ function pasteWriteSkyCastle(wb, raw, poResults, lookup) {
       // 总接单（新格式）
       const oRow = wsOrder.addRow([]);
       setCellRow(oRow, 1, po.creationDate);
-      setCellRow(oRow, 2, po.shippingDate || item.dueDate);
+      setCellRow(oRow, 2, item.dueDate || po.shippingDate);
       setCellRow(oRow, 3, po.customerPO || '');   // CUSTOMER PO
       setCellRow(oRow, 4, po.poNumber);
       setCellRow(oRow, 5, item.partNo);
@@ -684,8 +684,8 @@ function pasteWriteSkyCastle(wb, raw, poResults, lookup) {
       }
 
       // 日期
-      setCellRow(sRow, cols.custPODate, po.shippingDate || item.dueDate);
-      setCellRow(sRow, cols.rrShipDate, po.shippingDate || item.dueDate);
+      setCellRow(sRow, cols.custPODate, item.dueDate || po.shippingDate);
+      setCellRow(sRow, cols.rrShipDate, item.dueDate || po.shippingDate);
 
       // 新单默认状态
       setCellRow(sRow, cols.fileTime, '欠');
@@ -741,6 +741,19 @@ function pasteWriteSkyCastle(wb, raw, poResults, lookup) {
  *   - "RRM"  → RRM总排期
  *   - 其他 (A/B/河源/空) → 默认 KIK
  */
+function tomyRemarkColumn(sheet, newFormat) {
+  const headers = sheet.getRow(1);
+  const matches = [];
+  headers.eachCell((cell, col) => {
+    if (/^(备注|備註|remarks?)$/i.test(cell.text.trim())) matches.push(col);
+  });
+  const money = newFormat ? [25, 26, 27] : [23, 24, 25];
+  if (matches.length !== 1 || money.includes(matches[0])) {
+    throw new Error(sheet.name + ' 无法确认独立的备注列，请核对表头');
+  }
+  return matches[0];
+}
+
 function pasteWriteTomy(wb, raw, poResults, lookup, factory) {
   const XLSX_utils = require('xlsx').utils;
   const wsRaw = raw.Sheets['总接单'];
@@ -853,7 +866,7 @@ function pasteWriteTomy(wb, raw, poResults, lookup, factory) {
       if (item.divertedFrom) remarkParts.push(`${item.divertedFrom.qty}pcs 从 PO#${item.divertedFrom.sourcePO} 转入`);
       if (item.divertedTo) remarkParts.push(`${item.divertedTo.qty}pcs 转出至 PO#${item.divertedTo.targetPO}`);
       if (remarkParts.length) {
-        const remarkCol = hasNewFormat ? 24 : 24;  // 两种格式备注都在 col 24
+        const remarkCol = tomyRemarkColumn(wsSched, hasNewFormat);
         setCellRow(sRow, remarkCol, remarkParts.join('；'));
       }
       // 智能上色：新单/转单方向/局部变更
@@ -1202,7 +1215,7 @@ function directWriteSkyCastle(wb, excelPath, poResults, lookup) {
 
       // 总接单：只填非公式列
       setCell(wsOrder, orderLastRow, 1, po.creationDate, FILL_YELLOW);
-      setCell(wsOrder, orderLastRow, 2, po.shippingDate || item.dueDate, FILL_YELLOW);
+      setCell(wsOrder, orderLastRow, 2, item.dueDate || po.shippingDate, FILL_YELLOW);
       setCell(wsOrder, orderLastRow, 4, po.poNumber, FILL_YELLOW);
       setCell(wsOrder, orderLastRow, 5, item.partNo, FILL_YELLOW);
       setCell(wsOrder, orderLastRow, 6, item.quantity, FILL_YELLOW);
@@ -1242,8 +1255,8 @@ function directWriteSkyCastle(wb, excelPath, poResults, lookup) {
         setCell(wsSched, r, 13, cartonPack, FILL_YELLOW);
         setCell(wsSched, r, 14, Math.ceil(item.quantity / cartonPack), FILL_YELLOW);
       }
-      setCell(wsSched, r, 15, po.shippingDate || item.dueDate, FILL_YELLOW);
-      setCell(wsSched, r, 16, po.shippingDate || item.dueDate, FILL_YELLOW);
+      setCell(wsSched, r, 15, item.dueDate || po.shippingDate, FILL_YELLOW);
+      setCell(wsSched, r, 16, item.dueDate || po.shippingDate, FILL_YELLOW);
       // 默认状态字段（新单待确认）
       setCell(wsSched, r, 23, '需要(产品贴纸）', FILL_YELLOW);
       setCell(wsSched, r, 25, '欠', FILL_YELLOW);
