@@ -246,6 +246,28 @@ services:
     networks:
       - platform-net
 
+  sky-po-scheduling:
+    build:
+      context: ./apps/业务部/SKY排期系统
+    ports:
+      - "127.0.0.1:3200:3200"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3200"
+      DATA_PATH: /app/data
+      NODE_ENV: production
+    volumes:
+      - sky-po-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3200/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    mem_limit: 1024m
+    restart: unless-stopped
+    networks:
+      - platform-net
+
   tomy-paiqi:
     build:
       context: ./apps/业务部/TOMY排期核对系统
@@ -523,3 +545,6 @@ services:
 networks:
   platform-net:
     driver: bridge
+
+volumes:
+  sky-po-data:
