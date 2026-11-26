@@ -282,6 +282,7 @@ function insertEmptyRows(ws, afterRow, count) {
 function getExistingPOs(raw, type) {
   const XLSX_utils = require('xlsx').utils;
   const poSet = new Set();
+  const currentSky = type === 'skycastle' && raw.Sheets['四代排期'];
 
   // 从总排期/排期sheet读PO列
   let sheets, poCol;
@@ -294,19 +295,23 @@ function getExistingPOs(raw, type) {
   } else if (type === 'jaz_costume') {
     sheets = ['JWC客排', 'JWC仓排'];
     poCol = 7;  // col 8 "现PO" (0-indexed 7)
-  } else {
-    sheets = ['一二代排期', '三代排期', '蛋糕系列'];
+  } else if (type === 'skycastle') {
+    sheets = ['一二代排期', '三代排期', '四代排期', '蛋糕系列'];
     poCol = 6;
+  } else {
+    return poSet;
   }
 
   for (const name of sheets) {
     const ws = raw.Sheets[name];
     if (!ws) continue;
     const data = XLSX_utils.sheet_to_json(ws, { header: 1 });
-    for (let i = 2; i < data.length; i++) {
+    const poIndex = currentSky ? data[0]?.findIndex(value => String(value ?? '').trim() === 'PO号') : poCol;
+    if (poIndex == null || poIndex < 0) continue;
+    for (let i = currentSky ? 1 : 2; i < data.length; i++) {
       const row = data[i];
       if (!row) continue;
-      const v = row[poCol];
+      const v = row[poIndex];
       if (v) poSet.add(String(v).trim());
     }
   }
@@ -472,16 +477,18 @@ function applySmartRowColor(sRow, isNew, item, changes, colMap) {
 
 // 检测文件类型
 // ============================================================
-async function detectType(excelPath) {
-  const XLSX = require('xlsx');
-  const raw = XLSX.readFile(excelPath);
+function detectWorkbookType(raw) {
   const names = raw.SheetNames.map(n => n.toLowerCase());
   let type = 'unknown';
-  if (names.some(n => n.includes('一二代') || n.includes('三代'))) type = 'skycastle';
+  if (names.some(n => n.includes('一二代') || n.includes('三代') || n === '四代排期')) type = 'skycastle';
   else if (names.some(n => n === '总排期' || n.includes('kik总排期') || n.includes('rrm总排期'))) type = 'tomy';
   else if (names.some(n => n.includes('cmw+ner+pkw接单') || n.includes('cmw+ner+pkw客排'))) type = 'jaz_plastic';
   else if (names.some(n => n === 'jwc接单' || n === 'jwc客排')) type = 'jaz_costume';
   return { type, sheets: raw.SheetNames };
+}
+
+async function detectType(excelPath) {
+  return detectWorkbookType(require('xlsx').readFile(excelPath));
 }
 
 // ============================================================
@@ -506,8 +513,15 @@ async function writeToExcel(excelPath, poResults, options = {}) {
   }
 
   if (type === 'skycastle') {
-    pasteWriteSkyCastle(wb, raw, poResults, lookup);
+    if (raw.Sheets['四代排期']) require('./sky-current-layout').writeCurrentLayout(wb, raw, poResults);
+    else pasteWriteSkyCastle(wb, raw, poResults, lookup);
     buildDivertSheet(wb, poResults);
+    const fees = poResults.flatMap(po => (po.fees || []).map(fee => [po.poNumber,fee.description,fee.quantity,fee.unitPrice,fee.amount]));
+    if (fees.length) {
+      const detail = wb.addWorksheet('费用明细');
+      detail.addRow(['PO号','费用项目','数量','单价USD','金额USD']);
+      fees.forEach(row => detail.addRow(row));
+    }
     return { wb, type };
 
   } else if (type === 'tomy') {
@@ -1354,4 +1368,4 @@ function buildDivertSheet(wb, poResults) {
   ws.columns = [{ width: 16 }, { width: 16 }, { width: 12 }, { width: 16 }, { width: 50 }];
 }
 
-module.exports = { writeToExcel, detectType };
+module.exports = { writeToExcel, detectType, detectWorkbookType, getExistingPOs };

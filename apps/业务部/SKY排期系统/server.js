@@ -5,7 +5,7 @@ const fs = require('fs');
 const { PDFParse } = require('pdf-parse');
 const { v4: uuidv4 } = require('uuid');
 const { autoParse } = require('./parsers');
-const { writeToExcel, detectType } = require('./excel-writer');
+const { writeToExcel, detectType, detectWorkbookType, getExistingPOs } = require('./excel-writer');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3200);
@@ -109,21 +109,9 @@ app.post('/api/po/upload', uploadPDF.array('files', 50), async (req, res) => {
         const templateFiles = fs.readdirSync(uploadsDir).filter(f => path.parse(f).name === templateId);
         if (templateFiles.length > 0) {
           const XLSX = require('xlsx');
-          // 简单方式：直接用xlsx读PO列
           const raw = XLSX.readFile(path.join(uploadsDir, templateFiles[0]));
-          const names = raw.SheetNames.map(n => n.toLowerCase());
-          const type = names.some(n => n.includes('一二代')) ? 'skycastle' : 'tomy';
-          const poCol = type === 'tomy' ? 5 : 6;
-          const sheets = type === 'tomy' ? ['总排期'] : ['一二代排期', '三代排期', '蛋糕系列'];
-          const existingPOs = new Set();
-          for (const name of sheets) {
-            const ws = raw.Sheets[name];
-            if (!ws) continue;
-            const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-            for (let i = 2; i < data.length; i++) {
-              if (data[i] && data[i][poCol]) existingPOs.add(String(data[i][poCol]).trim());
-            }
-          }
+          const { type } = detectWorkbookType(raw);
+          const existingPOs = getExistingPOs(raw, type);
           results.forEach(r => { if (existingPOs.has(r.poNumber)) r.isRevised = true; });
         }
       } catch (e) { /* ignore */ }
@@ -210,12 +198,13 @@ app.post('/api/po/write/:sessionId', async (req, res) => {
     const { wb, type } = await writeToExcel(templatePath, session.results, { factory });
 
     const exportFile = path.join(exportsDir, `排期_${uuidv4()}.xlsx`);
-    await require('./full-workbook').writeFullWorkbook(templatePath, exportFile, wb, type, session.results);
+    await require('./full-workbook').writeFullWorkbook(templatePath, exportFile, wb, type, session.results, req.body.dateConfirmation);
 
     res.download(exportFile, `排期_已入录_${new Date().toLocaleDateString('zh-CN')}.xlsx`, () => {
       try { fs.unlinkSync(exportFile); } catch (e) { /* ignore */ }
     });
   } catch (err) {
+    if (err.token && err.changes) return res.status(409).json({error:err.message,dateConfirmation:err.token,changes:err.changes});
     res.status(500).json({ error: err.message });
   }
 });
