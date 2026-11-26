@@ -86,7 +86,7 @@ test('output editing preserves read-only access, permissions, and completed-vers
       await run(`UPDATE quote_sections SET status='approved' WHERE quote_id=?`,[id]);
       assert.equal((await api(endpoint,method,cell)).status,200);
       assert.equal((await one("SELECT status FROM quote_sections WHERE quote_id=? AND dept='molding'",[id])).status,'filled');
-      assert.equal((await one("SELECT COUNT(*) AS n FROM quote_sections WHERE quote_id=? AND status='approved'",[id])).n,7);
+      assert.equal(Number((await one("SELECT COUNT(*) AS n FROM quote_sections WHERE quote_id=? AND status='approved'",[id])).n),7);
     }
   });
   await t.test('a user with page edit but no molding edit cannot write molding output or spoof its department',async()=>{

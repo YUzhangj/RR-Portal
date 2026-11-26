@@ -368,9 +368,9 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
     ?? sheet.getCell(`D${indonesiaFreightRow}`).value), 0);
   assert.ok(Number(sheet.getCell(`D${surtaxRow}`).result
     ?? sheet.getCell(`D${surtaxRow}`).value) > 0);
-  assert.match(sheet.getCell(`D${indonesiaFreightRow}`).formula, /\$O\$7\/100/);
+  assert.equal(sheet.getCell(`D${indonesiaFreightRow}`).formula, undefined);
   assert.equal(sheet.getCell(`D${surtaxRow}`).formula, undefined);
-  assert.equal(workbook.outputEditState.editable.has(`报价明细!D${indonesiaFreightRow}`), false);
+  assert.equal(workbook.outputEditState.editable.has(`报价明细!D${indonesiaFreightRow}`), true);
   assert.equal(workbook.outputEditState.editable.has('报价明细!O7'), true);
   assert.equal(workbook.outputEditState.editable.has(`报价明细!D${surtaxRow}`), true);
   const systemSummaryReferences = [];
@@ -468,6 +468,7 @@ test('报价MOQ取所选材料档位，5K也用于测试费用分摊', async () 
   const args = { quote: { quote_no: 'MATERIAL-MOQ', qty: 3000 }, sections: [
     { dept: 'sales', payload_json: '{}' },
     { dept: 'engineering', payload_json: JSON.stringify({
+      output_moq_from_materials: true,
       hardware: [{ name: '螺丝', qty: 1, unit_price: 1, moq_qty: 5000,
         price_tiers: [{ moq_qty: 3000 }, { moq_qty: 10000 }] }],
       aux_materials: [{ name: '胶圈', qty: 1, unit_price: 1, note: '单位：PCS；适用MOQ：5K；价格来源：人民币含税' }],

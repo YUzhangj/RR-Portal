@@ -1197,7 +1197,7 @@ function renderDepartmentWorkbench() {
     return;
   }
   section._draft = section._draft || parseJson(section.payload_json, {});
-  if (window.IndonesiaFreight) {
+  if (window.IndonesiaFreight && window.IndonesiaFreight.rate(currentSectionsForWorkbench()) !== null) {
     window.IndonesiaFreight.apply(section._draft, window.IndonesiaFreight.rate(currentSectionsForWorkbench()));
   }
   const version = taskState.selected_version;

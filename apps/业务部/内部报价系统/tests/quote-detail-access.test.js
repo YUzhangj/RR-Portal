@@ -159,6 +159,28 @@ test('报价和核价完整明细只允许业务、工程访问，其他部门�
     const quoteData = await api(`/quotes/${id}`);
     assert.equal(quoteData.data.quotation_rates.indo_pct, 0);
   });
+  await t.test('unified freight requires every affected department and rolls back corrupt sources', async () => {
+    for (const [url,table,key,target] of [
+      [`/quotes/${id}/output-cell`,'quote_sections','quote_id',id],
+      [`/verifications/versions/${version}/output-cell`,'quote_verification_sections','version_id',version],
+    ]) {
+      db.prepare("UPDATE user_perms SET can_edit=0 WHERE menu='喷油部'").run();
+      const before=db.prepare(`SELECT * FROM ${table} WHERE ${key}=? ORDER BY id`).all(target);
+      const layout=await api(url.replace('output-cell','output-layout'));
+      assert.equal(layout.data.sheets.find(s=>s.name==='报价明细').cells.find(c=>c.address==='O7').editable,false);
+      assert.equal((await api(url,'PUT',{sheet_name:'报价明细',cell_address:'O7',value:8})).status,403);
+      assert.deepEqual(db.prepare(`SELECT * FROM ${table} WHERE ${key}=? ORDER BY id`).all(target),before);
+      db.prepare("UPDATE user_perms SET can_edit=1 WHERE menu='喷油部'").run();
+      const prior=db.prepare(`SELECT * FROM ${table} WHERE ${key}=? AND dept='sewing'`).get(target);
+      db.prepare(`UPDATE ${table} SET payload_json='[]' WHERE id=?`).run(prior.id);
+      const corrupt=db.prepare(`SELECT * FROM ${table} WHERE ${key}=? ORDER BY id`).all(target);
+      const audits=db.prepare('SELECT COUNT(*) AS n FROM audit_log').get().n;
+      assert.equal((await api(url,'PUT',{sheet_name:'报价明细',cell_address:'O7',value:9})).status,409);
+      assert.deepEqual(db.prepare(`SELECT * FROM ${table} WHERE ${key}=? ORDER BY id`).all(target),corrupt);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM audit_log').get().n,audits);
+      db.prepare(`UPDATE ${table} SET payload_json=? WHERE id=?`).run(prior.payload_json,prior.id);
+    }
+  });
   await t.test('editing permissions and completed-version locks still apply', async () => {
     db.prepare("UPDATE user_perms SET can_edit=0 WHERE menu='啤机部'").run();
     const denied = await api(`/verifications/versions/${version}/output-cell`, 'PUT', {

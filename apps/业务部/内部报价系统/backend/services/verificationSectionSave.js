@@ -37,6 +37,7 @@ function assertSectionRevision(section, revision) {
   }
 }
 async function saveVerificationSection(db, section, payload, submit, actor) {
+  payload = require('./materialMoqPolicy').adoptMaterialMoq(JSON.parse(section.payload_json || '{}'), payload);
   const filledAt = nextSectionTime(section);
   const saved = await db.prepare(`UPDATE quote_verification_sections
     SET payload_json=?, status=CASE WHEN ?=1 THEN 'filled' ELSE status END,

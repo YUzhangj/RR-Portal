@@ -73,7 +73,11 @@ function canEditDepartment(user, dept) {
   return hasMenuPermission(user, '报价单详情', 'edit') && hasMenuPermission(user, menu, 'edit');
 }
 function canViewQuoteDetail(user) {
-  return ['sales', 'engineering'].includes(user?.dept);
+  return ['sales', 'engineering'].includes(user?.dept) && hasMenuPermission(user, '报价单详情', 'view');
+}
+function canEditUnifiedIndonesiaRate(user) {
+  return canViewQuoteDetail(user) && require('../../frontend/indonesia-freight').departments
+    .every(dept => canEditDepartment(user, dept));
 }
 function requireQuoteDetailAccess(req, res, next) {
   if (!canViewQuoteDetail(req.user)) {
@@ -81,4 +85,4 @@ function requireQuoteDetailAccess(req, res, next) {
   }
   next();
 }
-module.exports = { requireAuth, loadUserAndPerms, quoteAccess, hasMenuPermission, canEditDepartment, canViewQuoteDetail, requireQuoteDetailAccess };
+module.exports = { requireAuth, loadUserAndPerms, quoteAccess, hasMenuPermission, canEditDepartment, canViewQuoteDetail, requireQuoteDetailAccess, canEditUnifiedIndonesiaRate };

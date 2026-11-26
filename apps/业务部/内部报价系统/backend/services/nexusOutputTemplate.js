@@ -4,7 +4,7 @@ const { DEFAULT_COSTING_BASIS } = require('./costingBasis');
 const InjectionPricing = require('../../frontend/injection-pricing');
 const { buildWorkbook: buildLegacyWorkbook } = require('./exportInternal');
 const { calculateQuoteCosts } = require('./quoteCostSummary');
-const { applyWorkbookOverrides } = require('./outputWorkbookOverrides');
+const { applyWorkbookOverrides, sourceSignatures } = require('./outputWorkbookOverrides');
 
 // The workbook body intentionally keeps the quotation template pulled from
 // Royal-Regent-Nexus.  Only the surrounding output page uses this system's
@@ -138,6 +138,8 @@ function buildReferenceBlock(ws, molding, sales, assembly, engineering) {
     const price = number(reference.price);
     ws.getCell(1, column).value = materialReferenceLabel(reference);
     ws.getCell(2, column).value = price;
+    ws.getCell(2, column).outputMaterialReference = { index, references: references.materials };
+    ws.getCell(2, column).outputEditable = true;
     ws.getCell(2, column).numFmt = '0.00';
     ws.getCell(3, column).value = 454;
     ws.getCell(3, column).numFmt = '0';
@@ -168,6 +170,7 @@ function buildReferenceBlock(ws, molding, sales, assembly, engineering) {
   const cartons = Array.isArray(carton.cartons) && carton.cartons.length
     ? carton.cartons : (carton.cl || carton.cw || carton.ch ? [carton] : []);
   const hasInnerCarton = cartons.some(box => /内箱/.test(text(box.name || box.label || box.ka_label)));
+  ws.getCell('O7').outputEditable = true;
   const lossPercentage = number(molding.injection_loss_pct, 3);
   const parameterPairs = [
     ['汇率', number(sales.header && sales.header.fx_rmb_hkd, DEFAULT_COSTING_BASIS.exchange.rmb_hkd), '0.00'],
@@ -176,7 +179,7 @@ function buildReferenceBlock(ws, molding, sales, assembly, engineering) {
     ['', null, '0.00'],
     ['料重损耗', lossPercentage / 100, '0%'],
     ['人工', number(assembly.assembly_base_rate, DEFAULT_COSTING_BASIS.assembly.base_rate_hkd), '#,##0'],
-    ['统一印尼运费', number(sales.indo_pct, number(engineering.indo_pct)), '0.00"%"'],
+    ['统一印尼运费', number(sales.indo_pct), '0.00"%"'],
   ];
   parameterPairs.forEach(([label, value, numFmt], index) => {
     if (!label) return;
@@ -222,6 +225,7 @@ function buildQuotationDetail(ws, quote, molding) {
     border: 'medium',
     wrap: false,
   });
+  ws.getCell('O7').outputEditable = true;
   const lossPercentage = number(molding.injection_loss_pct, 3);
   const headers = ['', '', '名称', '料型', '料重(G)', '含料损耗重量(G)', '料价(G)', '机型（A）', '1出几套', '目标数', '啤工', '料金额', '报价啤工'];
   headers.forEach((header, index) => {
@@ -242,7 +246,16 @@ function buildQuotationDetail(ws, quote, molding) {
   for (let index = 0; index < slots; index += 1) {
     const source = rows[index];
     const row = start + index;
-    const materialReference = materialReferenceColumn(molding, source);
+    const materialReferenceCandidate = materialReferenceColumn(molding, source);
+    const refs = referenceRows(molding || {}).materials.slice(0, 18);
+    const exactRefs = source ? refs.map((ref,index) => ({ref,index})).filter(({ref}) =>
+      text(source.material) && text(source.material).toUpperCase() === text(ref.name).toUpperCase()
+      && (!text(source.material_grade) || text(source.material_grade).toUpperCase() === text(ref.model).toUpperCase())) : [];
+    const explicitReference = exactRefs.length === 1 ? ws.getColumn(exactRefs[0].index + 3).letter + '2' : null;
+    const savedMaterialPrice = source?.material_unit_price;
+    const materialReference = materialReferenceCandidate && (savedMaterialPrice == null || savedMaterialPrice === ''
+      || Math.abs(Number(savedMaterialPrice) - Number((number(materialReferenceCandidate.reference.price) / 454).toFixed(4))) < 1e-10)
+      ? materialReferenceCandidate : null;
     const machineReference = machineReferenceColumn(molding, source);
     const weight = source ? number(source.weight_g) : 0;
     const materialPrice = source ? (materialReference
@@ -297,6 +310,7 @@ function buildQuotationDetail(ws, quote, molding) {
       } else {
         cell.value = value;
       }
+      if (source && offset + 1 === 7 && explicitReference) cell.outputReferenceInput = explicitReference;
       if (source) cell.outputSourceIdentity = ['molding', 'injection', index, source];
       styleCell(cell, {
         horizontal: [2, 3, 4].includes(offset + 1) ? 'left' : 'center',
@@ -331,7 +345,7 @@ function buildQuotationDetail(ws, quote, molding) {
     11: rows.reduce((sum, row) => sum + number(InjectionPricing.laborPrice(row)), 0),
     12: rows.reduce((sum, row) => {
       const reference = materialReferenceColumn(molding, row);
-      const price = reference
+      const price = row.material_unit_price != null && row.material_unit_price !== '' ? number(row.material_unit_price) : reference
         ? Number((number(reference.reference.price) / 454).toFixed(4))
         : number(row.material_unit_price);
       return sum + number(row.weight_g) * lossMultiplier * price;
@@ -974,7 +988,8 @@ function referenceMoqTiers(sales, payloads = {}) {
     Object.values(payload?.mixed_products || {}).forEach(visitPayload);
     if (payload?.mixed_shared) visitPayload(payload.mixed_shared);
   };
-  Object.values(payloads).forEach(visitPayload);
+  // 旧单仅查看不切换分摊档位；材料被明确保存后才使用所选 MOQ。
+  if (Object.values(payloads).some(p => p?.output_moq_from_materials === true)) Object.values(payloads).forEach(visitPayload);
   // 所选材料价格必须同时适用；多个起订门槛取最高值。
   const fallback = [selectedMaterialMoqs.length ? Math.max(...selectedMaterialMoqs) : 3000];
   const shipping = sales.shipping || {};
@@ -983,7 +998,8 @@ function referenceMoqTiers(sales, payloads = {}) {
   if (!Array.isArray(candidates)) return fallback;
   const tiers = candidates.map(item => {
     if (item && typeof item === 'object' && item.enabled === false) return 0;
-    return parseMoq(item && typeof item === 'object' ? (item.moq ?? item.qty ?? item.value) : item);
+    const raw = item && typeof item === 'object' ? (item.moq ?? item.qty ?? item.value) : item;
+    return Object.values(payloads).some(p => p?.output_moq_from_materials === true) ? parseMoq(raw) : number(raw);
   }).filter(value => value > 0);
   return tiers.length ? [...new Set(tiers)].sort((left, right) => left - right) : fallback;
 }
@@ -1270,7 +1286,7 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
       numFmt: index === 3 ? '0.0000' : undefined,
     }));
     ws.getCell(row, 4).outputDepartment = componentDepartments[keys[0]] || null;
-    ws.getCell(row, 4).outputSourceIdentity = values;
+    ws.getCell(row, 4).outputSourceIdentity = values.map((value,index) => index === 5 && value ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'excludeFromIndonesiaFreight')) : value);
     const freightEligible = ['imp_mat', 'dom_mat', 'injection_labor', 'blow', 'slush',
       'hardware', 'motor', 'electronic', 'suction', 'glue_bag', 'color_box', 'battery',
       'libao', 'plating', 'flocking', 'other_buy'];
@@ -1293,7 +1309,7 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
     row += 1;
   });
   // 运费和吊柜费由下方“运输方案”按柜型加入，不在上方直接成本里重复计算。
-  if (Number.isFinite(costs.indoFreightBase)) {
+  if (salesPayload.output_unified_indonesia === true && Number.isFinite(costs.indoFreightBase)) {
     components.misc = indonesiaBaseResult * number(salesPayload.indo_pct) / 100
       + number(costs.detailPricing?.surtaxHkd);
   }
@@ -1319,7 +1335,7 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
 
   const cartonUnitPriceCells = [];
   const indonesiaAddress = (componentCells.get('indo_freight') || [])[0];
-  if (indonesiaAddress && Number.isFinite(costs.indoFreightBase)) {
+  if (indonesiaAddress && salesPayload.output_unified_indonesia === true && Number.isFinite(costs.indoFreightBase)) {
     ws.getCell(indonesiaAddress).value = {
       formula: `(${[costs.indoFreightBase, ...indonesiaBaseAdjustments].join('+')})*$O$7/100`,
       result: number(components.misc) - number(costs.detailPricing?.surtaxHkd),
@@ -1565,6 +1581,7 @@ async function buildOutputWorkbook(args) {
     // 旧汇总页只保留为内部兼容数据，不在最终导出的工作表标签中展示。
     legacy.state = 'veryHidden';
   }
+  if (payloads.sales?.output_unified_indonesia !== true) workbook.outputNotice = '当前保留各部门原有印尼运费。统一比例仅在主动修改并保存后生效；修改参考料价并保存会联动对应明细，恢复原值可还原原手填料价。';
   const detail = workbook.addWorksheet('报价明细');
   configureSheet(detail);
   const costs = calculateQuoteCosts(args.quote || {}, args.sections || []);
@@ -1585,6 +1602,20 @@ async function buildOutputWorkbook(args) {
   }];
   workbook.calcProperties = { fullCalcOnLoad: true };
   workbook.outputEditableSheets = new Set(['报价明细']);
+  // Verify old corrections against the exact previous template signature, never an
+  // address-only fallback. Only presentation cells differ for unadopted legacy data.
+  if (!Object.values(payloads).some(p => p?.output_moq_from_materials === true || p?.output_unified_indonesia === true)) {
+    const paper = cartonPaperRates(payloads.engineering || {});
+    const legacyCells = { F7:'内纸箱系数', G7:paper.inner, H7:'平卡系数', I7:paper.flat,
+      N7:'印尼运费', O7:number(molding.indo_pct)/100 };
+    const saved = Object.fromEntries(Object.keys(legacyCells).map(a => [a,detail.getCell(a).value]));
+    try {
+      for (const [address,value] of Object.entries(legacyCells)) detail.getCell(address).value = value;
+      workbook.outputLegacySignatures = sourceSignatures(workbook);
+    } finally {
+      for (const [address,value] of Object.entries(saved)) detail.getCell(address).value = value;
+    }
+  }
   const outputEditState = applyWorkbookOverrides(workbook, args.overrides || []);
   Object.defineProperty(workbook, 'outputEditState', {
     value: outputEditState,

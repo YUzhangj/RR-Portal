@@ -8,22 +8,23 @@ const { boundOverride } = require('../backend/services/outputWorkbookOverrides')
 const { serializeWorkbook } = require('../backend/services/workbookPreview');
 const sections = data => Object.entries(data).map(([dept, payload]) => ({ dept, payload_json: JSON.stringify(payload) }));
 
-test('旧工程比例为8、其他部门为0时采用统一8%，显式0不被默认值覆盖', () => {
+test('历史各部门比例保持原值，主动设置零值不会被默认值覆盖', () => {
   const original = sections({ sales: {}, engineering: { indo_pct: 8 }, molding: { indo_pct: 0,
     mixed_products: { a: { indo_pct: 3 } }, mixed_shared: { indo_pct: 4 } } });
   const normalized = policy.normalizeSections(original);
-  assert.equal(policy.rate(normalized), 8);
-  assert.equal(JSON.parse(normalized[2].payload_json).mixed_products.a.indo_pct, 8);
-  assert.equal(JSON.parse(normalized[2].payload_json).mixed_shared.indo_pct, 8);
+  assert.equal(policy.rate(normalized), null);
+  assert.deepEqual(normalized, original);
+  assert.equal(JSON.parse(normalized[2].payload_json).mixed_products.a.indo_pct, 3);
+  assert.equal(JSON.parse(normalized[2].payload_json).mixed_shared.indo_pct, 4);
   assert.equal(JSON.parse(original[2].payload_json).indo_pct, 0);
-  assert.equal(policy.rate(policy.normalizeSections(original, 0)), 0);
+  assert.equal(JSON.parse(policy.normalizeSections(original, 0)[0].payload_json).indo_pct, 0);
   const hidden = { dept: 'engineering', payload_json: null };
   assert.equal(policy.normalizeSections([hidden], 8)[0].payload_json, null);
 });
 
 test('统一比例显示百分号，公式可编辑且联动运费、成本及报价', async () => {
   const args = { quote: { quote_no: 'UNIFIED-INDO', qty: 1000 }, sections: sections({
-    sales: { header: { fx_rmb_hkd: 1 }, shipping: { scenarios: [{ name: '出厂价', is_factory: true }] } },
+    sales: { output_unified_indonesia: true, indo_pct:8, header: { fx_rmb_hkd: 1 }, shipping: { scenarios: [{ name: '出厂价', is_factory: true }] } },
     engineering: { indo_pct: 8, hardware: [{ name: '五金', qty: 2, unit_price: 10 }],
       aux_materials: [{ name: '辅助', qty: 1, unit_price: 10 }],
       packaging_materials: [{ name: '彩盒', qty: 1, unit_price: 5 }] },
@@ -70,9 +71,9 @@ test('统一比例显示百分号，公式可编辑且联动运费、成本及�
   assert.equal(zero.getWorksheet('报价明细').getCell(freight.address).result, 0);
 });
 
-test('上方料价替代旧料价后，首次预览与重算的运费和直接成本一致', async () => {
+test('历史手填料价保留，首次预览与重算的运费和直接成本一致', async () => {
   const args = { quote: { quote_no: 'REFERENCE-INDO', qty: 1000 }, sections: sections({
-    sales: { indo_pct: 8, shipping: { scenarios: [{ name: '出厂价', is_factory: true }] } },
+    sales: { output_unified_indonesia: true, indo_pct: 8, shipping: { scenarios: [{ name: '出厂价', is_factory: true }] } },
     molding: { material_prices: [{ name: 'ABS', model: '750SW', price: 6.5 }],
       injection: [{ name: '件', material: 'ABS', material_grade: '750SW', weight_g: 10,
         material_unit_price: 0.02, shot_price: 0.4, sets: 1 }] },
@@ -85,7 +86,7 @@ test('上方料价替代旧料价后，首次预览与重算的运费和直接�
     if (row.getCell(2).value === '印尼运费') freight = row.getCell(4);
     if (row.getCell(1).value === '直接成本合计') total = row.getCell(4);
   });
-  assert.ok(Math.abs(freight.result - (10 * 1.03 * 0.0143 + 0.4) * 0.08) < 1e-9);
+  assert.ok(Math.abs(freight.result - (10 * 1.03 * 0.02 + 0.4) * 0.08) < 1e-9);
   for (const cell of [freight, total]) {
     assert.ok(Math.abs(recalculated.getWorksheet('报价明细').getCell(cell.address).result - cell.result) < 1e-9);
   }

@@ -1457,8 +1457,8 @@ test('internal export keeps Indonesian freight only in quotation summary', async
     worksheet.getCell(icRow, 12).value,
     0
   );
-  assert.equal(worksheet.getCell(pacbRow, 12).value.formula, `K${pacbRow}*10/100`);
-  assert.equal(worksheet.getCell(pacbRow, 12).value.result, 4);
+  assert.equal(worksheet.getCell(pacbRow, 12).value.formula, `K${pacbRow}*5/100`);
+  assert.equal(worksheet.getCell(pacbRow, 12).value.result, 2);
 });
 
 test('freight scenarios and production mold costs are exported beside quotation scenarios', async () => {
@@ -1650,7 +1650,7 @@ test('internal export mirrors UI formulas for slush and each departmental Indone
   const slushCostStart = slushSectionRows[slushTitle] + 3;
   const slushSubtotal = slushSectionRows['成本合计'];
   const slushTotal = slushSectionRows['总价 HKD'];
-  const slushIndo = slushSectionRows['印尼运费 2%'];
+  const slushIndo = slushSectionRows['印尼运费 3%'];
   assert.ok(slushTitle);
   assert.equal(slushWorksheet.getCell(slushCostStart, 5).value, '料重(g)');
   assert.equal(slushWorksheet.getCell(slushCostStart + 1, 5).value, '料价 HK$/lb');
@@ -1658,7 +1658,7 @@ test('internal export mirrors UI formulas for slush and each departmental Indone
   assert.equal(slushWorksheet.getCell(slushSubtotal, 3).value.formula, `SUM(C${slushCostStart}:C${slushCostStart + 6})`);
   assert.equal(slushWorksheet.getCell(slushSubtotal + 2, 3).value.formula, `C${slushSubtotal}*C${slushSubtotal + 1}`);
   assert.equal(slushWorksheet.getCell(slushTotal, 3).value.formula, `C${slushSubtotal + 2}*C${slushSubtotal + 3}`);
-  assert.equal(slushWorksheet.getCell(slushIndo, 3).value.formula, `C${slushTotal}*2/100`);
+  assert.equal(slushWorksheet.getCell(slushIndo, 3).value.formula, `C${slushTotal}*3/100`);
   assert.equal(Number(slushWorksheet.getCell(slushTotal, 3).value.result.toFixed(4)), 13.0896);
 
   const paintingWorksheet = workbook.getWorksheet('喷油明细');
@@ -1668,12 +1668,12 @@ test('internal export mirrors UI formulas for slush and each departmental Indone
     if (typeof value === 'string') paintingSectionRows[value] = row.number;
   });
   const paintingHeader = paintingSectionRows['五、二次加工（印喷报价）'] + 1;
-  assert.equal(paintingWorksheet.getCell(paintingHeader, 31).value, '印尼运费 2%');
-  assert.equal(paintingWorksheet.getCell(paintingHeader + 2, 31).value.formula, `AD${paintingHeader + 2}*30%*2/100`);
+  assert.equal(paintingWorksheet.getCell(paintingHeader, 31).value, '印尼运费 6%');
+  assert.equal(paintingWorksheet.getCell(paintingHeader + 2, 31).value.formula, `AD${paintingHeader + 2}*30%*6/100`);
 
   const sewingDetail = workbook.getWorksheet('车缝明细');
-  assert.equal(sewingDetail.getCell(3, 12).value, '印尼运费 2%');
-  assert.equal(sewingDetail.getCell(4, 12).value.formula, 'J4*2/100');
+  assert.equal(sewingDetail.getCell(3, 12).value, '印尼运费 4%');
+  assert.equal(sewingDetail.getCell(4, 12).value.formula, 'J4*4/100');
   assert.equal(sewingDetail.getCell(5, 12).value, 0);
 });
 

@@ -1,6 +1,6 @@
 const express = require('express');
 const db = require('../db');
-const { requireAuth, quoteAccess, hasMenuPermission, canEditDepartment, requireQuoteDetailAccess } = require('../middleware/auth');
+const { requireAuth, quoteAccess, hasMenuPermission, canEditDepartment, requireQuoteDetailAccess, canEditUnifiedIndonesiaRate } = require('../middleware/auth');
 const { quoteFrozen, withQuoteLifecycle } = require('../services/quoteFreeze');
 const { buildWorkbook } = require('../services/exportInternal');
 const { buildOutputWorkbook } = require('../services/nexusOutputTemplate');
@@ -57,7 +57,7 @@ router.get('/:id/output-layout', async (req, res) => {
     const editableCells = new Set([...workbook.outputEditState.editable].filter(key => {
       const bang = key.lastIndexOf('!');
       const dept = inferOutputSourceDepartment(workbook, key.slice(0, bang), key.slice(bang + 1));
-      return !isFrozen && canEditOutputDepartment(req.user, dept)
+      return !isFrozen && (key !== '报价明细!O7' || canEditUnifiedIndonesiaRate(req.user)) && canEditOutputDepartment(req.user, dept)
         && sections.some(section => section.dept === dept);
     }));
     const approvedCount = Number((await db.prepare(
@@ -125,6 +125,9 @@ const saveQuoteOutputCell = async (req, res) => {
   if (!canEditOutputDepartment(req.user, sourceDepartment)) return res.status(403).json({ error: '没有该来源部门的编辑权限' });
   const section = sections.find(row => row.dept === sourceDepartment);
   if (!section) return res.status(409).json({ error: '来源部门不存在' });
+  if (sheetName === '报价明细' && address === 'O7' && !canEditUnifiedIndonesiaRate(req.user)) {
+    return res.status(403).json({ error: '统一印尼运费会修改多个部门，须拥有所有受影响部门的编辑权限' });
+  }
   const targetCell = workbook.getWorksheet(sheetName)?.getCell(address);
   const update = outputCellUpdate(req.body, targetCell);
   if (!update) return res.status(400).json({ error: '请输入有效的非负用量和单价' });
@@ -138,6 +141,7 @@ const saveQuoteOutputCell = async (req, res) => {
     .run(id, sheetName, address, JSON.stringify(boundOverride(workbook, sheetName, address, storedValue, sourceDepartment)), req.user.name);
   await buildOutputWorkbook({quote, sections, overrides: await loadOutputOverrides(id)});
   await syncOutputValueToSource(db, id, workbook, sheetName, address, value, req.user.name);
+  await buildOutputWorkbook({quote, sections:await loadOutputSections(id), overrides:await loadOutputOverrides(id)});
   if (!isFrozen) {
     await db.prepare(`UPDATE quote_sections SET
       status = CASE WHEN status = 'approved' THEN 'filled' ELSE status END,

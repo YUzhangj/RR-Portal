@@ -85,6 +85,8 @@ router.put('/:id', quoteWriteRoute(db, async req => (await db.prepare('SELECT qu
     }
   }
 
+  payload = require('../services/materialMoqPolicy').adoptMaterialMoq(JSON.parse(sec.payload_json || '{}'), payload);
+
   // Reject stale edits, including another tab logged in as the same person.
   const hasBase = Object.hasOwn(req.body || {}, 'base_filled_at');
   const baseFilledAt = req.body?.base_filled_at ?? null;

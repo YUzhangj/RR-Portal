@@ -1086,8 +1086,8 @@ async function loadOutput() {
       : data.can_edit_output
       ? '原始数值可直接修改；公式结果可点击“查看计算 / 修改参数”追溯原部门输入。保存后来源部门将重新待审，小计、合计和利润会同步重算。'
       : data.can_export
-        ? '当前表格只读；需要修改时，请返回对应部门填写。下载文件保留全部工作表。'
-        : '业务和工程可直接修改已审核的来源参数，保存后该来源部门将重新待审；全部审核后可下载最终 Excel。';
+        ? '当前表格只读；点击公式可查看计算过程。下载文件保留全部工作表。'
+        : '当前表格只读：单据已锁定或账号没有编辑权限。全部审核后可下载最终 Excel。';
     if (data.output_notice) element('output-notice').textContent = data.output_notice;
     const stale = data.output_conflicts || [];
     element('clear-stale-output').hidden = !stale.length || !data.can_reset_conflicts;

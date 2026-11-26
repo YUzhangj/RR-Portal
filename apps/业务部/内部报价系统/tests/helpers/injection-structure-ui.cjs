@@ -20,6 +20,7 @@ module.exports = function structureUi(rows) {
   const context = vm.createContext({ window: { InjectionPricing: Pricing },
     document: { createElement: tag => new Element(tag) }, setTimeout() {},
     num: value => Number(value) || 0, alert: message => alerts.push(message) });
+  vm.runInContext(source.slice(source.indexOf('function escapeHtml('), source.indexOf('\n}', source.indexOf('function escapeHtml(')) + 2), context);
   vm.runInContext(source.slice(source.indexOf('function renderTable('), source.indexOf('// 辅助/包装材料 类别')), context);
   vm.runInContext(source.slice(source.indexOf('function formatNum('), source.indexOf('function legacyFormulaAmount(')), context);
   vm.runInContext(source.slice(source.indexOf('function changeInjectionStructure('), source.indexOf('function engineeringMoldSyncKey(')), context);
@@ -40,6 +41,7 @@ module.exports.pricing = function pricingUi(payload) {
   const context = vm.createContext({ payload, window: { InjectionPricing: Pricing },
     document: { createElement: tag => new Element(tag) }, setTimeout() {},
     num: value => Number(value) || 0, onChange() {}, refMolds: [], engineeringImagesForInjection: () => [] });
+  vm.runInContext(source.slice(source.indexOf('function escapeHtml('), source.indexOf('\n}', source.indexOf('function escapeHtml(')) + 2), context);
   vm.runInContext(source.slice(source.indexOf('function renderTable('), source.indexOf('// 辅助/包装材料 类别')), context);
   vm.runInContext(source.slice(source.indexOf('function formatNum('), source.indexOf('function legacyFormulaAmount(')), context);
   vm.runInContext(source.slice(source.indexOf('function engineeringTargetForInjection('), source.indexOf('// 仅补齐明确自动行')), context);

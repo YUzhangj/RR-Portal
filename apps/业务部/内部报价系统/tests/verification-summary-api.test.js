@@ -43,7 +43,7 @@ async function fixture(t){
   for(const id of [1,2,3])await query("INSERT INTO quote_verification_sections(id,version_id,dept,payload_json,status,filled_at,reviewed_at) VALUES(?,?,'sales',?,'approved','2026-10-16T00:00:00.123456Z','2026-10-16T00:00:01.654321Z')",[id,id,initial]);
   const authFile=path.join(__dirname,'../backend/middleware/auth.js'),authModule={exports:{}};
   vm.runInNewContext(fs.readFileSync(authFile,'utf8'),{module:authModule,require:id=>id==='../db'?db:createRequire(authFile)(id)});
-  const auth={quoteAccess:authModule.exports.quoteAccess,requireAuth(req,_res,next){
+  const auth={...authModule.exports,requireAuth(req,_res,next){
     req.user={id:7,username:'fixture',name:'Fixture',dept:req.headers['x-dept']||'sales',role:req.headers['x-role']||'staff',active_factory_code:req.headers['x-factory']||'qingxi',perms:req.headers['x-admin']==='1'?{'账号管理':{can_admin:1}}:{}};next();
   }};
   function route(file){const filename=path.join(__dirname,'../backend/routes',file),module={exports:{}},real=createRequire(filename);vm.runInNewContext(fs.readFileSync(filename,'utf8'),{module,require:id=>id==='../db'?db:id==='../middleware/auth'?auth:real(id)});return module.exports;}
