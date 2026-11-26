@@ -1271,6 +1271,7 @@ function enhanceWorkbook(workbook, { quote, sections }) {
 }
 
 async function buildWorkbook(args) {
+  args = { ...args, sections: require('../../frontend/indonesia-freight').normalizeSections(args.sections) };
   if (require('./mixedQuotation').getConfig(args.sections)?.enabled) {
     return require('./exportMixedQuotation').buildMixedWorkbook(args);
   }

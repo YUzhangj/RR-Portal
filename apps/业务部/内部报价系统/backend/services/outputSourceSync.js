@@ -7,6 +7,7 @@ function text(value) {
 
 function sourceFieldForOutputCell(workbook, sheetName, address) {
   if (sheetName !== '报价明细') return null;
+  if (address === 'O7') return { dept: 'sales', path: ['indo_pct'], unifiedIndonesia: true };
   const worksheet = workbook.getWorksheet(sheetName);
   if (!worksheet) return null;
   const cell = worksheet.getCell(address);
@@ -37,6 +38,11 @@ function setPath(target, path, value) {
 async function syncOutputValueToSource(db, quoteId, workbook, sheetName, address, value, actor) {
   const binding = sourceFieldForOutputCell(workbook, sheetName, address);
   if (!binding) return null;
+  if (binding.unifiedIndonesia) {
+    await syncUnifiedIndonesiaRate(db, quoteId, value, false, actor);
+    await db.prepare('DELETE FROM quote_output_overrides WHERE quote_id=? AND sheet_name=? AND cell_address=?').run(quoteId, sheetName, address);
+    return binding;
+  }
   const section = await db.prepare('SELECT payload_json, filled_at FROM quote_sections WHERE quote_id = ? AND dept = ?')
     .get(quoteId, binding.dept);
   if (!section) return null;
@@ -55,4 +61,25 @@ async function syncOutputValueToSource(db, quoteId, workbook, sheetName, address
   return binding;
 }
 
-module.exports = { sourceFieldForOutputCell, syncOutputValueToSource };
+async function syncUnifiedIndonesiaRate(db, id, percentage, verification = false, actor = null) {
+  if (!Number.isFinite(percentage) || percentage < 0) {
+    throw Object.assign(new Error('请输入有效的非负印尼运费比例'), { status: 400 });
+  }
+  const table = verification ? 'quote_verification_sections' : 'quote_sections';
+  const key = verification ? 'version_id' : 'quote_id';
+  const sections = await db.prepare(`SELECT * FROM ${table} WHERE ${key}=?`).all(id);
+  const policy = require('../../frontend/indonesia-freight');
+  for (const section of sections) {
+    if (!policy.departments.includes(section.dept)) continue;
+    let payload;
+    try { payload = JSON.parse(section.payload_json || '{}'); } catch { payload = {}; }
+    policy.apply(payload, percentage);
+    const filledAt = require('./verificationSectionSave').nextSectionTime(section);
+    await db.prepare(`UPDATE ${table} SET payload_json=?, filled_at=?, filled_by=COALESCE(?, filled_by),
+      status=CASE WHEN status='approved' THEN 'filled' ELSE status END,
+      reviewed_by=NULL, reviewed_at=NULL${verification ? ', review_comment=NULL' : ''} WHERE id=?`)
+      .run(JSON.stringify(payload), filledAt, actor, section.id);
+  }
+}
+
+module.exports = { sourceFieldForOutputCell, syncOutputValueToSource, syncUnifiedIndonesiaRate };

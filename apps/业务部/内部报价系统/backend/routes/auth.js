@@ -1,7 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const db = require('../db');
-const { loadUserAndPerms, requireAuth } = require('../middleware/auth');
+const { loadUserAndPerms, requireAuth, canViewQuoteDetail } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -44,6 +44,7 @@ router.post('/login', async (req, res) => {
     id: me.id, username: me.username, display_name: me.display_name,
     dept: me.dept, dept_name: deptRow ? deptRow.name_cn : me.dept,
     role: me.role, perms: me.perms,
+    can_view_quote_detail: canViewQuoteDetail(me),
     factory_code: me.factory_code, active_factory_code: me.active_factory_code,
     active_factory_name: me.active_factory_name, factories: me.factories,
     can_switch_factory: me.can_switch_factory,
@@ -69,6 +70,7 @@ router.get('/me', async (req, res) => {
     id: me.id, username: me.username, display_name: me.display_name,
     dept: me.dept, dept_name: deptRow ? deptRow.name_cn : me.dept,
     role: me.role, perms: me.perms,
+    can_view_quote_detail: canViewQuoteDetail(me),
     factory_code: me.factory_code, active_factory_code: me.active_factory_code,
     active_factory_name: me.active_factory_name, factories: me.factories,
     can_switch_factory: me.can_switch_factory,

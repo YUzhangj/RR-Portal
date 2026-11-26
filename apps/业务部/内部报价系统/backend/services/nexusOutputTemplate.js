@@ -164,17 +164,22 @@ function buildReferenceBlock(ws, molding, sales, assembly, engineering) {
   // Keep the quote parameters together on one visible reference row.  These
   // values come from the current quote instead of being template constants.
   const paperRates = cartonPaperRates(engineering || {});
+  const carton = engineering?.carton_calc || {};
+  const cartons = Array.isArray(carton.cartons) && carton.cartons.length
+    ? carton.cartons : (carton.cl || carton.cw || carton.ch ? [carton] : []);
+  const hasInnerCarton = cartons.some(box => /内箱/.test(text(box.name || box.label || box.ka_label)));
   const lossPercentage = number(molding.injection_loss_pct, 3);
   const parameterPairs = [
     ['汇率', number(sales.header && sales.header.fx_rmb_hkd, DEFAULT_COSTING_BASIS.exchange.rmb_hkd), '0.00'],
     ['主纸箱系数', paperRates.main, '0.00'],
-    ['内纸箱系数', paperRates.inner, '0.00'],
-    ['平卡系数', paperRates.flat, '0.00'],
+    [hasInnerCarton ? '内纸箱系数' : '', paperRates.inner, '0.00'],
+    ['', null, '0.00'],
     ['料重损耗', lossPercentage / 100, '0%'],
     ['人工', number(assembly.assembly_base_rate, DEFAULT_COSTING_BASIS.assembly.base_rate_hkd), '#,##0'],
-    ['印尼运费', number(molding.indo_pct) / 100, '0.00%'],
+    ['统一印尼运费', number(sales.indo_pct, number(engineering.indo_pct)), '0.00"%"'],
   ];
   parameterPairs.forEach(([label, value, numFmt], index) => {
+    if (!label) return;
     const labelColumn = 2 + index * 2;
     const valueColumn = labelColumn + 1;
     ws.getCell(7, labelColumn).value = label;
@@ -237,11 +242,7 @@ function buildQuotationDetail(ws, quote, molding) {
   for (let index = 0; index < slots; index += 1) {
     const source = rows[index];
     const row = start + index;
-    const materialReferenceCandidate = materialReferenceColumn(molding, source);
-    const savedMaterialPrice = source?.material_unit_price;
-    const materialReference = materialReferenceCandidate && (savedMaterialPrice == null || savedMaterialPrice === ''
-      || Math.abs(Number(savedMaterialPrice) - Number((number(materialReferenceCandidate.reference.price) / 454).toFixed(4))) < 1e-10)
-      ? materialReferenceCandidate : null;
+    const materialReference = materialReferenceColumn(molding, source);
     const machineReference = machineReferenceColumn(molding, source);
     const weight = source ? number(source.weight_g) : 0;
     const materialPrice = source ? (materialReference
@@ -330,7 +331,7 @@ function buildQuotationDetail(ws, quote, molding) {
     11: rows.reduce((sum, row) => sum + number(InjectionPricing.laborPrice(row)), 0),
     12: rows.reduce((sum, row) => {
       const reference = materialReferenceColumn(molding, row);
-      const price = row.material_unit_price != null && row.material_unit_price !== '' ? number(row.material_unit_price) : reference
+      const price = reference
         ? Number((number(reference.reference.price) / 454).toFixed(4))
         : number(row.material_unit_price);
       return sum + number(row.weight_g) * lossMultiplier * price;
@@ -525,6 +526,7 @@ function itemizedFreeRows(payloads, costs) {
       const itemCalculation = calculation(row);
       return [definition.tax, definition.category, displayName(row), itemCalculation.value, [key], {
         itemized: true, calculation: itemCalculation,
+        excludeFromIndonesiaFreight: key === 'electronic' && /^IC$/i.test(text(row.name)),
       }];
     });
     const sum = rows.reduce((total, row) => total + number(row[3]), 0);
@@ -953,19 +955,40 @@ function cartonShippingBasis(engineering) {
   return { cuft, quantity: Math.max(number(box.qty ?? carton.qty, 1), 1) };
 }
 
-function referenceMoqTiers(sales) {
+function referenceMoqTiers(sales, payloads = {}) {
+  const { parseMoq } = require('./parseHardwareSheet');
+  const selectedMaterialMoqs = [];
+  const visitRows = rows => (rows || []).forEach(item => {
+    if (!item || item.is_subtotal) return;
+    const noteMoq = text(item.note).match(/适用\s*MOQ\s*[:：]\s*([\d,.]+\s*[K万]?)/i);
+    const value = parseMoq(item.moq_qty) || parseMoq(item.moq) || parseMoq(noteMoq?.[1]);
+    if (value > 0) selectedMaterialMoqs.push(value);
+    if (Array.isArray(item.children)) visitRows(item.children);
+    if (Array.isArray(item.items)) visitRows(item.items);
+  });
+  const visitPayload = payload => {
+    for (const key of ['hardware', 'aux_materials', 'packaging_materials', 'electronics',
+      'injection', 'blow_items', 'slush_items', 'painting_items', 'sewing_groups']) {
+      if (Array.isArray(payload?.[key])) visitRows(payload[key]);
+    }
+    Object.values(payload?.mixed_products || {}).forEach(visitPayload);
+    if (payload?.mixed_shared) visitPayload(payload.mixed_shared);
+  };
+  Object.values(payloads).forEach(visitPayload);
+  // 所选材料价格必须同时适用；多个起订门槛取最高值。
+  const fallback = [selectedMaterialMoqs.length ? Math.max(...selectedMaterialMoqs) : 3000];
   const shipping = sales.shipping || {};
   const candidates = shipping.moq_tiers ?? shipping.moqs
     ?? (sales.pricing_summary && sales.pricing_summary.moq_tiers);
-  if (!Array.isArray(candidates)) return [3000];
+  if (!Array.isArray(candidates)) return fallback;
   const tiers = candidates.map(item => {
     if (item && typeof item === 'object' && item.enabled === false) return 0;
-    return number(item && typeof item === 'object' ? (item.moq ?? item.qty ?? item.value) : item);
+    return parseMoq(item && typeof item === 'object' ? (item.moq ?? item.qty ?? item.value) : item);
   }).filter(value => value > 0);
-  return tiers.length ? [...new Set(tiers)].sort((left, right) => left - right) : [3000];
+  return tiers.length ? [...new Set(tiers)].sort((left, right) => left - right) : fallback;
 }
 
-function buildReferenceShippingPricing(ws, sales, engineering, startRow, costTotalRow, total) {
+function buildReferenceShippingPricing(ws, sales, engineering, startRow, costTotalRow, total, payloads) {
   const shipping = sales.shipping || {};
   const freightCalc = referenceFreightCalc(sales);
   const supplied = Array.isArray(shipping.scenarios)
@@ -1028,7 +1051,7 @@ function buildReferenceShippingPricing(ws, sales, engineering, startRow, costTot
     result: baseResults[index],
   })), { bold: true, numFmt: '0.0000' });
 
-  const moqTiers = referenceMoqTiers(sales);
+  const moqTiers = referenceMoqTiers(sales, payloads);
   const quoteRows = [];
   const usdRows = [];
   const includedRows = [];
@@ -1221,6 +1244,8 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
   let row = startRow + 2;
   const rendered = detailRows.length ? detailRows : [['', '成本', '当前报价暂无成本数据', 0]];
   const componentCells = new Map();
+  const indonesiaBaseAdjustments = [];
+  let indonesiaBaseResult = number(costs.indoFreightBase);
   const upperCostLinks = upperQuotationCostLinks(ws, payloads.molding || {}, afterRow);
   for (const key of ['imp_mat', 'dom_mat', 'injection_labor']) {
     components[key] = upperCostLinks.get(key).result;
@@ -1232,7 +1257,7 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
     electronic: 'electronic', hardware: 'engineering', motor: 'engineering', suction: 'engineering',
     glue_bag: 'engineering', color_box: 'engineering', battery: 'engineering', libao: 'engineering',
     plating: 'engineering', flocking: 'engineering', other_buy: 'engineering', carton: 'engineering',
-    indo_freight: 'molding', surtax: 'sales',
+    indo_freight: 'sales', surtax: 'sales',
   };
   rendered.forEach(values => {
     const keys = values[4] || [];
@@ -1246,6 +1271,16 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
     }));
     ws.getCell(row, 4).outputDepartment = componentDepartments[keys[0]] || null;
     ws.getCell(row, 4).outputSourceIdentity = values;
+    const freightEligible = ['imp_mat', 'dom_mat', 'injection_labor', 'blow', 'slush',
+      'hardware', 'motor', 'electronic', 'suction', 'glue_bag', 'color_box', 'battery',
+      'libao', 'plating', 'flocking', 'other_buy'];
+    const freightFactor = keys.some(key => freightEligible.includes(key)) ? 1
+      : keys.some(key => ['painting_labor', 'paint_material'].includes(key)) ? 0.3 : 0;
+    if (freightFactor && !values[5]?.excludeFromIndonesiaFreight) {
+      const original = number(values[3]);
+      indonesiaBaseAdjustments.push(`${freightFactor}*(D${row}-(${original}))`);
+      indonesiaBaseResult += freightFactor * ((formulaResult(ws.getCell(row, 4)) || 0) - original);
+    }
     if (values[5]?.calculation) {
       Object.defineProperty(ws.getCell(row, 4), 'outputCalculation', {
         value: { ...values[5].calculation }, writable: true, configurable: true,
@@ -1258,6 +1293,10 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
     row += 1;
   });
   // 运费和吊柜费由下方“运输方案”按柜型加入，不在上方直接成本里重复计算。
+  if (Number.isFinite(costs.indoFreightBase)) {
+    components.misc = indonesiaBaseResult * number(salesPayload.indo_pct) / 100
+      + number(costs.detailPricing?.surtaxHkd);
+  }
   const total = costComponentTotal(costs)
     - number(components.freight)
     - number(components.cabinet);
@@ -1279,6 +1318,13 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
   };
 
   const cartonUnitPriceCells = [];
+  const indonesiaAddress = (componentCells.get('indo_freight') || [])[0];
+  if (indonesiaAddress && Number.isFinite(costs.indoFreightBase)) {
+    ws.getCell(indonesiaAddress).value = {
+      formula: `(${[costs.indoFreightBase, ...indonesiaBaseAdjustments].join('+')})*$O$7/100`,
+      result: number(components.misc) - number(costs.detailPricing?.surtaxHkd),
+    };
+  }
   const cartonMetrics = {};
   const cartonEnd = buildCartonPanel(
     ws, payloads.engineering || {}, startRow + 1, cartonUnitPriceCells, cartonMetrics
@@ -1296,7 +1342,7 @@ function buildReferenceLowerSections(ws, quote, sections, payloads, afterRow, so
   const laborTotal = number(components.injection_labor) + number(components.painting_labor) + number(components.assembly_labor);
   const lowerStart = Math.max(row, cartonEnd) + 2;
   const pricing = buildReferenceShippingPricing(
-    ws, salesPayload, payloads.engineering || {}, lowerStart, costTotalRow, total
+    ws, salesPayload, payloads.engineering || {}, lowerStart, costTotalRow, total, payloads
   );
   for (let r = lowerStart; r <= pricing.endRow; r++) ws.getRow(r).eachCell(c => { c.outputDepartment = 'sales'; });
   const selectedQuoteRow = pricing.quoteRows[pricing.quoteRows.length - 1];
@@ -1497,6 +1543,7 @@ function configureSheet(ws) {
 }
 
 async function buildOutputWorkbook(args) {
+  args = { ...args, sections: require('../../frontend/indonesia-freight').normalizeSections(args.sections) };
   const workbook = await buildLegacyWorkbook(args);
   const payloads = parseSections(args.sections);
   if (payloads.sales?.mixed_quote?.enabled || payloads.sales?.legacy_import?.excel_model

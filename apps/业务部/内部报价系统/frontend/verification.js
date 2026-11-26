@@ -971,7 +971,7 @@ function renderDetail() {
         <p>${esc(quote.customer || '—')} · ${baselineTitle()}建立于 ${esc(formatDate(taskState.baseline.frozen_at))}</p></div>
       <div class="verification-detail-actions">
         <span class="verification-status status-${esc(version.status)}">${esc(versionTitle(version))} · ${VERSION_STATUS[version.status]}</span>
-        <button id="verification-export-detail" class="mini" ${canExportDetail ? '' : 'disabled'}>导出核价明细 (${approvedCount}/${totalCount})</button>
+        <button id="verification-export-detail" class="mini ${me.can_view_quote_detail ? '' : 'hidden'}" ${canExportDetail ? '' : 'disabled'}>导出核价明细 (${approvedCount}/${totalCount})</button>
       </div>
     </header>
     <div class="verification-version-toolbar">
@@ -1052,6 +1052,7 @@ function renderWorkflow() {
   const navigationHost = $('verification-workflow-navigation');
   const version = taskState.selected_version;
   const departments = taskState.sections;
+  if (activeDepartment === '__output__' && !me.can_view_quote_detail) activeDepartment = me.dept;
   const approvedCount = departments.filter(section => section.status === 'approved').length;
   const totalCount = departments.length;
   if (!['__summary__', '__output__'].includes(activeDepartment)
@@ -1069,7 +1070,7 @@ function renderWorkflow() {
         ${esc(section.dept_name)}<small class="status-${esc(section.status)}">${SECTION_STATUS[section.status]}</small>
       </button>`).join('')}
       <button data-verification-dept="__summary__" class="verification-summary-tab ${activeDepartment === '__summary__' ? 'active' : ''}">汇总与减税<small>自动汇总</small></button>
-      <button data-verification-dept="__output__" class="verification-output-tab ${activeDepartment === '__output__' ? 'active' : ''}">核价明细表<small>表格预览</small></button>
+      ${me.can_view_quote_detail ? `<button data-verification-dept="__output__" class="verification-output-tab ${activeDepartment === '__output__' ? 'active' : ''}">核价明细表<small>表格预览</small></button>` : ''}
     </div>`;
   host.innerHTML = '<div id="verification-department-workbench"></div>';
   document.querySelectorAll('[data-verification-dept]').forEach(button => {
@@ -1196,6 +1197,9 @@ function renderDepartmentWorkbench() {
     return;
   }
   section._draft = section._draft || parseJson(section.payload_json, {});
+  if (window.IndonesiaFreight) {
+    window.IndonesiaFreight.apply(section._draft, window.IndonesiaFreight.rate(currentSectionsForWorkbench()));
+  }
   const version = taskState.selected_version;
   const editable = Boolean(section.can_edit) && !['completed', 'cancelled'].includes(version.status);
   const renderer = rendererForDepartment(section.dept);
@@ -1362,6 +1366,10 @@ function renderVersionSummary(host) {
 }
 
 function renderVersionOutput(host) {
+  if (!me.can_view_quote_detail) {
+    host.innerHTML = '<div class="card summary-empty">报价明细仅限业务部和工程部查看</div>';
+    return;
+  }
   const version = taskState.selected_version;
   const previewUrl = `./quote-output.html?verification_version_id=${encodeURIComponent(version.id)}&embed=1&ui=20261123-output-edit-r3`;
   host.innerHTML = `<article class="card verification-version-summary verification-output-card">

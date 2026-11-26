@@ -391,4 +391,4 @@ async function parseWorkbook(buffer, options = {}) {
   }
 }
 
-module.exports = { parseWorkbook, parseSheets };
+module.exports = { parseWorkbook, parseSheets, parseMoq };

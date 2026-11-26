@@ -165,7 +165,7 @@ test('direct costing stays separate from quotation reports and preserves real wo
     }
     const preview = await api(`/verifications/versions/${exportVersionId}/output-layout`);
     assert.equal(preview.status, 200, JSON.stringify(preview.body));
-    assert.equal(preview.body.can_edit_output, false);
+    assert.equal(preview.body.can_edit_output, true);
     assert.equal(preview.body.can_export, true);
     const previewDetail = preview.body.sheets.find(sheet => sheet.name === '报价明细');
     assert.ok(previewDetail);

@@ -14,11 +14,11 @@ test('output material unit price links to the matching upper reference when save
  assert.equal(c.formula,'C4');
  assert.equal(c.result,Number((6.5/454).toFixed(4)));
 });
-test('output preserves a different saved manual price even when an upper reference matches',async()=>{
+test('output links the matching upper reference even when the old saved price differs',async()=>{
  const wb=await buildOutputWorkbook(args([row('partA',10)]));
  const c=wb.getWorksheet('报价明细').getCell('G11');
- assert.equal(c.formula,undefined);
- assert.equal(c.value,0.02);
+ assert.equal(c.formula,'C4');
+ assert.equal(c.result,Number((6.5/454).toFixed(4)));
 });
 test('output preserves saved manual material unit price when no upper reference matches',async()=>{
  const unmatched=row('partA',10);

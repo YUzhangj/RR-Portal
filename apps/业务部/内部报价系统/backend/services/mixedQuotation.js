@@ -42,6 +42,7 @@ function amortizedUsd(engineering, quoteQty) {
     + molds.number(mc.testing_fee_usd ?? mc.testing_fee_rmb ?? 0, '测试费') / molds.number(mc.testing_amortization_qty ?? 2000, '测试费分摊数量', true);
 }
 function calculateMixedQuote(quote, sections, { strict = false } = {}) {
+  sections = require('../../frontend/indonesia-freight').normalizeSections(sections);
   const data = payloads(sections), config = data.sales?.mixed_quote;
   if (!config?.enabled) return null;
   data.molding = molds.engineeringCatalog(data.molding || {}, data.engineering);
@@ -81,6 +82,7 @@ function calculateMixedQuote(quote, sections, { strict = false } = {}) {
     const result = calculateSingleQuoteCosts(quote, projectSections(sections, product.id, quote.qty), {mixed:true});
     const sharedLabor = data.molding?.parts_catalog ? 0 : molding.productCosts[product.id];
     result.components.injection_labor += sharedLabor;
+    result.indoFreightBase = Number(result.indoFreightBase || 0) + sharedLabor;
     // 共模啤价也参与该款设置的印尼运费基数。
     const indo = sharedLabor * Number(data.molding?.mixed_products?.[product.id]?.indo_pct || 0) / 100;
     result.components.misc += indo;
@@ -117,7 +119,9 @@ function calculateMixedQuote(quote, sections, { strict = false } = {}) {
     freight_scenarios: freightScenarios.map(s => ({ ...s, final_usd: (beforeSurtax + (s.total - freight) * markup / divisor / fx) * (1 + surtax * surtaxMarkup / divisor) })),
     selected_container: selectedFreight.key,
     sewing_taxable: Object.fromEntries(['sewing_hair','sewing_cloth'].map(key=>[key, common.sewing_taxable[key]+products.reduce((n,p)=>n+p.sewing_taxable[key]*p.weight*costUnits,0)])),
-    common_sewing_taxable: common.sewing_taxable, components, hasSourceData: true, pricing: { fx, divisor, markup, surtax_markup: surtaxMarkup, tax_mode: taxMode, fixed_charge_hkd: fixedCharge, surtax_pct: surtax * 100 } };
+    common_sewing_taxable: common.sewing_taxable, components, hasSourceData: true,
+    indoFreightBase: Number(common.indoFreightBase || 0) + products.reduce((n, p) => n + p.indoFreightBase * p.weight * costUnits, 0),
+    pricing: { fx, divisor, markup, surtax_markup: surtaxMarkup, tax_mode: taxMode, fixed_charge_hkd: fixedCharge, surtax_pct: surtax * 100 } };
   const amounts = [result.average_usd, result.average_hkd, result.common_usd, result.before_surtax_usd,
     result.surcharge_usd, result.final_usd, result.final_hkd, result.quotedPrice,
     ...Object.values(components), ...products.flatMap(p => [p.base_hkd, p.price_hkd, p.price_usd]),

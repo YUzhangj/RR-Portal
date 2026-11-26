@@ -1,6 +1,6 @@
 const express = require('express');
 const db = require('../db');
-const { requireAuth, quoteAccess, hasMenuPermission, canEditDepartment } = require('../middleware/auth');
+const { requireAuth, quoteAccess, hasMenuPermission, canEditDepartment, requireQuoteDetailAccess } = require('../middleware/auth');
 const { quoteFrozen, withQuoteLifecycle } = require('../services/quoteFreeze');
 const { buildWorkbook } = require('../services/exportInternal');
 const { buildOutputWorkbook } = require('../services/nexusOutputTemplate');
@@ -17,6 +17,7 @@ const { vqCustomerProfile } = require('../services/customerProfiles');
 
 const router = express.Router();
 router.use(requireAuth);
+router.use(['/:id/output-layout', '/:id/output-cell', '/:id/output-export', '/:id/export'], requireQuoteDetailAccess);
 
 const loadOutputOverrides = quoteId => db.prepare(
   `SELECT sheet_name, cell_address, value_json, updated_by, updated_at
@@ -57,7 +58,7 @@ router.get('/:id/output-layout', async (req, res) => {
       const bang = key.lastIndexOf('!');
       const dept = inferOutputSourceDepartment(workbook, key.slice(0, bang), key.slice(bang + 1));
       return !isFrozen && canEditOutputDepartment(req.user, dept)
-        && sections.some(section => section.dept === dept && section.status !== 'approved');
+        && sections.some(section => section.dept === dept);
     }));
     const approvedCount = Number((await db.prepare(
       "SELECT COUNT(*) AS n FROM quote_sections WHERE quote_id = ? AND status = 'approved'"
@@ -82,7 +83,7 @@ router.get('/:id/output-layout', async (req, res) => {
       can_export: approvedCount >= totalDepts && !workbook.outputEditState.conflicts.length,
       output_conflicts: workbook.outputEditState.conflicts,
       can_reset_conflicts: !isFrozen && workbook.outputEditState.conflicts.every(c => canEditOutputDepartment(req.user, c.source_department)
-        && sections.some(s => s.dept === c.source_department && s.status !== 'approved')),
+        && sections.some(s => s.dept === c.source_department)),
       can_edit_output: editableCells.size > 0,
       output_notice: workbook.outputNotice || null,
       generated_at: new Date().toISOString(),
@@ -123,7 +124,7 @@ const saveQuoteOutputCell = async (req, res) => {
   const sourceDepartment = inferOutputSourceDepartment(workbook, sheetName, address);
   if (!canEditOutputDepartment(req.user, sourceDepartment)) return res.status(403).json({ error: '没有该来源部门的编辑权限' });
   const section = sections.find(row => row.dept === sourceDepartment);
-  if (!section || section.status === 'approved') return res.status(409).json({ error: '该部门已审核，请先退回后再修改' });
+  if (!section) return res.status(409).json({ error: '来源部门不存在' });
   const targetCell = workbook.getWorksheet(sheetName)?.getCell(address);
   const update = outputCellUpdate(req.body, targetCell);
   if (!update) return res.status(400).json({ error: '请输入有效的非负用量和单价' });
@@ -152,7 +153,8 @@ const saveQuoteOutputCell = async (req, res) => {
       ...(update.calculation ? { calculation: {
         quantity: update.calculation.quantity, unit_price: update.calculation.unitPrice,
       } } : {}),
-      output_only: isFrozen,
+      output_only: isFrozen, review_reopened: section.status === 'approved',
+      previous_reviewed_by: section.reviewed_by, previous_reviewed_at: section.reviewed_at,
     }));
   res.json({ ok: true, source_dept: sourceDepartment, revision: outputRevision(await loadOutputSections(id), await loadOutputOverrides(id), false) });
 };
@@ -176,14 +178,16 @@ const resetQuoteOutputCell = async (req, res) => {
   const workbook = await buildOutputWorkbook({ quote, sections });
   const stored = await db.prepare('SELECT value_json FROM quote_output_overrides WHERE quote_id=? AND sheet_name=? AND cell_address=?').get(id, sheetName, address);
   let previous; try { previous = JSON.parse(stored?.value_json || 'null'); } catch (_) {}
-  if (!stored) return res.json({ ok: true });
   const sourceDepartment = previous?.source_department || inferOutputSourceDepartment(workbook, sheetName, address);
   if (!canEditOutputDepartment(req.user, sourceDepartment)) return res.status(403).json({ error: '没有该来源部门的编辑权限' });
+  if (!stored) return res.json({ ok: true });
   const section = sections.find(row => row.dept === sourceDepartment);
-  if (!section || section.status === 'approved') return res.status(409).json({ error: '该部门已审核，请先退回后再修改' });
+  if (!section) return res.status(409).json({ error: '来源部门不存在' });
   const removed = await db.prepare('DELETE FROM quote_output_overrides WHERE quote_id = ? AND sheet_name = ? AND cell_address = ?')
     .run(id, sheetName, address);
   if (removed.changes) {
+    await db.prepare(`UPDATE quote_sections SET status=CASE WHEN status='approved' THEN 'filled' ELSE status END,
+      reviewed_by=NULL, reviewed_at=NULL WHERE quote_id=? AND dept=?`).run(id, sourceDepartment);
     await db.prepare("UPDATE quotes SET status = 'drafting' WHERE id = ? AND status IN ('fully_approved', 'exported')").run(id);
     await db.prepare(`INSERT INTO audit_log (quote_id, dept, actor, action, detail) VALUES (?, ?, ?, 'output_reset', ?)`)
       .run(id, sourceDepartment, req.user.name, JSON.stringify({ sheet_name: sheetName, cell_address: address }));
