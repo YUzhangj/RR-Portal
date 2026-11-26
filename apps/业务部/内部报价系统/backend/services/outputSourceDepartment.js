@@ -27,7 +27,8 @@ function detailDepartment(worksheet, cell) {
   if (row === 7) {
     if (col === 3) return 'sales';
     if ([5, 7, 9].includes(col)) return 'engineering';
-    if (col === 11 || col === 15) return 'molding';
+    if (col === 11) return 'molding';
+    if (col === 15) return 'sales';
     if (col === 13) return 'assembly';
   }
 

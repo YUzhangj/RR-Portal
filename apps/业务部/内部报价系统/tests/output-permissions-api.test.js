@@ -4,7 +4,7 @@ const {spawn} = require('node:child_process');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), net = require('node:net');
 const {DatabaseSync} = require('node:sqlite');
 
-test('output editing preserves read-only access, permissions, and review locks', {timeout: 60000}, async t => {
+test('output editing preserves read-only access, permissions, and completed-version locks', {timeout: 60000}, async t => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'direct-costing-api-'));
   const socket = net.createServer();
   await new Promise(resolve => socket.listen(0, '127.0.0.1', resolve));
@@ -81,10 +81,12 @@ test('output editing preserves read-only access, permissions, and review locks',
     assert.deepEqual(await rows('SELECT * FROM quote_sections WHERE quote_id=? ORDER BY id',[id]),before);
     assert.equal((await one('SELECT status FROM quotes WHERE id=?',[id])).status,'fully_approved');
   });
-  await t.test('approved departments cannot be changed or reset through output APIs',async()=>{
+  await t.test('editing or resetting an approved department reopens only that source for review',async()=>{
     for(const method of ['PUT','DELETE']) {
       await run(`UPDATE quote_sections SET status='approved' WHERE quote_id=?`,[id]);
-      assert.equal((await api(endpoint,method,cell)).status,409);
+      assert.equal((await api(endpoint,method,cell)).status,200);
+      assert.equal((await one("SELECT status FROM quote_sections WHERE quote_id=? AND dept='molding'",[id])).status,'filled');
+      assert.equal(Number((await one("SELECT COUNT(*) AS n FROM quote_sections WHERE quote_id=? AND status='approved'",[id])).n),7);
     }
   });
   await t.test('a user with page edit but no molding edit cannot write molding output or spoof its department',async()=>{
@@ -107,7 +109,7 @@ test('output editing preserves read-only access, permissions, and review locks',
     assert.equal(layout.body.sheets.find(s=>s.name==='报价明细').cells.find(c=>c.address==='C2').rawValue,12);
     assert.equal((await api(endpoint,'DELETE',cell)).status,200);
     assert.equal((await rows('SELECT * FROM quote_output_overrides WHERE quote_id=?',[id])).length,0);
-    assert.equal((await rows("SELECT * FROM audit_log WHERE quote_id=? AND action='output_reset'",[id])).length,1);
+    assert.equal((await rows("SELECT * FROM audit_log WHERE quote_id=? AND action='output_reset'",[id])).length,2);
   });
   await t.test('stale pages cannot overwrite newer corrections, and a failing batch rolls back all cells',async()=>{
     const before=await api(`/quotes/${id}/output-layout`);
@@ -144,7 +146,8 @@ test('output editing preserves read-only access, permissions, and review locks',
     assert.deepEqual(await rows('SELECT * FROM quote_verification_output_overrides WHERE version_id=?',[vid]),snapshot);
     assert.deepEqual(await rows('SELECT * FROM quote_sections WHERE quote_id=? ORDER BY id',[made.body.id]),original);
     await run("UPDATE quote_verification_sections SET status='approved' WHERE version_id=? AND dept='molding'",[vid]);
-    assert.equal((await api(path,'DELETE',cell)).status,403);
+    assert.equal((await api(path,'DELETE',cell)).status,200);
+    assert.equal((await one("SELECT status FROM quote_verification_sections WHERE version_id=? AND dept='molding'",[vid])).status,'filled');
     await run("UPDATE quote_verification_versions SET status='completed' WHERE id=?",[vid]);
     assert.equal((await api(path,'PUT',cell)).status,409);
   });

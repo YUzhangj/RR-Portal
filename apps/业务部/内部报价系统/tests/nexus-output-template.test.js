@@ -88,13 +88,13 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
   assert.equal(sheet.getCell('C7').value, 0.85);
   assert.equal(sheet.getCell('D7').value, '主纸箱系数');
   assert.equal(sheet.getCell('E7').value, 2.75);
-  assert.equal(sheet.getCell('F7').value, '内纸箱系数');
-  assert.equal(sheet.getCell('G7').value, 2.75);
+  assert.equal(sheet.getCell('F7').value, null);
+  assert.equal(sheet.getCell('G7').value, null);
   assert.equal(sheet.getCell('J7').value, '料重损耗');
   assert.equal(sheet.getCell('K7').value, 0.03);
   assert.equal(sheet.getCell('K7').numFmt, '0%');
-  assert.equal(sheet.getCell('H7').value, '平卡系数');
-  assert.equal(sheet.getCell('I7').value, 2.75);
+  assert.equal(sheet.getCell('H7').value, null);
+  assert.equal(sheet.getCell('I7').value, null);
   assert.equal(sheet.getCell('A8').value, '双层巴士报价');
   assert.equal(sheet.getCell('A9').value, '双层巴士-明细');
   assert.equal(sheet.getCell('C10').value, '名称');
@@ -371,6 +371,7 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
   assert.equal(sheet.getCell(`D${indonesiaFreightRow}`).formula, undefined);
   assert.equal(sheet.getCell(`D${surtaxRow}`).formula, undefined);
   assert.equal(workbook.outputEditState.editable.has(`报价明细!D${indonesiaFreightRow}`), true);
+  assert.equal(workbook.outputEditState.editable.has('报价明细!O7'), true);
   assert.equal(workbook.outputEditState.editable.has(`报价明细!D${surtaxRow}`), true);
   const systemSummaryReferences = [];
   sheet.eachRow(row => row.eachCell(cell => {
@@ -438,4 +439,62 @@ test('最终导出默认打开报价明细并隐藏旧系统汇总', async () =>
     changedQuotedPrice - finalDirectCostCell.result
   )) < 1e-9);
   assert.ok(overriddenWorkbook.outputEditState.overridden.has(`报价明细!${cartonLengthCell.address}`));
+});
+
+test('有内箱时保留实际使用的系数，修改后箱价仍联动', async () => {
+  const args = {
+    quote: { quote_no: 'INNER-BOX', product_name: '内箱系数', qty: 1000 },
+    sections: [{ dept: 'engineering', payload_json: JSON.stringify({
+      carton_calc: { cartons: [{ name: '内箱', cl: 10, cw: 8, ch: 6, qty: 4, paper_rate: 2.75 }] },
+    }) }],
+  };
+  const workbook = await buildOutputWorkbook(args);
+  const sheet = workbook.getWorksheet('报价明细');
+  assert.equal(sheet.getCell('F7').value, '内纸箱系数');
+  assert.equal(sheet.getCell('G7').value, 2.75);
+  let priceCell;
+  sheet.eachRow(row => row.eachCell(cell => {
+    if (cell.formula?.includes('*$G$7/1000')) priceCell = cell;
+  }));
+  assert.ok(priceCell);
+  const changed = await buildOutputWorkbook({ ...args, overrides: [{
+    sheet_name: '报价明细', cell_address: 'G7', value_json: JSON.stringify(require('../backend/services/outputWorkbookOverrides').boundOverride(workbook, '报价明细', 'G7', 5.5, 'engineering')),
+  }] });
+  const nextPrice = changed.getWorksheet('报价明细').getCell(priceCell.address);
+  assert.ok(Math.abs(nextPrice.result - priceCell.result * 2) < 0.0001);
+});
+
+test('报价MOQ取所选材料档位，5K也用于测试费用分摊', async () => {
+  const args = { quote: { quote_no: 'MATERIAL-MOQ', qty: 3000 }, sections: [
+    { dept: 'sales', payload_json: '{}' },
+    { dept: 'engineering', payload_json: JSON.stringify({
+      output_moq_from_materials: true,
+      hardware: [{ name: '螺丝', qty: 1, unit_price: 1, moq_qty: 5000,
+        price_tiers: [{ moq_qty: 3000 }, { moq_qty: 10000 }] }],
+      aux_materials: [{ name: '胶圈', qty: 1, unit_price: 1, note: '单位：PCS；适用MOQ：5K；价格来源：人民币含税' }],
+      mold_costs: { testing_fee_usd: 500 },
+    }) },
+  ] };
+  const workbook = await buildOutputWorkbook(args);
+  const sheet = workbook.getWorksheet('报价明细');
+  const labels = [];
+  let testingRow;
+  sheet.eachRow(row => {
+    if (/^报价（MOQ/.test(String(row.getCell(2).value))) labels.push(row.getCell(2).value);
+    if (row.getCell(14).value === 5000) testingRow = row;
+  });
+  assert.deepEqual(labels, ['报价（MOQ5K）']);
+  assert.ok(testingRow);
+  assert.equal(testingRow.getCell(15).value, 0.1);
+  const quote = sheet.getColumn(2).values.findIndex(value => value === '报价（MOQ5K）');
+  assert.match(sheet.getCell(quote, 4).formula, /^D\d+\*D\d+\/D\d+$/);
+
+  const explicit = structuredClone(args);
+  explicit.sections[0].payload_json = JSON.stringify({ shipping: { moq_tiers: ['5K', { moq: '10K' }] } });
+  const configured = (await buildOutputWorkbook(explicit)).getWorksheet('报价明细');
+  const configuredLabels = [];
+  configured.eachRow(row => {
+    if (/^报价（MOQ/.test(String(row.getCell(2).value))) configuredLabels.push(row.getCell(2).value);
+  });
+  assert.deepEqual(configuredLabels, ['报价（MOQ5K）', '报价（MOQ10K）']);
 });

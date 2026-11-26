@@ -70,8 +70,10 @@ async function fixture(t) {
   };
   const filename = path.join(__dirname, '../backend/routes/verifications.js');
   const realRequire = createRequire(filename), module = {exports:{}};
+  const authFile = path.join(__dirname, '../backend/middleware/auth.js'), auth = {exports:{}};
+  vm.runInNewContext(fs.readFileSync(authFile,'utf8'), {module:auth,require:id=>id==='../db'?db:createRequire(authFile)(id)});
   vm.runInNewContext(fs.readFileSync(filename,'utf8'), {module,require:id => id === '../db' ? db :
-    id === '../middleware/auth' ? {requireAuth(req,_res,next){req.user={name:'Fixture user',dept:req.headers['x-dept']||'assembly',role:req.headers['x-role']||'staff',edit:req.headers['x-can-edit']!=='0',review:req.headers['x-can-review']!=='0'};next();},quoteAccess:async()=>({status:200}),canEditDepartment:user=>user.edit,hasMenuPermission:user=>user.review} : realRequire(id)});
+    id === '../middleware/auth' ? {...auth.exports,requireAuth(req,_res,next){req.user={name:'Fixture user',dept:req.headers['x-dept']||'assembly',role:req.headers['x-role']||'staff',edit:req.headers['x-can-edit']!=='0',review:req.headers['x-can-review']!=='0'};next();},quoteAccess:async()=>({status:200}),canEditDepartment:user=>user.edit,hasMenuPermission:user=>user.review} : realRequire(id)});
   const express = require('express'), app = express();
   app.use(express.json());
   app.use('/api/verifications',module.exports);

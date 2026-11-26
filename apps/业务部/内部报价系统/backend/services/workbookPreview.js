@@ -93,6 +93,8 @@ function displayValue(cell) {
       ? cell.value.result
       : (typeof cell.result === 'number' ? cell.result : null));
   const numberFormat = String(cell.numFmt || '');
+  const percentagePoints = numberFormat.match(/^0(?:\.(0+))?"%"$/);
+  if (numericValue != null && percentagePoints) return `${numericValue.toFixed(percentagePoints[1]?.length || 0)}%`;
   const prefixedNumber = numberFormat.match(/^"([^"]*)"0(?:\.(#+|0+))?$/);
   if (numericValue != null && prefixedNumber) {
     const decimals = prefixedNumber[2] ? prefixedNumber[2].length : 0;

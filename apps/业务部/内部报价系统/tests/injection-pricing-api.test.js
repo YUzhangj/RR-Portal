@@ -88,7 +88,7 @@ test('真实隔离保存接口保留自动/手填/历史来源及供应商精确
   assert.deepEqual(molding.injection.map(row => row.shot_price), [1.01, 2.02, 0, 0, 0, null, .505, 0, .1234, .6313, 0]);
   const first = await api('/sections/' + section('molding').id, 'PUT', { payload: molding, base_filled_at: section('molding').filled_at });
   quote = await read();
-  assert.deepEqual(JSON.parse(section('molding').payload_json), JSON.parse(JSON.stringify(molding)),
+  assert.deepEqual(JSON.parse(section('molding').payload_json), {...JSON.parse(JSON.stringify(molding)), output_moq_from_materials:true},
     'compare all transport fields after normalizing only VM-created object prototypes');
   const loaded = JSON.parse(section('molding').payload_json);
   loaded.injection[1].shot_price_mode = 'manual'; // Explicit same-value hand edit remains fixed.
@@ -228,5 +228,5 @@ test('真实隔离保存接口保留自动/手填/历史来源及供应商精确
   const engineering = { hardware: [row, other], aux_materials: [], packaging_materials: [] };
   await api('/sections/' + section('engineering').id, 'PUT', { payload: engineering, base_filled_at: section('engineering').filled_at });
   quote = await read();
-  assert.deepEqual(JSON.parse(section('engineering').payload_json), engineering);
+  assert.deepEqual(JSON.parse(section('engineering').payload_json), {...engineering,output_moq_from_materials:true});
 });

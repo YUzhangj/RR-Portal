@@ -103,6 +103,7 @@ function boundOverride(workbook, sheetName, address, storedValue, department) {
     ...(typeof storedValue === 'object' ? storedValue : { value: storedValue }),
     source_signature: workbook.outputEditState.signatures.get(cellKey(sheetName, address)),
     source_department: department,
+    ...(workbook.getWorksheet(sheetName)?.getCell(address).outputMaterialReference ? { apply_reference_prices: true } : {}),
   };
 }
 
@@ -112,9 +113,15 @@ function applyWorkbookOverrides(workbook, rows) {
   const conflicts = [];
   const overrides = normalizeOverrides(rows);
   const applied = new Set();
-  for (const [id, value] of overrides) {
+  // Explicit row-price corrections take precedence over an upper reference,
+  // regardless of database row order in a multi-cell save.
+  const ordered = [...overrides].sort(([a],[b]) => {
+    const ref = id => {const [sheet,address]=ExcelFormulas.split(id);return !!workbook.getWorksheet(sheet)?.getCell(address).outputMaterialReference;};
+    return Number(ref(b))-Number(ref(a));
+  });
+  for (const [id, value] of ordered) {
     const numericValue = overrideNumericValue(value);
-    if (!allowed.has(id) || numericValue === null || !value?.source_signature || value.source_signature !== signatures.get(id)) {
+    if (!allowed.has(id) || numericValue === null || !value?.source_signature || (value.source_signature !== signatures.get(id) && value.source_signature !== workbook.outputLegacySignatures?.get(id))) {
       const [sheet_name, cell_address] = ExcelFormulas.split(id);
       conflicts.push({ sheet_name, cell_address, source_department: value?.source_department || null });
       continue;
@@ -126,6 +133,13 @@ function applyWorkbookOverrides(workbook, rows) {
     cell.value = numericValue;
     if (cell.outputCalculation && value && typeof value === 'object' && value.calculation) {
       cell.outputCalculation = { ...cell.outputCalculation, ...value.calculation, value: numericValue };
+    }
+    if (value.apply_reference_prices === true && cell.outputMaterialReference) {
+      worksheet.eachRow(row => row.eachCell(target => {
+        if (target.outputReferenceInput === address) {
+          target.value = { formula: `${cell.address.replace(/\d+$/, '')}4`, result: Number((numericValue / 454).toFixed(4)) };
+        }
+      }));
     }
     applied.add(id);
   }

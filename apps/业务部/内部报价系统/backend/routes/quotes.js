@@ -326,7 +326,8 @@ router.get('/:id', async (req, res) => {
   const quote_locked = await require('../services/quoteFreeze').quoteFrozen(db,id);
   const mixed_quote = require('../services/mixedQuotation').getConfig(sections);
   const salesHeader = JSON.parse(sections.find(s => s.dept === 'sales')?.payload_json || '{}').header || {};
-  const quotation_rates = { fx_rmb_hkd: salesHeader.fx_rmb_hkd ?? .85, fx_hkd_usd: salesHeader.fx_hkd_usd ?? 7.8 };
+  const quotation_rates = { fx_rmb_hkd: salesHeader.fx_rmb_hkd ?? .85, fx_hkd_usd: salesHeader.fx_hkd_usd ?? 7.8,
+    indo_pct: require('../../frontend/indonesia-freight').rate(sections) };
   const engPayload = JSON.parse(engSection?.payload_json || '{}');
   const mixed_engineering_molds = mixed_quote?.enabled ? Object.fromEntries([
     ...mixed_quote.products.map(p => [p.id, expandEngineeringMolds(engPayload.mixed_products?.[p.id]?.molds)]),

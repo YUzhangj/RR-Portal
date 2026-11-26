@@ -158,6 +158,10 @@ function calculateSingleQuoteCosts(quote, sections, options = {}) {
     return total + (boxPrice + flatCards) / Math.max(num(box.qty), 1);
   }, 0);
 
+  const indoFreightBase = hardwareTotal + auxiliaryTotal + packagingTotal
+    + sum(electronicRows, row => /^IC$/i.test(String(row.name || '').trim()) ? 0 : amount(row))
+    + domesticMaterial + importedMaterial + injectionLabor + blow + slushTotal
+    + (options.mixed ? sewingTotalRmb : sewingMaterialRmb) / fxRH + paintingTotal * 0.3;
   const indoFreight = (hardwareTotal + auxiliaryTotal + packagingTotal) * num(eng.indo_pct) / 100
     + sum(electronicRows, row => /^IC$/i.test(String(row.name || '').trim()) ? 0 : amount(row)) * num(electronic.indo_pct) / 100
     + (domesticMaterial + importedMaterial + injectionLabor + blow) * num(mold.indo_pct) / 100
@@ -207,11 +211,12 @@ function calculateSingleQuoteCosts(quote, sections, options = {}) {
     assembly.assembly_step_groups, assembly.packaging_step_groups, cartons,
   ].some(rows => Array.isArray(rows) && rows.length > 0);
   return { components, sewing_taxable: require('../../frontend/sewing-tax').taxableAmounts(sewing, components, quote.customer), quotedPrice: hasSourceData ? (options.mixed ? +detailPricing.quotedPrice.toFixed(4) : detailPricing.quotedPrice) : 0, hasSourceData,
-    rawQuotedPrice: hasSourceData ? detailPricing.quotedPrice : 0, indoFreight, detailPricing };
+    rawQuotedPrice: hasSourceData ? detailPricing.quotedPrice : 0, indoFreight, indoFreightBase, detailPricing };
 
 }
 
 function calculateQuoteCosts(quote, sections) {
+  sections = require('../../frontend/indonesia-freight').normalizeSections(sections);
   if (parseSections(sections).sales?.mixed_quote?.enabled) {
     return require('./mixedQuotation').calculateMixedQuote(quote, sections);
   }

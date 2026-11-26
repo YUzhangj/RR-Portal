@@ -72,4 +72,17 @@ function canEditDepartment(user, dept) {
   const menu = require('../permissions/menu_catalog').DEPT_TO_MENU[dept];
   return hasMenuPermission(user, '报价单详情', 'edit') && hasMenuPermission(user, menu, 'edit');
 }
-module.exports = { requireAuth, loadUserAndPerms, quoteAccess, hasMenuPermission, canEditDepartment };
+function canViewQuoteDetail(user) {
+  return ['sales', 'engineering'].includes(user?.dept) && hasMenuPermission(user, '报价单详情', 'view');
+}
+function canEditUnifiedIndonesiaRate(user) {
+  return canViewQuoteDetail(user) && require('../../frontend/indonesia-freight').departments
+    .every(dept => canEditDepartment(user, dept));
+}
+function requireQuoteDetailAccess(req, res, next) {
+  if (!canViewQuoteDetail(req.user)) {
+    return res.status(403).json({ error: '报价明细仅限业务部和工程部查看' });
+  }
+  next();
+}
+module.exports = { requireAuth, loadUserAndPerms, quoteAccess, hasMenuPermission, canEditDepartment, canViewQuoteDetail, requireQuoteDetailAccess, canEditUnifiedIndonesiaRate };

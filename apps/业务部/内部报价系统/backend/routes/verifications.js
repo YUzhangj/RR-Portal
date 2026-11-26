@@ -3,7 +3,7 @@ const {resolveWorkshop, workshopName, fixedWorkshop} = require('../services/veri
 const {payloadRevision,validRevision,assertRevision,saveMetadataSql} = require('../services/verificationMetadata');
 const express = require('express');
 const db = require('../db');
-const { requireAuth, quoteAccess, canEditDepartment, hasMenuPermission } = require('../middleware/auth');
+const { requireAuth, quoteAccess, canEditDepartment, hasMenuPermission, requireQuoteDetailAccess, canEditUnifiedIndonesiaRate } = require('../middleware/auth');
 const { expandEngineeringMolds } = require('../services/engineeringMolds');
 const { sectionRevision, assertSectionRevision, saveVerificationSection, nextSectionTime, withVerificationVersion } = require('../services/verificationSectionSave');
 
@@ -20,6 +20,7 @@ const {outputCellUpdate}=require('../services/outputCellCalculation');
 const {inferOutputSourceDepartment}=require('../services/outputSourceDepartment');
 const router = express.Router();
 router.use(requireAuth);
+router.use(['/versions/:versionId/output-layout', '/versions/:versionId/output-cell', '/versions/:versionId/export'], requireQuoteDetailAccess);
 
 const activeQuotePredicate = 'AND q.deleted_at IS NULL';
 
@@ -43,7 +44,7 @@ function editableVerificationOutputCells(user, version, sections, workbook) {
     const [sheetName, address] = splitOutputCellKey(key);
     const department = inferOutputSourceDepartment(workbook, sheetName, address);
     const section = byDepartment.get(department);
-    return section && section.status !== 'approved'
+    return section && (`${sheetName}!${address}` !== '报价明细!O7' || canEditUnifiedIndonesiaRate(user))
       && canOperateDepartment(user, department) && canEditDepartment(user, department);
   }));
 }
@@ -576,7 +577,7 @@ router.get('/versions/:versionId/output-layout', async (req, res) => {
       output_conflicts: workbook.outputEditState.conflicts,
       can_reset_conflicts: !['completed', 'cancelled'].includes(version.status) && workbook.outputEditState.conflicts.every(c =>
         canOperateDepartment(req.user, c.source_department) && canEditDepartment(req.user, c.source_department)
-        && sections.some(s => s.dept === c.source_department && s.status !== 'approved')),
+        && sections.some(s => s.dept === c.source_department)),
       can_edit_output: editableCells.size > 0,
       revision: outputRevision(sections, overrides, version.status),
       verification_version_id: versionId,
@@ -634,11 +635,14 @@ async function mutateVerificationOutputCell(req, res, remove = false, heldVersio
       }
       const department = (remove && previousValue?.source_department) || inferOutputSourceDepartment(workbook, sheetName, address);
       const section = sections.find(item => item.dept === department);
-      if (!section || section.status === 'approved'
+      if (!section
         || !canOperateDepartment(req.user, department) || !canEditDepartment(req.user, department)) {
-        throw Object.assign(new Error('没有修改该部分的权限，或该部分已审核锁定'), { status: 403 });
+        throw Object.assign(new Error('没有修改该部分的权限'), { status: 403 });
       }
 
+      if (!remove && sheetName === '报价明细' && address === 'O7' && !canEditUnifiedIndonesiaRate(req.user)) {
+        throw Object.assign(new Error('统一印尼运费会修改多个部门，须拥有所有受影响部门的编辑权限'), { status: 403 });
+      }
       if (remove) {
         await db.prepare(`DELETE FROM quote_verification_output_overrides
           WHERE version_id=? AND sheet_name=? AND cell_address=?`).run(versionId, sheetName, address);
@@ -651,6 +655,8 @@ async function mutateVerificationOutputCell(req, res, remove = false, heldVersio
           .run(versionId, sheetName, address, JSON.stringify(boundOverride(workbook, sheetName, address, update.storedValue, department)), actorName(req.user));
       }
       if (!remove) await buildOutputWorkbook({quote:{...quote,version:version.label || quote.version},sections,overrides:await loadVerificationOutputOverrides(versionId)});
+      if (!remove) await require('../services/outputSourceSync').syncOutputValueToSource(db, versionId, workbook, sheetName, address, update.value, actorName(req.user), true);
+      if (!remove) await buildOutputWorkbook({quote:{...quote,version:version.label || quote.version},sections:await db.prepare('SELECT * FROM quote_verification_sections WHERE version_id=?').all(versionId),overrides:await loadVerificationOutputOverrides(versionId)});
       await db.prepare(`UPDATE quote_verification_sections SET status='filled', filled_by=?,
         filled_at=?, reviewed_by=NULL, reviewed_at=NULL, review_comment=NULL WHERE id=?`)
         .run(actorName(req.user), nextSectionTime(section), section.id);
@@ -662,6 +668,7 @@ async function mutateVerificationOutputCell(req, res, remove = false, heldVersio
         version.quote_id, department, actorName(req.user),
         remove ? 'verification_output_reset' : 'verification_output_edit',
         JSON.stringify({ version_id: versionId, sheet_name: sheetName, cell_address: address,
+          review_reopened: section.status === 'approved', previous_reviewed_by: section.reviewed_by, previous_reviewed_at: section.reviewed_at,
           ...(remove ? {} : {
             value: update.value,
             ...(update.calculation ? { calculation: {

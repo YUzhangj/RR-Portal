@@ -285,7 +285,9 @@ function renderTable(container, columns, rows, opts = {}) {
   const headerRefreshers = [];
   tr.innerHTML = (showRowNumber ? '<th style="width:36px">#</th>' : '') +
     columns.map(c => `<th${c.className ? ` class="${c.className}"` : ''}${c.width ? ` style="width:${c.width}"` : ''}>${c.headerInput
-      ? `${c.label} <input type="number" step="any" class="th-hinput" data-k="${c.key}" value="${c.headerInput.get() ?? ''}" style="width:56px"${readonly ? ' disabled' : ''}>${c.headerInput.suffix ?? ''}`
+      ? (readonly || c.key === 'indo_amt'
+        ? `${c.label} <span class="header-rate">${escapeHtml(c.headerInput.get() ?? 0)}${c.headerInput.suffix ?? ''}</span>`
+        : `${c.label} <input type="number" step="any" class="th-hinput" data-k="${c.key}" value="${c.headerInput.get() ?? ''}" style="width:56px">${c.headerInput.suffix ?? ''}`)
       : c.label}</th>`).join('') +
     (readonly ? '' : '<th style="width:36px"></th>');
   thead.appendChild(tr);
@@ -1764,7 +1766,7 @@ function renderHierElectronics(container, rows, onChange, canEdit, fxRmbHkd, pct
     <th style="width:90px">单价 HKD</th>
     <th style="width:90px">金额 HKD</th>
     <th style="width:80px">税点 %</th>
-    <th style="width:150px">印尼运费 <input type="number" step="any" id="elec-indo-pct" value="${(pctHost && pctHost.indo_pct) ?? ''}" style="width:56px" ${canEdit ? '' : 'disabled'}>%</th>
+    <th style="width:150px">印尼运费 <span>${escapeHtml((pctHost && pctHost.indo_pct) ?? 0)}%</span></th>
     <th>备注</th>
     ${canEdit ? '<th style="width:36px"></th>' : ''}
   </tr></thead><tbody></tbody>`;
@@ -2151,7 +2153,7 @@ function renderLossSummary(host, title, getRawSum, getLossPct, fxRmbHkd, currenc
       ${loss ? `<div class="ls-row"><span class="ls-label">损耗</span><span class="ls-val">${loss.toFixed(2)}%</span></div>` : ''}
       ${primary}
       ${indo ? `<div class="ls-row"><span class="ls-label">${indo.label || '印尼运费'}
-          <input class="ls-indo-pct" type="number" step="any" value="${indo.host[indo.pctKey] ?? ''}" style="width:52px" ${indo.readonly ? 'disabled' : ''}>%</span>
+          <span>${escapeHtml(indo.host[indo.pctKey] ?? 0)}%</span></span>
         <span class="ls-val ls-indo-val">${formatNum(indo.base() * num(indo.host[indo.pctKey]) / 100)}</span></div>` : ''}`;
     if (indo && !indo.readonly) {
       const input = card.querySelector('.ls-indo-pct');
@@ -2281,6 +2283,7 @@ function legacyFormulaComponents(payloads) {
 
 // ============== 汇总面板 ==============
 function renderSummaryPane(host, sections, quote, me) {
+  sections = window.IndonesiaFreight?.normalizeSections(sections) || sections;
   if (window.__data?.mixed_quote?.enabled && window.MixedQuotation && !window.__WORKBENCH_EMBED__) {
     return window.MixedQuotation.summary(host, quote, me);
   }
@@ -2506,7 +2509,7 @@ function renderSummaryPane(host, sections, quote, me) {
   const costCols = [
     ['注塑+吹气', toHkd(injTotalRmb + blowTotal * fxRH)], ['二次加工（印喷）', ppTotal], ['五金', hwTotal],
     ['辅助材料', auxRaw], ['包装材料', pkmatRaw], ['组装人工', asmLaborTotal + asmStepTotal], ['包装/混装人工', pkLaborTotal + pkgStepTotal],
-    ['印尼运费', toHkd(shipping)],
+    [`印尼运费（${window.IndonesiaFreight?.rate(sections) ?? num(eng.indo_pct)}%）`, toHkd(shipping)],
     ['搪胶', toHkd(slushTotalRmb)], ['纸箱', toHkd(cartonRmb)],
   ];
   // 电子和车缝在出货价算价中独立乘码点、除找数，不承担运费/吊柜费。
@@ -7186,6 +7189,7 @@ async function renderQuotePage() {
   $('qid').textContent = id;
   if ($('btn-output')) $('btn-output').href = `./quote-output.html?id=${encodeURIComponent(id)}`;
   const me = await api('/auth/me');
+  if ($('btn-output')) $('btn-output').hidden = !me.can_view_quote_detail;
   if ($('who-chip')) {
     const roleZh = { admin: '管理员', supervisor: '主管', staff: '员工' }[me.role] || me.role;
     const nm = me.display_name || me.name || me.username || '';
@@ -7197,6 +7201,7 @@ async function renderQuotePage() {
     location.href = './index.html';
   };
   const data = await api('/quotes/' + id);
+  data.sections = window.IndonesiaFreight?.normalizeSections(data.sections, data.quotation_rates?.indo_pct) || data.sections;
   const { quote, sections } = data;
   const quoteLocked = Boolean(data.quote_locked);
   try {
@@ -7338,7 +7343,7 @@ async function renderQuotePage() {
     }
     // “汇总与输出”从顶部深蓝导航移到部门导航右侧。
     const outputLink = $('btn-output');
-    if (outputLink) {
+    if (outputLink && me.can_view_quote_detail) {
       outputLink.classList.add('quote-output-link');
       tabBar.appendChild(outputLink);
     }
@@ -7592,6 +7597,8 @@ async function renderQuotePage() {
 
   // 导出按钮
   const exp = document.createElement('div'); exp.className = 'card';
+  exp.hidden = !me.can_view_quote_detail;
+  exp.classList.toggle('hidden', !me.can_view_quote_detail);
   const approved = sections.filter(s => s.status === 'approved').length;
   const totalDepts = sections.length;
   exp.innerHTML = `<button id="btn-export" ${approved < totalDepts ? 'disabled' : ''}>导出报价明细 (${approved}/${totalDepts})</button>

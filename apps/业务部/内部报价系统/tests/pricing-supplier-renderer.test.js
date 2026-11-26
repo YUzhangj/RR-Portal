@@ -37,6 +37,7 @@ function contextFor(payload) {
     confirm: () => true,
     refMolds: [], engineeringImagesForInjection: () => [],
   });
+  vm.runInContext(source.slice(source.indexOf('function escapeHtml('), source.indexOf('\n}', source.indexOf('function escapeHtml(')) + 2), context);
   vm.runInContext(source.slice(source.indexOf('function renderTable('), source.indexOf('// 辅助/包装材料 类别')), context);
   vm.runInContext(source.slice(source.indexOf('function formatNum('), source.indexOf('function legacyFormulaAmount(')), context);
   vm.runInContext(source.slice(source.indexOf('function changeInjectionStructure('), source.indexOf('function engineeringMoldSyncKey(')), context);

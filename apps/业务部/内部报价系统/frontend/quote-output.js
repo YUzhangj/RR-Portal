@@ -104,7 +104,7 @@ function sourceForCell(cell) {
     if ([5, 7, 9].includes(column)) return { dept: 'engineering', section: '纸箱计算 · 纸箱/平卡系数' };
     if (column === 11) return { dept: 'molding', section: '统一零件报价 · 料重损耗' };
     if (column === 13) return { dept: 'assembly', section: '人工参数' };
-    if (column === 15) return { dept: 'molding', section: '印尼运费参数' };
+    if (column === 15) return { dept: 'sales', section: '各部门统一印尼运费比例', valueLabel: '印尼运费（%，输入 8 表示 8%）' };
   }
   if (row >= 11 && row <= 23) return { dept: 'molding', section: '统一零件报价' };
   const rowContent = sheet.cells
@@ -1051,7 +1051,9 @@ async function loadOutput() {
     const layoutPath = verificationVersionId
       ? `/verifications/versions/${encodeURIComponent(verificationVersionId)}/output-layout`
       : `/quotes/${encodeURIComponent(quoteId)}/output-layout`;
-    const [me, data] = await Promise.all([api('/auth/me'), api(layoutPath)]);
+    const me = await api('/auth/me');
+    if (!me.can_view_quote_detail) throw new Error('报价明细仅限业务部和工程部查看');
+    const data = await api(layoutPath);
     state.data = data;
     const quote = data.quote;
     element('output-user').textContent = `${me.active_factory_name || me.active_factory_code || ''} · ${me.dept_name || ''}`;
@@ -1077,15 +1079,15 @@ async function loadOutput() {
     element('output-notice').className = `notice${data.can_export ? '' : ' warning'}`;
     element('output-notice').textContent = verificationVersionId
       ? data.can_edit_output
-        ? '蓝色角标单元格可修改；点击选中后可直接输入，或打开“修改来源参数”。保存后当前核价版本的公式、小计和利润会同步重算。'
+        ? '蓝色角标单元格可修改；点击选中后可直接输入，或打开“修改来源参数”。保存后来源部门将重新待审，当前核价版本的公式、小计和利润会同步重算。'
         : data.can_export
           ? '当前核价版本已全部审核并锁定；点击公式单元格可查看计算过程。'
           : '当前账号没有所选部分的编辑权限，可点击公式单元格查看计算过程。'
       : data.can_edit_output
-      ? '原始数值可直接修改；公式结果可点击“查看计算 / 修改参数”追溯原部门输入。保存后小计、合计和利润会同步重算。'
+      ? '原始数值可直接修改；公式结果可点击“查看计算 / 修改参数”追溯原部门输入。保存后来源部门将重新待审，小计、合计和利润会同步重算。'
       : data.can_export
-        ? '当前表格只读；需要修改时，请返回对应部门填写。下载文件保留全部工作表。'
-        : '部分部门尚未审核；当前可预览，全部审核后才可下载最终 Excel。';
+        ? '当前表格只读；点击公式可查看计算过程。下载文件保留全部工作表。'
+        : '当前表格只读：单据已锁定或账号没有编辑权限。全部审核后可下载最终 Excel。';
     if (data.output_notice) element('output-notice').textContent = data.output_notice;
     const stale = data.output_conflicts || [];
     element('clear-stale-output').hidden = !stale.length || !data.can_reset_conflicts;
