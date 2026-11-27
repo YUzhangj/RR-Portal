@@ -195,12 +195,16 @@ app.post('/api/po/write/:sessionId', async (req, res) => {
     const templatePath = path.join(uploadsDir, templateFiles[0]);
 
     // 用 exceljs 写入，保留原文件所有格式
-    const { wb, type } = await writeToExcel(templatePath, session.results, { factory });
+    const { wb, type, orders } = await writeToExcel(templatePath, session.results, { factory });
 
     const exportFile = path.join(exportsDir, `排期_${uuidv4()}.xlsx`);
-    await require('./full-workbook').writeFullWorkbook(templatePath, exportFile, wb, type, session.results, req.body.dateConfirmation);
+    if (type === 'skycastle') {
+      await require('./paste-workbook').writePasteWorkbook(templatePath, exportFile, wb, orders);
+    } else {
+      await require('./full-workbook').writeFullWorkbook(templatePath, exportFile, wb, type, session.results, req.body.dateConfirmation);
+    }
 
-    res.download(exportFile, `排期_已入录_${new Date().toLocaleDateString('zh-CN')}.xlsx`, () => {
+    res.download(exportFile, `${type === 'skycastle' ? '排期粘贴副本' : '排期_已入录'}_${new Date().toLocaleDateString('zh-CN')}.xlsx`, () => {
       try { fs.unlinkSync(exportFile); } catch (e) { /* ignore */ }
     });
   } catch (err) {
