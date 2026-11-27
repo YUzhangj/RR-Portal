@@ -9,10 +9,12 @@ function packagingFromNotes(notes) {
     const entry = line.trim().replace(/^(?:\(\d+\)|\d+[.)]|[*•])\s*/, '');
     const label = entry.match(/^Packaging(?:\s+(?:version|artwork))?\s*[:：]\s*(.*)$/i);
     const value = (label ? label[1] : entry).trim().replace(/[.;；]$/, '').trim();
-    if (/^2\s*L(?:\s+English\s*\/\s*French)?$/i.test(value)) {
+    // A PO may put its importer-label instruction on the same line as the artwork.
+    const artwork = value.replace(/,\s*will apply importer label$/i, '').trim();
+    if (/^2\s*L(?:\s+English\s*\/\s*French)?$/i.test(artwork)) {
       versions.add('Jazwares客版（2L）');
-    } else if (/^(?:(?:Sky Castle\s+)?(?:Generic\s+)?US(?:\s+Generic)?\s+Packaging|美文版?)$/i.test(value) ||
-               (label && /^(?:US(?:\s+English)?|English)$/i.test(value))) {
+    } else if (/^(?:(?:Sky Castle\s+)?(?:Generic\s+)?US(?:\s+Generic)?\s+Packaging|Sky Castle English artwork|美文版?)$/i.test(artwork) ||
+               (label && /^(?:US(?:\s+English)?|English)$/i.test(artwork))) {
       versions.add('Jazwares客版（美文）');
     }
   }

@@ -111,7 +111,17 @@ test('按商品客户和 NOTES 区分 Jazwares 两种包装，不从收货地、
   assert.equal(read(buyer, note + 'Packaging: 2L').items[0].customerPackaging, 'Jazwares客版（2L）');
   assert.equal(read('Another Buyer', note + 'Packaging: 2L').items[0].customerPackaging, undefined);
   assert.equal(read(buyer, note).items[0].customerPackaging, undefined);
+  assert.equal(read(buyer, 'Packaging: 2L, will apply importer label').items[0].customerPackaging, 'Jazwares客版（2L）');
   assert.match(read(buyer, 'Packaging: 2L\nUS PACKAGING').error, /核对包装版本/);
+});
+
+test('Jazwares 美文版支持带贴纸说明或美文稿件名称的 NOTES', () => {
+  for (const note of ['*US Generic packaging, will apply importer label', 'Packaging Artwork: Sky Castle English artwork']) {
+    const parse = (customer, notes) => autoParse(sampleWithNotes(customer, notes), 'sample.pdf');
+    assert.equal(parse('Jazwares, LLC', note).items[0].customerPackaging, 'Jazwares客版（美文）');
+    assert.equal(parse('Another Buyer', note).items[0].customerPackaging, undefined);
+    assert.match(parse('Jazwares, LLC', note + '\nPackaging: 2L').error, /核对包装版本/);
+  }
 });
 
 test('重新导入只更新匹配订单的三个包装版本栏，改动标黄', async t => {
